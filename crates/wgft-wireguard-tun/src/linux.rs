@@ -11,7 +11,7 @@ use tokio::process::Command as Process;
 use tokio::sync::mpsc;
 use wgft_wireguard::{Device, Event};
 
-use crate::{Command, Status, TunSettings};
+use crate::{Command, InboundFilter, Status, TunSettings, Verdict};
 
 /// `IFF_TUN | IFF_NO_PI`。値は `c_short` に収まる。
 #[expect(clippy::cast_possible_truncation, reason = "0x1001 fits in a c_short")]
@@ -106,6 +106,9 @@ pub(crate) struct Shell {
     events: mpsc::Sender<Event>,
     send_errors: u64,
     tun_write_errors: u64,
+    filter: InboundFilter,
+    filter_drops: u64,
+    filter_replies: u64,
 }
 
 impl Shell {
@@ -114,6 +117,7 @@ impl Shell {
         tun: &TunSettings,
         listen: SocketAddr,
         events: mpsc::Sender<Event>,
+        filter: InboundFilter,
     ) -> io::Result<Self> {
         let fd = open_tun(&tun.name)?;
         configure(tun).await?;
@@ -127,6 +131,9 @@ impl Shell {
             events,
             send_errors: 0,
             tun_write_errors: 0,
+            filter,
+            filter_drops: 0,
+            filter_replies: 0,
         })
     }
 
@@ -146,17 +153,49 @@ impl Shell {
                 .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0))),
             send_errors: self.send_errors,
             tun_write_errors: self.tun_write_errors,
+            filter_drops: self.filter_drops,
+            filter_replies: self.filter_replies,
         }
     }
 
     /// Device の出力をすべて取り出して socket と TUN と event の channel へ送る。
     async fn flush(&mut self) -> io::Result<()> {
-        while let Some(tx) = self.device.poll_transmit() {
-            if self.udp.send_to(&tx.payload, tx.to).await.is_err() {
-                self.send_errors += 1;
+        loop {
+            while let Some(tx) = self.device.poll_transmit() {
+                if self.udp.send_to(&tx.payload, tx.to).await.is_err() {
+                    self.send_errors += 1;
+                }
+            }
+            // 返事は Device に送信として入れ、送る datagram が増える。増えなくなるまで繰り返す。
+            // 返事は受けた packet ごとに高々 1 つで、受けた packet は Device のキューの上限を超えない
+            if !self.deliver_packets().await? {
+                break;
             }
         }
+        while let Some(event) = self.device.poll_event() {
+            // 受け手が遅ければ捨てる。ループを event の受け手に止めさせない
+            let _ = self.events.try_send(event);
+        }
+        Ok(())
+    }
+
+    /// 復号した packet を filter に通して TUN へ書く。返事を Device に入れたら `true` を返す。
+    async fn deliver_packets(&mut self) -> io::Result<bool> {
+        let mut replied = false;
         while let Some(packet) = self.device.poll_packet() {
+            match (self.filter)(&packet) {
+                Verdict::Deliver => {}
+                Verdict::Drop => {
+                    self.filter_drops += 1;
+                    continue;
+                }
+                Verdict::Reply(reply) => {
+                    self.filter_replies += 1;
+                    self.device.handle_packet(Instant::now(), &reply);
+                    replied = true;
+                    continue;
+                }
+            }
             loop {
                 let mut guard = self.tun.writable().await?;
                 match guard.try_io(|fd| write_fd(fd.as_raw_fd(), &packet)) {
@@ -171,11 +210,7 @@ impl Shell {
                 }
             }
         }
-        while let Some(event) = self.device.poll_event() {
-            // 受け手が遅ければ捨てる。ループを event の受け手に止めさせない
-            let _ = self.events.try_send(event);
-        }
-        Ok(())
+        Ok(replied)
     }
 
     pub(crate) async fn run(mut self, mut commands: mpsc::Receiver<Command>) -> io::Result<()> {

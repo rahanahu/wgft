@@ -28,6 +28,27 @@ pub struct TunSettings {
     pub mtu: u16,
 }
 
+/// What the shell does with a packet the device decrypted, before it reaches the TUN device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// Write the packet to the TUN device.
+    Deliver,
+    /// Discard the packet.
+    Drop,
+    /// Discard the packet and send this IPv4 packet back through the tunnel instead, as if it had
+    /// come from the TUN device, for example a TCP reset for a port without a rule.
+    Reply(Vec<u8>),
+}
+
+/// Decides each inbound packet. The kernel behind the TUN device would otherwise hand every
+/// packet to the host's own services and, with forwarding on, to the LAN.
+pub type InboundFilter = Box<dyn FnMut(&[u8]) -> Verdict + Send>;
+
+/// An [`InboundFilter`] that delivers every packet, for lab tests of the device alone.
+pub fn deliver_all() -> InboundFilter {
+    Box::new(|_| Verdict::Deliver)
+}
+
 /// The state of the shell's peer and the device's drop counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Status {
@@ -41,6 +62,10 @@ pub struct Status {
     pub send_errors: u64,
     /// Packets the TUN device refused to take.
     pub tun_write_errors: u64,
+    /// Inbound packets the filter dropped.
+    pub filter_drops: u64,
+    /// Inbound packets the filter answered with a reply.
+    pub filter_replies: u64,
 }
 
 #[cfg_attr(
@@ -134,7 +159,8 @@ impl Handle {
 }
 
 /// Creates the TUN device, configures its address, MTU and link state, binds the UDP socket to
-/// `listen` and starts the event loop on the current tokio runtime.
+/// `listen` and starts the event loop on the current tokio runtime. `filter` decides every
+/// decrypted packet before it is written to the TUN device; outbound packets are not filtered.
 ///
 /// `seed` must be fresh operating-system entropy and `unix` the wall clock since the Unix epoch;
 /// see [`wgft_wireguard::Device::new`]. Needs `CAP_NET_ADMIN` and the `ip` command.
@@ -149,12 +175,13 @@ pub async fn spawn(
     listen: SocketAddr,
     seed: Zeroizing<[u8; 32]>,
     unix: Duration,
+    filter: InboundFilter,
 ) -> io::Result<Handle> {
     let device = wgft_wireguard::Device::new(config, seed, Instant::now(), unix)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
     let (commands, command_rx) = mpsc::channel(16);
     let (event_tx, events) = mpsc::channel(256);
-    let task = start(device, &tun, listen, command_rx, event_tx).await?;
+    let task = start(device, &tun, listen, command_rx, event_tx, filter).await?;
     Ok(Handle {
         commands,
         events: Some(events),
@@ -169,8 +196,9 @@ async fn start(
     listen: SocketAddr,
     commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<Event>,
+    filter: InboundFilter,
 ) -> io::Result<tokio::task::JoinHandle<io::Result<()>>> {
-    let shell = linux::Shell::open(device, tun, listen, events).await?;
+    let shell = linux::Shell::open(device, tun, listen, events, filter).await?;
     Ok(tokio::spawn(shell.run(commands)))
 }
 
@@ -185,6 +213,7 @@ async fn start(
     _listen: SocketAddr,
     _commands: mpsc::Receiver<Command>,
     _events: mpsc::Sender<Event>,
+    _filter: InboundFilter,
 ) -> io::Result<tokio::task::JoinHandle<io::Result<()>>> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

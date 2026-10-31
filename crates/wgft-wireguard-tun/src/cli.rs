@@ -139,6 +139,11 @@ async fn print_status(handle: &Handle) {
     }
     let _ = write!(line, " send_errors={}", status.send_errors);
     let _ = write!(line, " tun_write_errors={}", status.tun_write_errors);
+    let _ = write!(
+        line,
+        " filter_drops={} filter_replies={}",
+        status.filter_drops, status.filter_replies
+    );
     eprintln!("{line}");
 }
 
@@ -199,7 +204,15 @@ pub(crate) fn run() -> ExitCode {
         }
     };
     let result = runtime.block_on(async {
-        let handle = wgft_wireguard_tun::spawn(config, tun, args.listen, seed, unix).await?;
+        let handle = wgft_wireguard_tun::spawn(
+            config,
+            tun,
+            args.listen,
+            seed,
+            unix,
+            wgft_wireguard_tun::deliver_all(),
+        )
+        .await?;
         let local = handle.status().await?.local;
         eprintln!("wgft-wireguard-tun: up tun={} local={local}", args.tun);
         serve(handle).await
