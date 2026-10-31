@@ -140,10 +140,7 @@ func TestBoundAcceptQueue(t *testing.T) {
 
 func TestBoundOutOfOrderFlood(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	acceptOne(t, l)
-	n.drain()
+	_, p := n.accepted(true, true)
 	for i := 0; i < 5000; i++ {
 		s := p.seg(flagACK, []byte{1, 2})
 		s.seq = p.snd + uint32(1+(i*7919)%250000)
@@ -171,10 +168,7 @@ func TestBoundNeverReadingPeer(t *testing.T) {
 	}{{"floor", 0, sendFloor}, {"boost", 1, boostSize}} {
 		t.Run(tc.name, func(t *testing.T) {
 			n := newTestNetPool(t, smallLimits(), newBoostPool(tc.slots))
-			l := listen(t, n, 80)
-			p := n.handshake(40000, 80, true, false, true)
-			c := acceptOne(t, l)
-			n.drain()
+			c, p := n.accepted(true, false)
 			p.wnd = 0
 			p.ack(nil)
 			c.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
@@ -202,10 +196,7 @@ func TestBoundNeverReadingPeer(t *testing.T) {
 
 func TestBoundEmptyACKFlood(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, true)
 	p.wnd = 65535
 	c.Write(make([]byte, sendFloor))
 	outs := n.drain()
@@ -263,10 +254,7 @@ func TestBoundTimeWaitChurn(t *testing.T) {
 
 func TestBoundSmallWritesSlowReader(t *testing.T) {
 	n := newTestNetPool(t, smallLimits(), newBoostPool(0))
-	l := listen(t, n, 80)
-	n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, _ := n.accepted(true, false)
 	// 1 byte の書き込みを 1 つずつ送らせ、相手は確認しない。記録の輪が満ちたら送らない
 	sent := 0
 	for i := 0; i < 3*floorRecords; i++ {
@@ -287,10 +275,7 @@ func TestBoundSmallWritesSlowReader(t *testing.T) {
 
 func TestBoundUnmatchedFloodKeepsOtherClasses(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	p.wnd = 65535
 	c.Write(make([]byte, 20000))
 	// どの接続にも当たらない segment の洪水が制御の輪を埋める

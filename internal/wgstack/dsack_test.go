@@ -7,10 +7,7 @@ import "testing"
 // tcp_dsack_set)。
 func TestDSACKBlocksForDuplicateParts(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	acceptOne(t, l)
-	n.drain()
+	_, p := n.accepted(true, true)
 	base := p.snd
 	p.ack(make([]byte, 1000)) // [0, 1000)
 	n.drain()

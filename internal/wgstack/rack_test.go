@@ -20,10 +20,7 @@ func rackConn(t *testing.T, segs int) (*testNet, *tcb, *sackPeer, []out) {
 func rackConnApp(t *testing.T, segs int) (*testNet, *Conn, *tcb, *sackPeer, []out) {
 	t.Helper()
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, true)
 	cs := c.c
 	cs.mu.Lock()
 	cs.srtt, cs.rttvar, cs.minRTT, cs.hasRTT, cs.hasMinRTT = int64(testRTT), int64(testRTT)/2, int64(testRTT), true, true

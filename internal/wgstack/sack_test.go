@@ -13,10 +13,7 @@ const testSegPayload = testMTU - 40 - 12 // timestamp を付けた segment の�
 func sackConn(t *testing.T, segs int) (*testNet, *Conn, *sackPeer, []out) {
 	t.Helper()
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, true)
 	if _, err := c.Write(make([]byte, segs*testSegPayload)); err != nil {
 		t.Fatal(err)
 	}
@@ -277,10 +274,7 @@ func TestLimitedTransmit(t *testing.T) {
 // PRR が回復の間に送る量を届いた量の ssthresh / RecoverFS 倍に抑えることを確かめる。
 func TestRecoveryStaysWithinCwnd(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, true)
 	cs := c.c
 	c.Write(make([]byte, 150*testSegPayload))
 	q := newSackPeer(p)

@@ -11,10 +11,7 @@ import (
 func TestNoRTOBeforeTheProbeCanBeAcked(t *testing.T) {
 	const rtt = 80 * time.Millisecond
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, true, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, true)
 	cs := c.c
 	cs.mu.Lock()
 	cs.srtt, cs.rttvar, cs.minRTT, cs.hasRTT, cs.hasMinRTT = int64(rtt), int64(5*time.Millisecond), int64(rtt), true, true
@@ -54,10 +51,7 @@ func TestNoRTOBeforeTheProbeCanBeAcked(t *testing.T) {
 // 再送の印を消す。
 func TestRTOWithAPendingFastRetransmitSendsTheHeadOnce(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	cs := c.c
 	c.Write(make([]byte, 10*testSegPayload))
 	outs := n.drain()

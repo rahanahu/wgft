@@ -9,10 +9,7 @@ import (
 // 送ったとき、その場で ACK を返すことを確かめる。接続は TIME_WAIT の行に移るが、移る前に負った ACK を落とさない。
 func TestCombinedFINACKIsAcknowledged(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.Close()
 	outs := n.drain()
 	if len(outs) != 1 || !outs[0].seg.has(flagFIN) {

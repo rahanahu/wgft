@@ -157,6 +157,17 @@ func (n *testNet) advance(d time.Duration) {
 	n.d.Tick()
 }
 
+// accepted は 80 番で待ち受け、相手の 40000 番から窓の scale を付けて接続を開き、Accept で受け取った接続と
+// 相手の側の接続を返す。握手の出力は読み捨てる。ts と sack は相手が timestamp と SACK を求めるかである。
+func (n *testNet) accepted(ts, sack bool) (*Conn, *peerConn) {
+	n.t.Helper()
+	l := listen(n.t, n, 80)
+	p := n.handshake(40000, 80, ts, sack, true)
+	c := acceptOne(n.t, l)
+	n.drain()
+	return c, p
+}
+
 // peerConn は相手の側の 1 つの接続の番号を追う。
 type peerConn struct {
 	n      *testNet

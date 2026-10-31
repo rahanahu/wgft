@@ -55,10 +55,7 @@ func TestAcceptQueueCaps(t *testing.T) {
 // boostedConn は送信の向きの需要で boost を得た接続と、その相手を返す。相手は書いた分をすべて確認する。
 func boostedConn(t *testing.T) (*testNet, *Conn, *peerConn) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	if _, err := c.Write(make([]byte, demandBytes)); err != nil { // floor に収まるので待たない
 		t.Fatal(err)
 	}
@@ -101,10 +98,7 @@ func TestDemoteRefusedWhileSendBytesExceedTheFloor(t *testing.T) {
 
 func TestDataAfterCloseResets(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.Close() // FIN_WAIT_1、相手はまだ FIN を確認しない
 	n.drain()
 	p.ack([]byte("late"))
@@ -119,10 +113,7 @@ func TestDataAfterCloseResets(t *testing.T) {
 
 func TestOlderReorderedACKDoesNotChangeTheWindow(t *testing.T) {
 	n := newTestNet(t, smallLimits())
-	l := listen(t, n, 80)
-	p := n.handshake(40000, 80, true, false, true)
-	c := acceptOne(t, l)
-	n.drain()
+	c, p := n.accepted(true, false)
 	c.Write(make([]byte, 3000))
 	p.absorb(n.drain())
 	newer := p.seg(flagACK, nil)
@@ -156,10 +147,7 @@ func TestNoRetireBeforeDeliveryOrWithHeldData(t *testing.T) {
 	})
 	t.Run("out-of-order data", func(t *testing.T) {
 		n := newTestNet(t, smallLimits())
-		l := listen(t, n, 80)
-		p := n.handshake(40000, 80, true, true, true)
-		c := acceptOne(t, l)
-		n.drain()
+		c, p := n.accepted(true, true)
 		s := p.seg(flagACK, []byte("ooo"))
 		s.seq += 1000
 		n.inject(s)
