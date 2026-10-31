@@ -86,6 +86,23 @@ func TestSendBatchInit(t *testing.T) {
 	}
 }
 
+// Read が buffer ごとに確かめる印を書ける条件は、offset + MTU + 詰め物 + 認証の tag ≤ 長さ - 16 の境で
+// 切り替わる。
+func TestSendBatchFitsBoundary(t *testing.T) {
+	l := newTestLedger(t, 864, 32, 14)
+	const offset = 16
+	edge := offset + l.mtu + sealOverhead + tagSize
+	if !l.fits(make([]byte, edge), offset) {
+		t.Fatalf("a %d-byte buffer at offset %d must fit MTU %d", edge, offset, l.mtu)
+	}
+	if l.fits(make([]byte, edge-1), offset) {
+		t.Fatalf("a %d-byte buffer at offset %d must not fit MTU %d", edge-1, offset, l.mtu)
+	}
+	if l.fits(make([]byte, edge), -1) {
+		t.Fatal("a negative offset must not fit")
+	}
+}
+
 // 門は L + R + n ≤ P_max を守り、2 より小さければ 1 個だけを許す。
 func TestSendBatchGate(t *testing.T) {
 	// C = 3、k_tx = 8、P_max = 40:k_eff = min(8, 40/4) = 8、R = 16
