@@ -106,16 +106,19 @@ func (c *tcb) releaseBoost() {
 	c.s.pool.release(c)
 }
 
-// demote は需要の無い保有者を floor に戻せたかを返す。戻すのは次の条件がすべて成り立つときだけである。
-// 受信は、保持する最も右の byte(順序外のデータを含む)が最も古い未読の byte から floor の内側にあること。
-// 送信は、送信の輪の byte が floor 以下で、確認を待つ記録の数が floor の記録の輪の容量以下であること。
-// 最後に、OnBoost で登録した関数が f(false) に真を返すこと。戻した後も広告した右端は縮めず、floor の
-// 外に届いたデータは受信のバッファに入れずに捨てる(inputData の limit)。mu を持って呼ぶ。
+// demote は需要の無い保有者を floor に戻せたかを返す。呼ぶのは、空きの枠が無いときの acquire だけである
+// (枠の取り合い)。戻すのは次の条件がすべて成り立つときだけである。受信は、順序どおりの未読の byte が floor
+// 以下であること。送信は、送信の輪の byte が floor 以下で、確認を待つ記録の数が floor の記録の輪の容量以下で
+// あること。最後に、OnBoost で登録した関数が f(false) に真を返すこと。
+// 戻すときに順序外のデータが floor の外にあるか、区間が floor の表に入らなければ、その分を取り消す(RFC 2018
+// 8 節、設計文書の「boost の取得と floor への戻り」)。相手は累積の確認まで送ったデータを持つので、取り消した
+// データは再送で届く。戻した後も広告した右端は縮めず、floor の外に届いたデータは受信のバッファに入れずに
+// 捨てる(inputData の limit)。mu を持って呼ぶ。
 func (c *tcb) demote(now int64) bool {
 	if !c.boosted || now-c.lastDemand < int64(idleReclaim) {
 		return false
 	}
-	if c.rcv.rightmost()-c.rcv.readOff > recvFloor || c.rcv.n > floorIntervals {
+	if c.rcv.unread() > recvFloor {
 		return false
 	}
 	if c.tailOff-c.unaOff > sendFloor || c.recs.n > floorRecords {
@@ -124,6 +127,7 @@ func (c *tcb) demote(now int64) bool {
 	if c.onBoost != nil && !c.onBoost(false) {
 		return false
 	}
+	c.s.boostReneged.Add(c.rcv.renege(c.rcv.readOff+recvFloor, floorIntervals))
 	c.boosted, c.rcvBoost = false, false
 	c.setSendStage(sendFloor, c.floorRecs)
 	c.setRecvStage(recvFloor, c.floorIv)
@@ -148,8 +152,8 @@ func (c *tcb) setSendStage(capacity uint64, recs []record) {
 
 // setRecvStage は受信の向きを容量 capacity の段に移す。受信の輪の書いた範囲(未読と順序外)を写し、順序外の
 // 区間を iv に移す。呼び出し側は、保持する最も右の byte が最も古い未読の byte から capacity の内側にあり、
-// 使っている区間が iv に入ることを保証する(floor へ戻すときは demote が確かめる)。そのため setIntervals は
-// 区間を持ち続けて偽を返すことが無く、その値を見ない。mu を持って呼ぶ。
+// 使っている区間が iv に入ることを保証する(floor へ戻すときは demote が取り消しで満たす)。そのため
+// setIntervals は区間を持ち続けて偽を返すことが無く、その値を見ない。mu を持って呼ぶ。
 func (c *tcb) setRecvStage(capacity uint64, iv []interval) {
 	c.rcv.r.resize(capacity, c.rcv.written())
 	c.rcv.setIntervals(iv)

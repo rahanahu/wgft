@@ -77,6 +77,34 @@ func (b *recvBuf) clearIntervals() {
 	b.n, b.root, b.free, b.used, b.nrecent, b.ooo = 0, 0, 0, 0, 0, 0
 }
 
+// renege は順序外のデータのうち、limit 以降の byte と、始まりの順で maxN 個目より後の区間を捨てる(RFC 2018
+// 8 節の取り消し)。limit をまたぐ区間は limit で切る。捨てた区間の最近の印も外すので、後の SACK の block は
+// 捨てた範囲を知らせない。順序どおりのデータは捨てない。呼び出し側は nxtOff <= limit を保証する。捨てた byte
+// の数を返す。輪の中身は消さないので、呼び出し側は続けて輪を移す(setRecvStage は残った範囲だけを写す)。
+func (b *recvBuf) renege(limit uint64, maxN int) uint64 {
+	if b.n > maxN {
+		ivs := b.walk(b.root, make([][2]uint64, 0, maxN+1), maxN+1)
+		limit = min(limit, ivs[maxN][0])
+	}
+	if b.root == 0 || b.rightmost() <= limit {
+		return 0
+	}
+	before := b.ooo
+	// 始まりが limit より前の区間を残す。limit は呼び出し側の readOff + floor か、nxtOff より後の区間の始まりなので
+	// 1 以上である
+	keep, drop := b.splitStartUpTo(b.root, limit-1)
+	b.n -= b.release(drop)
+	if keep != 0 {
+		if x := b.node(b.lastNode(keep)); b.full(x.end) > limit {
+			b.ooo -= b.full(x.end) - limit
+			x.end = uint32(limit)
+		}
+	}
+	b.root = keep
+	b.forgetRecent(func(x uint64) bool { return x >= limit })
+	return before - b.ooo
+}
+
 // alloc は節を 1 つ取り、区間 [s, e) を入れて返す。空きが無ければ 0 を返す。
 func (b *recvBuf) alloc(s, e uint64) int16 {
 	k := b.free

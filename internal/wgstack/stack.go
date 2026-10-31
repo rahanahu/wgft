@@ -165,6 +165,7 @@ type counters struct {
 	probeAborted   atomic.Uint64
 	boostGranted   atomic.Uint64
 	boostReclaimed atomic.Uint64
+	boostReneged   atomic.Uint64
 
 	// 送り手の事象(wgstack-performance.md の「安く確かめる手順」)
 	rtos, rtosBackedOff, rtosShortOfDupThresh               atomic.Uint64
