@@ -223,13 +223,15 @@ func (c *tcb) nextQueued() int {
 }
 
 // tlpEligible は、TLP の probe の期限を張れるかを返す(RFC 8985 7.2)。回復と RTO の後の回復の間、
-// probe の確認を待つ間、窓の probe の間は張らない。
+// SACK 済みの記録がある間、probe の確認を待つ間、窓の probe の間は張らない。SACK 済みの記録があれば、
+// RACK の並べ替えの期限と、相手が SACK を取り消した疑いの早めた RTO(renegeTimer)が損失を扱う。
 func (c *tcb) tlpEligible() bool {
-	return c.sackOK && !c.persist && !c.inRecovery && !c.tlpActive && c.sndUna != c.sndMax && seqGE(c.sndUna, c.recover)
+	return c.sackOK && !c.persist && !c.inRecovery && !c.tlpActive && c.sacked == 0 && c.sndUna != c.sndMax &&
+		seqGE(c.sndUna, c.recover)
 }
 
 // scheduleTLP は PTO の期限を決める。新しいデータを送った後と、累積の確認が進んだ後に呼ぶ。RTO の
-// 期限より遅くなるなら張らない。
+// 期限より遅くなるなら RTO の期限に張り、その時刻には RTO ではなく probe を送る(RFC 8985 7.2)。
 func (c *tcb) scheduleTLP(now int64) {
 	c.tlpAt = 0
 	if !c.tlpEligible() {
@@ -243,15 +245,23 @@ func (c *tcb) scheduleTLP(now int64) {
 		}
 	}
 	at := now + max(pto, int64(time.Millisecond))
-	if c.rtoAt != 0 && at >= c.rtoAt {
-		return
+	if c.rtoAt != 0 {
+		at = min(at, c.rtoAt)
 	}
 	c.tlpAt = at
 }
 
-// onTLP は PTO の期限。新しいデータか最後の記録の再送を probe として 1 つ送る(RFC 8985 7.3)。
+// onTLP は PTO の期限。新しいデータか最後の記録の再送を probe として 1 つ送る(RFC 8985 7.3)。前の probe の
+// 後に RTT を測っていなければ(7.3 の条件 2)probe を送らない。RTO は最後の手段として残すので、張ってある
+// RTO の期限は動かさず、無いときだけ今から張る。動かすと、PTO を張り直す新しいデータが続く間 RTO が起きない。
 func (c *tcb) onTLP(now int64) {
 	if !c.tlpEligible() {
+		return
+	}
+	if !c.tlpSampled {
+		if c.rtoAt == 0 {
+			c.setRTO(now + c.curRTO())
+		}
 		return
 	}
 	c.tlpProbe = true
@@ -325,6 +335,13 @@ func (c *tcb) rearmRetrans() {
 // 期限は RTO の期限を動かさない。TLP の probe を送った時だけ、buildTLP が RTO を張り直す。
 func (c *tcb) onRetransTimer(now int64) {
 	switch {
+	case c.tlpAt != 0 && c.rtoAt != 0 && now >= c.rtoAt && c.tlpAt <= c.rtoAt && c.tlpEligible() && c.tlpSampled:
+		// PTO を RTO の期限に揃えてある。RTO ではなく probe を送り、送れたかによらず RTO を今から張り直す
+		// (RFC 8985 7.2、7.3)。前の probe の後に RTT を測っていなければ probe を送れないので、その期限の RTO を
+		// 起こす
+		c.tlpAt = 0
+		c.rtoAt = now + c.curRTO()
+		c.onTLP(now)
 	case c.rtoAt != 0 && now >= c.rtoAt:
 		c.rtoAt = 0
 		c.onRTO(now)

@@ -399,6 +399,7 @@ func (c *tcb) buildTLP(b []byte, space int, now int64) int {
 	}
 	if n > 0 {
 		c.tlpActive, c.tlpRetrans, c.tlpEnd = true, retrans, c.sndMax
+		c.tlpSampled = false
 		c.tlpAt = 0
 		c.s.tlpProbes.Add(1)
 		// probe の後は RTO を今から張り直す(RFC 8985 7.3、Linux の tcp_send_loss_probe)。前の累積の確認から

@@ -10,10 +10,14 @@ func ratio(a, b time.Duration, min float64) string {
 	return fmt.Sprintf("%s %.1f", yesNo(float64(a) >= min*float64(b), "at least", "below"), min)
 }
 
+// retransmitRTO loses one segment and every retransmission of it, and checks RFC 6298's backoff.
+// The SYN does not permit SACK, as in the other loss-recovery scenarios: with SACK, wgstack and
+// gVisor send a tail loss probe at the first RTO deadline, RFC 8985 7.2, and the RTO that follows
+// starts unbacked, so the first gap would not show the doubling.
 func retransmitRTO(h *H) {
 	const port = 8004
 	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
+	p, _, c := h.Connect(l, port, NoSACKSYN())
 	data := pattern(1000, 0x22)
 	if _, err := c.Write(data); err != nil {
 		h.T.Fatalf("write: %v", err)

@@ -162,6 +162,7 @@ type tcbState struct {
 	hasMinRTT                       bool
 	rtoAt, reoAt, tlpAt             int64 // 再送のタイマーの節が分け合う期限
 	tlpActive, tlpRetrans, tlpProbe bool
+	tlpSampled                      bool // 前の probe の後(probe が無ければ接続の始めの後)に RTT を測った(RFC 8985 7.3 の 2)
 	tlpEnd                          uint32
 	tlpCutSeq                       uint32 // TLP の probe が窓を下げた時の SND.MAX。tlpCut の間だけ意味を持つ
 	tlpCut                          bool   // SND.UNA が tlpCutSeq に届く前の損失は、TLP の縮小と同じ輻輳の事象である
@@ -330,6 +331,7 @@ func (c *tcb) rttSample(r int64) {
 	if r < 0 {
 		return
 	}
+	c.tlpSampled = true
 	if !c.hasRTT {
 		c.srtt, c.rttvar, c.hasRTT = r, r/2, true
 	} else {
@@ -343,8 +345,9 @@ func (c *tcb) rttSample(r int64) {
 	if !c.hasMinRTT || r < c.minRTT {
 		c.minRTT, c.hasMinRTT = r, true
 	}
-	rto := c.srtt + max(int64(time.Millisecond), 4*c.rttvar)
-	c.rto = min(max(rto, int64(rtoMin)), int64(rtoMax))
+	// 下限は RTO 全体ではなく RTTVAR の項に掛ける(Linux と同じ)。RFC 6298 の式の値以上で、RTTVAR の小さな
+	// 経路でも Linux より早く RTO を起こさない(wgstack-performance.md の「RACK-TLP」のタイマーの規則)
+	c.rto = min(c.srtt+max(4*c.rttvar, int64(rtoMin)), int64(rtoMax))
 }
 
 // tsRTTSample は、相手が返した自分の TSval(TSecr)から RTT を測る(RFC 7323 4.1)。自分の今の TSval より

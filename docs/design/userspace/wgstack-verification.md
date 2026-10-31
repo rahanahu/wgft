@@ -154,6 +154,9 @@ Linux の既定は、完成に含めない回復の仕組みを有効にして�
   どれも Linux 6.1 の既定の値で、namespace ごとの値なので明示して固定します
 
 損失の回復を確かめる台本は、相手の SYN で SACK を許さず、両者を NewReno の動作にします。
+RTO の倍化を確かめる `retransmit-rto` も SACK を許さず、TLP の probe が最初の期限を使わないようにします。
+wgstack と gVisor は SACK を交渉した接続だけで TLP を使い、RTO の期限に揃えた PTO では最初の再送が probe になるためです。
+RTO の期限に送る probe と、その後の RTO の間隔は、wgstack の単体の試験(`TestThinStreamProbesAtTheRTODeadline`)で確かめます。
 SACK を交渉する台本は、受け手として返す SACK の block の内容と順を確かめます。
 値の一覧は、試験の書き手が台本を足すときに増やします。
 台本の族は、固定の値の上に族の値を重ねられます。
