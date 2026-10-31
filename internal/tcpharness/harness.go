@@ -692,7 +692,8 @@ func (p *Peer) SendFreshAck() uint32 {
 // passed over. A second such segment, or any other, fails the quiet: a DUT that dropped the
 // testbench's ACK keeps resending with the old TSecr. On a ClockedDUT nothing is passed over,
 // since Inject returns after the engine handled the segment and the race cannot happen. fAt is
-// when f arrived. It returns how many it passed over.
+// when f arrived. It returns how many it passed over, and timedOut when the wait for Delivered
+// below ended the quiet.
 //
 // The wait of d is the interval of a negative claim, so it starts only once the DUT has the ACK:
 // where c is a Deliverer on a real-time DUT, QuietSince first waits, for at most settleBudget,
@@ -700,21 +701,27 @@ func (p *Peer) SendFreshAck() uint32 {
 // that comes during that wait is judged as above. Without that wait, a DUT that dropped the ACK
 // and passed one probe could leave d before its next retransmission: when the FIN went out
 // before the DUT had the ACK of the data in front of it, the probe comes at once and the
-// retransmission after a further probe timeout and RTO, 400 ms or more on an idle machine. The
-// interval trusts the DUT's Delivered: a DUT that reports Delivered while it still lacks the ACK
-// gets the interval at once, as it did before QuietSince waited for it.
-func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time, c Conn) (Segment, bool, int) {
+// retransmission after a further probe timeout and RTO, 400 ms or more on an idle machine, and
+// more on a loaded runner (over 3.5 s once on the Windows runner). A DUT that has not reported
+// Delivered when settleBudget ends fails the quiet with timedOut: the interval cannot start,
+// since nothing shows the DUT has the ACK. The interval trusts the DUT's Delivered: a DUT that
+// reports Delivered while it still lacks the ACK gets the interval at once, as it did before
+// QuietSince waited for it.
+func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time, c Conn) (seg Segment, quiet bool, stale int, timedOut bool) {
 	_, clocked := p.h.DUT.(ClockedDUT)
-	settled := func() bool { return true }
+	delivered := func() bool { return true }
 	if dl, ok := c.(Deliverer); ok && !clocked {
-		settled = dl.Delivered
+		delivered = dl.Delivered
 	}
-	stale := 0
 	settleBy := p.h.Now().Add(settleBudget)
-	var deadline time.Time // zero until the DUT has the ACK or settleBudget has passed
+	var deadline time.Time // zero until the DUT has the ACK
 	for {
-		if deadline.IsZero() && (settled() || !p.h.Now().Before(settleBy)) {
-			deadline = p.h.Now().Add(d)
+		if deadline.IsZero() {
+			if delivered() {
+				deadline = p.h.Now().Add(d)
+			} else if !p.h.Now().Before(settleBy) {
+				return Segment{}, false, stale, true
+			}
 		}
 		wait := settlePoll
 		if !deadline.IsZero() {
@@ -724,7 +731,7 @@ func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time, 
 		if !ok {
 			// past the deadline, or the DUT closed its output and nothing more can come
 			if !deadline.IsZero() || p.h.closed {
-				return Segment{}, true, stale
+				return Segment{}, true, stale, false
 			}
 			continue
 		}
@@ -744,14 +751,12 @@ func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time, 
 			}
 			continue
 		}
-		return s, false, stale
+		return s, false, stale, false
 	}
 }
 
-// settleBudget bounds QuietSince's wait for the DUT to report the ACK. A DUT that never reports
-// it, because it lost the ACK, resends its FIN well within it; the budget only ends the wait for
-// a DUT that neither reports nor resends, whose Delivered check then fails on its own.
-// settlePoll is how often QuietSince asks in the meantime.
+// settleBudget bounds QuietSince's wait for the DUT to report the ACK; a conformant engine reports
+// it within milliseconds of the ACK. settlePoll is how often QuietSince asks in the meantime.
 const (
 	settleBudget = 3 * time.Second
 	settlePoll   = 10 * time.Millisecond

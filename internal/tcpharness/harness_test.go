@@ -272,7 +272,8 @@ func coarseClock() time.Time {
 
 // QuietSince waits for the DUT to report Delivered with short polls. A poll that ends with nothing
 // is not taken for a closed output on a coarse clock, where a 10 ms poll can measure 0: a segment
-// that comes later still fails the quiet. A closed output ends the wait at once.
+// that comes later still fails the quiet. A closed output ends the wait at once, and a DUT that
+// never reports Delivered fails the quiet when the wait's budget ends.
 func TestQuietSinceOnACoarseClock(t *testing.T) {
 	for i := range 5 {
 		stub := &stubRealtime{out: make(chan []byte, 1)}
@@ -281,9 +282,9 @@ func TestQuietSinceOnACoarseClock(t *testing.T) {
 		p := h.NewPeer(8000)
 		late := Segment{Src: p.Remote, Dst: p.Local, Flags: FlagACK, Seq: 1, Ack: 2}.Marshal()
 		timer := time.AfterFunc(150*time.Millisecond, func() { stub.out <- late })
-		s, quiet, _ := p.QuietSince(500*time.Millisecond, 0, Segment{}, h.Now(), undelivered{})
+		s, quiet, _, timedOut := p.QuietSince(500*time.Millisecond, 0, Segment{}, h.Now(), undelivered{})
 		timer.Stop()
-		if quiet || s.Seq != 1 {
+		if quiet || timedOut || s.Seq != 1 {
 			t.Fatalf("run %d: a segment 150 ms into the wait for Delivered: quiet=%v, got %v", i, quiet, s)
 		}
 	}
@@ -294,10 +295,19 @@ func TestQuietSinceOnACoarseClock(t *testing.T) {
 	h.wall = coarseClock
 	p := h.NewPeer(8000)
 	start := time.Now()
-	if _, quiet, _ := p.QuietSince(500*time.Millisecond, 0, Segment{}, h.Now(), undelivered{}); !quiet {
+	if _, quiet, _, _ := p.QuietSince(500*time.Millisecond, 0, Segment{}, h.Now(), undelivered{}); !quiet {
 		t.Fatal("a closed output is not quiet")
 	}
 	if spent := time.Since(start); spent > settleBudget/2 {
 		t.Fatalf("a closed output kept QuietSince waiting %v", spent)
+	}
+
+	// A DUT that neither resends nor reports Delivered is not quiet: nothing shows it has the ACK
+	stub = &stubRealtime{out: make(chan []byte)}
+	h = newH(t, Engine{Name: "stub"}, "coarse", stub, 10)
+	h.wall = coarseClock
+	p = h.NewPeer(8000)
+	if _, quiet, _, timedOut := p.QuietSince(500*time.Millisecond, 0, Segment{}, h.Now(), undelivered{}); quiet || !timedOut {
+		t.Fatalf("a DUT that never reports Delivered: quiet=%v timedOut=%v, want not quiet and timed out", quiet, timedOut)
 	}
 }
