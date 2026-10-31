@@ -6,9 +6,14 @@
 
 Repository documents describe the checked-out revision; main can include unreleased changes.
 Use the matching Git tag and release notes for a released version.
-The [manuals](../manual/README.md) explain verified installation and operation, the [design specification](../design/README.md) defines behavior and compatibility, and the [testing policy](testing.md) defines required checks.
-The [test catalog](testing-catalog.md) identifies missing tests and limits of verification; the [lab instructions](../../lab/README.md) explain execution.
 Read the project conventions and the affected topic before changing it.
+These documents have the following roles:
+
+- [Manuals](../manual/README.md): explain verified installation and operation.
+- [Design specification](../design/README.md): defines behavior and compatibility.
+- [Testing policy](testing.md): defines required checks.
+- [Test catalog](testing-catalog.md): identifies missing tests and limits of verification.
+- [Lab instructions](../../lab/README.md): explain execution.
 
 Current documents retain constraints, unimplemented proposals and the reasoning needed to understand a decision.
 Use Git history for previous specifications and completed plans, pull requests for change rationale and detailed validation, and release notes for changes between releases.

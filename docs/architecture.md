@@ -12,6 +12,6 @@
 - <a id="2-代表的な経路"></a> [2. 代表的な経路](development/architecture.md#2-代表的な経路)
 - <a id="ルールの追加"></a> [ルールの追加](development/architecture.md#ルールの追加)
 - <a id="エージェントの起動"></a> [エージェントの起動](development/architecture.md#エージェントの起動)
-- <a id="3-壊れたときに見る順番"></a> [3. 壊れたときに見る順番](development/architecture.md#3-壊れたときに見る順番)
+- <a id="3-壊れたときに見る順番"></a> [3. 障害の調査で確認する順番](development/architecture.md#3-障害の調査で確認する順番)
 
 </details>
