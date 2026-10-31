@@ -196,6 +196,10 @@ func agentCredentialsPath(cmd *cobra.Command) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// 空のままだと joinPath が "/agent.json" や相対の "agent.json" を返し、root では / に秘密鍵を書いてしまう
+	if strings.TrimSpace(c.str("WGFT_DATA_DIR")) == "" {
+		return "", configErrorf("WGFT_DATA_DIR", "is empty; give the directory that holds agent.json")
+	}
 	return joinPath(c.str("WGFT_DATA_DIR"), "agent.json"), nil
 }
 

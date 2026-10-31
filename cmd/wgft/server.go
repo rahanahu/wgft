@@ -303,6 +303,10 @@ reverted automatically; it only prints a list to revert by hand.`,
 			if err != nil {
 				return err
 			}
+			// 空のままだと /wgft.sqlite を指し、--purge ではルート直下のファイルを消しに行く
+			if strings.TrimSpace(c.str("WGFT_DATA_DIR")) == "" {
+				return configErrorf("WGFT_DATA_DIR", "is empty; give the directory that holds wgft.sqlite, for example /var/lib/wgft")
+			}
 			o.DBPath = c.str("WGFT_DATA_DIR") + "/wgft.sqlite"
 			return teardown.Run(o, os.Stdout)
 		},
