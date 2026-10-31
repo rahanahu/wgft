@@ -14,7 +14,7 @@ use wgft_wireguard::{Device, Event};
 use crate::{Command, Status, TunSettings};
 
 /// `_IOW('T', 202, int)`。`linux/if_tun.h` の値。
-const TUNSETIFF: u64 = 0x4004_54ca;
+const TUNSETIFF: libc::Ioctl = 0x4004_54ca;
 const IFNAMSIZ: usize = 16;
 /// `IFF_TUN | IFF_NO_PI`。値は `c_short` に収まる。
 #[expect(clippy::cast_possible_truncation, reason = "0x1001 fits in a c_short")]
@@ -54,8 +54,7 @@ fn open_tun(name: &str) -> io::Result<OwnedFd> {
     };
     req.name[..name.len()].copy_from_slice(name.as_bytes());
     // SAFETY: req は TUNSETIFF が読み書きする struct ifreq と同じ配置で、呼び出しの間生きている
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), TUNSETIFF as libc::Ioctl, &raw mut req) };
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), TUNSETIFF, &raw mut req) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
     }

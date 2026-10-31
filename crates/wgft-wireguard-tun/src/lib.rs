@@ -10,7 +10,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, oneshot};
-use wgft_wireguard::{DeviceConfig, Drops, Event, PeerStatus};
+use wgft_wireguard::{DeviceConfig, Drops, Event, PeerStatus, Zeroizing};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -141,7 +141,7 @@ pub async fn spawn(
     config: DeviceConfig,
     tun: TunSettings,
     listen: SocketAddr,
-    seed: [u8; 32],
+    seed: Zeroizing<[u8; 32]>,
     unix: Duration,
 ) -> io::Result<Handle> {
     let device = wgft_wireguard::Device::new(config, seed, Instant::now(), unix)

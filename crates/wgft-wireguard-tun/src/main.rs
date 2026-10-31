@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::Parser;
 use wgft_wireguard::{
     DeviceConfig, Event, Ipv4Prefix, Limits, PeerConfig, PrivateKey, ProtocolTimers, PublicKey,
+    Zeroizing,
 };
 use wgft_wireguard_tun::{Handle, TunSettings};
 
@@ -182,8 +183,8 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let mut seed = [0u8; 32];
-    if let Err(e) = getrandom::fill(&mut seed) {
+    let mut seed = Zeroizing::new([0u8; 32]);
+    if let Err(e) = getrandom::fill(&mut seed[..]) {
         eprintln!("wgft-wireguard-tun: read entropy: {e}");
         return ExitCode::FAILURE;
     }
