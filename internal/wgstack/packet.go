@@ -273,8 +273,12 @@ func writeIPv4Header(b []byte, total int, id uint16, proto uint8, src, dst uint3
 }
 
 // clearDF は writeIPv4Header で書いた b[:20] の DF を下ろし、checksum を直す。
-func clearDF(b []byte) {
-	b[6] &^= 0x40
+func clearDF(b []byte) { setFragField(b, binary.BigEndian.Uint16(b[6:8])&^0x4000) }
+
+// setFragField は writeIPv4Header で書いた b[:20] の flag と断片の offset の欄(6 から 7 byte 目)を field に
+// し、header の checksum を直す。
+func setFragField(b []byte, field uint16) {
+	binary.BigEndian.PutUint16(b[6:8], field)
 	b[10], b[11] = 0, 0
 	binary.BigEndian.PutUint16(b[10:12], ^checksum(0, b[:20]))
 }

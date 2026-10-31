@@ -85,15 +85,21 @@ func (s *stack) sendICMPErrorRaw(orig []byte, typ, code uint8, rest uint32, now 
 		}
 		writeIPv4Header(b, total, id, protoICMP, dst, src)
 		m := b[ipHeaderLen:total]
-		m[0], m[1], m[2], m[3] = typ, code, 0, 0
+		m[0], m[1] = typ, code
 		binary.BigEndian.PutUint32(m[4:8], rest)
 		copy(m[8:], quote)
-		binary.BigEndian.PutUint16(m[2:4], ^checksum(0, m))
+		finishICMP(m)
 		return total
 	})
 	if !ok {
 		s.refused(&s.ctlDropped, &s.ctlGate, now, "dropped control packets because the control output ring was full")
 	}
+}
+
+// finishICMP は ICMP の message m の checksum の欄を 0 にしてから、m 全体の checksum を書く。
+func finishICMP(m []byte) {
+	m[2], m[3] = 0, 0
+	binary.BigEndian.PutUint16(m[2:4], ^checksum(0, m))
 }
 
 func (s *stack) sendICMPError(ip *ipv4, typ, code uint8, rest uint32, now int64) {
@@ -132,8 +138,8 @@ func (s *stack) echoReply(ip *ipv4, now int64) {
 		clearDF(b) // echo の応答は DF を立てない(Linux と同じく PMTU discovery を使わない)
 		m := b[ipHeaderLen:total]
 		copy(m, ip.payload)
-		m[0], m[2], m[3] = icmpEchoReply, 0, 0
-		binary.BigEndian.PutUint16(m[2:4], ^checksum(0, m))
+		m[0] = icmpEchoReply
+		finishICMP(m)
 		return total
 	})
 	if !ok {
@@ -324,9 +330,8 @@ func (c *PingConn) Write(b []byte) (int, error) {
 		writeIPv4Header(buf, total, id, protoICMP, src, dst)
 		m := buf[ipHeaderLen:total]
 		copy(m, b)
-		m[2], m[3] = 0, 0
 		binary.BigEndian.PutUint16(m[4:6], ident)
-		binary.BigEndian.PutUint16(m[2:4], ^checksum(0, m))
+		finishICMP(m)
 		return total
 	})
 	if !ok {
