@@ -1,0 +1,217 @@
+{
+  "status": "failed",
+  "checked_at": "2026-10-31T21:16:43Z",
+  "data_dir": "/tmp/spec-agent-us",
+  "checks": [
+    {
+      "id": "host.platform",
+      "status": "ok",
+      "group": "Host",
+      "label": "platform",
+      "detail": "linux/amd64, wgft v1.5.1-0.20261031211448-dc6479ad5090; the memory soft limit would be 216 MiB, computed here from the flow caps 8192 UDP and 2048 TCP, not read from the running agent"
+    },
+    {
+      "id": "host.privileges",
+      "status": "unknown",
+      "reason": "running_as_root",
+      "group": "Host",
+      "label": "privileges",
+      "detail": "running as root, uid 0; the data directory is readable; new files can be created in the data directory; agent.json is readable; root bypasses file permissions, so this run cannot say whether the user the agent runs as can reach them; the running agent runs as uid 0, root",
+      "next": "run this command as the same user as the agent. For the packaged systemd unit, that is wgft: runuser -u wgft -- wgft agent doctor. If the agent itself runs as root, this result is expected"
+    },
+    {
+      "id": "host.interfaces",
+      "status": "ok",
+      "group": "Host",
+      "label": "interfaces",
+      "detail": "2 interfaces; up and not loopback: eth0 192.168.50.2/24"
+    },
+    {
+      "id": "host.resolve",
+      "status": "ok",
+      "group": "Host",
+      "label": "endpoint resolve",
+      "detail": "the agent API endpoint is the literal address 203.0.113.1, so there is no name to resolve"
+    },
+    {
+      "id": "agent.credentials",
+      "status": "ok",
+      "group": "Credentials",
+      "label": "credentials",
+      "detail": "last: registered as \"home\" to 203.0.113.1:8443, pinned to cert sha256:3f1c9a5e7b2d, joined with token sha256:35c2c5418185, mode 0600"
+    },
+    {
+      "id": "agent.process",
+      "status": "ok",
+      "group": "Credentials",
+      "label": "process",
+      "detail": "an agent process holds the lock next to the credentials file, so one is running for this data directory"
+    },
+    {
+      "id": "agent.last_state",
+      "status": "ok",
+      "group": "Credentials",
+      "label": "last state",
+      "detail": "last: generation 4, 4 rules, tunnel address 10.200.0.2/24, peer 203.0.113.1:51820, mtu 1420"
+    },
+    {
+      "id": "agent.control",
+      "status": "ok",
+      "group": "Connection",
+      "label": "control socket",
+      "detail": "the running agent answered doctor on its control socket at /tmp/spec-agent-us/agent.json.sock"
+    },
+    {
+      "id": "stream.connection",
+      "status": "ok",
+      "group": "Connection",
+      "label": "control connection",
+      "detail": "the control stream to the server is up"
+    },
+    {
+      "id": "stream.backoff",
+      "status": "unknown",
+      "reason": "no_threshold",
+      "group": "Connection",
+      "label": "reconnect backoff",
+      "detail": "no reconnect wait has been recorded on this connection yet; no attempt is waiting now",
+      "next": "read it with the control connection above: a wait that keeps growing while the stream stays down points at the server or the line to it, not at this host; a wait that stays at 10s means the WireGuard handshake is recent, so the line works and the server is not accepting the control connection"
+    },
+    {
+      "id": "stream.liveness",
+      "status": "unknown",
+      "reason": "no_threshold",
+      "group": "Connection",
+      "label": "liveness",
+      "detail": "the last ping went out at 2026-10-31T21:16:37Z, 5s ago; the last pong came back at 2026-10-31T21:16:37Z, 5s ago",
+      "next": "these are the agent's own keepalives on the control stream. They are cleared whenever it reconnects, so an empty pair on a stream that is up means the connection is new"
+    },
+    {
+      "id": "tunnel.resolve",
+      "status": "ok",
+      "group": "Tunnel",
+      "label": "wg endpoint resolve",
+      "detail": "the WireGuard peer is the literal address 203.0.113.1, so there is no name to resolve"
+    },
+    {
+      "id": "tunnel.local",
+      "status": "ok",
+      "group": "Tunnel",
+      "label": "tunnel",
+      "detail": "the tunnel is up to 203.0.113.1:51820; the last handshake was at 2026-10-31T21:16:07Z, 36s ago"
+    },
+    {
+      "id": "tunnel.socket_buffers",
+      "status": "ok",
+      "group": "Tunnel",
+      "label": "socket buffers",
+      "detail": "the WireGuard UDP sockets on port 46693 got a receive buffer of 14680064 bytes and a send buffer of 14680064 bytes when the tunnel was built at 2026-10-31T21:16:07Z, 35s ago; userspace mode requires 14680064 bytes each"
+    },
+    {
+      "id": "tunnel.udp_accounting",
+      "status": "ok",
+      "group": "Tunnel",
+      "label": "UDP accounting",
+      "detail": "the UDP receive accounting of the tunnel is consistent"
+    },
+    {
+      "id": "tunnel.watchdog",
+      "status": "unknown",
+      "reason": "no_threshold",
+      "group": "Tunnel",
+      "label": "watchdog",
+      "detail": "the tunnel in place was built at 2026-10-31T21:16:07Z, 35s ago; the rebuild interval in force is 5m0s; no rebuild is waiting to be retried",
+      "next": "the interval is the value the agent judges by, not a countdown: the time left is not kept anywhere, so it is not shown. A rebuild pending here means the tunnel line above says why the last build failed"
+    },
+    {
+      "id": "tunnel.transfer",
+      "status": "unknown",
+      "reason": "no_threshold",
+      "group": "Tunnel",
+      "label": "transfer",
+      "detail": "124 bytes received and 244 bytes sent on the tunnel built at 2026-10-31T21:16:07Z, 35s ago",
+      "next": "a tunnel that nobody is using stays at these numbers and is healthy, so this command sets no threshold on them. Run it twice while traffic should be flowing to see whether they move"
+    },
+    {
+      "id": "relay.listeners",
+      "status": "failed",
+      "reason": "listener_error",
+      "group": "Relay",
+      "label": "listeners",
+      "detail": "1 of 3 rules cannot serve: r_01M69X3RBZNEEZ0312V7WRK5E9 tcp: 1 of 1 listener open, 1 cannot reach the target: tcp/39972: dial tcp 192.168.50.3:1: connect: connection refused. The other 2 rules listen",
+      "next": "a listener that cannot bind names a port another process on this host already holds; free it, or have the server publish another public port. A target that cannot be reached names the LAN service; check that it is up and that this host can reach it"
+    },
+    {
+      "id": "relay.sessions",
+      "status": "unknown",
+      "reason": "no_threshold",
+      "group": "Relay",
+      "label": "sessions",
+      "detail": "tcp budget 2048, 0 in use, 2 rules admitted, cap 1024 per rule, minimum 1022; udp budget 8192, 0 in use, 1 rule admitted; r_01M69X3R7SBH7F8X635BZQ65QC 0 flows in 0 sessions; r_01M69X3RB9KS3BSAPT8TBWKDAJ 0 flows in 0 sessions; r_01M69X3RBZNEEZ0312V7WRK5E9 0 flows in 0 sessions",
+      "next": "flows are what the budget counts: one per public-side connection for TCP, one per source address and port for UDP. Sessions count both sides of a TCP relay, so the two numbers differ by design"
+    },
+    {
+      "id": "relay.refusals",
+      "status": "unknown",
+      "reason": "no_threshold",
+      "group": "Relay",
+      "label": "refusals",
+      "detail": "no flow has been refused since this tunnel was built at 2026-10-31T21:16:07Z, 35s ago",
+      "next": "the count starts again at zero whenever the tunnel is rebuilt, so read it against the time above. budget means the whole process was full, rule_cap means that one rule hit its share, reserve means the room left was held for the unfilled minimums of rules, floor means a rule below its minimum left the room to the first flows of other rules and the spare, spare means the room left was kept for a rule added later"
+    },
+    {
+      "id": "relay.allow_targets",
+      "status": "ok",
+      "group": "Relay",
+      "label": "target allowlist",
+      "detail": "the running agent enforces no target allowlist, so the server can name any target this host can reach",
+      "next": "set WGFT_AGENT_ALLOW_TARGETS on this host and restart the agent to hold it to a list"
+    },
+    {
+      "id": "dataplane.interface",
+      "status": "not_tested",
+      "reason": "userspace_mode",
+      "group": "Dataplane",
+      "label": "interface",
+      "detail": "the agent runs in userspace mode and relays traffic itself, so there is no kernel dataplane to read; the Relay lines above answer for forwarding"
+    },
+    {
+      "id": "dataplane.table",
+      "status": "not_tested",
+      "reason": "userspace_mode",
+      "group": "Dataplane",
+      "label": "table",
+      "detail": "the agent runs in userspace mode and relays traffic itself, so there is no kernel dataplane to read; the Relay lines above answer for forwarding"
+    },
+    {
+      "id": "host.forwarding",
+      "status": "not_tested",
+      "reason": "userspace_mode",
+      "group": "Dataplane",
+      "label": "forwarding",
+      "detail": "the agent runs in userspace mode and relays traffic itself, so there is no kernel dataplane to read; the Relay lines above answer for forwarding"
+    }
+  ],
+  "history": {
+    "available": false,
+    "detail": "this command only evaluates the current state. To find when this agent stopped working, read its log on this host with journalctl -u wgft-agent, or docker logs for a container, and the server log on the VPS."
+  },
+  "not_tested": [
+    {
+      "id": "the server side",
+      "detail": "what the server sees: whether it publishes each rule, what it reads from its own WireGuard, and whether the last handshake is healthy. This command never judges that; run wgft server doctor on the VPS for it."
+    },
+    {
+      "id": "reaching the vps",
+      "detail": "whether this host's line reaches the VPS's WireGuard UDP port and its agent API port. Nothing is dialled towards the VPS from here, so a blocked home firewall or ISP does not show up."
+    },
+    {
+      "id": "the targets",
+      "detail": "the LAN services this agent forwards to. Nothing is dialled from here. A running agent tests TCP targets itself every 30s, and its result is what the listeners line above reports; a UDP target cannot be tested at all, so no line here answers for one."
+    },
+    {
+      "id": "local settings",
+      "detail": "the effective value and source of every setting on this host. The agent prints those as its first lines when it starts; read them in its log."
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"type":"heartbeat","heartbeat":{"generation":0,"tunnel":{"state":"error","reason":"no tunnel; full state not received","last_handshake":"0001-01-01T00:00:00Z"},"rules":[]}}

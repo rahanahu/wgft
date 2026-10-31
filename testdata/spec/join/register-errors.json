@@ -1,0 +1,7 @@
+[
+  {"status":400,"body":"bad request\n","refusal":"config","subject":"WGFT_NAME"},
+  {"status":401,"body":"invalid token\n","refusal":"conflict","subject":"WGFT_JOIN"},
+  {"status":409,"body":"agent already registered\n","refusal":"conflict","subject":"WGFT_JOIN"},
+  {"status":429,"body":"too many attempts\n","error":"registration API: HTTP 429: too many attempts"},
+  {"status":500,"body":"internal error\n","error":"registration API: HTTP 500: internal error"}
+]

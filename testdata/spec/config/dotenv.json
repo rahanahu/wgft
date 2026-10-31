@@ -1,0 +1,342 @@
+{
+  "description": "Inputs to the agent's dotenv reader. input is the file's content, or null for a file that does not exist. An ok case gives the map read from the file, before the caller picks the keys it knows. An error case gives the line number and the reason; the whole message is \"refusing to start [config PATH:LINE]: REASON\" for agent run and \"cannot continue [config PATH:LINE]: REASON\" for a command that starts nothing, and the exit code is 3. must_not_contain lists text from the line that the message must not repeat.",
+  "ok": [
+    {
+      "name": "basic",
+      "input": "WGFT_DATA_DIR=/srv/wgft\nWGFT_MODE=userspace\n",
+      "want": {
+        "WGFT_DATA_DIR": "/srv/wgft",
+        "WGFT_MODE": "userspace"
+      }
+    },
+    {
+      "name": "missing file",
+      "input": null,
+      "want": {}
+    },
+    {
+      "name": "empty file",
+      "input": "",
+      "want": {}
+    },
+    {
+      "name": "comments and blank lines",
+      "input": "# comment\n\nWGFT_NAME=home\n#WGFT_MODE=kernel\n",
+      "want": {
+        "WGFT_NAME": "home"
+      }
+    },
+    {
+      "name": "hash inside a value is part of the value",
+      "input": "WGFT_JOIN=wgft://vps.example.com:8443/TOKEN#sha256:0000\nWGFT_NAME=home#1\n",
+      "want": {
+        "WGFT_JOIN": "wgft://vps.example.com:8443/TOKEN#sha256:0000",
+        "WGFT_NAME": "home#1"
+      }
+    },
+    {
+      "name": "equals sign inside a value",
+      "input": "WGFT_NAME=a=b\n",
+      "want": {
+        "WGFT_NAME": "a=b"
+      }
+    },
+    {
+      "name": "empty value",
+      "input": "WGFT_NAME=\n",
+      "want": {
+        "WGFT_NAME": ""
+      }
+    },
+    {
+      "name": "duplicate key, the last line wins",
+      "input": "WGFT_NAME=a\nWGFT_NAME=b\n",
+      "want": {
+        "WGFT_NAME": "b"
+      }
+    },
+    {
+      "name": "CRLF line ends",
+      "input": "WGFT_NAME=home\r\nWGFT_MODE=kernel\r\n",
+      "want": {
+        "WGFT_NAME": "home",
+        "WGFT_MODE": "kernel"
+      }
+    },
+    {
+      "name": "every trailing CR is removed",
+      "input": "WGFT_NAME=home\r\r\n",
+      "want": {
+        "WGFT_NAME": "home"
+      }
+    },
+    {
+      "name": "a line holding only CR is blank",
+      "input": "\r\nWGFT_NAME=home\n",
+      "want": {
+        "WGFT_NAME": "home"
+      }
+    },
+    {
+      "name": "CR inside a value is kept",
+      "input": "WGFT_NAME=a\rb\n",
+      "want": {
+        "WGFT_NAME": "a\rb"
+      }
+    },
+    {
+      "name": "no final newline",
+      "input": "WGFT_NAME=home",
+      "want": {
+        "WGFT_NAME": "home"
+      }
+    },
+    {
+      "name": "quote after the first byte of a value is kept",
+      "input": "WGFT_NAME=ho\"me'\n",
+      "want": {
+        "WGFT_NAME": "ho\"me'"
+      }
+    },
+    {
+      "name": "whitespace other than space and tab in a value is kept",
+      "input": "WGFT_NAME=a\u000bb\nWGFT_MODE=c\u00a0d\n",
+      "want": {
+        "WGFT_NAME": "a\u000bb",
+        "WGFT_MODE": "c\u00a0d"
+      }
+    },
+    {
+      "name": "keys of any shape are read; the caller ignores the ones it does not know",
+      "input": "wgft_mode=kernel\nFOO-BAR=1\nWGFT_UNKNOWN=x\n",
+      "want": {
+        "wgft_mode": "kernel",
+        "FOO-BAR": "1",
+        "WGFT_UNKNOWN": "x"
+      }
+    },
+    {
+      "name": "byte order mark becomes part of the first key",
+      "input": "\ufeffWGFT_NAME=home\nWGFT_MODE=kernel\n",
+      "want": {
+        "\ufeffWGFT_NAME": "home",
+        "WGFT_MODE": "kernel"
+      }
+    },
+    {
+      "name": "vertical tab inside a key is not rejected",
+      "input": "WGFT\u000bNAME=x\n",
+      "want": {
+        "WGFT\u000bNAME": "x"
+      }
+    }
+  ],
+  "error": [
+    {
+      "name": "no equals sign",
+      "input": "WGFT_NAME\n",
+      "line": 1,
+      "reason": "not in KEY=value form; the line is not shown, since it may hold a secret",
+      "must_not_contain": []
+    },
+    {
+      "name": "empty key",
+      "input": "=hunter2\n",
+      "line": 1,
+      "reason": "not in KEY=value form; the line is not shown, since it may hold a secret",
+      "must_not_contain": [
+        "hunter2"
+      ]
+    },
+    {
+      "name": "indented comment is not a comment",
+      "input": "  # WGFT_MODE=kernel\n",
+      "line": 1,
+      "reason": "key name may not contain whitespace; the line is not shown, since it may hold a secret",
+      "must_not_contain": [
+        "kernel"
+      ]
+    },
+    {
+      "name": "indented comment without an equals sign",
+      "input": "  # note\n",
+      "line": 1,
+      "reason": "not in KEY=value form; the line is not shown, since it may hold a secret",
+      "must_not_contain": [
+        "note"
+      ]
+    },
+    {
+      "name": "line of spaces is not blank",
+      "input": "WGFT_NAME=a\n   \n",
+      "line": 2,
+      "reason": "not in KEY=value form; the line is not shown, since it may hold a secret",
+      "must_not_contain": []
+    },
+    {
+      "name": "space before the equals sign",
+      "input": "WGFT_NAME =home\n",
+      "line": 1,
+      "reason": "key name may not contain whitespace; the line is not shown, since it may hold a secret",
+      "must_not_contain": [
+        "home"
+      ]
+    },
+    {
+      "name": "leading space in the key",
+      "input": " WGFT_NAME=home\n",
+      "line": 1,
+      "reason": "key name may not contain whitespace; the line is not shown, since it may hold a secret",
+      "must_not_contain": [
+        "home"
+      ]
+    },
+    {
+      "name": "tab inside the key",
+      "input": "WGFT\tNAME=home\n",
+      "line": 1,
+      "reason": "key name may not contain whitespace; the line is not shown, since it may hold a secret",
+      "must_not_contain": [
+        "home"
+      ]
+    },
+    {
+      "name": "trailing vertical tab in the key",
+      "input": "WGFT_NAME\u000b=home\n",
+      "line": 1,
+      "reason": "key name may not contain whitespace; the line is not shown, since it may hold a secret",
+      "must_not_contain": [
+        "home"
+      ]
+    },
+    {
+      "name": "export prefix",
+      "input": "export WGFT_NAME=home\n",
+      "line": 1,
+      "reason": "key name may not contain whitespace; the line is not shown, since it may hold a secret",
+      "must_not_contain": [
+        "home"
+      ]
+    },
+    {
+      "name": "double-quoted value",
+      "input": "WGFT_JOIN=\"wgft://vps.example.com:8443/TOKEN#sha256:0000\"\n",
+      "line": 1,
+      "reason": "do not quote the value of WGFT_JOIN; Docker keeps quotes as part of the value",
+      "must_not_contain": [
+        "TOKEN",
+        "vps.example.com"
+      ]
+    },
+    {
+      "name": "single-quoted value",
+      "input": "WGFT_NAME='home'\n",
+      "line": 1,
+      "reason": "do not quote the value of WGFT_NAME; Docker keeps quotes as part of the value",
+      "must_not_contain": [
+        "home"
+      ]
+    },
+    {
+      "name": "quoted empty value",
+      "input": "WGFT_NAME=\"\"\n",
+      "line": 1,
+      "reason": "do not quote the value of WGFT_NAME; Docker keeps quotes as part of the value",
+      "must_not_contain": []
+    },
+    {
+      "name": "quote is checked before whitespace",
+      "input": "WGFT_NAME=\"my home\"\n",
+      "line": 1,
+      "reason": "do not quote the value of WGFT_NAME; Docker keeps quotes as part of the value",
+      "must_not_contain": [
+        "home"
+      ]
+    },
+    {
+      "name": "key that is not name-shaped is not shown",
+      "input": "WGFT-NAME='x'\n",
+      "line": 1,
+      "reason": "do not quote the value of this key; Docker keeps quotes as part of the value",
+      "must_not_contain": [
+        "WGFT-NAME"
+      ]
+    },
+    {
+      "name": "space inside a value",
+      "input": "WGFT_NAME=my home\n",
+      "line": 1,
+      "reason": "the value of WGFT_NAME may not contain whitespace",
+      "must_not_contain": [
+        "my",
+        "home"
+      ]
+    },
+    {
+      "name": "tab inside a value",
+      "input": "WGFT_NAME=my\thome\n",
+      "line": 1,
+      "reason": "the value of WGFT_NAME may not contain whitespace",
+      "must_not_contain": [
+        "home"
+      ]
+    },
+    {
+      "name": "trailing space after a value",
+      "input": "WGFT_NAME=home \n",
+      "line": 1,
+      "reason": "the value of WGFT_NAME may not contain whitespace",
+      "must_not_contain": [
+        "home"
+      ]
+    },
+    {
+      "name": "comment after a value",
+      "input": "WGFT_NAME=home # the agent name\n",
+      "line": 1,
+      "reason": "the value of WGFT_NAME may not contain whitespace",
+      "must_not_contain": [
+        "home",
+        "agent name"
+      ]
+    },
+    {
+      "name": "secret value is never shown",
+      "input": "WGFT_JOIN=wgft://vps.example.com:8443/TOK EN#sha256:0000\n",
+      "line": 1,
+      "reason": "the value of WGFT_JOIN may not contain whitespace",
+      "must_not_contain": [
+        "TOK",
+        "vps.example.com",
+        "sha256"
+      ]
+    },
+    {
+      "name": "non-ASCII key is not shown",
+      "input": "WGFT_NAM\u00c9=a b\n",
+      "line": 1,
+      "reason": "the value of this key may not contain whitespace",
+      "must_not_contain": [
+        "NAM"
+      ]
+    },
+    {
+      "name": "the first bad line is reported",
+      "input": "WGFT_NAME=a\n\n# c\nWGFT_MODE=kernel\nbad line\nalso bad\n",
+      "line": 5,
+      "reason": "not in KEY=value form; the line is not shown, since it may hold a secret",
+      "must_not_contain": [
+        "bad"
+      ]
+    },
+    {
+      "name": "CRLF lines are counted once",
+      "input": "WGFT_NAME=a\r\nWGFT_MODE=kernel\r\nbroken\r\n",
+      "line": 3,
+      "reason": "not in KEY=value form; the line is not shown, since it may hold a secret",
+      "must_not_contain": [
+        "broken"
+      ]
+    }
+  ]
+}

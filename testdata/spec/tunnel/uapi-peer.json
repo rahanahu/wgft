@@ -1,0 +1,21 @@
+{
+  "comment": "The one WireGuard peer a userspace agent configures, read back from the device as UAPI get lines. The input is the tunnel the agent derives from state.wg. The agent does not set listen_port, so the device takes a port the OS chooses; listen_port_nonzero says the device reports a real port. The server key is a dummy value.",
+  "input": {
+    "server_pubkey": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    "endpoint": "127.0.0.1:9",
+    "address": "10.200.0.2",
+    "server_address": "10.200.0.1",
+    "mtu": 1420,
+    "keepalive_seconds": 25
+  },
+  "want": {
+    "peers": 1,
+    "listen_port_nonzero": true,
+    "peer": {
+      "public_key": "0101010101010101010101010101010101010101010101010101010101010101",
+      "endpoint": "127.0.0.1:9",
+      "persistent_keepalive_interval": "25",
+      "allowed_ip": ["10.200.0.1/32"]
+    }
+  }
+}

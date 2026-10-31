@@ -1,0 +1,345 @@
+{
+  "description": "Values that the door of wgft agent run judges before it touches the credentials file, the tunnel or a listener. env lists variables to set; every other WGFT_* variable and WGFT_CONFIG are unset, the dotenv file does not exist, and WGFT_DATA_DIR is a fresh directory unless env sets it. args are flags given to agent run. goos, when present, is the operating system the case is judged for. A case with message is refused with exactly that message and exit code 3. A case without message passes the door.",
+  "cases": [
+    {
+      "env": {
+        "WGFT_DATA_DIR": "  "
+      },
+      "message": "refusing to start [config WGFT_DATA_DIR]: is empty; give the directory that holds agent.json"
+    },
+    {
+      "env": {
+        "WGFT_DATA_DIR": ""
+      },
+      "message": "refusing to start [config WGFT_DATA_DIR]: is empty; give the directory that holds agent.json"
+    },
+    {
+      "env": {
+        "WGFT_MODE": "Kernel"
+      },
+      "message": "refusing to start [config WGFT_MODE]: must be kernel or userspace, not \"Kernel\""
+    },
+    {
+      "env": {
+        "WGFT_MODE": " userspace"
+      },
+      "message": "refusing to start [config WGFT_MODE]: must be kernel or userspace, not \" userspace\""
+    },
+    {
+      "env": {
+        "WGFT_MODE": "kernel"
+      },
+      "goos": "windows",
+      "message": "refusing to start [prerequisite WGFT_MODE]: the agent's kernel mode needs Linux, and this is windows; leave WGFT_MODE unset or set it to userspace"
+    },
+    {
+      "env": {
+        "WGFT_MODE": "kernel"
+      },
+      "goos": "darwin",
+      "message": "refusing to start [prerequisite WGFT_MODE]: the agent's kernel mode needs Linux, and this is darwin; leave WGFT_MODE unset or set it to userspace"
+    },
+    {
+      "env": {
+        "WGFT_WG_INTERFACE": ""
+      },
+      "message": "refusing to start [config WGFT_WG_INTERFACE]: is empty; give the WireGuard interface name, for example wgft0"
+    },
+    {
+      "env": {
+        "WGFT_WG_INTERFACE": "abcdefghijklmnop"
+      },
+      "message": "refusing to start [config WGFT_WG_INTERFACE]: \"abcdefghijklmnop\" is longer than the 15 bytes the kernel allows for an interface name"
+    },
+    {
+      "env": {
+        "WGFT_WG_INTERFACE": ".."
+      },
+      "message": "refusing to start [config WGFT_WG_INTERFACE]: \"..\" is not a usable interface name"
+    },
+    {
+      "env": {
+        "WGFT_WG_INTERFACE": "wg ft"
+      },
+      "message": "refusing to start [config WGFT_WG_INTERFACE]: \"wg ft\" contains byte 0x20, which is not usable in an interface name; /, :, %, a NUL byte and whitespace including 0xa0 are not allowed"
+    },
+    {
+      "env": {
+        "WGFT_WG_INTERFACE": "wg%d"
+      },
+      "message": "refusing to start [config WGFT_WG_INTERFACE]: \"wg%d\" contains byte 0x25, which is not usable in an interface name; /, :, %, a NUL byte and whitespace including 0xa0 are not allowed"
+    },
+    {
+      "env": {
+        "WGFT_WG_INTERFACE": "wg/0"
+      },
+      "message": "refusing to start [config WGFT_WG_INTERFACE]: \"wg/0\" contains byte 0x2f, which is not usable in an interface name; /, :, %, a NUL byte and whitespace including 0xa0 are not allowed"
+    },
+    {
+      "env": {
+        "WGFT_WG_INTERFACE": "wg\u00e0"
+      },
+      "message": "refusing to start [config WGFT_WG_INTERFACE]: \"wg\u00e0\" contains byte 0xa0, which is not usable in an interface name; /, :, %, a NUL byte and whitespace including 0xa0 are not allowed"
+    },
+    {
+      "env": {
+        "WGFT_AGENT_NETSTACK": "lwip"
+      },
+      "message": "refusing to start [config WGFT_AGENT_NETSTACK]: must be gvisor or wgstack, not \"lwip\""
+    },
+    {
+      "env": {
+        "WGFT_AGENT_NETSTACK": "WGSTACK"
+      },
+      "message": "refusing to start [config WGFT_AGENT_NETSTACK]: must be gvisor or wgstack, not \"WGSTACK\""
+    },
+    {
+      "args": [
+        "--agent-netstack",
+        "lwip"
+      ],
+      "message": "refusing to start [config WGFT_AGENT_NETSTACK]: must be gvisor or wgstack, not \"lwip\""
+    },
+    {
+      "env": {
+        "WGFT_MAX_UDP_FLOWS": "15"
+      },
+      "message": "refusing to start [config WGFT_MAX_UDP_FLOWS]: \"15\" is not an integer between 16 and 65535"
+    },
+    {
+      "env": {
+        "WGFT_MAX_UDP_FLOWS": "65536"
+      },
+      "message": "refusing to start [config WGFT_MAX_UDP_FLOWS]: \"65536\" is not an integer between 16 and 65535"
+    },
+    {
+      "env": {
+        "WGFT_MAX_UDP_FLOWS": " 100"
+      },
+      "message": "refusing to start [config WGFT_MAX_UDP_FLOWS]: \" 100\" is not an integer between 16 and 65535"
+    },
+    {
+      "env": {
+        "WGFT_MAX_UDP_FLOWS": "1e3"
+      },
+      "message": "refusing to start [config WGFT_MAX_UDP_FLOWS]: \"1e3\" is not an integer between 16 and 65535"
+    },
+    {
+      "env": {
+        "WGFT_MAX_UDP_FLOWS": "0x400"
+      },
+      "message": "refusing to start [config WGFT_MAX_UDP_FLOWS]: \"0x400\" is not an integer between 16 and 65535"
+    },
+    {
+      "env": {
+        "WGFT_MAX_UDP_FLOWS": ""
+      },
+      "message": "refusing to start [config WGFT_MAX_UDP_FLOWS]: \"\" is not an integer between 16 and 65535"
+    },
+    {
+      "env": {
+        "WGFT_MAX_TCP_FLOWS": "one"
+      },
+      "message": "refusing to start [config WGFT_MAX_TCP_FLOWS]: \"one\" is not an integer between 16 and 65535"
+    },
+    {
+      "env": {
+        "WGFT_MAX_UDP_FLOWS": "1",
+        "WGFT_MAX_TCP_FLOWS": "1"
+      },
+      "message": "refusing to start [config WGFT_MAX_UDP_FLOWS]: \"1\" is not an integer between 16 and 65535"
+    },
+    {
+      "args": [
+        "--max-udp-flows",
+        "016"
+      ],
+      "message": "refusing to start [config WGFT_MAX_UDP_FLOWS]: \"14\" is not an integer between 16 and 65535"
+    },
+    {
+      "env": {
+        "WGFT_AGENT_BATCH_MIB": "-1"
+      },
+      "message": "refusing to start [config WGFT_AGENT_BATCH_MIB]: \"-1\" is not a whole number of MiB of at least 0; 0 turns send batching off"
+    },
+    {
+      "env": {
+        "WGFT_AGENT_BATCH_MIB": "1.5"
+      },
+      "message": "refusing to start [config WGFT_AGENT_BATCH_MIB]: \"1.5\" is not a whole number of MiB of at least 0; 0 turns send batching off"
+    },
+    {
+      "env": {
+        "WGFT_AGENT_BATCH_MIB": " 4"
+      },
+      "message": "refusing to start [config WGFT_AGENT_BATCH_MIB]: \" 4\" is not a whole number of MiB of at least 0; 0 turns send batching off"
+    },
+    {
+      "env": {
+        "WGFT_AGENT_BATCH_MIB": "4MiB"
+      },
+      "message": "refusing to start [config WGFT_AGENT_BATCH_MIB]: \"4MiB\" is not a whole number of MiB of at least 0; 0 turns send batching off"
+    },
+    {
+      "env": {
+        "WGFT_AGENT_BATCH_MIB": "-99999999999999999999"
+      },
+      "message": "refusing to start [config WGFT_AGENT_BATCH_MIB]: \"-99999999999999999999\" is not a whole number of MiB of at least 0; 0 turns send batching off"
+    },
+    {
+      "env": {
+        "WGFT_AGENT_ALLOW_TARGETS": ","
+      },
+      "message": "refusing to start [config WGFT_AGENT_ALLOW_TARGETS]: WGFT_AGENT_ALLOW_TARGETS: \",\" has no entries; leave it unset to allow every target"
+    },
+    {
+      "env": {
+        "WGFT_AGENT_ALLOW_TARGETS": "10.0.0.1:0"
+      },
+      "message": "refusing to start [config WGFT_AGENT_ALLOW_TARGETS]: WGFT_AGENT_ALLOW_TARGETS: entry \"10.0.0.1:0\" port is not an integer in 1-65535"
+    },
+    {
+      "env": {
+        "WGFT_MODE": "x",
+        "WGFT_AGENT_NETSTACK": "y",
+        "WGFT_DATA_DIR": " "
+      },
+      "message": "refusing to start [config WGFT_DATA_DIR]: is empty; give the directory that holds agent.json"
+    },
+    {
+      "env": {
+        "WGFT_MODE": "x",
+        "WGFT_AGENT_NETSTACK": "y"
+      },
+      "message": "refusing to start [config WGFT_MODE]: must be kernel or userspace, not \"x\""
+    },
+    {
+      "env": {
+        "WGFT_WG_INTERFACE": "",
+        "WGFT_AGENT_NETSTACK": "y"
+      },
+      "message": "refusing to start [config WGFT_WG_INTERFACE]: is empty; give the WireGuard interface name, for example wgft0"
+    },
+    {
+      "env": {
+        "WGFT_AGENT_NETSTACK": "y",
+        "WGFT_MAX_UDP_FLOWS": "1"
+      },
+      "message": "refusing to start [config WGFT_AGENT_NETSTACK]: must be gvisor or wgstack, not \"y\""
+    },
+    {
+      "env": {
+        "WGFT_MAX_TCP_FLOWS": "1",
+        "WGFT_AGENT_BATCH_MIB": "x"
+      },
+      "message": "refusing to start [config WGFT_MAX_TCP_FLOWS]: \"1\" is not an integer between 16 and 65535"
+    },
+    {
+      "env": {
+        "WGFT_AGENT_BATCH_MIB": "x",
+        "WGFT_AGENT_ALLOW_TARGETS": ","
+      },
+      "message": "refusing to start [config WGFT_AGENT_BATCH_MIB]: \"x\" is not a whole number of MiB of at least 0; 0 turns send batching off"
+    },
+    {
+      "env": {
+        "WGFT_MODE": ""
+      }
+    },
+    {
+      "env": {
+        "WGFT_MODE": "userspace"
+      }
+    },
+    {
+      "env": {
+        "WGFT_MODE": "kernel"
+      },
+      "goos": "linux"
+    },
+    {
+      "env": {
+        "WGFT_AGENT_NETSTACK": ""
+      }
+    },
+    {
+      "env": {
+        "WGFT_AGENT_NETSTACK": "gvisor"
+      }
+    },
+    {
+      "env": {
+        "WGFT_AGENT_NETSTACK": "wgstack"
+      }
+    },
+    {
+      "env": {
+        "WGFT_WG_INTERFACE": "wgft-home.1"
+      }
+    },
+    {
+      "env": {
+        "WGFT_WG_INTERFACE": "abcdefghijklmno"
+      }
+    },
+    {
+      "env": {
+        "WGFT_MAX_UDP_FLOWS": "+16",
+        "WGFT_MAX_TCP_FLOWS": "065535"
+      }
+    },
+    {
+      "args": [
+        "--max-udp-flows",
+        "0x400",
+        "--max-tcp-flows",
+        "1_000"
+      ]
+    },
+    {
+      "env": {
+        "WGFT_AGENT_BATCH_MIB": ""
+      }
+    },
+    {
+      "env": {
+        "WGFT_AGENT_BATCH_MIB": "0"
+      }
+    },
+    {
+      "env": {
+        "WGFT_AGENT_BATCH_MIB": "-0"
+      }
+    },
+    {
+      "env": {
+        "WGFT_AGENT_BATCH_MIB": "+4"
+      }
+    },
+    {
+      "env": {
+        "WGFT_AGENT_BATCH_MIB": "99999999999999999999"
+      }
+    },
+    {
+      "env": {
+        "WGFT_AGENT_ALLOW_TARGETS": "  "
+      }
+    },
+    {
+      "env": {
+        "WGFT_AGENT_ALLOW_TARGETS": "192.168.1.20:25565,192.168.1.21:2456-2458"
+      }
+    },
+    {
+      "env": {
+        "WGFT_JOIN": "not-a-join-string"
+      }
+    },
+    {
+      "env": {
+        "WGFT_NAME": "Not A Valid Name"
+      }
+    }
+  ]
+}
