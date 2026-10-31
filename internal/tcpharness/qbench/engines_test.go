@@ -181,7 +181,10 @@ func newRig(engine, client string, imp Impair, seed int64, trace string) (*Rig, 
 	return r, nil
 }
 
+// Close halts the link first, so it delivers nothing into a device that is closing, then closes
+// the devices, waits for the pumps and flushes the link's log.
 func (r *Rig) Close() {
+	r.L.Halt()
 	r.C.close()
 	r.D.Close()
 	r.wg.Wait()
