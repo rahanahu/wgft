@@ -50,6 +50,9 @@ func main() {
 			return nil
 		}
 		if strings.HasSuffix(path, ".rs") {
+			if rustExempt(path) {
+				return nil
+			}
 			src, rerr := os.ReadFile(path)
 			if rerr != nil {
 				return rerr
