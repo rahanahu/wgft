@@ -616,15 +616,21 @@ func dropFirstResend(inner tcpharness.DUT) tcpharness.DUT {
 	d := &delayedACKs{DUT: inner, out: make(chan []byte, 1024)}
 	go func() {
 		defer close(d.out)
-		sent := map[uint32]bool{}
-		dropped := false
+		// by the testbench's port, so that each connection, such as each attempt of a scenario that
+		// starts over, loses its own first resend
+		sent := map[uint16]map[uint32]bool{}
+		dropped := map[uint16]bool{}
 		for pkt := range inner.Emitted() {
 			if s, err := tcpharness.Parse(pkt); err == nil && len(s.Payload) > 0 {
-				if sent[s.Seq] && !dropped {
-					dropped = true
+				port := s.Dst.Port()
+				if sent[port] == nil {
+					sent[port] = map[uint32]bool{}
+				}
+				if sent[port][s.Seq] && !dropped[port] {
+					dropped[port] = true
 					continue
 				}
-				sent[s.Seq] = true
+				sent[port][s.Seq] = true
 			}
 			d.out <- pkt
 		}
