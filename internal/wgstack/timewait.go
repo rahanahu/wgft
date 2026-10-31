@@ -14,14 +14,16 @@ const (
 )
 
 type twRow struct {
-	tup      tuple
-	sndNxt   uint32
-	rcvNxt   uint32
+	tup    tuple
+	origin int32 // 元の接続の枠
+	sndNxt uint32
+	rcvNxt uint32
+	// 世代は 64 bit。32 bit では枠の再利用が 2^32 回で一周し、古い参照が通ってしまう。
+	// 下の並びは、8 byte の値を境界に揃えて行の大きさを 64 byte に保つためのもの。
+	deadline int64
+	gen      uint64
 	tsRecent uint32
 	tsOffset uint32
-	deadline int64
-	origin   int32 // 元の接続の枠
-	gen      uint32
 	prev     int32
 	next     int32
 	wnd      uint16
@@ -41,7 +43,7 @@ type twTable struct {
 }
 
 func newTWTable(n int, key sipKey) twTable {
-	t := twTable{rows: make([]twRow, n), idx: newIndex(n, key), free: make([]int32, n), head: -1, tail: -1}
+	t := twTable{rows: make([]twRow, n), idx: newIndex(n, key, false), free: make([]int32, n), head: -1, tail: -1}
 	for i := range t.free {
 		t.free[i] = int32(n - 1 - i)
 	}
@@ -272,7 +274,7 @@ func (s *stack) pollTWRow(id int32, b []byte, now int64) int {
 
 // abortTWRow は、元の接続の値の Abort で、その接続の行が表に残っていれば RST を送って外す。tmu を
 // 持って呼ぶ。
-func (s *stack) abortTWRow(tup tuple, origin int32, gen uint32) {
+func (s *stack) abortTWRow(tup tuple, origin int32, gen uint64) {
 	id := s.tw.find(tup)
 	if id < 0 {
 		return

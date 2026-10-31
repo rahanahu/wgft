@@ -109,10 +109,14 @@ func checkHeld(t testing.TB, n *testNet) Stats {
 	}
 	// 4 つ組の hash の表の項は、inIndex の枠と 1 対 1 で、項の世代と 4 つ組がその枠の今の接続と合う
 	s.tmu.Lock()
-	ents := make([]indexEnt, 0, len(s.conns))
-	for _, e := range s.connIdx.ents {
+	type ent struct {
+		indexEnt
+		gen uint64
+	}
+	ents := make([]ent, 0, len(s.conns))
+	for i, e := range s.connIdx.ents {
 		if e.id != 0 {
-			ents = append(ents, e)
+			ents = append(ents, ent{e, s.connIdx.gens[i]})
 		}
 	}
 	s.tmu.Unlock()

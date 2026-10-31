@@ -257,7 +257,7 @@ wgstack に替えると、次の項が変わります。
 | 今の項 | wgstack での扱い |
 |---|---|
 | [TCP のフロー](memory-server.md#tcp-のフロー-1-本の上界)(1,598 KiB × K)と TCP の boost | netstack の分は N_c × (c_conn + f_s + f_r + r_f + h_f) と B × (d_s + d_r + d_rec + d_h) に替わります。今の固定の分の 74 KiB は中継のコピーのバッファを含み、wgstack の式は中継と `internal/netpipe` を数えないので、中継の側の K に比例する項は残します |
-| wgstack の固定の構造 | M_fix を加えます。K が 2048 のとき約 25.6 MiB です |
+| wgstack の固定の構造 | M_fix を加えます。K が 2048 のとき約 25.2 MiB です |
 | [中身の無い ACK の処理待ち](memory-server.md#中身の無い-ack-の処理待ちの上界) | 無くなります |
 | 閉じた後の netstack の TCP の接続 | M × c_tw。M は `vpsd` の入れ替わりに合わせて決め直します |
 | netstack の出力のキュー(64 MiB) | 今のキューは UDP の出力も持ちます。Q_ctl × s_ctl と、作り直した UDP の送信の予算の項(今の式の M_udp_tx)に替わります |

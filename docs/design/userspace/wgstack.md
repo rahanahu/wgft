@@ -499,7 +499,11 @@ M_wgstack = M_fix
 初期の値は動作を確かめるための値であり、最適値として探した値ではありません。
 どの値も設定項目にしません。
 
-公開する 4 つの target(linux/amd64、linux/arm64、windows/amd64、darwin/arm64)の build で確かめた大きさは、c_conn が 5,432 byte、記録 1 件が 32 byte、区間 1 つが 16 byte、握手の途中の行が 80 byte、TIME_WAIT の行が 64 byte、hash の表の 1 項目が 24 byte です。
+公開する 4 つの target(linux/amd64、linux/arm64、windows/amd64、darwin/arm64)の build で確かめた大きさは、c_conn が 5,440 byte、記録 1 件が 32 byte、区間 1 つが 16 byte、握手の途中の行が 80 byte、TIME_WAIT の行が 64 byte、hash の表の 1 項目が握手の途中と TIME_WAIT の表で 20 byte、接続の表で 28 byte です。
+接続の表の 1 項目は、4 つ組と hash と行の番号の 20 byte に、世代の 8 byte を加えた値です。
+接続の枠の世代は 64 bit で、枠、handle、接続の表、TIME_WAIT の行、boost の確認が同じ幅の世代を比べます。
+枠は LIFO で再利用されるので、1 つの相手が接続を繰り返すと同じ枠の世代が 1 回ごとに 1 進みます。
+32 bit の世代では 2^32 回の再利用で一周し、古い handle や参照が次の接続の枠に届いてしまうため、64 bit にします。
 どの target でも同じ大きさであることは、大きさを定数で比べる一時の試験を 4 つの target の build でコンパイルして確かめました。
 記録 1 件は SACK の scoreboard の欄を含みます([ACK 1 つの手間の上界](wgstack-performance.md#ack-1-つの手間の上界))。
 
@@ -515,15 +519,15 @@ r_f、h_f、d_rec、d_h は、切り上げると 18,432、4,096、286,720、65,5
 M_fix の表、UDP の管理の配列、echo の応答の枠も同じく切り上げて数えます。
 `Stats` の `RecordBytes` と `IntervalBytes` も同じ大きさで数え、枠が今使う記録の輪と区間の表が floor のものかどうかを、段の印ではなく配列の同一性で見ます。
 
-既定の K の 2048 では、Device の `Bound` の `Total` は約 1,498.6 MiB で、そのうち TCP の項の和は約 1,486.0 MiB です。
-内訳は M_fix が約 25.6 MiB、floor の項が約 1,335.0 MiB、boost の項が約 125.4 MiB です。
+既定の K の 2048 では、Device の `Bound` の `Total` は約 1,498.1 MiB で、そのうち TCP の項の和は約 1,485.5 MiB です。
+内訳は M_fix が約 25.2 MiB、floor の項が約 1,335.0 MiB、boost の項が約 125.4 MiB です。
 送信の記録は floor の項に約 45.0 MiB、boost の項に約 4.4 MiB を加えます。
 区間の表は floor の項に約 10.0 MiB、boost の項に約 1.0 MiB を加えます。
 区間 1 つは区間の treap の節(子の位置と優先度)を含みます。
 M_fix は核の構造(事象の数と観測の関数を含みます)、接続の枠、3 つの hash の表、行の表、空きの list、タイマーの節、出力の list、制御の輪、chunk の置き場に残す 1 MiB、送信の向きのバッチの台帳の輪([数えの規則](wgstack-batching.md#数えの規則))を数えます。
 空きの list は枠や行を使うと短くなりますが、配列は作成の時の大きさのまま残るので、UDP の管理の配列の空きの list とともに作成の時の大きさで数えます。
 接続の枠 1 つが表の外に持つ構造も M_fix に数えます。
-linux/amd64 の Go 1.27 で測ると、アプリケーションの handle と 2 つのアドレスが 176 byte、読み書きを起こす 2 つの channel と読み書きの期限の 2 つの channel が 448 byte、期限の 2 つのタイマーが 256 byte で、合わせて 880 byte です。
+linux/amd64 の Go 1.27 で測ると、アプリケーションの handle と 2 つのアドレスが 192 byte、読み書きを起こす 2 つの channel と読み書きの期限の 2 つの channel が 448 byte、期限の 2 つのタイマーが 256 byte で、合わせて 896 byte です。
 枠 1 つあたり 1 KiB として数えます。
 本番の大きさの表(K は 256)で 256 本の接続に floor いっぱいの受信のデータを持たせた試験(記録 1 件が 24 byte だった完成の段階の測定)では、生きているヒープの増加は約 83.8 MB で、会計が数えた chunk、記録、M_fix の和の約 84.7 MB に収まりました。
 boost の項は、k 本の接続に両方の向きの boost を持たせて送信と受信の輪を満たす試験で、生きているヒープの増加を k 本の枠の floor の項、boost の項、枠の外の構造の和と比べます。

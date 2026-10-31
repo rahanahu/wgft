@@ -73,9 +73,16 @@ func FuzzParse(f *testing.F) {
 }
 
 func TestIndexBackwardShift(t *testing.T) {
-	x := newIndex(64, sipKey{1, 2})
+	for _, withGen := range []bool{false, true} {
+		t.Run(map[bool]string{false: "gen-less", true: "with-gen"}[withGen], func(t *testing.T) { indexBackwardShift(t, withGen) })
+	}
+}
+
+func indexBackwardShift(t *testing.T, withGen bool) {
+	x := newIndex(64, sipKey{1, 2}, withGen)
 	r := rand.New(rand.NewPCG(1, 2))
 	ref := map[tuple]int32{}
+	refGen := map[tuple]uint64{}
 	for i := 0; i < 20000; i++ {
 		tup := tuple{laddr: 1, raddr: uint32(r.IntN(8)), lport: 80, rport: uint16(r.IntN(16))}
 		if _, ok := ref[tup]; ok && r.IntN(2) == 0 {
@@ -83,14 +90,23 @@ func TestIndexBackwardShift(t *testing.T) {
 				t.Fatal("remove failed")
 			}
 			delete(ref, tup)
+			delete(refGen, tup)
 		} else if len(ref) < 64 {
 			id := int32(r.IntN(1000))
-			x.insert(tup, id, 0)
+			g := r.Uint64()
+			x.insert(tup, id, g)
 			ref[tup] = id
+			if withGen {
+				refGen[tup] = g
+			}
 		}
 		for k, v := range ref {
-			if got, _ := x.find(k); got != v {
+			got, gen := x.find(k)
+			if got != v {
 				t.Fatalf("step %d: find %v = %d, want %d", i, k, got, v)
+			}
+			if gen != refGen[k] {
+				t.Fatalf("step %d: find %v gen = %d, want %d", i, k, gen, refGen[k])
 			}
 		}
 		used := 0

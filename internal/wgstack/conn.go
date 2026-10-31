@@ -93,13 +93,13 @@ func (d *deadline) expired() bool {
 type Conn struct {
 	s     *stack
 	c     *tcb
-	gen   uint32
+	gen   uint64
 	tup   tuple
 	laddr *net.TCPAddr
 	raddr *net.TCPAddr
 }
 
-func newConn(c *tcb, gen uint32) *Conn {
+func newConn(c *tcb, gen uint64) *Conn {
 	return &Conn{
 		s:     c.s,
 		c:     c,

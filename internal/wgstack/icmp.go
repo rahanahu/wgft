@@ -203,7 +203,7 @@ type pingTable struct {
 
 type pingEP struct {
 	used  bool
-	gen   uint32
+	gen   uint64
 	ident uint16
 	laddr uint32
 	raddr uint32
@@ -243,7 +243,7 @@ func (s *stack) pingReply(ip *ipv4) {
 type PingConn struct {
 	s   *stack
 	i   int
-	gen uint32
+	gen uint64
 	l   net.IPAddr
 	r   net.IPAddr
 }
