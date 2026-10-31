@@ -13,7 +13,7 @@ wgft のテストは、実行の費用、所要時間、必要な機材、再現
   どの変更がどのテストを流すかは、後述の「変更の契機と対象のパス」の表で決まります
 - C 類 (段階の完了の関門):関係する実装の段階を終えるときに流すテストです。
   悪い条件のネットワーク、クラッシュからの回復、別のディストリビューションでのラボの一式、長時間の通信、小さいメモリの環境を含みます。
-関係する変更を含む段階の完了時に流し直す項目は、この類に置きます
+  関係する変更を含む段階の完了時に流し直す項目は、この類に置きます
 - D 類 (リリース候補の関門):リリースの候補の版ごとに流すテストです。
   Windows と macOS のエージェント、旧版からの更新、リリースの成果物を確かめます
 - E 類 (手作業と実機の関門):実 VPS、実回線の自宅ルータ、Windows と Mac の実機、実アプリケーションでの長時間の利用のように、再現用の環境では作れない条件を人が確かめる関門です
@@ -32,7 +32,7 @@ v1.0 はリリース済みですが、その事実だけで新設項目の実装
 
 テストは「N 秒待てば足りる」という想定だけでは書きません。
 まず状態が届き収束したことを確認してから、観察の区間に入ります。
-何も起きないことを主張する否定の主張は区間そのものを必要とするので、この規範は区間を禁じません。
+何も起きないという否定の主張は区間そのものを必要とするので、この規範は区間を禁じません。
 求めるのは、区間に入る前に収束を確認することです。
 待ちの上限 (budget) は残します。
 上限は待ちすぎを防ぐ道具であり、主張の根拠ではないからです。
@@ -42,12 +42,13 @@ v1.0 はリリース済みですが、その事実だけで新設項目の実装
 ## マージの前に流すテスト
 
 コードを変える PR は、マージの前にラボの一式 (A9) を両モードで流します。
-ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、今は L1 から L20 です。
-流し方は、1 台の Lab Host VM の中で `labhost run -parallel 8 all` を実行することです。
+ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、現在は L1 から L20 です。
+1 台の Lab Host VM の中で `labhost run -parallel 8 all` を実行して流します。
 この 1 コマンドが、両モードの確認と、分類に従った並列と単独の振り分けを含みます。
 `lab/lab suite --vms N` は同じ仕事を N 台の一時的な VM に分けて流し、1 つの判定にまとめます。
-VM の間では単独の確認の約束が弱まるため、1 台で流す形が厳密な形です。
+VM の間では単独の確認の約束が弱まるため、1 台で流すほうが厳密です。
 違いは[単独の確認の扱い](../../lab/README.md#単独の確認の扱い)にあります。
+
 文書だけを変える PR は、ラボを流しません。
 CI の検査のうち A8 は、どちらの PR でも流します。
 A1 から A7 は、Markdown の文書と `docs/images/` の画像だけを変える PR では流しません。
@@ -61,7 +62,11 @@ Go のコード (`go.mod`、`go.sum` を含む)、`deploy/`、`lab/` 自身、�
 一式の費用が大きく伸びた場合は、この規則を見直します。
 所要時間と資源の費用は、実行時の結果を PR に記載します。
 
-B 類の契機は、ラボの一式に含まれないテスト (B 類の一覧のうち実装済みのもの) を選ぶためと、開発の途中でラボの確認を流し直すときに、変えた領域の確認だけを選ぶために使います。
+B 類の契機は、次のテストを選ぶために使います。
+
+- ラボの一式に含まれないテスト: B 類の一覧のうち実装済みのものです。
+- 開発の途中でラボの確認を流し直すときの確認: 変えた領域の確認だけを選びます。
+
 開発の途中の選び方は、後述の「ラボの一式の内訳」の表の契機の列にあります。
 
 ## 変更の契機と対象のパス
@@ -109,9 +114,9 @@ CI は、`build-test` (A1 から A7)、B4 (`windows-test`)、B5 (`release-snapsh
 振り分けは `.github/workflows/ci.yml` の `changes` という 1 つのジョブが担い、`dorny/paths-filter` で変更されたパスを調べます。
 振り分けはワークフロー全体の `paths:` ではなく、ジョブごとの `if:` で行います。
 ワークフローの `paths:` で絞ると、当たらない PR ではジョブそのものが実行されず、GitHub の checks の一覧に現れません。
-ブランチ保護がこれらを必須の check にした場合、現れない check はいつまでも待ち続け、マージを永久に塞ぎます。
+ブランチ保護がこれらを必須の check にした場合、GitHub は現れない check の結果をいつまでも待つため、マージができなくなります。
 ジョブごとの `if:` であれば、当たらない PR でもジョブは実行され、内容を飛ばして skipped で終わります。
-GitHub は skipped のジョブを必須の check の合格として扱うため、マージを塞ぎません。
+GitHub は skipped のジョブを必須の check の合格として扱うため、マージを妨げません。
 
 `build-test` の絞り方は、他のジョブと向きが逆です。
 他のジョブは流す条件をパスの一覧で数え上げますが、`build-test` は skip する条件を数え上げます。
@@ -122,16 +127,18 @@ A1 から A7 の検査が見るのは Go のソース、`go.mod`、`go.sum`、�
 
 向きを逆にした理由は、A2 の `go test ./...` が Go 以外のファイルも読むことにあります。
 読み取りの対象は `docs/cli.md`、`internal/vpsd/admin` が `go:embed` で取り込む Web UI のテンプレートと静的ファイル、`tools/labhost` の `suite_test.go` が読む `lab/suite.txt`、`internal/policy` と `internal/dataplane/linuxkernel/nft` の `testdata` です。
-流す条件を数え上げる書き方では、後から加わった読み取り先が漏れて、検査が静かに skip されます。
-skip する条件を数え上げる書き方では、一覧に無いパスはすべて流す側に倒れます。
+流す条件を数え上げる書き方では、後から加わった読み取り先が一覧から漏れ、誰も気づかないまま検査が skip されます。
+skip する条件を数え上げる書き方では、一覧に無いパスが 1 つでも混じれば検査を流します。
 
 B4 と B8 は、前節の表の `agent-platform` の契機どおりには絞りません。
 `agent-platform` の契機は、CI では再現できない実機の確認 (D1、D2、E4、E5) の定義としてそのまま残しますが、`windows-test` と `macos-test` は、Go のソースファイル (`*.go`) 1 つでも、`go.mod`、`go.sum` のどちらかでも変えた PR で流します。
+
 理由は、この 2 つのジョブが実行する `cmd/wgft` と `internal/agent` などのテストの一式が、実際のサーバのデータベースや admin backend を組み立てるためです。
 組み立てに使う依存は `internal/vpsd/store`、`internal/vpsd/admin`、`proto`、`internal/model`、`internal/policy`、`internal/resource`、`internal/nettun` など広い範囲に及び、パスの一覧として手で追いかけると保守のたびに漏れが生じます。
 加えて、特定の OS でだけ壊れる変更は、`*_windows.go` のようなプラットフォーム固有のファイルの外に置かれることもあります。
 共有パッケージの中でファイルパスや `file:` の URI をスラッシュ区切りで組み立てるコードは、その一例です。
 Linux と macOS では動いても Windows では壊れ、これを捉えられるのは実際に Windows で流すジョブだけです。
+
 この理由から、`windows-test` と `macos-test` は Go のコードと `go.mod`、`go.sum` のどれも変えない PR (文書、`lab/` のスクリプト、`deploy/` の設定ファイル、画像だけの変更) でだけ skip します。
 `scripts/portable-test-packages.sh` も同じ契機に入れています。
 このスクリプトが 2 つのジョブの対象そのものを決めるためです。
@@ -140,14 +147,16 @@ B4 と B8 が `go test` に渡す package は、スクリプトが数え上げ�
 対象は、その `GOOS` でビルドできる package のうち、その環境での失敗が既に分かっているものを除いた全部です。
 `go list ./...` は `//go:build linux` の付いたファイルだけからなるディレクトリを外すので、`internal/vpsd`、`internal/dataplane/linuxkernel`、`internal/platform/linux` は自然に対象から外れます。
 除く package とその理由はスクリプトの中にあります。
-2026-09-23 までは ci.yml が package のパスを 2 か所に直書きしており、新しい package を加えたときに一覧に入れ忘れた分が Windows と macOS で一度も走らない状態になりました。
+
+2026-09-23 までは ci.yml が package のパスを 2 か所に直書きしており、新しい package を加えたときに一覧に入れ忘れた分が Windows と macOS で一度も実行されない状態になりました。
+
 `go test ./...` をこの 2 つのジョブで流さない理由は変えていません。
-`internal/dataplane/userspace`、`internal/vpsd/store`、`tools/labhost` には、この変更より前から native Windows で落ちるテストがあり、issue #109 が記録しています。
-`internal/dataplane/userspace` では `TestPrepareBindFailureIsFailClosed` が落ちます。
-`internal/vpsd/store` では `TestOpenTightensExistingModesTo0600` と `TestNarrowModeKeepsOwnerBits` が落ちます。
+`internal/dataplane/userspace`、`internal/vpsd/store`、`tools/labhost` には、この変更より前から native Windows で失敗するテストがあり、issue #109 が記録しています。
+`internal/dataplane/userspace` では `TestPrepareBindFailureIsFailClosed` が失敗します。
+`internal/vpsd/store` では `TestOpenTightensExistingModesTo0600` と `TestNarrowModeKeepsOwnerBits` が失敗します。
 どちらも Windows の分岐を持たずにファイルのモードを `0o600` と `0o400` に照合しており、Windows は POSIX のパーミッションのビットを保持しません。
-`tools/labhost` では `TestRunLockNamesItsHolder` が落ちます。
-ロックの持ち主の名前を `/proc/<pid>/comm` から読むので、POSIX ではなく Linux を前提にしており、`/proc` の無い macOS でも落ちる見込みです。
+`tools/labhost` では `TestRunLockNamesItsHolder` が失敗します。
+ロックの持ち主の名前を `/proc/<pid>/comm` から読むので、POSIX ではなく Linux を前提にしており、`/proc` の無い macOS でも失敗する見込みです。
 macOS で除くのは `tools/labhost` だけです。
 `internal/vpsd/store` と `internal/dataplane/userspace` は、issue #109 が挙げる 3 つのテストを含めて macOS の runner で通ることを確かめました。
 
@@ -159,7 +168,7 @@ B6 は `build` の契機に加えて、Go のソースファイルの変更で�
 `govulncheck` は既知の脆弱性への到達可能性をコード全体の呼び出しグラフから判定するため、`go.mod` や `go.sum` を変えない Go のソースの変更だけでも、既存の脆弱な依存関係への呼び出しの経路が新しく生まれることがあります。
 これは前節の表の `build` だけに絞った記述より広い判定です。
 
-パスによる判定ができない、または信用できないときは、契機を問わずすべてを流す側に倒します。
+パスによる判定ができない、または信用できないときは、契機を問わずすべてを流します。
 `changes` ジョブの `paths-filter` の実行が失敗したとき、比較対象の直前のコミットが無いとき (ブランチの最初の push、force push)、`workflow_dispatch` による手動実行のとき、`.github/workflows/**` 自身を変更したとき (振り分けの仕組み自身の変更を、その仕組みに判定させないため) は、`build-test`、B4、B5、B6、B8 のすべてを流します。
 B6 はこれに加えて、週に 1 回の定期実行と `workflow_dispatch` でも流します。
 定期実行はコードを変えていない PR にも起きるため、この場合の失敗は外部の脆弱性の情報の変化によるものであり、コードの不具合とは限りません。
@@ -174,22 +183,14 @@ netns のトポロジを組む `lab/netns.sh` は Incus に依存しないので
 
 ラボの一式は、2 つの単位で隔てて流せます。
 1 つは VM です。
-使い捨ての VM を複数立て、確認ごとに
-別の VM を割り当てます。
+使い捨ての VM を複数立て、確認ごとに別の VM を割り当てます。
 もう 1 つは Sandbox です。
-1 台の VM を OS とカーネルを与える Lab Host
-とし、その中に使い捨ての Sandbox を並べます。
-Sandbox は、6 つの network namespace
-(`wgft-<id>-client`、`-vps`、`-router`、`-home`、`-lan`、確認の shell 自身が動く `-runner`)、
-`/tmp/wgft-lab/<id>/` の作業ディレクトリ、自分が起こしたプロセスをひとまとまりに持ちます。
+1 台の VM を OS とカーネルを与える Lab Host とし、その中に使い捨ての Sandbox を並べます。
+Sandbox は、6 つの network namespace (`wgft-<id>-client`、`-vps`、`-router`、`-home`、`-lan`、確認の shell 自身が動く `-runner`)、`/tmp/wgft-lab/<id>/` の作業ディレクトリ、自分が起こしたプロセスをひとまとまりに持ちます。
 
-network namespace は、インタフェース名、アドレス、待ち受けポート、`127.0.0.1:8686`、WireGuard
-のポート、`table inet wgft`、conntrack のテーブルをすでに隔てています。
-Sandbox が分けるのは、
-network namespace が隔てない部分、つまり作業ディレクトリとプロセスの所有だけです。
-Sandbox の
-発行と後片付けは [tools/labhost](../../tools/labhost) が担い、使い方は [lab/README.md](../../lab/README.md)
-にあります。
+network namespace は、インタフェース名、アドレス、待ち受けポート、`127.0.0.1:8686`、WireGuard のポート、`table inet wgft`、conntrack のテーブルをすでに隔てています。
+Sandbox が分けるのは、network namespace が隔てない部分、つまり作業ディレクトリとプロセスの所有だけです。
+Sandbox の発行と後片付けは [tools/labhost](../../tools/labhost) が担い、使い方は [lab/README.md](../../lab/README.md) にあります。
 
 [lab/suite.txt](../../lab/suite.txt) は、確認ごとに次の 4 つの分類のどれかを持ちます。
 
@@ -200,26 +201,20 @@ Sandbox の
 | `exclusive-timing` | Lab Host VM の中で単独で流します。壁時計で測る区間の中で何が起きないかを主張するため、VM を分け合うと前の段の収束が区間に食い込みます |
 | `exclusive-global` | Lab Host VM の中で単独で流します。`nf_conntrack_max` のように network namespace が隔てない値を変えるため、VM の中に 1 つしかありません |
 
-`labhost run all` は、`parallel` の確認をプールで並列に流し、そのあと `exclusive-*` の確認を
-1 つずつ流します。
-確認ごとの並列可否は、この文書の表に個別に書く代わりに
-[lab/suite.txt](../../lab/suite.txt) の 1 か所にまとめてあります。
+`labhost run all` は、`parallel` の確認をプールで並列に流し、そのあと `exclusive-*` の確認を 1 つずつ流します。
+確認ごとの並列可否は、この文書の表に個別に書く代わりに [lab/suite.txt](../../lab/suite.txt) の 1 か所にまとめてあります。
 
 プールへ渡す順は [lab/suite.txt](../../lab/suite.txt) の行の順です。
-suite.txt は `parallel` の確認を
-所要時間の長い順に並べます。
-長い確認が短い確認の後に始まると、一式の終わりがその 1 つの確認の
-終わりまで延びるためです。
+長い確認が短い確認の後に始まると、一式の終わりがその 1 つの確認の終わりまで延びるため、suite.txt は `parallel` の確認を所要時間の長い順に並べます。
 新しい確認は、所要時間に応じた位置に加えます。
-`exclusive-*` の確認は、
-並べた位置にかかわらずプールの後に流れます。
+`exclusive-*` の確認は、並べた位置にかかわらずプールの後に流れます。
 
 `lab/lab suite` で一式を複数の VM に分けて流す場合も、`exclusive-*` の確認は割り当てられた VM の中で単独で流れます。
 VM の間ではホストを分け合うため、単独の確認も別の VM の確認と資源を取り合います。
-VM の間で守るのは、`rates.sh` がレートを測る時間窓だけです。
-別の VM の単独の確認と、suite.txt で `rate=flood` を持つフラッドの確認は、見積もりで時間窓の前後 30 秒に入らないように割り当て、`labhost merge` が実際の時刻で重なりを調べます。
+VM の間で守るのは、`rates.sh` がレートを測る区間だけです。
+別の VM の単独の確認と、suite.txt で `rate=flood` を持つフラッドの確認は、見積もりでその区間の前後 30 秒に入らないように割り当て、`labhost merge` が実際の時刻で重なりを調べます。
 規則は[単独の確認の扱い](../../lab/README.md#単独の確認の扱い)にあります。
-1 台の VM で流す `labhost run -parallel 8 all` では、単独の確認の間に一式の他の確認が流れないので、こちらが厳密な形です。
+1 台の VM で流す `labhost run -parallel 8 all` では、単独の確認の間に一式の他の確認が流れないので、こちらのほうが厳密です。
 
 ## テストの一覧
 
@@ -246,7 +241,7 @@ VM の間で守るのは、`rates.sh` がレートを測る時間窓だけです
 | A6 | `staticcheck` | 静的解析で分かる誤り | CI (Linux) | コードを変える PR | PR の更新ごと | 自動 |
 | A7 | Windows と macOS へのクロスビルドと `go vet` | 共有のパッケージの変更で Windows、macOS のビルドが壊れること | CI (Linux) | コードを変える PR | PR の更新ごと | 自動 |
 | A8 | 出力と公開ファイルの検査 (`scripts/check-japanese`、`scripts/check-ascii-punct.sh`、`scripts/check-log-tokens.sh`、`scripts/check-docs.py` とその fixture) | ツールの出力への日本語の混入、全角記号、ログへのトークンの値の出力、リンク切れ、日英の対の欠け、旧参照先の喪失 | CI (Linux) | すべての PR | PR の更新ごと | 自動 |
-| A9 | ラボの一式 (L 番号のうち実装済みの確認。今は L1 から L20。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。関係する実装の段階の共通の完了条件 | ラボ (1 台の Lab Host VM の中で Sandbox を並列に。使い捨て VM で 1 確認 1 台の並列、1 台で順に、も残ります) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | 自動 (開発者が起動) |
+| A9 | ラボの一式 (L 番号のうち実装済みの確認。現在は L1 から L20。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。関係する実装の段階の共通の完了条件 | ラボ (1 台の Lab Host VM の中で Sandbox を並列に。使い捨て VM で 1 確認 1 台の並列、1 台で順に、も残ります) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | 自動 (開発者が起動) |
 
 ### ラボの一式の内訳
 
@@ -286,7 +281,7 @@ L15 は server の 30 秒ごとの再試行を待つ場合に、確認の待ち�
 | B4 | CI の `windows-test` (`internal/dataplane/userspace/utun` の `TestAgentServerInProcessForwarding` を含む。後述の「実機の確認を小さな回帰テストに置き換えた範囲」) | Windows でだけ通る経路 (認証情報の ACL、`LockFileEx`、UDP の待ち方) の退行と、エージェントのトンネル・中継の転送そのものの退行 (D1 の一部の置き換え) | CI (Windows の runner) | `agent-platform` | 契機に当たる PR の更新ごと | 自動 |
 | B5 | CI の `release-snapshot` | GoReleaser の設定、フック、成果物の名前の食い違い | CI (Linux) | `build`、`rc` | 契機に当たる PR の更新ごと | 自動 |
 | B6 | CI の `govulncheck` | 依存するモジュールの既知の脆弱性 | CI (Linux) | `build`、`rc`、週に 1 回の定期実行 | 契機に当たる PR の更新ごと。定期実行は週に 1 回 | 自動 |
-| B7 | `lab/version-skew.sh` | 旧 agent と新 server、新 agent と旧 server、legacy v0 の agent と新 server の組で、登録、全体状態の配信、転送、再接続が壊れること。旧い側には、直前のリリースと、agent の無効化より前の最後のリリースである v1.1.3 の 2 つを使う。旧い側が表せない機能のルールを理由付きの `not_active` にすること (7a.6 節) は、該当する capability がまだ無いため確認を SKIP する。新しい server と旧い agent の組では、agent の無効化で転送が止まらないこと、有効化で転送が戻らないこと、無効化が VPS 側だけにとどまり旧い agent 自身に届かないこと、`agent ls`、`status`、`server doctor` が無効を示さないこと、無効化の間に旧い agent が落ちたり再接続を繰り返したりすること (5.1 節)。v1.1.3 の agent との組は、無効化を知らない agent が `enabled:false` の写しで止まらないことを検出する。直前のリリースの server と新しい agent の組でも、その server の CLI で無効化と有効化をしたときの同じ失敗を検出する。v1.1.3 の server は無効化を持たないので、この組では無効化の確認を SKIP する | ラボ (直前のリリース、v1.1.3、legacy v0 のバイナリを GitHub の Releases から取得してキャッシュする。ラボの VM から GitHub への経路が無い場合は、バイナリを事前に置く。直前のリリースの版はスクリプトの定数を既定とし、環境変数 `WGFT_SKEW_OLD_VERSION` で上書きできる。定数が直前のリリースより古いまま流すときは、この変数で直前のリリースを明示する) | `protocol`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | 自動 (開発者が起動) |
+| B7 | `lab/version-skew.sh` | 旧 agent と新 server、新 agent と旧 server、legacy v0 の agent と新 server の組で、登録、全体状態の配信、転送、再接続が壊れること。旧い側には、直前のリリースと、agent の無効化より前の最後のリリースである v1.1.3 の 2 つを使う。旧い側が表せない機能のルールを理由付きの `not_active` にすること (7a.6 節) は、該当する capability がまだ無いため確認を SKIP する。新しい server と旧い agent の組では、agent の無効化で転送が止まらないこと、有効化で転送が戻らないこと、無効化が VPS 側だけにとどまり旧い agent 自身に届かないこと、`agent ls`、`status`、`server doctor` が無効を示さないこと、無効化の間に旧い agent が異常終了したり再接続を繰り返したりすること (5.1 節)。v1.1.3 の agent との組は、無効化を知らない agent が `enabled:false` の写しで止まらないことを検出する。直前のリリースの server と新しい agent の組でも、その server の CLI で無効化と有効化をしたときの同じ失敗を検出する。v1.1.3 の server は無効化を持たないので、この組では無効化の確認を SKIP する | ラボ (直前のリリース、v1.1.3、legacy v0 のバイナリを GitHub の Releases から取得してキャッシュする。ラボの VM から GitHub への経路が無い場合は、バイナリを事前に置く。直前のリリースの版はスクリプトの定数を既定とし、環境変数 `WGFT_SKEW_OLD_VERSION` で上書きできる。定数が直前のリリースより古いまま流すときは、この変数で直前のリリースを明示する) | `protocol`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | 自動 (開発者が起動) |
 | B8 | CI の `macos-test` (`internal/dataplane/userspace/utun` の `TestAgentServerInProcessForwarding` を含む) | macOS でだけ通る経路 (UDP の送信バッファの既定 9216 バイトを超えるデータグラムの書き込み) の退行 (D2 の一部の置き換え。後述の「実機の確認を小さな回帰テストに置き換えた範囲」) | CI (macOS の runner) | `agent-platform`、`rc` | 契機に当たる PR の更新ごと | 自動 |
 | B9 | 配布物の VM 試験 (`scripts/dist-vm.sh`) | 同梱の unit で起動しないこと、VM の再起動の後に転送が戻らないこと、設定の誤りで再起動を繰り返すこと | 2 台の VM (server と agent) | `deploy`、`rc` | 契機に当たる PR ごとに 1 つのディストリビューションで、リリース候補ごとに 3 つのディストリビューションで | 自動 (開発者が起動) |
 | B10 | Docker のイメージの疎通 (`scripts/docker-smoke.sh`) | `deploy/Dockerfile.*` から作ったイメージで server と agent が動かないこと | Docker か Podman のある Linux (ホスト、CI の runner、ラボの VM のどれでも可) | `build`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | 自動 (開発者が起動) |
@@ -309,7 +304,7 @@ B9 は、リリース候補ごとに Debian 12、Ubuntu 24.04、Fedora 44 の 3 
 | C3 | 規模の試験 | ルール数とエージェント数が多いときの適用時間、テーブルの差し替え、全体状態の大きさの問題 | ラボ | `phase` | 段階の完了ごとに 1 回 | 自動 (開発者が起動) |
 | C4 | ラボの一式を別のディストリビューションで | カーネルと nftables の版の違いによる挙動の違い (通知、`ct count`、式の表記) | ラボ (`WGFT_LAB_IMAGE` で別のイメージの VM) | `phase`、`kernel` | 関係する変更 (kernel 側の経路) を含む段階の完了時 | 自動 (開発者が起動。Fedora の SELinux enforcing と firewalld 有効の条件は未確認) |
 | C5 | 長時間の TCP と UDP (新設) | 通常の WireGuard のセッションの鍵の更新、ハートビート、conntrack の期限をまたいで長いセッションが切れること。`agent rotate-key` の後に新しい通信が戻らないこと | ラボ | `phase`、`resource`、`dataplane-net` | 関係する変更 (Resource Guard、network dataplane) を含む段階の完了時 | 自動 (新設) |
-| C6 | 小さいメモリの環境 (新設) | 上限を下げた設定と 256 MiB に制限したメモリで、フラッドの下で server が OOM で落ちること | ラボ (メモリを制限した cgroup) | `phase`、`resource`、`dataplane-net` | 関係する変更 (Resource Guard、network dataplane) を含む段階の完了時 | 自動 (新設) |
+| C6 | 小さいメモリの環境 (新設) | 上限を下げた設定と 256 MiB に制限したメモリで、フラッドの下で server が OOM で強制終了されること | ラボ (メモリを制限した cgroup) | `phase`、`resource`、`dataplane-net` | 関係する変更 (Resource Guard、network dataplane) を含む段階の完了時 | 自動 (新設) |
 
 ### D 類 (リリース候補の関門)
 
