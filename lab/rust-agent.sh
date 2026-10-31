@@ -79,9 +79,15 @@ cleanup() {
   ip netns exec "$HOME_NS" ip link del "$TUN" 2>/dev/null
   rm -rf "$DATA" "$RDATA" "$GDATA" "$BLOB"
 }
-# handshake_ok <name>: the server saw a WireGuard handshake from the agent, and the agent's heartbeat
-# reports an ok tunnel
-handshake_ok() { [ "$(agent_field "$1" 'bool(a["last_handshake"]) and a["tunnel"]["state"] == "ok"')" = True ]; }
+# handshake_ok <name> <since>: the server saw a WireGuard handshake from the agent, and a heartbeat
+# received after <since> (seconds since the epoch) reports an ok tunnel, so an earlier agent's
+# heartbeat for the same name does not count
+handshake_ok() {
+  [ "$(agent_field "$1" 'bool(a["last_handshake"]) and a["tunnel"]["state"] == "ok" and a.get("last_heartbeat", "") != "" and __import__("datetime").datetime.fromisoformat(a["last_heartbeat"]).timestamp() > '"$2")" = True ]
+}
+# pubkey_of <agent.json>: the WireGuard public key derived from the file's private key; the private
+# key itself is never printed
+pubkey_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wg_private_key"])' "$1" | wg pubkey; }
 start_rust() { # start_rust <data-dir> <log> [join]
   WGFT_JOIN="${3:-}" WGFT_WG_INTERFACE="$TUN" \
     ip netns exec "$HOME_NS" setsid nohup wgft-rs agent run --data-dir "$1" > "$2" 2>&1 < /dev/null &
@@ -125,13 +131,15 @@ disown
 
 echo "== $mode: phase 1, the Rust agent enrolls itself"
 join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
+since=$(date +%s)
 start_rust "$RDATA" "$RLOG" "$join"
 wait_for 20 agent_row home
 check "rust agent registered" "home" "$(agent_row home)"
-check "rust agent sent its own key" "generated wg key pair" "$(grep -o 'generated wg key pair' "$RLOG")"
+wait_for 20 test -n "$(agent_field home 'a.get("public_key", "")')"
+check "server holds the key the rust agent generated" "$(pubkey_of "$RDATA/agent.json")" "$(agent_field home 'a.get("public_key", "")')"
 check "server selected protocol v1" "server selected protocol v1" "$(grep -o 'server selected protocol v1' "$RLOG")"
 check "tun device carries the tunnel address" "10.200.0.2/" "$(ip netns exec "$HOME_NS" ip -4 -o addr show dev "$TUN" 2>&1)"
-wait_for 40 handshake_ok home
+wait_for 40 handshake_ok home "$since"
 check "wireguard handshake seen by the server" "True" "$(agent_field home 'bool(a["last_handshake"])')"
 check "agent reports an ok tunnel" "ok" "$(agent_field home 'a["tunnel"]["state"] + " " + a["tunnel"].get("reason", "")')"
 # The agent pings the server's tunnel address every keepalive, 25 s. A userspace server answers from
@@ -153,7 +161,18 @@ wait_for 20 grep -q 'applied generation 2: ' "$RLOG"
 wait_for 40 test "$(agent_field home 'len(a.get("rules") or [])')" = 2
 check "agent reports both rules ok" "ok ok" "$(agent_field home '" ".join(r["state"] for r in a.get("rules") or [])')"
 transfer "rust agent" 39981
-check "agent.json written in the v1 shape" '"last_state"' "$(cat "$RDATA/agent.json")"
+# The agent's inbound filter passes only rule ports to the host. A service on the agent host that
+# listens on 0.0.0.0 at a port without a rule must stay unreachable through the tunnel: the agent
+# answers the SYN with a RST. Only the kernel server routes the tunnel range from its own namespace.
+if [ "$mode" = kernel ]; then
+  ip netns exec "$HOME_NS" setsid nohup socat TCP-LISTEN:39998,reuseaddr,fork SYSTEM:'echo host-service' >/dev/null 2>&1 < /dev/null &
+  disown
+  sleep 1
+  check "a host service without a rule is refused through the tunnel" "Connection refused" \
+    "$(vps timeout -k 2 8 socat -T 5 - TCP:10.200.0.2:39998 2>&1 < /dev/null)"
+fi
+check "agent.json records the applied generation and the tunnel address" "2 10.200.0.2/24" \
+  "$(python3 -c 'import json,sys; f=json.load(open(sys.argv[1])); print(f["last_state"]["generation"], f["tunnel_address"])' "$RDATA/agent.json")"
 kill_named wgft-rs
 check "tun device removed on stop" "does not exist" "$(ip netns exec "$HOME_NS" ip link show "$TUN" 2>&1)"
 
@@ -161,31 +180,33 @@ echo "== $mode: phase 2, the Go v1 agent still works against the same server"
 join=$(vps wgft agent join-string --name home2 --admin "$ADMIN" 2>/dev/null | head -1)
 WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$GDATA" > "$GLOG" 2>&1 < /dev/null &
 disown
+since=$(date +%s)
 wait_for 20 agent_row home2
 vps wgft rule add --agent home2 --tcp 39991 --to 192.168.50.3:25570 --admin "$ADMIN" >/dev/null
 vps wgft rule add --agent home2 --tcp 39992 --to 192.168.50.3:25571 --admin "$ADMIN" >/dev/null
-wait_for 40 handshake_ok home2
+wait_for 40 handshake_ok home2 "$since"
 transfer "go agent" 39991
 kill_go_agent
 
 echo "== $mode: phase 3, the Rust agent starts from the Go agent's agent.json"
-before=$(cat "$GDATA/agent.json")
+go_pub=$(pubkey_of "$GDATA/agent.json")
+since=$(date +%s)
 start_rust "$GDATA" "$R2LOG"
 wait_for 20 grep -q 'stream: connected' "$R2LOG"
 check "no new registration" "name home2, mode userspace" "$(grep -o 'name home2, mode userspace' "$R2LOG")"
-wait_for 40 handshake_ok home2
-check "handshake with the Go agent's key" "ok" "$(agent_field home2 'a["tunnel"]["state"]')"
-check "same public key as the Go agent" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wg_private_key"][:8])' <(echo "$before"))" \
-  "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wg_private_key"][:8])' "$GDATA/agent.json")"
+wait_for 40 handshake_ok home2 "$since"
+check "handshake reported by the rust agent on the Go agent's key" "ok" "$(agent_field home2 'a["tunnel"]["state"]')"
+check "server holds the Go agent's key" "$go_pub" "$(agent_field home2 'a.get("public_key", "")')"
 transfer "rust agent on go credentials" 39991
 kill_named wgft-rs
 
 echo "== $mode: phase 4, the Go v1 agent starts from the agent.json the Rust agent wrote"
+since=$(date +%s)
 ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$RDATA" > "$G2LOG" 2>&1 < /dev/null &
 disown
 wait_for 20 grep -q 'stream: connected' "$G2LOG"
 check "go agent reads the rust agent.json" "name home, mode userspace" "$(grep -o 'name home, mode userspace' "$G2LOG")"
-wait_for 40 handshake_ok home
+wait_for 40 handshake_ok home "$since"
 transfer "go agent on rust credentials" 39981
 kill_go_agent
 

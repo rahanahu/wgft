@@ -5,9 +5,15 @@
 //! 行い、状態を読む。中継はカーネルのソケットをトンネルのアドレスに bind する (`relay`)。
 
 use crate::logf;
+use crate::relay::OpenPorts;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
+
+use zeroize::Zeroizing;
+
+use crate::inbound::{Counts, CountsSnapshot};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -51,15 +57,28 @@ impl Config {
         let (a, l) = w.address.split_once('/').ok_or_else(bad)?;
         let address: Ipv4Addr = a.parse().map_err(|_| bad())?;
         let prefix_len: u8 = l.parse().map_err(|_| bad())?;
-        if prefix_len > 32 {
-            return Err(bad());
+        // 帯は server と agent の 2 つのアドレスを入れられる長さが要る。/31 と /32 は帯が経路に
+        // ならず、帯の先頭の次を server とする決まりも成り立たない
+        if prefix_len > 30 {
+            return Err(format!(
+                "address {:?} has a prefix longer than /30",
+                w.address
+            ));
         }
         let mask = if prefix_len == 0 {
             0
         } else {
             u32::MAX << (32 - prefix_len)
         };
-        let server_address = Ipv4Addr::from((u32::from(address) & mask).wrapping_add(1));
+        let network = u32::from(address) & mask;
+        let server_address = Ipv4Addr::from(network.wrapping_add(1));
+        let broadcast = Ipv4Addr::from(network | !mask);
+        if address == Ipv4Addr::from(network) || address == server_address || address == broadcast {
+            return Err(format!(
+                "address {:?} is the network, server or broadcast address of its band",
+                w.address
+            ));
+        }
         let keepalive = match u64::try_from(w.keepalive) {
             Ok(s) if (1..=KEEPALIVE_MAX_SECONDS.unsigned_abs()).contains(&s) => {
                 Duration::from_secs(s)
@@ -101,18 +120,16 @@ pub fn decode_key(s: &str) -> Result<[u8; 32], String> {
     <[u8; 32]>::try_from(b.as_slice()).map_err(|_| "key is not 32 bytes".to_owned())
 }
 
-/// 新しい秘密鍵 (base64)。`wg genkey` と同じく clamp する。
+/// 新しい秘密鍵 (base64)。`wg genkey` と同じく clamp する。乱数と文字列は捨てるときに 0 で消す。
 ///
 /// # Errors
 ///
 /// 乱数を読めなければ誤りを返す。
-pub fn generate_private_key() -> Result<String, String> {
-    let mut b = [0u8; 32];
-    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b)
+pub fn generate_private_key() -> Result<Zeroizing<String>, String> {
+    let mut b = Zeroizing::new([0u8; 32]);
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b[..])
         .map_err(|_| "no randomness".to_owned())?;
-    Ok(wgft_wireguard::PrivateKey::generate(b)
-        .to_base64()
-        .to_string())
+    Ok(wgft_wireguard::PrivateKey::generate(*b).to_base64())
 }
 
 /// 秘密鍵 (base64) から公開鍵 (base64)。
@@ -139,6 +156,8 @@ pub struct Reading {
     pub tx_bytes: u64,
     /// 名前の解決の失敗などの誤り。
     pub err: Option<String>,
+    /// 最終ハンドシェイクの単調な時計の時刻。device が持つ値で、壁時計が動いても変わらない。
+    pub handshake_observed_at: Option<std::time::Instant>,
 }
 
 /// 動いているトンネル。
@@ -148,6 +167,9 @@ pub struct Tunnel {
     shared: Arc<Mutex<Reading>>,
     device: Arc<wgft_wireguard_tun::Handle>,
     monitor: JoinHandle<()>,
+    counts: Arc<Counts>,
+    started_at: Instant,
+    clock: Option<PathBuf>,
 }
 
 impl Tunnel {
@@ -157,11 +179,30 @@ impl Tunnel {
     /// # Errors
     ///
     /// device か TUN を作れなければ誤りを返す。
-    pub async fn start(private_key: &str, tun_name: &str, cfg: Config) -> Result<Tunnel, String> {
+    pub async fn start(
+        private_key: &str,
+        tun_name: &str,
+        cfg: Config,
+        open: OpenPorts,
+        clock: Option<&Path>,
+    ) -> Result<Tunnel, String> {
         let shared = Arc::new(Mutex::new(Reading::default()));
         let ep = resolve(&cfg.endpoint).await;
         set_endpoint(&shared, ep.clone());
-        let device = Arc::new(device::start(private_key, tun_name, &cfg, ep.ok()).await?);
+        let counts = Arc::new(Counts::default());
+        let unix = stamp::start(clock);
+        let device = Arc::new(
+            device::start(
+                private_key,
+                tun_name,
+                &cfg,
+                ep.ok(),
+                open,
+                Arc::clone(&counts),
+                unix,
+            )
+            .await?,
+        );
         logf!(
             "tunnel: up addr={} mtu={} endpoint={} tun={tun_name}",
             cfg.address,
@@ -172,13 +213,40 @@ impl Tunnel {
             cfg.clone(),
             Arc::clone(&shared),
             Arc::clone(&device),
+            tun_name.to_owned(),
         ));
         Ok(Tunnel {
             cfg,
             shared,
             device,
             monitor,
+            counts,
+            started_at: Instant::now(),
+            clock: clock.map(Path::to_path_buf),
         })
+    }
+
+    /// 入口の検査の判定ごとの数。
+    #[must_use]
+    pub fn filter_counts(&self) -> CountsSnapshot {
+        self.counts.snapshot()
+    }
+
+    /// トンネルを立てた時刻 (単調な時計)。
+    #[must_use]
+    pub fn started_at(&self) -> Instant {
+        self.started_at
+    }
+
+    /// device を動かす外殻のタスクが終わっているか。終わっていればトンネルは動いていない。
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.device.is_finished()
+    }
+
+    /// handshake の時刻の印の高い水位をファイルに残す。
+    pub fn persist_clock(&self) {
+        stamp::persist(self.clock.as_deref());
     }
 
     /// 自分のトンネルのアドレス。
@@ -198,6 +266,7 @@ impl Tunnel {
         let mut r = lock(&self.shared).clone();
         match device::read(&self.device).await {
             Ok(d) => {
+                r.handshake_observed_at = d.last_handshake_at;
                 r.last_handshake = d.last_handshake;
                 r.rx_bytes = d.rx_bytes;
                 r.tx_bytes = d.tx_bytes;
@@ -209,6 +278,7 @@ impl Tunnel {
 
     /// 閉じる。TUN を消す。
     pub async fn close(self) {
+        stamp::persist(self.clock.as_deref());
         self.monitor.abort();
         let _ = self.monitor.await;
         match Arc::try_unwrap(self.device) {
@@ -240,14 +310,22 @@ fn set_endpoint(shared: &Mutex<Reading>, ep: Result<SocketAddrV4, String>) {
 /// keepalive ごとに、ハンドシェイクが keepalive の 5 倍の間成功していなければエンドポイントを引き直し、
 /// server のアドレスへ ICMP echo を 1 つ送る (Go の `tunnel.Run`)。ping はデータのパケットなので、
 /// server がセッションを失っていれば鍵の寿命を待たずに新しいハンドシェイクが始まる。
-async fn monitor(cfg: Config, shared: Arc<Mutex<Reading>>, dev: Arc<wgft_wireguard_tun::Handle>) {
+async fn monitor(
+    cfg: Config,
+    shared: Arc<Mutex<Reading>>,
+    dev: Arc<wgft_wireguard_tun::Handle>,
+    tun_name: String,
+) {
     let mut tick = tokio::time::interval(cfg.keepalive);
     tick.tick().await;
     let mut pinged: Option<bool> = None;
     loop {
         tick.tick().await;
-        let hs = device::read(&dev).await.ok().and_then(|d| d.last_handshake);
-        let stale = hs.is_none_or(|t| t.elapsed().unwrap_or_default() > cfg.keepalive * 5);
+        let hs = device::read(&dev)
+            .await
+            .ok()
+            .and_then(|d| d.last_handshake_at);
+        let stale = hs.is_none_or(|t| t.elapsed() > cfg.keepalive * 5);
         if stale {
             let before = lock(&shared).endpoint;
             let ep = resolve(&cfg.endpoint).await;
@@ -265,7 +343,14 @@ async fn monitor(cfg: Config, shared: Arc<Mutex<Reading>>, dev: Arc<wgft_wiregua
             set_endpoint(&shared, ep);
         }
         // 答えの有無が変わったときだけ 1 行出す
-        let answered = match ping(cfg.address, cfg.server_address, Duration::from_secs(2)).await {
+        let answered = match ping(
+            cfg.address,
+            cfg.server_address,
+            Duration::from_secs(2),
+            Some(tun_name.clone()),
+        )
+        .await
+        {
             Ok(rtt) => {
                 if pinged != Some(true) {
                     logf!(
@@ -296,35 +381,71 @@ async fn monitor(cfg: Config, shared: Arc<Mutex<Reading>>, dev: Arc<wgft_wiregua
     }
 }
 
-/// `host:port` を IPv4 の `SocketAddrV4` にする。ホスト名は A レコードを引き、決まった順で先頭を選ぶ。
-async fn resolve(endpoint: &str) -> Result<SocketAddrV4, String> {
+/// `wg.endpoint` の読み (仕様 tunnel.md のエンドポイントの解決)。
+#[derive(Debug, PartialEq, Eq)]
+enum Endpoint {
+    /// IPv4 のアドレス。角括弧に入った IPv4 も受ける。
+    Addr(SocketAddrV4),
+    /// ホスト名。A レコードを引く。
+    Name(String, u16),
+}
+
+fn parse_endpoint(endpoint: &str) -> Result<Endpoint, String> {
     let Some((host, port)) = endpoint.rsplit_once(':') else {
         return Err(format!("{endpoint:?} is not in host:port form"));
     };
+    // ポートは 10 進の数字だけ。符号とサービス名は拒み、先頭の 0 は受ける
+    if port.is_empty() || !port.bytes().all(|c| c.is_ascii_digit()) {
+        return Err(format!("{endpoint:?} has an invalid port"));
+    }
     let port: u16 = port
         .parse()
         .map_err(|_| format!("{endpoint:?} has an invalid port"))?;
+    let inner = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'));
+    if let Some(h) = inner {
+        return match h.parse::<Ipv4Addr>() {
+            Ok(a) => Ok(Endpoint::Addr(SocketAddrV4::new(a, port))),
+            Err(_) => Err("IPv6 endpoints are not supported".into()),
+        };
+    }
+    if host.is_empty() {
+        return Err(format!("{endpoint:?} has no host"));
+    }
     if let Ok(a) = host.parse::<Ipv4Addr>() {
-        return Ok(SocketAddrV4::new(a, port));
+        return Ok(Endpoint::Addr(SocketAddrV4::new(a, port)));
     }
-    if host.starts_with('[') {
-        return Err("IPv6 endpoints are not supported".into());
+    if host.contains(':') {
+        return Err(format!("{endpoint:?} is not in host:port form"));
     }
-    let fut = tokio::net::lookup_host((host, port));
+    Ok(Endpoint::Name(host.to_owned(), port))
+}
+
+/// A レコードの一覧から、アドレスの小さい順で先頭を選ぶ。
+fn pick(host: &str, port: u16, mut v4: Vec<Ipv4Addr>) -> Result<SocketAddrV4, String> {
+    v4.sort();
+    v4.first()
+        .map(|a| SocketAddrV4::new(*a, port))
+        .ok_or_else(|| format!("no A record for {host}"))
+}
+
+/// `host:port` を IPv4 の `SocketAddrV4` にする。ホスト名は A レコードを 5 秒の期限で引く。
+async fn resolve(endpoint: &str) -> Result<SocketAddrV4, String> {
+    let (host, port) = match parse_endpoint(endpoint)? {
+        Endpoint::Addr(a) => return Ok(a),
+        Endpoint::Name(h, p) => (h, p),
+    };
+    let fut = tokio::net::lookup_host((host.as_str(), port));
     let addrs = tokio::time::timeout(Duration::from_secs(5), fut)
         .await
         .map_err(|_| format!("lookup {host}: timed out"))?
         .map_err(|e| format!("lookup {host}: {e}"))?;
-    let mut v4: Vec<SocketAddrV4> = addrs
+    let v4 = addrs
         .filter_map(|a| match a {
-            SocketAddr::V4(a) => Some(a),
+            SocketAddr::V4(a) => Some(*a.ip()),
             SocketAddr::V6(_) => None,
         })
         .collect();
-    v4.sort();
-    v4.first()
-        .copied()
-        .ok_or_else(|| format!("no A record for {host}"))
+    pick(&host, port, v4)
 }
 
 /// server のトンネルのアドレスへ ICMP echo を 1 つ送り、往復時間を返す。カーネルの ICMP の
@@ -333,13 +454,23 @@ async fn resolve(endpoint: &str) -> Result<SocketAddrV4, String> {
 /// # Errors
 ///
 /// ソケットを作れないか、期限までに答えが無ければ誤りを返す。
-pub async fn ping(from: Ipv4Addr, to: Ipv4Addr, timeout: Duration) -> Result<Duration, String> {
-    tokio::task::spawn_blocking(move || ping_blocking(from, to, timeout))
+pub async fn ping(
+    from: Ipv4Addr,
+    to: Ipv4Addr,
+    timeout: Duration,
+    device: Option<String>,
+) -> Result<Duration, String> {
+    tokio::task::spawn_blocking(move || ping_blocking(from, to, timeout, device.as_deref()))
         .await
         .map_err(|e| e.to_string())?
 }
 
-fn ping_blocking(from: Ipv4Addr, to: Ipv4Addr, timeout: Duration) -> Result<Duration, String> {
+fn ping_blocking(
+    from: Ipv4Addr,
+    to: Ipv4Addr,
+    timeout: Duration,
+    device: Option<&str>,
+) -> Result<Duration, String> {
     use socket2::{Domain, Protocol, SockAddr, Socket, Type};
     // ICMP のデータグラムのソケットは net.ipv4.ping_group_range が許す group だけが作れる。この値は
     // network namespace ごとで、新しい namespace の既定は誰も許さないので、作れなければ raw の
@@ -353,6 +484,14 @@ fn ping_blocking(from: Ipv4Addr, to: Ipv4Addr, timeout: Duration) -> Result<Dura
         ),
         Err(e) => return Err(format!("icmp socket: {e}")),
     };
+    // TUN に結び付け、ホストの他の interface から来る答えを受けない
+    #[cfg(target_os = "linux")]
+    if let Some(d) = device {
+        s.bind_device(Some(d.as_bytes()))
+            .map_err(|e| format!("icmp bind to device {d}: {e}"))?;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = device;
     s.bind(&SockAddr::from(SocketAddrV4::new(from, 0)))
         .map_err(|e| format!("icmp bind {from}: {e}"))?;
     let seq = u16::try_from(
@@ -421,6 +560,94 @@ fn checksum(b: &[u8]) -> u16 {
     !(u16::try_from(sum).unwrap_or(0))
 }
 
+/// handshake の時刻の印 (TAI64N) の高い水位。
+///
+/// device は handshake の初めの送信に、作ったときに渡した壁時計の値に経過時間を足した時刻の印を付ける。
+/// 相手の WireGuard (Linux と wireguard-go) は、前に受けた印より古い印の handshake を捨てる。壁時計が
+/// 前の device の作成より戻っていると (RTC の無いホストの NTP の前、時計の巻き戻し)、handshake が
+/// 通らなくなる。そこで、プロセスの中で前の device の印より 1 秒新しい値と、データディレクトリの
+/// ファイルに残した印の大きい方を下限にする。ファイルは agent.json と分ける。Go の agent が agent.json を
+/// 書き直すと、知らないキーを捨てるためである。
+mod stamp {
+    use std::path::Path;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant, SystemTime};
+
+    /// 前の device に渡した値と、渡した時刻。
+    static LAST: Mutex<Option<(Duration, Instant)>> = Mutex::new(None);
+
+    fn now_unix() -> Duration {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+    }
+
+    fn current() -> Option<Duration> {
+        let last = *LAST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        last.map(|(unix, at)| unix + at.elapsed())
+    }
+
+    fn read(file: Option<&Path>) -> Option<Duration> {
+        let text = std::fs::read_to_string(file?).ok()?;
+        text.trim().parse::<u64>().ok().map(Duration::from_secs)
+    }
+
+    /// 新しい device に渡す値を決めて覚え、ファイルに残す。
+    pub(super) fn start(file: Option<&Path>) -> Duration {
+        let mut unix = now_unix();
+        if let Some(prev) = current() {
+            unix = unix.max(prev + Duration::from_secs(1));
+        }
+        if let Some(saved) = read(file) {
+            unix = unix.max(saved + Duration::from_secs(1));
+        }
+        *LAST
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((unix, Instant::now()));
+        persist(file);
+        unix
+    }
+
+    /// 今の印をファイルに残す。書けなくても動作は続ける。
+    pub(super) fn persist(file: Option<&Path>) {
+        let (Some(file), Some(stamp)) = (file, current()) else {
+            return;
+        };
+        let tmp = file.with_extension("tmp");
+        let ok = std::fs::write(&tmp, format!("{}\n", stamp.as_secs()))
+            .and_then(|()| std::fs::rename(&tmp, file));
+        if let Err(e) = ok {
+            crate::logf!(
+                "cannot record the handshake clock in {}: {e}",
+                file.display()
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn never_goes_back() {
+            let dir = std::env::temp_dir().join(format!("wgft-stamp-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let f = dir.join("agent.json.clock");
+            // ファイルに未来の印があれば、それより新しい値を使う
+            let future = now_unix().as_secs() + 3600;
+            std::fs::write(&f, format!("{future}\n")).unwrap();
+            let a = start(Some(&f));
+            assert!(a.as_secs() > future);
+            let b = start(Some(&f));
+            assert!(b >= a + Duration::from_secs(1));
+            assert!(read(Some(&f)).unwrap().as_secs() >= b.as_secs());
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+}
+
 /// device の層との接続部分。`wgft-wireguard` の device を、`wgft-wireguard-tun` の Linux の TUN の外殻で
 /// 動かす。
 mod device {
@@ -435,6 +662,7 @@ mod device {
     #[derive(Default)]
     pub(super) struct DeviceReading {
         pub(super) last_handshake: Option<SystemTime>,
+        pub(super) last_handshake_at: Option<Instant>,
         pub(super) rx_bytes: u64,
         pub(super) tx_bytes: u64,
     }
@@ -444,6 +672,9 @@ mod device {
         tun_name: &str,
         cfg: &Config,
         endpoint: Option<SocketAddrV4>,
+        open: crate::relay::OpenPorts,
+        counts: std::sync::Arc<crate::inbound::Counts>,
+        unix: std::time::Duration,
     ) -> Result<Handle, String> {
         let key =
             PrivateKey::from_base64(private_key).map_err(|e| format!("wg_private_key: {e}"))?;
@@ -466,12 +697,23 @@ mod device {
         let mut seed = wgft_wireguard::Zeroizing::new([0u8; 32]);
         ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut seed[..])
             .map_err(|_| "no randomness for the device seed".to_owned())?;
-        let unix = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default();
-        wgft_wireguard_tun::spawn(dc, tun, SocketAddr::from(([0, 0, 0, 0], 0)), seed, unix)
-            .await
-            .map_err(|e| format!("start the tunnel device {tun_name}: {e}"))
+        // トンネルの入口の検査。TUN に書く前に、ルールのポートと ping の答えだけを通す
+        let inbound = crate::inbound::Inbound {
+            addr: cfg.address,
+            open,
+            counts,
+        };
+        let filter: wgft_wireguard_tun::InboundFilter = Box::new(move |p| inbound.verdict(p));
+        wgft_wireguard_tun::spawn(
+            dc,
+            tun,
+            SocketAddr::from(([0, 0, 0, 0], 0)),
+            seed,
+            unix,
+            filter,
+        )
+        .await
+        .map_err(|e| format!("start the tunnel device {tun_name}: {e}"))
     }
 
     pub(super) async fn read(h: &Handle) -> Result<DeviceReading, String> {
@@ -488,6 +730,7 @@ mod device {
         });
         Ok(DeviceReading {
             last_handshake,
+            last_handshake_at: p.last_handshake,
             rx_bytes: p.rx_bytes,
             tx_bytes: p.tx_bytes,
         })
@@ -534,6 +777,58 @@ mod tests {
                 .keepalive,
             DEFAULT_KEEPALIVE
         );
+    }
+
+    #[derive(serde::Deserialize)]
+    struct EndpointCase {
+        name: String,
+        endpoint: String,
+        lookup: Option<Vec<Ipv4Addr>>,
+        #[serde(default)]
+        want: String,
+        #[serde(default)]
+        error: bool,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct EndpointFixture {
+        cases: Vec<EndpointCase>,
+    }
+
+    /// 仕様の fixture `testdata/spec/tunnel/endpoint.json` と照らす。名前の解決は fixture の一覧で置き換える。
+    #[test]
+    fn endpoints_follow_the_spec() {
+        let path = format!(
+            "{}/../../testdata/spec/tunnel/endpoint.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let f: EndpointFixture =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        for c in f.cases {
+            let got = parse_endpoint(&c.endpoint).and_then(|e| match e {
+                Endpoint::Addr(a) => Ok(a),
+                Endpoint::Name(h, p) => pick(&h, p, c.lookup.clone().unwrap_or_default()),
+            });
+            if c.error {
+                assert!(got.is_err(), "{}: {got:?}", c.name);
+            } else {
+                assert_eq!(got.map(|a| a.to_string()), Ok(c.want.clone()), "{}", c.name);
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_addresses_that_cannot_hold_agent_and_server() {
+        for a in [
+            "10.200.0.0/24",
+            "10.200.0.1/24",
+            "10.200.0.255/24",
+            "10.200.0.2/31",
+            "10.200.0.2/32",
+        ] {
+            assert!(Config::from_wg(&wg(a, 25)).is_err(), "{a}");
+        }
+        assert!(Config::from_wg(&wg("10.200.0.2/30", 25)).is_ok());
     }
 
     #[test]

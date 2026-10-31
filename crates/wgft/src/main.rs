@@ -184,7 +184,7 @@ fn agent_options(a: &RunArgs) -> Result<Options, Refusal> {
 fn run_agent(a: &RunArgs) -> Result<(), AgentError> {
     let opts = agent_options(a)?;
     if !a.agent_netstack.is_empty() {
-        eprintln!(
+        wgft_agent::logf!(
             "WGFT_AGENT_NETSTACK={}: unused; this Rust agent prototype carries the tunnel on a Linux TUN device and the kernel network stack",
             a.agent_netstack
         );
@@ -193,6 +193,8 @@ fn run_agent(a: &RunArgs) -> Result<(), AgentError> {
 }
 
 fn main() -> ExitCode {
+    // 時差はスレッドが 1 つのうちに読む
+    wgft_agent::logging::init();
     let cli = match Cli::try_parse() {
         Ok(c) => c,
         Err(e) => {

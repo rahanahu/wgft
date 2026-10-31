@@ -4,15 +4,16 @@ use crate::logf;
 use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use wgft_proto::{GoTime, Heartbeat, Join, STATUS_ERROR, STATUS_OK, State, TunnelStatus, WgConfig};
+use zeroize::Zeroizing;
 
 use crate::credentials::{self, Credentials};
 use crate::enroll::{register, token_hash};
 use crate::error::{AgentError, Refusal};
-use crate::relay::Manager;
+use crate::relay::{Manager, OpenPorts};
 use crate::stream;
 use crate::tunnel::{self, Tunnel};
 
@@ -22,8 +23,17 @@ const REASON_NO_TUNNEL: &str = "no tunnel";
 const REASON_NO_TUNNEL_BUILD_RETRYING: &str = "no tunnel; building it failed and will be retried";
 const REASON_NO_TUNNEL_FULL_STATE_PENDING: &str = "no tunnel; full state not received";
 
+/// トンネルの作成に失敗したときの立て直しの間隔。最初は 30 秒、その後は 300、600、900 秒で、
+/// 900 秒の後は 900 秒ごと (仕様 tunnel.md のトンネルの作り直し)。
+const REBUILD_BACKOFF: [Duration; 4] = [
+    Duration::from_secs(30),
+    Duration::from_mins(5),
+    Duration::from_mins(10),
+    Duration::from_mins(15),
+];
+
 /// agent の起動の設定。値の検査は `wgft` のコマンドが済ませてから渡す。
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Options {
     /// データディレクトリ。`agent.json` を置く。
     pub data_dir: PathBuf,
@@ -37,24 +47,71 @@ pub struct Options {
     pub tun_name: String,
 }
 
+// 接続文字列は秘密なので Debug に出さない
+impl std::fmt::Debug for Options {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Options")
+            .field("data_dir", &self.data_dir)
+            .field(
+                "join",
+                &if self.join.is_empty() {
+                    ""
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("name", &self.name)
+            .field("version", &self.version)
+            .field("tun_name", &self.tun_name)
+            .finish()
+    }
+}
+
 impl Options {
+    /// handshake の時刻の印の高い水位を残すファイル。agent.json の隣に置く。
+    pub(crate) fn clock_path(&self) -> PathBuf {
+        self.data_dir.join("agent.json.clock")
+    }
+
     pub(crate) fn credentials_path(&self) -> PathBuf {
         self.data_dir.join(credentials::FILE_NAME)
     }
 }
 
 /// 動いている agent の状態。全体状態の適用の間じゅう排他を持つ。
-#[derive(Debug)]
 pub(crate) struct Agent {
     pub(crate) opts: Options,
     pub(crate) creds: Credentials,
-    pub(crate) private_key: String,
+    pub(crate) private_key: Zeroizing<String>,
     tunnel: Option<Tunnel>,
     relay: Option<Manager>,
     wg: Option<WgConfig>,
     pub(crate) generation: u64,
-    /// トンネルの作成に失敗した全体状態。30 秒ごとに立て直す。
+    /// トンネルの作成に失敗した全体状態と、次に立て直す時刻と、失敗の回数。
     retry: Option<State>,
+    retry_at: Option<Instant>,
+    retry_failures: usize,
+    /// トンネルの作り直しの閾値と、最後に見た最終ハンドシェイク (単調な時計) と、それを見た時刻。
+    rebuild_after: Duration,
+    seen_handshake: Option<Instant>,
+    seen_at: Option<Instant>,
+    /// 入口の検査で捨てた数を前にログに出した値と時刻。
+    refused_logged: (u64, Option<Instant>),
+    /// stream の外の経路 (トンネルの立て直し) が状態を変えたことを、接続中の stream に伝え、
+    /// ハートビートを 1 回送らせる。
+    pub(crate) state_changed: Arc<Notify>,
+}
+
+// 鍵と恒久トークンを Debug に出さない
+impl std::fmt::Debug for Agent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Agent")
+            .field("opts", &self.opts)
+            .field("name", &self.creds.name)
+            .field("tunnel", &self.tunnel)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
 }
 
 pub(crate) type Shared = Arc<Mutex<Agent>>;
@@ -75,21 +132,42 @@ impl Agent {
             }
             self.close().await;
             let cfg = tunnel::Config::from_wg(&st.wg).map_err(|e| format!("wireguard: {e}"))?;
-            match Tunnel::start(&self.private_key, &self.opts.tun_name, cfg).await {
+            let open = OpenPorts::default();
+            let server = cfg.server_address;
+            let clock = self.opts.clock_path();
+            match Tunnel::start(
+                &self.private_key,
+                &self.opts.tun_name,
+                cfg,
+                open.clone(),
+                Some(&clock),
+            )
+            .await
+            {
                 Ok(t) => {
-                    self.relay = Some(Manager::new(t.address()));
+                    self.relay = Some(Manager::new(
+                        t.address(),
+                        server,
+                        Some(self.opts.tun_name.clone()),
+                        open,
+                    ));
                     self.tunnel = Some(t);
                     self.wg = Some(st.wg.clone());
                     self.retry = None;
+                    self.retry_at = None;
+                    self.retry_failures = 0;
                 }
                 Err(e) => {
+                    let wait = REBUILD_BACKOFF[self.retry_failures.min(REBUILD_BACKOFF.len() - 1)];
                     self.retry = Some(st.clone());
-                    return Err(format!("wireguard: {e}"));
+                    self.retry_at = Some(Instant::now() + wait);
+                    self.retry_failures += 1;
+                    return Err(format!("wireguard: {e}; retrying in {}s", wait.as_secs()));
                 }
             }
         }
         let relay = self.relay.as_mut().ok_or("no relay")?;
-        let actions = relay.apply(&st.rules);
+        let actions = relay.apply(&st.rules).await;
         let listening = relay.listening();
         self.generation = st.generation;
         self.creds.last_state = Some(st.clone());
@@ -125,18 +203,30 @@ impl Agent {
     }
 
     pub(crate) async fn close(&mut self) {
-        self.relay = None;
+        // 中継の接続を先に RST で切り、リスナーを閉じてからトンネルを閉じる
+        if let Some(mut r) = self.relay.take() {
+            r.close().await;
+        }
         if let Some(t) = self.tunnel.take() {
             t.close().await;
         }
         self.wg = None;
     }
 
-    pub(crate) async fn last_handshake(&self) -> Option<SystemTime> {
-        match &self.tunnel {
-            Some(t) => t.read().await.last_handshake,
-            None => None,
-        }
+    /// 最終ハンドシェイクが新しいか。壁時計の値と、その値を最初に観測してからの単調な時計の経過の
+    /// どちらも 180 秒より短いときだけ新しいとする (仕様 stream.md の再接続の待ち)。
+    pub(crate) async fn handshake_fresh(&self) -> bool {
+        const FRESH_FOR: Duration = Duration::from_secs(180);
+        let Some(t) = &self.tunnel else { return false };
+        let r = t.read().await;
+        let wall = r
+            .last_handshake
+            .and_then(|h| SystemTime::now().duration_since(h).ok())
+            .is_some_and(|d| d < FRESH_FOR);
+        let mono = r
+            .handshake_observed_at
+            .is_some_and(|o| o.elapsed() < FRESH_FOR);
+        wall && mono
     }
 
     /// ハートビートの中身 (理由の整形の前)。
@@ -180,11 +270,18 @@ impl Agent {
         hb
     }
 
-    /// 30 秒ごとの見回り。作成に失敗したトンネルを立て直し、開けなかったリスナーを開き直す。
+    /// 30 秒ごとの見回り。作成に失敗したトンネルを時刻が来たら立て直し、開けなかったリスナーを
+    /// 開き直す。立て直せたら、接続中の stream にハートビートを送らせる。
     async fn tick(&mut self) {
-        if let Some(st) = self.retry.clone() {
+        self.watch_tunnel().await;
+        if let Some(st) = self.retry.clone()
+            && self.retry_at.is_none_or(|at| Instant::now() >= at)
+        {
             match self.apply(&st).await {
-                Ok(()) => logf!("tunnel: rebuilt for generation {}", st.generation),
+                Ok(()) => {
+                    logf!("tunnel: rebuilt for generation {}", st.generation);
+                    self.state_changed.notify_one();
+                }
                 Err(e) => logf!("tunnel: rebuilding for generation {}: {e}", st.generation),
             }
         }
@@ -193,6 +290,72 @@ impl Agent {
         }
     }
 }
+
+impl Agent {
+    /// トンネルの見張り (仕様 tunnel.md のハンドシェイクの監視と作り直し)。新しいハンドシェイクが
+    /// 無い時間が閾値を超えるか、device を動かす外殻が止まっていれば、同じ全体状態でトンネルを作り直す。
+    /// 時間は、最後に見たハンドシェイクを観測した時刻とトンネルを立てた時刻の遅い方から単調な時計で
+    /// 測る。閾値は 300 秒で、作り直すたびに 2 倍にし、900 秒で止める。新しいハンドシェイクを見たら
+    /// 300 秒に戻す。あわせて、時刻の印の高い水位を残し、入口の検査が捨てた数をログに出す。
+    async fn watch_tunnel(&mut self) {
+        let Some(t) = &self.tunnel else { return };
+        t.persist_clock();
+        let counts = t.filter_counts();
+        let finished = t.is_finished();
+        let started = t.started_at();
+        let hs = t.read().await.handshake_observed_at;
+        let now = Instant::now();
+        if hs.is_some() && hs != self.seen_handshake {
+            self.seen_handshake = hs;
+            self.seen_at = Some(now);
+            self.rebuild_after = REBUILD_AFTER_MIN;
+        }
+        let since = self.seen_at.map_or(started, |s| s.max(started));
+        let reason = if finished {
+            Some("the tunnel device stopped".to_owned())
+        } else if now.duration_since(since) > self.rebuild_after {
+            Some(format!(
+                "no new wireguard handshake for {}s",
+                now.duration_since(since).as_secs()
+            ))
+        } else {
+            None
+        };
+        self.log_refused(counts);
+        let Some(reason) = reason else { return };
+        let Some(st) = self.creds.last_state.clone() else {
+            return;
+        };
+        logf!("tunnel: {reason}; rebuilding it");
+        self.rebuild_after = (self.rebuild_after * 2).min(REBUILD_AFTER_MAX);
+        self.close().await;
+        match self.apply(&st).await {
+            Ok(()) => self.state_changed.notify_one(),
+            Err(e) => logf!("tunnel: rebuilding: {e}"),
+        }
+    }
+
+    /// 入口の検査が捨てた数が増えていれば、1 分に 1 回までログに出す。server の正しい作りは捨てられる
+    /// packet を送らないので、増え続けるのは server が乗っ取られている兆候でありうる。
+    fn log_refused(&mut self, c: crate::inbound::CountsSnapshot) {
+        let (last, at) = self.refused_logged;
+        if c.refused() > last && at.is_none_or(|a| a.elapsed() >= Duration::from_mins(1)) {
+            logf!(
+                "tunnel: the inbound filter refused {} packets from the server so far: {} not for this agent, {} fragments, {} to ports without a rule ({} answered with a reset), {} other",
+                c.refused(),
+                c.not_for_agent,
+                c.fragments,
+                c.closed_port,
+                c.resets,
+                c.other
+            );
+            self.refused_logged = (c.refused(), Some(Instant::now()));
+        }
+    }
+}
+
+const REBUILD_AFTER_MIN: Duration = Duration::from_mins(5);
+const REBUILD_AFTER_MAX: Duration = Duration::from_mins(15);
 
 /// agent を動かす。シグナルか、復帰できない誤りまで戻らない。
 ///
@@ -214,6 +377,7 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
         AgentError::Other(format!("create data dir {}: {e}", opts.data_dir.display()))
     })?;
     let _lock = credentials::acquire(&path).map_err(|e| AgentError::Other(e.to_string()))?;
+    credentials::remove_leftover_temps(&path);
     let (creds, private_key) = prepare(&opts).await?;
     let agent = Arc::new(Mutex::new(Agent {
         opts,
@@ -224,6 +388,13 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
         wg: None,
         generation: 0,
         retry: None,
+        retry_at: None,
+        retry_failures: 0,
+        rebuild_after: REBUILD_AFTER_MIN,
+        seen_handshake: None,
+        seen_at: None,
+        refused_logged: (0, None),
+        state_changed: Arc::new(Notify::new()),
     }));
     {
         let mut a = agent.lock().await;
@@ -279,12 +450,12 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
 }
 
 /// 認証情報を読み、モードを確かめ、鍵を用意し、未登録なら登録する。呼び手がロックを持つ。
-async fn prepare(opts: &Options) -> Result<(Credentials, String), AgentError> {
+async fn prepare(opts: &Options) -> Result<(Credentials, Zeroizing<String>), AgentError> {
     let path = opts.credentials_path();
     let mut creds =
         Credentials::load_or_new(&path).map_err(|e| AgentError::Other(e.to_string()))?;
     if creds.recorded_mode() != "userspace" {
-        return Err(Refusal::config(
+        return Err(Refusal::mode_gate(
             "WGFT_MODE",
             format!(
                 "agent.json records {} mode, and this Rust agent prototype runs userspace mode only; start the Go agent for this data directory",
@@ -320,7 +491,7 @@ async fn prepare(opts: &Options) -> Result<(Credentials, String), AgentError> {
         k
     } else {
         tunnel::public_key(&creds.wg_private_key).map_err(AgentError::Other)?;
-        creds.wg_private_key.clone()
+        Zeroizing::new(creds.wg_private_key.clone())
     };
     ensure_registered(&mut creds, opts).await?;
 
@@ -448,7 +619,7 @@ pub(crate) async fn recover(agent: &Shared) -> Result<(), AgentError> {
     }
     let resp = register(&j, &name).await.map_err(|e| match e {
         AgentError::Other(s) => AgentError::Other(format!("re-register failed: {s}")),
-        r @ AgentError::Refused(_) => r,
+        AgentError::Refused(r) => AgentError::Refused(r.context("re-register failed")),
     })?;
     let mut a = agent.lock().await;
     record(
@@ -492,12 +663,19 @@ mod tests {
         Agent {
             opts: Options::default(),
             creds: Credentials::default(),
-            private_key: String::new(),
+            private_key: Zeroizing::new(String::new()),
             tunnel: None,
             relay: None,
             wg: None,
             generation: 0,
             retry: None,
+            retry_at: None,
+            retry_failures: 0,
+            rebuild_after: REBUILD_AFTER_MIN,
+            seen_handshake: None,
+            seen_at: None,
+            refused_logged: (0, None),
+            state_changed: Arc::new(Notify::new()),
         }
     }
 

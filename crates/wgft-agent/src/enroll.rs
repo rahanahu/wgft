@@ -22,6 +22,9 @@ use wgft_proto::{Join, REGISTER_RESPONSE_LIMIT, RegisterRequest, RegisterRespons
 
 use crate::error::{AgentError, Refusal};
 
+/// 登録の要求の全体の期限。Go の agent の pinned client の `Timeout` と同じ。
+const REGISTER_DEADLINE: Duration = Duration::from_secs(15);
+
 /// 証明書がピンと一致しないことを示す文言の始まり。
 pub const PIN_MISMATCH: &str = "server certificate does not match the pinned hash";
 
@@ -154,14 +157,17 @@ pub async fn register(j: &Join, name: &str) -> Result<RegisterResponse, AgentErr
         token: j.token.clone(),
     })
     .map_err(|e| AgentError::Other(e.to_string()))?;
+    // Go の agent の pinned client の 15 秒の期限が、接続から本文の読みまでの全体にかかる。
+    // 接続を回すタスクは、期限で打ち切った後も残らないよう最後に止める
+    let mut conn_task = None;
     let fut = async {
-        let tls = connect_pinned(&j.endpoint, j.pin, Duration::from_secs(15))
+        let tls = connect_pinned(&j.endpoint, j.pin, REGISTER_DEADLINE)
             .await
             .map_err(|e| AgentError::Other(format!("cannot reach the registration API: {e}")))?;
         let (mut send, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls))
             .await
             .map_err(|e| AgentError::Other(format!("cannot reach the registration API: {e}")))?;
-        tokio::spawn(conn);
+        conn_task = Some(tokio::spawn(conn));
         let req = hyper::Request::post("/api/v1/agents/register")
             .header(hyper::header::HOST, j.endpoint.as_str())
             .header(hyper::header::CONTENT_TYPE, "application/json")
@@ -176,8 +182,11 @@ pub async fn register(j: &Join, name: &str) -> Result<RegisterResponse, AgentErr
         let data = read_prefix(resp.into_body(), REGISTER_RESPONSE_LIMIT).await;
         Ok::<_, AgentError>((status, data))
     };
-    let (status, data) = tokio::time::timeout(Duration::from_secs(30), fut)
-        .await
+    let done = tokio::time::timeout(REGISTER_DEADLINE, fut).await;
+    if let Some(t) = conn_task {
+        t.abort();
+    }
+    let (status, data) = done
         .map_err(|_| AgentError::Other("cannot reach the registration API: timed out".into()))??;
     let text = String::from_utf8_lossy(&data).trim().to_owned();
     match status {

@@ -6,6 +6,7 @@
 pub mod credentials;
 pub mod enroll;
 pub mod error;
+pub mod inbound;
 pub mod logging;
 pub mod relay;
 mod run;

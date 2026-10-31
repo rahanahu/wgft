@@ -14,6 +14,8 @@ pub enum Category {
     Prerequisite,
     /// 他の状態との食い違い。
     Conflict,
+    /// 記録されたモードと動かすモードの食い違い。
+    ModeGate,
 }
 
 impl Category {
@@ -22,6 +24,7 @@ impl Category {
             Category::Config => "config",
             Category::Prerequisite => "prerequisite",
             Category::Conflict => "conflict",
+            Category::ModeGate => "mode-gate",
         }
     }
 }
@@ -35,6 +38,8 @@ pub struct Refusal {
     pub subject: String,
     /// 理由。
     pub reason: String,
+    /// 前に付ける文脈。例えば `re-register failed`。
+    pub context: Option<&'static str>,
 }
 
 impl Refusal {
@@ -45,6 +50,7 @@ impl Refusal {
             category: Category::Config,
             subject: subject.to_owned(),
             reason: reason.into(),
+            context: None,
         }
     }
 
@@ -55,6 +61,7 @@ impl Refusal {
             category: Category::Prerequisite,
             subject: subject.to_owned(),
             reason: reason.into(),
+            context: None,
         }
     }
 
@@ -65,12 +72,36 @@ impl Refusal {
             category: Category::Conflict,
             subject: subject.to_owned(),
             reason: reason.into(),
+            context: None,
         }
+    }
+}
+
+impl Refusal {
+    /// 記録されたモードと動かすモードの食い違い。
+    #[must_use]
+    pub fn mode_gate(subject: &str, reason: impl Into<String>) -> Self {
+        Refusal {
+            category: Category::ModeGate,
+            subject: subject.to_owned(),
+            reason: reason.into(),
+            context: None,
+        }
+    }
+
+    /// 前に文脈を付ける。終了コードは変わらない。
+    #[must_use]
+    pub fn context(mut self, c: &'static str) -> Self {
+        self.context = Some(c);
+        self
     }
 }
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(c) = self.context {
+            write!(f, "{c}: ")?;
+        }
         write!(f, "refusing to start [{}", self.category.as_str())?;
         if !self.subject.is_empty() {
             write!(f, " {}", self.subject)?;
@@ -138,6 +169,11 @@ mod tests {
             r.to_string(),
             "refusing to start [config WGFT_JOIN]: not registered and no join string; provide via WGFT_JOIN or --join"
         );
-        assert_eq!(AgentError::from(r).exit_code(), 3);
+        assert_eq!(AgentError::from(r.clone()).exit_code(), 3);
+        assert!(
+            r.context("re-register failed")
+                .to_string()
+                .starts_with("re-register failed: refusing to start [config WGFT_JOIN]: ")
+        );
     }
 }

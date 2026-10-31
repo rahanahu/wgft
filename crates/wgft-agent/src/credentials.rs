@@ -22,7 +22,7 @@ pub const MAX_FILE_SIZE: u64 = 512 << 20;
 pub const TEMP_PREFIX: &str = ".wgft-credentials-";
 
 /// `agent.json` の中身。フィールドの順は Go の構造体の宣言の順。
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Credentials {
     /// エージェント名。
     #[serde(default)]
@@ -68,6 +68,21 @@ pub struct Credentials {
     pub extra: Map<String, Value>,
 }
 
+// 恒久トークンと鍵を Debug に出さない
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Credentials")
+            .field("name", &self.name)
+            .field("endpoint", &self.endpoint)
+            .field("cert_sha256", &self.cert_sha256)
+            .field("permanent_token", &"<redacted>")
+            .field("wg_private_key", &"<redacted>")
+            .field("mode", &self.mode)
+            .field("tunnel_address", &self.tunnel_address)
+            .finish_non_exhaustive()
+    }
+}
+
 /// 認証情報の読み書きの誤り。
 #[derive(Debug)]
 pub enum CredentialsError {
@@ -97,6 +112,101 @@ fn other(path: &Path, e: impl std::fmt::Display) -> CredentialsError {
     CredentialsError::Other(format!("credentials file {}: {e}", path.display()))
 }
 
+/// `path` を開く。最後の要素が symlink なら辿らず (Unix は `O_NOFOLLOW`)、開いた記述子の fstat で
+/// 通常のファイルであることを確かめる。名前を差し替えられても、確かめたのは開いたファイルである。
+fn open_regular(path: &Path, opts: &mut OpenOptions) -> std::io::Result<(File, fs::Metadata)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(not(unix))]
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(std::io::Error::other("is a symbolic link"));
+    }
+    #[cfg(unix)]
+    let f = opts.open(path).map_err(|e| {
+        // O_NOFOLLOW は symlink に ELOOP を返す
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            std::io::Error::other("is a symbolic link")
+        } else {
+            e
+        }
+    })?;
+    #[cfg(not(unix))]
+    let f = opts.open(path)?;
+    let meta = f.metadata()?;
+    if !meta.file_type().is_file() {
+        return Err(std::io::Error::other("is not a regular file"));
+    }
+    Ok((f, meta))
+}
+
+/// agent.json の書き方。Go の `json.MarshalIndent(f, "", "  ")` と同じく 2 文字で字下げし、`<`、`>`、
+/// `&`、U+2028、U+2029 を `<` の形で書く。
+struct GoIndent {
+    inner: serde_json::ser::PrettyFormatter<'static>,
+}
+
+impl serde_json::ser::Formatter for GoIndent {
+    fn write_string_fragment<W: ?Sized + Write>(
+        &mut self,
+        w: &mut W,
+        fragment: &str,
+    ) -> std::io::Result<()> {
+        let mut start = 0;
+        for (i, c) in fragment.char_indices() {
+            let esc = match c {
+                '<' => "\\u003c",
+                '>' => "\\u003e",
+                '&' => "\\u0026",
+                '\u{2028}' => "\\u2028",
+                '\u{2029}' => "\\u2029",
+                _ => continue,
+            };
+            w.write_all(&fragment.as_bytes()[start..i])?;
+            w.write_all(esc.as_bytes())?;
+            start = i + c.len_utf8();
+        }
+        w.write_all(&fragment.as_bytes()[start..])
+    }
+    fn begin_array<W: ?Sized + Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.inner.begin_array(w)
+    }
+    fn end_array<W: ?Sized + Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.inner.end_array(w)
+    }
+    fn begin_array_value<W: ?Sized + Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        self.inner.begin_array_value(w, first)
+    }
+    fn end_array_value<W: ?Sized + Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.inner.end_array_value(w)
+    }
+    fn begin_object<W: ?Sized + Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.inner.begin_object(w)
+    }
+    fn end_object<W: ?Sized + Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.inner.end_object(w)
+    }
+    fn begin_object_key<W: ?Sized + Write>(
+        &mut self,
+        w: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        self.inner.begin_object_key(w, first)
+    }
+    fn begin_object_value<W: ?Sized + Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.inner.begin_object_value(w)
+    }
+    fn end_object_value<W: ?Sized + Write>(&mut self, w: &mut W) -> std::io::Result<()> {
+        self.inner.end_object_value(w)
+    }
+}
+
 impl Credentials {
     /// 読む。無ければ [`CredentialsError::NotFound`]。symlink と通常のファイルでないものは拒む。
     ///
@@ -104,22 +214,19 @@ impl Credentials {
     ///
     /// 読めないか JSON として読めなければ誤りを返す。
     pub fn load(path: &Path) -> Result<Credentials, CredentialsError> {
-        let meta = match fs::symlink_metadata(path) {
-            Ok(m) => m,
+        let (f, meta) = match open_regular(path, OpenOptions::new().read(true)) {
+            Ok(x) => x,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(CredentialsError::NotFound);
             }
             Err(e) => return Err(other(path, e)),
         };
-        if !meta.file_type().is_file() {
-            return Err(other(path, "is not a regular file"));
-        }
         if meta.len() > MAX_FILE_SIZE {
             return Err(other(path, "is larger than wgft ever writes"));
         }
         let mut b = Vec::new();
-        File::open(path)
-            .and_then(|f| f.take(MAX_FILE_SIZE + 1).read_to_end(&mut b))
+        f.take(MAX_FILE_SIZE + 1)
+            .read_to_end(&mut b)
             .map_err(|e| other(path, e))?;
         if b.len() as u64 > MAX_FILE_SIZE {
             return Err(other(path, "grew while being read"));
@@ -139,31 +246,49 @@ impl Credentials {
         }
     }
 
-    /// 一時ファイルに書いて rename する。Unix では作った瞬間から 0600。
-    /// Go の `json.MarshalIndent(f, "", "  ")` と同じ 2 文字の字下げで書く。
+    /// Go の v1 の agent と同じ byte 列にする。
+    ///
+    /// # Errors
+    ///
+    /// 書けない値があれば誤りを返す。
+    pub fn to_go_json(&self) -> Result<Vec<u8>, serde_json::Error> {
+        let mut out = Vec::new();
+        let fmt = GoIndent {
+            inner: serde_json::ser::PrettyFormatter::with_indent(b"  "),
+        };
+        let mut ser = serde_json::Serializer::with_formatter(&mut out, fmt);
+        self.serialize(&mut ser)?;
+        Ok(out)
+    }
+
+    /// 一時ファイルに書いて rename する。Unix では作った瞬間から 0600。既にあるファイルの持ち主と
+    /// group は保つ (root が書き直す場合)。
     ///
     /// # Errors
     ///
     /// 書けなければ誤りを返す。既にある `path` が通常のファイルでなければ何も書かずに拒む。
     pub fn save(&self, path: &Path) -> Result<(), CredentialsError> {
-        let b = serde_json::to_vec_pretty(self).map_err(|e| other(path, e))?;
+        let b = self.to_go_json().map_err(|e| other(path, e))?;
         if b.len() as u64 > MAX_FILE_SIZE {
             return Err(other(path, "would be larger than wgft ever writes"));
         }
-        if let Ok(m) = fs::symlink_metadata(path)
-            && !m.file_type().is_file()
-        {
-            return Err(other(
-                path,
-                "is not a regular file, so it was left untouched",
-            ));
-        }
+        let old = match fs::symlink_metadata(path) {
+            Ok(m) if !m.file_type().is_file() => {
+                return Err(other(
+                    path,
+                    "is not a regular file, so it was left untouched",
+                ));
+            }
+            Ok(m) => Some(m),
+            Err(_) => None,
+        };
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         let (tmp_path, mut tmp) = create_temp(dir)
             .map_err(|e| other(path, format!("create temp credentials file: {e}")))?;
         let result = tmp
             .write_all(&b)
             .and_then(|()| tmp.sync_all())
+            .and_then(|()| keep_owner(&tmp, old.as_ref()))
             .and_then(|()| {
                 drop(tmp);
                 fs::rename(&tmp_path, path)
@@ -171,6 +296,11 @@ impl Credentials {
         if let Err(e) = result {
             let _ = fs::remove_file(&tmp_path);
             return Err(other(path, e));
+        }
+        // rename をディスクに残すため、ディレクトリも fsync する (Unix)
+        #[cfg(unix)]
+        if let Err(e) = File::open(dir).and_then(|d| d.sync_all()) {
+            return Err(other(path, format!("sync the data directory: {e}")));
         }
         Ok(())
     }
@@ -184,6 +314,32 @@ impl Credentials {
             &self.mode
         }
     }
+}
+
+/// root が書き直すとき、新しいファイルの持ち主と group を前のファイルに合わせる。開いた記述子に対して
+/// 行うので、名前を差し替えられても他のファイルに触らない。
+#[cfg(unix)]
+fn keep_owner(tmp: &File, old: Option<&fs::Metadata>) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    // 一時ファイルはこのプロセスの実効 uid が持つので、持ち主が 0 なら root で動いている
+    let mine = tmp.metadata()?;
+    if let Some(m) = old
+        && mine.uid() == 0
+        && (m.uid(), m.gid()) != (mine.uid(), mine.gid())
+    {
+        std::os::unix::fs::fchown(tmp, Some(m.uid()), Some(m.gid()))?;
+    }
+    Ok(())
+}
+
+/// Windows では持ち主を変えない。ファイルの ACL は試作では扱わない。
+#[cfg(not(unix))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the same signature as the Unix version"
+)]
+fn keep_owner(_tmp: &File, _old: Option<&fs::Metadata>) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn create_temp(dir: &Path) -> std::io::Result<(PathBuf, File)> {
@@ -209,6 +365,33 @@ fn create_temp(dir: &Path) -> std::io::Result<(PathBuf, File)> {
     Err(std::io::Error::other("cannot pick a temporary file name"))
 }
 
+/// 前の保存が途中で止まって残した一時ファイルを消す。ロックを取った後に呼ぶので、消すのは動いている
+/// agent の書きかけではない。通常のファイルだけを消す。
+pub fn remove_leftover_temps(credentials: &Path) {
+    let dir = credentials.parent().unwrap_or_else(|| Path::new("."));
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let is_temp = e
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.starts_with(TEMP_PREFIX));
+        if is_temp && e.file_type().is_ok_and(|t| t.is_file()) {
+            match fs::remove_file(e.path()) {
+                Ok(()) => crate::logf!(
+                    "removed the leftover temporary credentials file {}",
+                    e.path().display()
+                ),
+                Err(err) => crate::logf!(
+                    "cannot remove the leftover temporary credentials file {}: {err}",
+                    e.path().display()
+                ),
+            }
+        }
+    }
+}
+
 /// 隣の `.lock` ファイルの排他ロック。Go の agent と同じく Unix は `flock`、Windows は `LockFileEx`
 /// (Rust の標準の `File::try_lock`) なので、Go の agent と Rust の agent は同じデータディレクトリで
 /// 同時に動かない。
@@ -225,25 +408,53 @@ pub fn lock_path(credentials: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// ロックを取る。取れなければ [`CredentialsError::Locked`]。
+/// ロックを取る。取れなければ [`CredentialsError::Locked`]。ロックファイルの symlink と通常のファイル
+/// でないものは拒む。ロックを取った後に、その名前が今も同じファイルを指すことを確かめ、別のプロセスが
+/// 消して作り直していれば取り直す (Go の `flock` と同じく 4 回まで)。
 ///
 /// # Errors
 ///
 /// ロックファイルを開けないか、別のプロセスがロックを持っていれば誤りを返す。
 pub fn acquire(credentials: &Path) -> Result<Lock, CredentialsError> {
     let p = lock_path(credentials);
-    let mut opts = OpenOptions::new();
-    opts.read(true).write(true).create(true).truncate(false);
+    for _ in 0..4 {
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let (f, opened) = open_regular(&p, &mut opts).map_err(|e| other(&p, e))?;
+        match f.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Err(CredentialsError::Locked),
+            Err(TryLockError::Error(e)) => return Err(other(&p, e)),
+        }
+        if same_file(&opened, &p) {
+            return Ok(Lock { _file: f });
+        }
+    }
+    Err(other(
+        &p,
+        "the lock file kept being replaced while it was being locked",
+    ))
+}
+
+/// 開いたファイル `opened` と、今の `path` が同じファイルかどうか。
+fn same_file(opened: &fs::Metadata, path: &Path) -> bool {
+    let Ok(now) = fs::symlink_metadata(path) else {
+        return false;
+    };
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+        use std::os::unix::fs::MetadataExt;
+        opened.dev() == now.dev() && opened.ino() == now.ino()
     }
-    let f = opts.open(&p).map_err(|e| other(&p, e))?;
-    match f.try_lock() {
-        Ok(()) => Ok(Lock { _file: f }),
-        Err(TryLockError::WouldBlock) => Err(CredentialsError::Locked),
-        Err(TryLockError::Error(e)) => Err(other(&p, e)),
+    #[cfg(not(unix))]
+    {
+        let _ = opened;
+        now.file_type().is_file()
     }
 }
 
@@ -334,6 +545,72 @@ mod tests {
                 0o600
             );
         }
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    /// 仕様の fixture (Go の v1 の agent が書いたファイル) を読んで書くと、同じ byte 列に戻る。
+    #[test]
+    fn spec_files_round_trip_byte_for_byte() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/spec/credentials");
+        let mut n = 0;
+        for e in fs::read_dir(&dir).unwrap() {
+            let p = e.unwrap().path();
+            let want = fs::read_to_string(&p).unwrap().replace("\r\n", "\n");
+            let c: Credentials = serde_json::from_str(&want).unwrap();
+            assert_eq!(
+                String::from_utf8(c.to_go_json().unwrap()).unwrap(),
+                want,
+                "{}",
+                p.display()
+            );
+            assert!(!format!("{c:?}").contains(&c.permanent_token) || c.permanent_token.is_empty());
+            n += 1;
+        }
+        assert!(n > 0);
+    }
+
+    #[test]
+    fn writes_html_characters_escaped_like_go() {
+        let c = Credentials {
+            name: "a<b>&c\u{2028}".into(),
+            ..Credentials::default()
+        };
+        let s = String::from_utf8(c.to_go_json().unwrap()).unwrap();
+        assert!(
+            s.contains(r#""name": "a\u003cb\u003e\u0026c\u2028""#),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn refuses_a_symlinked_file_and_lock() {
+        let d = tmpdir("symlink");
+        let real = d.join("real.json");
+        fs::write(&real, "{}").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, d.join(FILE_NAME)).unwrap();
+            assert!(matches!(
+                Credentials::load(&d.join(FILE_NAME)),
+                Err(CredentialsError::Other(_))
+            ));
+            std::os::unix::fs::symlink(&real, lock_path(&d.join("other.json"))).unwrap();
+            assert!(acquire(&d.join("other.json")).is_err());
+        }
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn removes_leftover_temps() {
+        let d = tmpdir("temps");
+        fs::write(d.join(format!("{TEMP_PREFIX}123")), "x").unwrap();
+        fs::write(d.join("keep.json"), "x").unwrap();
+        remove_leftover_temps(&d.join(FILE_NAME));
+        let names: Vec<_> = fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("keep.json")]);
         fs::remove_dir_all(d).unwrap();
     }
 

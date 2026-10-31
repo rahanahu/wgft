@@ -5,7 +5,8 @@
 //! 繋ぎ直す。
 
 use crate::logf;
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -37,7 +38,41 @@ const HANDSHAKE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const HANDSHAKE_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_FRESH_MAX: Duration = Duration::from_secs(10);
-const TUNNEL_FRESH_FOR: Duration = Duration::from_secs(180);
+const CONNECT_DEADLINE: Duration = Duration::from_secs(15);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 再接続の待ちに入るたびの 1 行を間引く。前の行と違う行はすぐに出し、同じ行は 1 分に 1 行までにして、
+/// 間引いた数を次に出す行に添える (Go の agent の `reconnectLog`)。
+#[derive(Default)]
+struct ReconnectLog {
+    last: String,
+    last_at: Option<Instant>,
+    suppressed: u32,
+}
+
+impl ReconnectLog {
+    fn print(&mut self, msg: String) {
+        if msg == self.last
+            && self
+                .last_at
+                .is_some_and(|t| t.elapsed() < Duration::from_mins(1))
+        {
+            self.suppressed += 1;
+            return;
+        }
+        if self.suppressed > 0 {
+            logf!(
+                "{msg}; {} repeat(s) of the previous line not logged",
+                self.suppressed
+            );
+        } else {
+            logf!("{msg}");
+        }
+        self.suppressed = 0;
+        self.last = msg;
+        self.last_at = Some(Instant::now());
+    }
+}
 
 /// 1 本の接続の終わり方。
 #[derive(Debug)]
@@ -85,19 +120,14 @@ impl std::fmt::Display for End {
 /// stream に繋ぎ続ける。復帰できない認証の拒否のときだけ誤りを返して終わる。
 pub(crate) async fn stream_loop(agent: Shared) -> Result<(), AgentError> {
     let mut backoff = BACKOFF_MIN;
+    let mut waits = ReconnectLog::default();
     loop {
         let started = Instant::now();
         let end = stream_once(&agent).await;
         if started.elapsed() > Duration::from_mins(1) {
             backoff = BACKOFF_MIN;
         }
-        let fresh = agent
-            .lock()
-            .await
-            .last_handshake()
-            .await
-            .and_then(|t| SystemTime::now().duration_since(t).ok())
-            .is_some_and(|d| d < TUNNEL_FRESH_FOR);
+        let fresh = agent.lock().await.handshake_fresh().await;
         if backoff > BACKOFF_FRESH_MAX && end.caps_while_fresh() && fresh {
             backoff = BACKOFF_FRESH_MAX;
         }
@@ -145,7 +175,7 @@ pub(crate) async fn stream_loop(agent: Shared) -> Result<(), AgentError> {
                 backoff.as_secs()
             ),
         };
-        logf!("{msg}");
+        waits.print(msg);
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
     }
@@ -158,7 +188,7 @@ async fn connect(agent: &Shared) -> Result<Ws, End> {
         (
             a.creds.endpoint.clone(),
             a.creds.cert_sha256.clone(),
-            a.creds.permanent_token.clone(),
+            zeroize::Zeroizing::new(a.creds.permanent_token.clone()),
             a.private_key.clone(),
         )
     };
@@ -168,7 +198,9 @@ async fn connect(agent: &Shared) -> Result<Ws, End> {
         ));
     };
     let public_key = tunnel::public_key(&private_key).map_err(End::Other)?;
-    let tls = connect_pinned(&endpoint, pin, Duration::from_secs(30))
+    // Go の agent の pinned client の 15 秒の期限が、TLS と WebSocket の握手の全体にかかる
+    let deadline = tokio::time::Instant::now() + CONNECT_DEADLINE;
+    let tls = connect_pinned(&endpoint, pin, CONNECT_DEADLINE)
         .await
         .map_err(|e| {
             if e.starts_with(PIN_MISMATCH) {
@@ -180,14 +212,15 @@ async fn connect(agent: &Shared) -> Result<Ws, End> {
     let mut req = format!("wss://{endpoint}/api/v1/agents/stream")
         .into_client_request()
         .map_err(|e| End::Other(e.to_string()))?;
-    let auth = HeaderValue::from_str(&format!("Bearer {token}"))
+    let mut auth = HeaderValue::from_str(&format!("Bearer {}", token.as_str()))
         .map_err(|_| End::Other("credentials file: permanent_token is invalid".into()))?;
+    auth.set_sensitive(true);
     req.headers_mut().insert("Authorization", auth);
     let config = WebSocketConfig::default()
         .max_message_size(Some(STREAM_READ_LIMIT))
         .max_frame_size(Some(STREAM_READ_LIMIT));
     let handshake = tokio_tungstenite::client_async_with_config(req, tls, Some(config));
-    let mut ws = match tokio::time::timeout(Duration::from_secs(30), handshake).await {
+    let mut ws = match tokio::time::timeout_at(deadline, handshake).await {
         Err(_) => return Err(End::Other("websocket handshake timed out".into())),
         Ok(Err(WsError::Http(resp))) if resp.status().as_u16() == 401 => {
             return Err(End::Unauthorized);
@@ -230,7 +263,9 @@ async fn stream_once(agent: &Shared) -> End {
     };
     let mut first = true;
     let mut heartbeat_tick = tokio::time::interval(HEARTBEAT_INTERVAL);
+    heartbeat_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     heartbeat_tick.tick().await;
+    let state_changed = Arc::clone(&agent.lock().await.state_changed);
     let mut ping_tick = tokio::time::interval(PING_INTERVAL);
     ping_tick.tick().await;
     let mut pong_deadline: Option<tokio::time::Instant> = None;
@@ -294,6 +329,12 @@ async fn stream_once(agent: &Shared) -> End {
                     _ => {}
                 }
             }
+            () = state_changed.notified() => {
+                let hb = agent.lock().await.heartbeat().await;
+                if let Err(e) = send_heartbeat(&mut ws, hb).await {
+                    return End::Other(e);
+                }
+            }
             _ = heartbeat_tick.tick() => {
                 let hb = agent.lock().await.heartbeat().await;
                 if let Err(e) = send_heartbeat(&mut ws, hb).await {
@@ -311,8 +352,10 @@ async fn stream_once(agent: &Shared) -> End {
             }
             _ = ping_tick.tick() => {
                 if pong_deadline.is_none() {
-                    if let Err(e) = ws.send(WsMessage::Ping(Vec::new().into())).await {
-                        return End::Other(e.to_string());
+                    match tokio::time::timeout(WRITE_TIMEOUT, ws.send(WsMessage::Ping(Vec::new().into()))).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => return End::Other(e.to_string()),
+                        Err(_) => return End::Other("ping write timed out".into()),
                     }
                     pong_deadline = Some(tokio::time::Instant::now() + PONG_TIMEOUT);
                 }
@@ -390,12 +433,7 @@ where
     S::Error: std::fmt::Display,
 {
     let text = serde_json::to_string(m).map_err(|e| e.to_string())?;
-    match tokio::time::timeout(
-        Duration::from_secs(10),
-        ws.send(WsMessage::Text(text.into())),
-    )
-    .await
-    {
+    match tokio::time::timeout(WRITE_TIMEOUT, ws.send(WsMessage::Text(text.into()))).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(e.to_string()),
         Err(_) => Err("write timed out".into()),

@@ -16,7 +16,7 @@ hyper-util = { workspace = true, features = ["tokio"] }
 ring.workspace = true
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
 socket2 = { workspace = true, features = ["all"] }
 time = { workspace = true, features = ["formatting", "local-offset", "macros"] }
 tokio = { workspace = true, features = ["rt", "macros", "net", "time", "sync", "signal", "io-util", "fs"] }
@@ -25,6 +25,10 @@ tokio-tungstenite = { workspace = true, features = ["handshake"] }
 wgft-proto.workspace = true
 wgft-wireguard.workspace = true
 wgft-wireguard-tun.workspace = true
+zeroize = { workspace = true, features = ["zeroize_derive"] }
 
 [lints]
 workspace = true
+
+[target."cfg(unix)".dependencies]
+libc.workspace = true
