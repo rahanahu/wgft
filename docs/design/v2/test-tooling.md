@@ -42,7 +42,7 @@ Rust の wgstack の核は sans-IO で、台本と記録と fuzz は偽の時計
 | 構文の fixture | `internal/tcpharness/scripts/testdata/` | 言語に依らない | 2 つの構文解析器が同じ木を作ることの確かめ |
 | Go の runner | `internal/tcpharness` (`script*.go`) | Go | 台本を `tcpharness.Scenario` にし、今の DUT のすべてに流す |
 | DUT の口の符号 | `internal/dutproto` | Go | 3 節の frame の符号化と復号。モジュールの中の何も import しない |
-| Go の DUT の server | `tools/dutserve` | Go | 凍結した Go の wgstack を 3 節の口で出す |
+| Go の DUT の server | `internal/wgstack` の試験のバイナリの `dutserve` の形 | Go | 凍結した Go の wgstack を 3 節の口で出す |
 | 別のプロセスの DUT | `internal/tcpharness/rustdut` | Go | 3 節の口の client。`tcpharness.ClockedDUT` を実装する。相手は Rust の `wgstack-dut` か、確かめのための `dutserve` |
 | Rust の道具の crate | `crates/wgft-tcpharness` | Rust | 口の符号、packet の組み立て、台本の構文解析器と runner、記録の照合 |
 | Rust の DUT | `crates/wgft-wgstack-dut` | Rust | Rust の wgstack を `ClockedDut` に合わせる adapter と、3 節の口の server のバイナリ `wgstack-dut` |
@@ -60,7 +60,7 @@ Rust の wgstack の核の crate は `crates/wgft-wgstack` です。
 
 台本は 1 つのファイルに 1 つで、拡張子は `.scn`、ファイル名は台本の名前です (`fin-passive-close.scn`)。
 置き場所は `internal/tcpharness/scripts/` です。
-Go の runner は `go:embed` でファイルを取り込み、Rust の runner は `CARGO_MANIFEST_DIR` からの相対の道で読みます。
+Go の runner は `go:embed` でファイルを取り込み、Rust の runner は `CARGO_MANIFEST_DIR` からの相対のパスで読みます。
 
 形式は行を単位にした文の列です。
 JSON や YAML ではなく専用の形にした理由は次のとおりです。
@@ -90,7 +90,8 @@ attrs   = INDENT "what:" TEMPLATE NL INDENT "got:" TEMPLATE NL
 - 文:1 行に 1 つで、先頭の語が動詞です。結果を持つ文は `-> 名前` で結果を名前に結びます
 - 字下げ:意味を持つのは `check` と `require` の `what:` と `got:` の行だけです。`if` の中は `end` で閉じます
 - 分岐:`if`、`else`、`end` だけを持ち、繰り返しを持ちません。台本は `stop` で正常に終われます
-- 名前:台本全体で 1 つの名前空間です。同じ名前に結び直せ、`if` の中で結んだ名前は後でも見えます。結ぶ前の名前を読むと台本の誤りとして落ちます
+- 名前:台本全体で 1 つの名前空間です。同じ名前に結び直せ、`if` の中で結んだ名前は後でも見えます
+- 結びの静的な検査:構文解析の後、流す前に、どの名前もその読み取りに至るすべての経路で先に結ばれていることを確かめます。`if` で片方の枝だけが結ぶ名前を後で読む台本は、流す前に台本の誤りになります。この検査は 2 つの構文解析器が同じ規則で行い、構文の fixture に誤りの例を含めます
 - `linux:` の行:`tcpharness.Scenario.Linux` と同じく、参照の Linux がこの台本だけに使う sysctl です。今移す台本は使いません
 
 ### 式と型
@@ -155,6 +156,11 @@ ipv4 の欄は `src`、`dst`、`proto`、`id`、`df`、`ttl`、`payload` です�
 
 list を受ける関数は、2 つ目の引数を要素ごとに `s` に結んで評価します。
 `filter(l, 述語)`、`first(l, 述語)` (無ければ見えなかった捕捉)、`any(l, 述語)`、`count(l)`、`max_of(l, 式)`、`sum_of(l, 式)` です。
+
+述語の中の `s` は、外で `s` という名前を結んでいても、その述語の中では候補を指します。
+述語が読む外の名前と相手の欄は、文を始めた時の値に固定します。
+待つ間に `Peer.Next` が `dut_ack`、`dut_window`、`ts_recent` を更新しても、述語の中の値は変わりません。
+今の Go の台本の述語は、`acks(p.SndNxt)` のように作った時の値を取るか、待つ間に変わらない欄 (`RcvNxt` など) だけを読むので、この規則で意味は変わりません。
 
 ### 時刻の確かめ
 
@@ -359,7 +365,8 @@ pub trait ClockedDut {
 操作はすべて待たずに戻ります。
 実装は 2 つです。
 `crates/wgft-wgstack-dut` の adapter が Rust の wgstack を同じプロセスで包み、`crates/wgft-tcpharness` の `ProcessDut` が 3 節の口で別のプロセスを叩きます。
-adapter は `inject` を同じ時刻の `handle_packet` の列に、`advance` を時刻の更新と期限の来た `handle_timeout` に、`poll` を `poll_transmit` に写します。
+adapter は `inject` を同じ時刻の `handle_packet` の列に、`advance` を新しい時刻での 1 回の `handle_timeout` に、`poll` を `poll_transmit` に写します。
+1 回の `handle_timeout` は、Go の `ManualClock.Advance` の後の 1 回の `Tick` と同じく、新しい時刻までに期限の来たタイマーをすべて動かします。
 `poll_event` の知らせは adapter が読み捨て、操作の結果だけを runner に返します。
 台本を Rust の wgstack に流す試験は `crates/wgft-wgstack-dut/tests/scenarios.rs` に置きます。
 
@@ -387,18 +394,32 @@ Rust の wgstack の engine の名前は `wgstack-rs` です。
 ### 2 つの runner の一致の確かめ
 
 2 つの runner の意味のずれは、DUT への呼び出しの列で捉えます。
-同じ DUT と同じ種で 2 つの runner が同じ台本を流すと、3 節の口の要求と応答の列 (transcript) が byte の単位で一致することを求めます。
+台本の言語の台本を、同じ DUT と同じ種と手で進める時計で 2 つの runner が流すと、3 節の口の要求と応答の列 (transcript) が byte の単位で一致することを求めます。
 
 - Go の runner の transcript は、`rustdut` が pipe に書いた要求と読んだ応答です
 - Rust の runner の transcript は、`ClockedDut` の呼び出しを同じ符号で書き出す包みが作ります
 
-Rust の wgstack ができる前は、DUT に `tools/dutserve` (凍結した Go の wgstack) を使い、Rust の runner は `ProcessDut` でそれを叩きます。
+transcript の一致を求めるのは、台本の言語の台本だけです。
+Go に残す台本のうち別の goroutine で読み書きする台本 (受信の溢れ、窓の開き方など) は、goroutine の進み方で要求の順が変わるので、確かめの ID と結果と観察の文字列の一致だけを求めます。
+それらの台本は Rust の runner では流れないので、比べる相手は同じ台本を `wgstackdut` で流した結果と、`rustdut` で凍結した Go の wgstack に流した結果です。
+
+Rust の wgstack ができる前は、DUT に `dutserve` (3 節。凍結した Go の wgstack) を使い、Rust の runner は `ProcessDut` でそれを叩きます。
 これで、Rust の runner の意味を Rust の wgstack を待たずに確かめられます。
 Rust の wgstack ができた後は、`wgstack-dut` のバイナリを両方の runner が叩きます。
 
-実時間の待ちで呼び出しの数が変わらないように、`rustdut` は次の規則を持ちます。
-待つ必要を返した読み書きと受け入れ、`Delivered` の問い合わせは、その後に状態を変える要求 (packet の注入、時計、引き取り、アプリケーションの操作) を送るまで、同じ要求を送り直さずに前の応答を使います。
+実時間の待ちで呼び出しの数が変わらないように、`rustdut` は送り直さない規則を持ちます。
+問い合わせの要求は、前の同じ問い合わせの後に状態を変える要求を送っていなければ、送り直さずに前の応答を使います。
 答えが変わりえない問い合わせを送り直さないので、transcript は壁時計の待ちに依りません。
+要求の分け方は次の表のとおりで、この表が規則の正本です。
+
+| 分け方 | 要求 | 扱い |
+| --- | --- | --- |
+| 状態を変える要求 | `INJECT`、`ADVANCE`、`POLL`、`TCP_LISTEN`、`UDP_LISTEN`、`CLOSE`、`CLOSE_WRITE`、`ABORT`、`CLOSE_FOR_DELIVERY`、`BOOST_POLICY`、`EVENTS`、`UDP_SEND`、`PING_OPEN`、`PING_SEND`、`PING_CLOSE`。結果を返した `ACCEPT`、`READ`、`WRITE`、`UDP_RECV`、`PING_RECV` | 送るたびに、それまでの問い合わせの応答を使えなくする |
+| 問い合わせ | `NOW`、`DELIVERED`、`STATS`、`BOUND`、`HELD`。`WOULD_BLOCK` か 0 byte を返した `ACCEPT`、`READ`、`WRITE`、`UDP_RECV`、`PING_RECV` | 状態を変える要求が間に無ければ送り直さない |
+
+`ACCEPT` などは応答を見るまで分け方が決まりません。
+`rustdut` は、`WOULD_BLOCK` の応答を得た要求を問い合わせとして覚え、同じ要求を次に送る前にこの規則を当てます。
+DUT の側は、`WOULD_BLOCK` を返す要求で engine の状態を変えません (3 節)。
 
 ## 3. DUT の口 (標準入出力)
 
@@ -447,7 +468,7 @@ packet は binary なので、JSON でなく binary の frame にします。
 | `STATS` | なし | `key=value` の文字列 |
 | `BOUND`、`HELD` | なし | 上界の式の値と、今の保持の量の `key=value` の文字列 |
 | `RTO_AT` | 接続、時刻 | その時刻に使っていた RTO か不明 (`--clock real` だけ) |
-| `CONN_SOCKET` | 接続、Unix ソケットの道 | `OK` (`--clock real` だけ。後述) |
+| `CONN_SOCKET` | 接続、Unix ソケットのパス | `OK` (`--clock real` だけ。後述) |
 
 誤りの応答は、種類 (timeout、EOF、closed、reset、broken pipe、その他) と英語の文を持ちます。
 `rustdut` は種類を Go の誤りに戻します。
@@ -463,14 +484,16 @@ DUT の側はこれを守り、2 節の送り直さない規則はこれに頼�
 Rust の wgstack では、これが hook の `may_return` に当たります。
 口をまたいで同期の呼び返しはできないので、`BOOST_POLICY` で答えを先に渡し、`wgstack-dut` の hook がその答えを返し、変化を `EVENTS` で渡します。
 
-frame の種類の番号と本体の並びの正本は、B1 の PR が `internal/dutproto` の Go の定義と、この節に足す付録の表で持ちます。
+frame の種類の番号と本体の並びの正本は、T2a の PR が `internal/dutproto` の Go の定義と、この節に足す付録の表で持ちます。
 Rust の符号は同じ表から書き、2 つの符号が同じ bytes を作ることを、Go の試験が書き出した frame の例 (`internal/dutproto/testdata/frames/`) で照らします。
 
 ### Go の DUT の adapter (`rustdut`)
 
 `rustdut` は 3 節の client で、`tcpharness.ClockedDUT`、`Listener`、`Conn`、`Deliverer`、`DeliveryCloser`、`Booster` と UDP の `net.PacketConn` を実装します。
-今の DUT と同じく `New(addr, mtu)` と `Engine(known)` を持ち、`Engine` の `New` が台本の種から `HELLO` の乱数の種を作ります。
-バイナリの道は環境変数 `WGFT_TEST_WGSTACK_DUT` で受け、無ければ試験を SKIP にします。
+今の DUT と同じく `New(addr, mtu)` と `Engine(known)` を持ちます。
+`Engine` の `New` は、`wgstackdut` が Go の wgstack に渡す乱数の源 (台本の種から作った鍵の `math/rand/v2` の `ChaCha8`) を同じ形で作り、その先頭の 64 byte を `HELLO` の種にします。
+Go の wgstack は作成の時に乱数の源から 64 byte だけを読むので、同じ台本の種なら `wgstackdut`、`dutserve`、Rust の wgstack が同じ 64 byte を受け取ります。
+バイナリのパスは環境変数 `WGFT_TEST_WGSTACK_DUT` で受け、無ければ試験を SKIP にします。
 このため、`go test ./...` は cargo の無い環境でもそのまま通ります。
 
 待つ操作は `rustdut` が壁時計で待ちます。
@@ -479,19 +502,31 @@ Rust の符号は同じ表から書き、2 つの符号が同じ bytes を作る
 `Accept(ctx)` は `ACCEPT` を同じ規則で送り直します。
 これは `wgstackdut` の `Conn` が締め切りを壁時計で測るのと同じ意味です。
 
-### Go の server (`tools/dutserve`)
+### Go の server (`dutserve`)
 
-`tools/dutserve` は、凍結した Go の wgstack を `wgstackdut` で作り、3 節の口で出します。
+`dutserve` は、凍結した Go の wgstack を 3 節の口で出す Go の server です。
 用途は 3 つです。
 4 節の記録を作ること、`rustdut` 自身の確かめ (同じ台本を `wgstackdut` で直接流した結果と、`rustdut` で `dutserve` に流した結果が一致すること)、Rust の runner の確かめです。
 
-Go の wgstack は待たずに戻る読み書きを持ちません。
-締め切りを過ぎた `Read` と `Write` は、データの有無より先に timeout を返すためです。
-`dutserve` は締め切りを 1 ms 先にして呼び、データがあれば受け取り、無ければ timeout を `WOULD_BLOCK` にします。
-`dutserve` は要求を 1 つずつ処理し、手で進める時計は要求の外で動かないので、1 ms の間に状態は変わりません。
-Go の `Accept` は締め切りを持たないので、`dutserve` は待ち受けごとに受け入れの goroutine を持ちます。
-受け入れる接続が無い時に `ACCEPT` を受けると、後で届いた接続をこの goroutine が要求の外で取り出し、transcript が決まらなくなります。
-`dutserve` はこの場合を記録の meta に印し、4 節の照合はその記録を使いません。
+`dutserve` は独立したコマンドでなく、`internal/wgstack` の試験のバイナリの 1 つの形です。
+`go test -c -o bin/wgstack-dutserve.test ./internal/wgstack` で作り、環境変数 `WGFT_WGSTACK_DUTSERVE=1` を与えて起こすと、`TestMain` が試験を流さずに標準入出力で口を出します。
+コードはすべて `internal/wgstack` の `_test.go` にあり、凍結した製品のコードは変えません。
+
+package の中に置く理由は、待たずに戻る操作を正しく作るためです。
+Go の wgstack の公開の `Read`、`Write`、`Accept` は待つ操作で、締め切りを過ぎた `Read` と `Write` はデータの有無より先に timeout を返し、`Accept` は締め切りを持ちません。
+`dutserve` は、`FuzzCore` と同じ package の中の確かめで、操作が待たずに戻ると分かった時だけ公開の操作を呼び、待つ場合は呼ばずに `WOULD_BLOCK` を返します。
+
+- `ACCEPT`:待ち受けの列に接続がある時だけ `Accept` を呼びます
+- `READ`:`readable` が真の時だけ `Read` を呼びます。データ、EOF、誤りのどれでも待たずに戻ります
+- `WRITE`:`room` が 0 より大きい時は、その量までを `Write` に渡します。接続が書けない状態 (閉じた後、誤りの後、送信の向きを閉じた後) なら `Write` を呼んで誤りを受け取ります。どちらでもなければ `WOULD_BLOCK` を返します
+- `UDP_RECV` と `PING_RECV`:同じ形の受信の列の確かめを `_test.go` に足して使います
+
+`dutserve` は壁時計で待たず、受け入れの goroutine も持たないので、transcript は要求の列だけで決まります。
+
+`dutserve` は Go の wgstack を公開の `New` で作り、既定の上限だけを受け付けます。
+既定でない上限の組を持つ `HELLO` は誤りで断ります。
+小さな上限の記録 (`FuzzCore` など) は、4 節の `testNet` の記録だけが作ります。
+boost の枠の集まりはプロセスで 1 つですが、`dutserve` は DUT ごとに新しいプロセスなので、別の DUT の状態は混ざりません。
 
 ### Rust の wgstack に求める口
 
@@ -511,8 +546,15 @@ API の名前が実装で変わったときは、adapter とこの段落を同�
 記録は、凍結した Go の wgstack に対する 3 節の要求と応答の列 (transcript) です。
 `HELLO` が乱数の種と上限の組と boost の方針を持つので、記録だけで同じ engine を作り直せます。
 比べる応答は、引き取った packet の bytes と順序、アプリケーションの操作の結果、受け入れの結果、時刻です。
-`STATS` は比べません。
-Go と Rust で数の内訳が同じになる理由が無いためです。
+`STATS`、`BOUND`、`HELD` の応答は byte の単位で比べません。
+Go と Rust で数の内訳と確保の大きさが同じになる理由が無いためです。
+これらの要求は記録に残し、照合は Rust の側でも同じ要求を送って、応答の形が正しいことだけを確かめます。
+
+Go の送信のバッチの印の鍵は `crypto/rand` から読みますが、記録には入りません。
+`wgstackdut`、`dutserve`、`testNet` はどれも `Config.SendBatch` を与えません。
+バッチを使わない Device は台帳を作らず、鍵を読みません。
+バッチを使う Device でも、鍵から作る印は packet の後ろの buffer の領域に書き、packet の bytes には出ません。
+どちらもコードから読んで確かめました。
 
 記録の元は次のとおりです。
 
@@ -530,8 +572,17 @@ Go と Rust で数の内訳が同じになる理由が無いためです。
 記録の 1 つのファイルは、gzip で圧縮した次の列です。
 
 1. magic (`WGFTREC1`)
-2. meta の長さ (u32) と meta (JSON):元の試験の名前、台本の名前、種、Go の commit、作った日時、印 (後述)、決まらない記録の印
+2. meta の長さ (u32) と meta (JSON):元の試験の名前、台本の名前、種、Go の commit、Go の版、`GOARCH`、`GOAMD64`、印 (後述)
 3. 要求の frame と応答の frame の組の列
+
+meta は作った日時を持ちません。
+gzip の header の更新時刻 (ModTime) は 0 にし、名前の欄は空にします。
+同じ入力から同じ bytes のファイルができ、作り直しが git の差分にならないためです。
+照合と、2 回作って同じになる確かめは、3 の frame の部分だけを比べます。
+
+記録は linux/amd64 で `GOAMD64=v1` に固定して作ります。
+CUBIC の浮動小数点の値は、Go の compiler が積和の命令を使うかで最後の桁が変わりうるので、作る環境を 1 つに決めて meta に書きます。
+作る手順は、この組でない環境では記録を作らずに止まります。
 
 置き場所は `testdata/wgstack-rec/<元>/<名前>.rec.gz` です。
 Rust で読むのに使う crate は、gzip に flate2、meta に serde と serde_json です。
@@ -547,7 +598,7 @@ Rust の wgstack は段階を踏んで機能を足すので、記録に印を付
 印は記録を作る時に入力から決めます。
 相手が示す option (`sack`、`ts`、`ws`)、試験の選択 (輻輳の制御、boost の与え方)、入力の種類 (`udp`、`icmp`、`frag`、`ping`) です。
 `replay.rs` は Rust の wgstack が持つと宣言した印の集まりを持ち、印がすべてその中にある記録だけを照らし、残りを数えて報告します。
-すべての記録が一致することは、Rust の wgstack を agent の既定にする PR の前の条件にします。
+すべての記録が一致すること (意図した違いの一覧の行を除く) は、agent を wgstack の上で動かす PR (wgstack の Rust 版の設計の実装の 7) のマージの前の条件で、ラボの一式で Rust の agent が Go の agent を置き換えられるとする判定の前の条件でもあります。
 
 Go の不具合を Rust で直したときのように、意図して出力を変えた所は、意図した違いの一覧 (`testdata/wgstack-rec/divergences.json`) に書きます。
 1 行は、記録の名前、最初に食い違う frame の位置、Rust の応答、理由です。
@@ -557,9 +608,11 @@ Go の不具合を Rust で直したときのように、意図して出力を�
 
 ### 作り方と量
 
-`go run ./tools/dutserve -record` に当たる手順が適合の台本の記録を作り、`WGFT_WGSTACK_RECORD` を付けた `go test ./internal/wgstack` が残りを作ります。
-記録は 1 つずつ順に作ります。
-Go の wgstack の boost の枠の集まりはプロセスで 1 つなので、並行に作ると別の Device の状態が混ざるためです。
+適合の台本の記録は、`rustdut` が `dutserve` との間の frame の列を書き出して作ります。
+残りは `WGFT_WGSTACK_RECORD` を付けた `go test ./internal/wgstack` が作ります。
+`testNet` の記録は 1 つずつ順に作ります。
+Go の wgstack の boost の枠の集まりはプロセスで 1 つなので、同じプロセスで並行に作ると別の Device の状態が混ざるためです。
+`dutserve` は DUT ごとに別のプロセスなので、並行に作れます。
 同じ Go の commit と種から作った記録が同じ bytes になることを、作る手順が 2 回作って確かめます。
 
 git に入れるのは、圧縮した合計が 5 MiB 以下の集まりです。
@@ -572,7 +625,7 @@ stream の試験の全部の種 (段階の関門の数) のような大きな集
 照合を求めるのは移行の間です。
 Go の wgstack を消す PR で、応答を比べる照合の試験を消し、git の記録の要求の列を 6 節の `replay` の seed と回帰の入力に移します。
 記録はその後も Rust の回帰の入力として残り、不変条件と panic の無いことを確かめます。
-それより後に Rust の wgstack が意図して出力を変えても、記録を作り直す道はありません。
+それより後に Rust の wgstack が意図して出力を変えても、記録を作り直す手段はありません。
 Go の wgstack が無くなるためです。
 
 ## 5. qbench
@@ -581,7 +634,7 @@ qbench は、判定の規則と cell の表と基準の値をそのまま使い�
 engine は `wgstack-dut` のバイナリを `--clock real` で起こします。
 
 - packet:Go の側が socketpair を作り、片方を子のプロセスの fd 3 に渡し、もう片方を `tun.Device` として Rig の Link につなぎます
-- アプリケーション:受け入れた接続ごとに、Go の側が Unix ソケットで待ち、`CONN_SOCKET` でその道を渡します。子のプロセスは接続して、engine の接続と Unix ソケットの間で byte を中継します。Go の側は通常の `net.Conn` を受け取るので、`runBulk` と `runThin` は変わりません。`Abort` は `ABORT` を送ります
+- アプリケーション:受け入れた接続ごとに、Go の側が Unix ソケットで待ち、`CONN_SOCKET` でそのパスを渡します。子のプロセスは接続して、engine の接続と Unix ソケットの間で byte を中継します。Go の側は通常の `net.Conn` を受け取るので、`runBulk` と `runThin` は変わりません。`Abort` は `ABORT` を送ります
 - 統計:`Stats` は `STATS` と子のプロセスの CPU 時間 (`wait4` の rusage) を出し、`RTOAt` は `RTO_AT` を使います
 
 TUN を使わない理由は次のとおりです。
@@ -593,8 +646,9 @@ socketpair は TUN と同じく packet の境目を保ち、カーネルの経�
 Linux の TUN の上で Rust の engine を動かす確かめは、qbench でなく、ラボで Rust の agent を流す `lab/tcpquality.sh` が受け持ちます。
 
 中継の 1 段は製品の中継と同じ形で、engine の CPU は子のプロセスの分として Go の CPU と分けて測れます。
-一方で、細い stream の遅れには Unix ソケットの 1 段が加わります。
-判定の前に、この加わる遅れを測って記録します。
+一方で、Unix ソケットの中継は子のプロセスの CPU に加わり、細い stream の遅れにも 1 段が加わります。
+子のプロセスの CPU は engine だけの CPU ではありません。
+判定の前に、中継だけを流す形 (engine を通さずに Unix ソケットの間で byte を写す) で、この 1 段の CPU と遅れを測って記録します。
 
 判定は環境変数 `QBENCH_SUBJECT=wgstack-rs` で、判定する engine を Rust の wgstack にします。
 移行の間、関門は Go の wgstack も測り、判定せずに並べて出します。
@@ -612,7 +666,7 @@ Linux の TUN の上で Rust の engine を動かす確かめは、qbench でな
 
 `core` は `FuzzCore` の解釈器 (`op%8` で操作を選び、相手の模型 `peerConn` が packet を作る) を同じ byte の読み方で写します。
 同じ読み方なので Go の corpus はそのまま seed になります。
-相手の模型は DUT の出力に応じて packet を作るので、Rust の wgstack の出力が Go と同じ間は同じ道をたどり、違えば別の道をたどります。
+相手の模型は DUT の出力に応じて packet を作るので、Rust の wgstack の出力が Go と同じ間は同じ経路をたどり、違えば別の経路をたどります。
 どちらでも seed としては働きます。
 
 `replay` の入力は 3 節の要求の列で、壊れた末尾は捨てて読みます。
@@ -638,10 +692,11 @@ cargo-fuzz の crate は `[workspace]` を自分で持ち、ワークスペー�
 | fuzz の smoke | `parse`、`core`、`adversarial_sender`、`replay` を libFuzzer の `-runs` の回数で流す | 回数は Rust の実行の速さを測ってから、1 段 2 分以内に決める |
 | ラボ | `linuxdut` の適合の実行は表を使うので、移した台本も今と同じく流れる | 今と同じ |
 
-道具の照合の段は、CI に新しい job (`rust-harness`) として足します。
-cargo と Go の両方が要り、`crates/**`、`internal/tcpharness/**`、`internal/dutproto/**`、`tools/dutserve/**`、`internal/wgstack/**` を変えた PR で流します。
+道具の照合の段は、CI に新しい job (`harness-rust-go`) として足します。
+cargo と Go の両方が要り、`crates/**`、`internal/tcpharness/**`、`internal/dutproto/**`、`internal/wgstack/**` を変えた PR で流します。
 この job は Go の試験を流すので、ラボの一式を省ける Rust だけの CI の job には当たりません。
-[テストの規範](../../development/testing.md)の B 類の表と振り分けは、job を足す PR で直します。
+[テストの規範](../../development/testing.md)は Rust の job を `rust-*` の名前で数えてラボの一式を省くので、この job は `rust-` で始めない名前にします。
+job を足す PR は、同じ PR で testing.md の B 類の表と振り分けに `harness-rust-go` を足し、この job を変える PR がラボを省けないことを書きます。
 
 ホストの関門 (`scripts/wgstack-gate.sh`) には、Rust の段 (Rust の台本と記録の照合、`rustdut` の適合の種 1 から 5、fuzz の smoke) を足します。
 対象の crate やバイナリが無い木では、今の段と同じく SKIP にします。
@@ -649,7 +704,10 @@ cargo と Go の両方が要り、`crates/**`、`internal/tcpharness/**`、`inte
 別の script にせず今の script に段を足すのは、1 つの表で全部の段の結果と時間を見られ、並列の数の上限を共有できるためです。
 
 台本の検出力は、今の `gvisordut` の故障を入れた試験と同じ考えで、Rust の wgstack に故障を 1 つずつ入れた build で確かめます。
-故障は `wgft-wgstack-dut` の cargo の feature で選び、台本の言語の台本と `rustdut` の Go の台本を流して、その故障を捉えるはずの確かめが落ちることを求めます。
+故障は cargo の feature でなく、`RUSTFLAGS="--cfg wgstack_fault=\"名前\""` で選びます。
+feature はワークスペースの中で統合され、別の crate の試験の build に故障が漏れうるためです。
+故障の名前の一覧は `Cargo.toml` の `[lints.rust]` の `unexpected_cfgs` の `check-cfg` に書き、知らない名前を build の警告 (`-D warnings` の下では誤り) にします。
+故障を入れた build は別の target directory に作り、台本の言語の台本と `rustdut` の Go の台本を流して、その故障を捉えるはずの確かめが落ちることを求めます。
 故障を核の crate に入れるか adapter の側で作るかは、核の公開の API で作れる故障の範囲を見て、T4 で決めます。
 
 ### 段階の関門
@@ -668,10 +726,10 @@ cargo と Go の両方が要り、`crates/**`、`internal/tcpharness/**`、`inte
 | | `docs(v2): design the test tooling for the Rust wgstack` | この文書 | 文書だけ | |
 | T1a | `test(tcpharness): add the scenario script language and its Go runner` | 構文解析器、解釈器、組み込み、構文の fixture、台本の乱数の値の書き出し、handshake と close の族の台本、Go の関数との一致の確かめ | 約 2,000 行 | この文書 |
 | T1b | `test(tcpharness): move the ICMP, UDP and RFC 2525 scenarios to scripts` | 残りの台本、Linux での照らし、移した Go の関数を消す | 約 +900、-1,300 行 | T1a |
-| T2a | `test(tcpharness): add the DUT frames, a Go frame server and rustdut` | `internal/dutproto` と frame の付録、`tools/dutserve`、`rustdut`、`wgstackdut` と `rustdut` で同じ結果になる確かめ | 約 1,500 行 | この文書 |
+| T2a | `test(tcpharness): add the DUT frames, a Go frame server and rustdut` | `internal/dutproto` と frame の付録、`internal/wgstack` の `dutserve` の形、`rustdut`、`wgstackdut` と `rustdut` で同じ結果になる確かめ | 約 1,500 行 | この文書 |
 | T2b | `test(wgstack): record the frozen Go wgstack for replay` | `testNet` の記録の包み、記録の手順、2 回作って同じになる確かめ、git に入れる記録 | 約 600 行と記録 | T2a |
 | T3a | `test(wgstack-rs): add the tcpharness crate` | 口の符号、packet の組み立て、台本の乱数の写し、`ProcessDut`、記録の読み込み | 約 1,500 行 | T2a |
-| T3b | `test(wgstack-rs): run scenario scripts in Rust` | Rust の構文解析器と runner、`dutserve` に対する transcript の一致、CI の `rust-harness` | 約 2,000 行 | T1b、T3a |
+| T3b | `test(wgstack-rs): run scenario scripts in Rust` | Rust の構文解析器と runner、`dutserve` に対する transcript の一致、CI の `harness-rust-go` | 約 2,000 行 | T1b、T3a |
 | T3c | `test(wgstack-rs): add wgstack-dut and replay the Go recordings` | adapter、`wgstack-dut`、記録の照合と意図した違いの一覧、期待した差の一覧のファイル、関門の段 | 約 1,200 行 | T2b、T3b、実装の 4 |
 | T4 | `test(wgstack-rs): fuzz targets and adversarial bounds` | `tools/fuzzseed`、`core`、`adversarial_sender`、`replay`、回帰の試験、敵対的な保持の試験、stream の一致の試験、故障を入れた build | 約 3,000 行。段ごとに分ける | 実装の 3 から。4 から 6 に合わせて足す |
 | 8 の試験の側 | `test(wgstack-rs): qbench through wgstack-dut` | `--clock real`、socketpair の `tun.Device`、`wgstack-rs` の engine、判定の切り替え | 約 1,000 行 | 実装の 5 と 7 |
@@ -685,12 +743,10 @@ Rust の wgstack を相手にするのは T3c からで、実装の 4 の API �
 ## 9. 未決の点
 
 - 口の往復の費用:1 往復を数 µs から数十 µs と見込んでいますが、測っていません。`rustdut` で 30 秒の待ちを持つ台本は、1 ms ごとに 2 往復します。遅すぎる場合は、`POLL` が空の時に時計を 1 ms 進めて次の packet を返す要求を足します
-- `dutserve` の 1 ms の締め切り:Go の wgstack の `Read` と `Write` が、締め切りの前にデータを受け渡すことはコードから読みましたが、試験で確かめていません
-- 受け入れの goroutine:準備のできていない `ACCEPT` が、記録の元の試験に現れないかは未確認です。現れた記録は照合に使いません
-- 送信のバッチの印の鍵:Go の wgstack は、この鍵を `Config.Rand` でなく `crypto/rand` から読みます。鍵が packet の bytes と送る順に効かないことは未確認です。効く場合は、記録がこの鍵も持つ必要があります
-- 記録の大きさ:git に入れる上限の 5 MiB は測る前の値です。B2 で測って直します
-- 乱数の写し:Go の PCG と `IntN` の写しと、Go の `%q` と `%.0f` の丸めの写しは、Go の試験が書き出した値との照合で確かめます。照合の値の数は B4 で決めます
-- 台本の観察の文字列:移した台本の観察の文字列が Go の関数と同じになることは、A2 と A3 の照らしの試験で確かめます。それまでは未確認です
+- `dutserve` の待たない操作:`FuzzCore` の確かめ (`readable`、`room`、待ち受けの列) が、公開の操作が待たずに戻る条件と一致することはコードから読みましたが、試験で確かめていません。T2a で、確かめが真の時に操作が待たないことを試験にします
+- 記録の大きさ:git に入れる上限の 5 MiB は測る前の値です。T2b で測って直します
+- 乱数の写し:Go の PCG と `IntN` の写しと、Go の `%q` と `%.0f` の丸めの写しは、Go の試験が書き出した値との照合で確かめます。照合の値の数は T3b で決めます
+- 台本の観察の文字列:移した台本の観察の文字列が Go の関数と同じになることは、T1a と T1b の照らしの試験で確かめます。それまでは未確認です
 - 実時間の Rust の DUT:`--clock real` の外側の層が製品の層と同じものになるかは、Rust の wgstack の外側の層の設計で決まります
 - qbench の Unix ソケットの 1 段:細い stream の遅れの p99 にどれだけ加わるかは未測定です
 - fuzz の速さ:cargo-fuzz の 1 秒あたりの実行回数は未測定で、関門の回数はその後に決めます
@@ -716,10 +772,10 @@ wgstack の Rust 版の設計 (`docs/design/v2/wgstack-rs.md`) の「検証」�
 | 点 | wgstack の Rust 版の設計の提案 | この文書 | 理由 |
 | --- | --- | --- | --- |
 | 台本の形式 | JSON | 行を単位にした専用の形 (`.scn`) と、2 つの構文解析器の構文の fixture | 台本は RFC の根拠の注釈を要し、JSON は注釈を持てない。照合の述語と観察の文字列にはどちらの形式でも式の言語が要り、JSON に文字列で埋めても構文解析器を 2 つ書く費用は減らない |
-| 台本の置き場所 | `testdata/tcpharness/` | `internal/tcpharness/scripts/` | Go の runner は台本を `go:embed` で試験のバイナリに入れる。`linuxdut` の試験はラボの VM で作り置きの試験のバイナリとして流れるので、実行の時に repo の道を探さずに済む。`go:embed` は package の外の directory を読めない |
+| 台本の置き場所 | `testdata/tcpharness/` | `internal/tcpharness/scripts/` | Go の runner は台本を `go:embed` で試験のバイナリに入れる。`linuxdut` の試験はラボの VM で作り置きの試験のバイナリとして流れるので、実行の時に repo のパスを探さずに済む。`go:embed` は package の外の directory を読めない |
 | 時刻の範囲の単位 | RTO の回数のような規格の単位 | 今の Go の台本と同じ時間の値 (遅延 ACK の 500 ms など) | 移す時に確かめと観察の文字列を Go の台本と同じに保ち、期待した差の一覧をそのまま使うため |
 | Rust の runner の置き場所 | `wgft-wgstack` の試験 | `wgft-tcpharness` の lib と `wgft-wgstack-dut` の試験 | 試験の担当のコードを実装の担当の crate に置かず、核の crate の依存を空に保つ。runner を `ProcessDut` で `dutserve` にも向けられ、Rust の wgstack を待たずに runner の意味を確かめられる |
-| runner どうしの照合 | 結果が同じ | 要求と応答の列が byte の単位で同じ | 結果が同じでも、台本の意味のずれが DUT への呼び出しの違いとして隠れうる。呼び出しの列まで比べると、ずれた最初の文が分かる |
+| runner どうしの照合 | 結果が同じ | 台本の言語の台本は、手で進める時計で要求と応答の列が byte の単位で同じ。goroutine を使う Go の台本は結果が同じ | 結果が同じでも、台本の意味のずれが DUT への呼び出しの違いとして隠れうる。呼び出しの列まで比べると、ずれた最初の文が分かる |
 | qbench の口 | `wgstack-dut` の TUN の形と、制御の pipe でのアプリケーションの操作 | socketpair の packet と、Unix ソケットで中継するアプリケーションの byte | TUN の向こうはカーネルになり、qbench の Go の Link を packet の通り道に挟めない (5 節)。中継の形は製品の中継と同じで、`runBulk` と `runThin` を変えずに済む |
 | `core` の書き手 | 試験の担当 | 同じ (合わせた) | |
 
