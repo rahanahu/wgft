@@ -414,7 +414,7 @@ wgstack との違いと適合の場面は、決定ではなく計画と未確認
 - `tcp: fix initial tp->rcvq_space.space value for passive TS enabled flows`(6.1.147-1 から):受信の窓の自動調整の最初の値が少し小さくなります(後述)
 - `tcp: fix tcp_ofo_queue() to avoid including too much DUP SACK range`(6.1.148-1 から):順序外のデータを順序どおりにする時の D-SACK の範囲を重なりだけにします
 
-VM で確かめるには、`uname -v` で Debian の package の版を読み、`/usr/share/doc/linux-image-$(uname -r)/changelog.Debian.gz` を上の件名で探します。
+VM で確かめるには、`uname -v` で Debian の package の版を読み、`/usr/share/doc/linux-image-$(uname -r)/changelog.gz` を上の件名で探します。
 上の Debian の版は bookworm の changelog の値で、VM の上ではまだ確かめていません。
 
 値は、性能の参照の Linux(`linuxdut.PinPerformance`)が既定のまま使う sysctl の値です。

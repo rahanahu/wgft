@@ -14,8 +14,8 @@
 3. 核のファイルと UDP に触れる実装を、リファクタリングの後に始めます
 
 参照の Linux は、第 2 段階が main に入った直後、dial の実装の前に、Debian 13 の trixie-backports の 7.2 のカーネルに移ります([決めたこと](#決めたこと))。
-能動の open の Linux の挙動は、別の PR で書いている Linux の opener の挙動の仕様(v6.1 と v7.2 を扱います)にまとめます。
-その仕様が入るまでは、RFC 9293 とこの文書の規則に従います。
+能動の open の Linux の挙動は、[接続を張る Linux](wgstack-dial-linux.md)(6.1 と 7.2 を扱います)にまとめます。
+wgstack が Linux に倣うか RFC に倣うかを選ぶ点は、その仕様の[wgstack で選ぶ点](wgstack-dial-linux.md#wgstack-で選ぶ点)にあります。
 この文書はその仕様を写さず、wgstack が従う規則の骨格だけを書きます。
 
 ## 目的と範囲
@@ -76,7 +76,7 @@ I7 は、カーネルモードの `vpsd` が wgstack を作らず、そのコー
 
 ## TCP の能動の open
 
-能動の open の規則は RFC 9293 とこの文書の規則に従い、別の PR で書いている Linux の opener の挙動の仕様が入った後はその仕様にも合わせます。
+能動の open の規則は RFC 9293 とこの文書の規則に従い、[接続を張る Linux](wgstack-dial-linux.md)の挙動にも合わせます。
 Linux と違う挙動を選ぶ点は、[期待した差](wgstack-verification.md#期待した差の一覧)に記録します。
 
 ### SYN-SENT の置き場
@@ -126,7 +126,7 @@ RFC 9293 3.10.7.3 の SYN-SENT の規則に従います。
 ### client の側の option
 
 SYN に MSS、SACK-permitted、timestamp、窓の scale を載せます。
-並びは、別の PR で書いている Linux の opener の挙動の仕様が入った後に、その仕様に合わせます。
+並びは、[接続を張る Linux の option と並び](wgstack-dial-linux.md#option-と並び)に合わせます。
 使うかどうかは SYN-ACK で決めます。
 
 - MSS:SYN-ACK の値に従い、値 0 と欠落では 536 を使います
@@ -322,7 +322,7 @@ dial の側で加わるものは次のとおりです。
 
 - 適合の試験:`Dial` と `DialUDP` を持つ DUT の任意の面を加えます。
   参照の opener は Linux で、ラボの network namespace の TUN の中から Linux のソケットが接続し、試験の側が待ち受けの役で SYN を受けます。
-  台本の期待は、別の PR で書いている Linux の opener の挙動の仕様に従い、それが入るまでは RFC 9293 とこの文書の規則に従います。
+  台本の期待は[接続を張る Linux](wgstack-dial-linux.md)の挙動に従い、台本の案は[適合の台本の案](wgstack-dial-linux.md#適合の台本の案)にあります。
   台本は、SYN の option と並び、SYN の再送の間隔と打ち切り、option の無い SYN-ACK、窓の scale の無い SYN-ACK、MSS 0 と欠落、窓 0 の SYN-ACK、誤った ACK への RST、RST による拒否、SYN-SENT の間の ICMP、同時の open、データを持つ SYN-ACK、確立した後の重複の SYN-ACK、[dial の誤りの約束](#dial-の誤りの約束)を扱います。
   同時の open の台本では、wgstack の dial の失敗を期待した差にします。
   データ、窓、再送、終わり方の台本は、確立の段を能動の open に替えて同じ台本を流します
