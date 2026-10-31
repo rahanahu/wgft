@@ -946,7 +946,7 @@ Linux は RACK を使う間は DupThresh で損失を決めず(`tcp_time_to_reco
 ## 上界の式への項
 
 新しい構造は、次のどれかの項に入ります。
-各段階は `Bound` と上界の試験(`bound_test.go`)を、入れた項に合わせて同じ変更で直します。
+各段階は `Bound` と上界の試験(`bound_test.go`)を、入れた項に合わせて同じ変更で直し、[上界の表](wgstack-bound-table.md)を生成し直します。
 
 | 変更 | 新しく持つもの | 入る項 |
 |---|---|---|

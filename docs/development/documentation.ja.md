@@ -50,6 +50,18 @@ go test ./cmd/wgft -run TestCLIDocUpToDate -update
 `TestCLIDocUpToDate` はヘルプとの一致と、実行可能なコマンドの使用例を検査します。
 ヘルプの挙動はラボで確認したものだけを書きます。
 README はコマンド一覧を重複させず、リファレンスと `wgft <command> --help` に案内します。
+
+[wgstack の上界の表](../design/userspace/wgstack-bound-table.md)も手で編集しません。
+wgstack の上界の項、構造の大きさ、表の大きさを変えた場合は、同じコミットで表を生成し直します。
+
+```sh
+go test ./internal/wgstack -run TestBoundDocUpToDate -update
+```
+
+`TestBoundDocUpToDate` は表と `Device.Bound` の一致を検査します。
+設計文書は上界の値を手で書き写さず、式と表の行への参照で示します。
+議論に桁が要る箇所では丸めた値を添えます。
+
 Web UI のテンプレート、文言、サンプルデータを変更した場合は `scripts/screenshot-ui.sh` を実行し、画像の差分を確認します。
 前提と手順はスクリプトの冒頭に従います。
 README の図は Mermaid にします。

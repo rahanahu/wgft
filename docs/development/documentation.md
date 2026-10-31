@@ -50,6 +50,18 @@ go test ./cmd/wgft -run TestCLIDocUpToDate -update
 `TestCLIDocUpToDate` checks agreement with help and requires examples for executable commands.
 Describe help behavior only after laboratory verification.
 READMEs link to the reference and `wgft <command> --help` instead of repeating command tables.
+
+Do not edit the [wgstack bound table](../design/userspace/wgstack-bound-table.md) manually either.
+After changing a term of the wgstack bound, a structure size or a table size, regenerate the table in the same commit:
+
+```sh
+go test ./internal/wgstack -run TestBoundDocUpToDate -update
+```
+
+`TestBoundDocUpToDate` checks the table against `Device.Bound`.
+Design documents do not copy bound values by hand; they state the formula and link to the row of the table.
+Where an argument needs the order of magnitude, add a rounded value.
+
 After changing Web UI templates, text or sample data, run `scripts/screenshot-ui.sh` and inspect the image diff; its header defines prerequisites and procedure.
 Use Mermaid for README diagrams.
 

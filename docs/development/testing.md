@@ -57,6 +57,7 @@ A1 から A7 は、Markdown の文書と `docs/images/` の画像だけを変え
 Go のコード (`go.mod`、`go.sum` を含む)、`deploy/`、`lab/` 自身、設定と dotenv の扱い、`scripts/`、`.goreleaser.yaml`、`.github/workflows/` がこれに当たります。
 変更がコードに当たらないのは、Markdown とテキストの文書 (README、`docs/` の文書とその画像) だけです。
 `docs/cli.md` はヘルプから生成するので、ヘルプを変えた PR は Go のコードを変える PR です。
+`docs/design/userspace/wgstack-bound-table.md` も `Device.Bound` から生成するので、同じ扱いです。
 
 ラボの一式は自動で実行できるため、コードを変えたらすべてを流します。
 一式の費用が大きく伸びた場合は、この規則を見直します。
@@ -124,9 +125,10 @@ A1 から A7 の検査が見るのは Go のソース、`go.mod`、`go.sum`、�
 `changes` ジョブは変更されたパスの一覧を受け取り、一覧のすべてが Markdown の文書か `docs/images/` の画像であるときにだけ `build-test` を skip します。
 当てはまらないパスが 1 つでも混じれば流します。
 `docs/cli.md` は Markdown ですが、`cmd/wgft/helptext.go` から生成して `TestCLIDocUpToDate` が照合するので、文書としては扱いません。
+`docs/design/userspace/wgstack-bound-table.md` も、`internal/wgstack` から生成して `TestBoundDocUpToDate` が照合するので、同じく文書としては扱いません。
 
 向きを逆にした理由は、A2 の `go test ./...` が Go 以外のファイルも読むことにあります。
-読み取りの対象は `docs/cli.md`、`internal/vpsd/admin` が `go:embed` で取り込む Web UI のテンプレートと静的ファイル、`tools/labhost` の `suite_test.go` が読む `lab/suite.txt`、`internal/policy` と `internal/dataplane/linuxkernel/nft` の `testdata` です。
+読み取りの対象は `docs/cli.md`、`docs/design/userspace/wgstack-bound-table.md`、`internal/vpsd/admin` が `go:embed` で取り込む Web UI のテンプレートと静的ファイル、`tools/labhost` の `suite_test.go` が読む `lab/suite.txt`、`internal/policy` と `internal/dataplane/linuxkernel/nft` の `testdata` です。
 流す条件を数え上げる書き方では、後から加わった読み取り先が一覧から漏れ、誰も気づかないまま検査が skip されます。
 skip する条件を数え上げる書き方では、一覧に無いパスが 1 つでも混じれば検査を流します。
 
@@ -234,7 +236,7 @@ VM の間で守るのは、`rates.sh` がレートを測る区間だけです。
 | 番号 | テスト | リスク | 環境 | 契機 | 頻度 | 自動化 |
 |---|---|---|---|---|---|---|
 | A1 | `gofmt -l`、`go mod tidy` の差分、`go vet`、`go build ./...` | 書式の崩れ、`go.mod` の不整合、ビルドの失敗 | CI (Linux) | コードを変える PR | PR の更新ごと | 自動 |
-| A2 | `go test ./...` | 単体で確かめられる退行全般 (`docs/cli.md` とヘルプの食い違いを捉える `TestCLIDocUpToDate` を含めて) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 自動 |
+| A2 | `go test ./...` | 単体で確かめられる退行全般 (`docs/cli.md` とヘルプの食い違いを捉える `TestCLIDocUpToDate` と、wgstack の上界の表と `Device.Bound` の食い違いを捉える `TestBoundDocUpToDate` を含めて) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 自動 |
 | A3 | Admission Policy の共有 fixture (`internal/policy/admissiontest`、`internal/policy/testdata/admission`) | nftables のコンパイラと Go の評価器の判定、drop の種類、カウンタの食い違い (7a.9 節) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 自動 |
 | A4 | 計画と収束の故障注入 (`internal/planner`、`internal/reconcile` の retry、repair、drift のテスト、`internal/dataplane` の fail-closed のテスト) | Prepare、Commit の失敗の扱い、世代の前進、再試行の誤り (7a.3 節) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 自動 |
 | A5 | nftables の行の生成 (`internal/dataplane/linuxkernel/nft` と `internal/policy/nftables` の単体テスト) | 行の順序、行の抜け、ルールごとの fail-closed の誤り (カーネルを使わない照合) | CI (Linux)、ホスト | コードを変える PR | PR の更新ごと | 自動 |

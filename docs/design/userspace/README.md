@@ -22,6 +22,7 @@
 - [UDP の受信と出力の会計](udp-accounting.md)
 - [UDP の中継と応答のバッファ](udp-relay.md)
 - [エージェントの wgft の netstack(実装の途中)](wgstack.md)
+- [wgstack の上界の表(生成)](wgstack-bound-table.md)
 - [wgstack の検証(未実装)](wgstack-verification.md)
 - [wgstack の性能の段階(未実装)](wgstack-performance.md)
 - [wgstack のバッチと segment のまとめ(未実装)](wgstack-batching.md)

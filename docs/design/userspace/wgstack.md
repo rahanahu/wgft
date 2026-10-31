@@ -544,13 +544,14 @@ M_wgstack = M_fix
 初期の値は動作を確かめるための値であり、最適値として探した値ではありません。
 どの値も設定項目にしません。
 
-公開する 4 つの target(linux/amd64、linux/arm64、windows/amd64、darwin/arm64)の build で確かめた大きさは、c_conn が 5,440 byte、記録 1 件が 32 byte、区間 1 つが 16 byte、握手の途中の行が 80 byte、TIME_WAIT の行が 64 byte、hash の表の 1 項目が握手の途中と TIME_WAIT の表で 20 byte、接続の表で 28 byte です。
-接続の表の 1 項目は、4 つ組と hash と行の番号の 20 byte に、世代の 8 byte を加えた値です。
+c_conn、記録 1 件、区間 1 つ、表の 1 行と hash の表の 1 項目の大きさは、[生成した上界の表](wgstack-bound-table.md#構造の大きさ)にあります。
+接続の表の 1 項目は、ほかの表の 1 項目(4 つ組と hash と行の番号)に、世代の 8 byte を加えた値です。
 接続の枠の世代は 64 bit で、枠、handle、接続の表、TIME_WAIT の行、boost の確認が同じ幅の世代を比べます。
 枠は LIFO で再利用されるので、1 つの相手が接続を繰り返すと同じ枠の世代が 1 回ごとに 1 進みます。
 32 bit の世代では 2^32 回の再利用で一周し、古い handle や参照が次の接続の枠に届いてしまうため、64 bit にします。
-どの target でも同じ大きさであることは、大きさを定数で比べる一時の試験を 4 つの target の build でコンパイルして確かめました。
+公開する 4 つの target(linux/amd64、linux/arm64、windows/amd64、darwin/arm64)のどれでも同じ大きさであることは、大きさを定数で比べる一時の試験を 4 つの target の build でコンパイルして確かめました。
 記録 1 件は SACK の scoreboard の欄を含みます([ACK 1 つの手間の上界](wgstack-performance.md#ack-1-つの手間の上界))。
+区間 1 つは区間の treap の節(子の位置と優先度)を含みます。
 
 確保の丸め:Go のヒープは object を、32 KiB までは大きさの区分に、それより大きければ 8 KiB の page の倍数に切り上げて持ちます。
 ポインタを含む object の一部には、さらに 8 byte の管理の頭が付きます。
@@ -560,15 +561,14 @@ M_wgstack = M_fix
 8 byte はポインタを含まない配列にも足すので、測った値は実際の量より小さくなりません。
 chunk だけは頭を足さずに測ります。
 chunk はポインタを含まない 16 KiB の配列で、大きさの区分にちょうど一致するためです。
-r_f、h_f、d_rec、d_h は、切り上げると 18,432、4,096、286,720、65,536 byte です。
+切り上げた f_s、f_r、r_f、h_f、d_s、d_r、d_rec、d_h の値は、[枠 1 つの項](wgstack-bound-table.md#枠-1-つの項)の表にあります。
 M_fix の表、UDP の管理の配列、echo の応答の枠も同じく切り上げて数えます。
 `Stats` の `RecordBytes` と `IntervalBytes` も同じ大きさで数え、枠が今使う記録の輪と区間の表が floor のものかどうかを、段の印ではなく配列の同一性で見ます。
 
-既定の K の 2048 では、Device の `Bound` の `Total` は約 1,498.1 MiB で、そのうち TCP の項の和は約 1,485.5 MiB です。
-内訳は M_fix が約 25.2 MiB、floor の項が約 1,335.0 MiB、boost の項が約 125.4 MiB です。
-送信の記録は floor の項に約 45.0 MiB、boost の項に約 4.4 MiB を加えます。
-区間の表は floor の項に約 10.0 MiB、boost の項に約 1.0 MiB を加えます。
-区間 1 つは区間の treap の節(子の位置と優先度)を含みます。
+Device の `Bound` の項ごとの値は、構成ごとに[生成した上界の表](wgstack-bound-table.md#構成ごとの上界)にあります。
+既定の K の 2048 では `Total` は約 1.5 GiB で、その大半は N_c に比例する floor の項です([floor の項の行](wgstack-bound-table.md#bound-floor))。
+表は `TestBoundDocUpToDate` が `Bound` と構造の大きさから生成し、照合します。
+上界の項、構造の大きさ、表の大きさを変える変更は、表を同じコミットで生成し直します([生成する文書](../../development/documentation.ja.md#生成するリファレンスと画像))。
 M_fix は核の構造(事象の数と観測の関数を含みます)、接続の枠、3 つの hash の表、行の表、空きの list、タイマーの節、出力の list、制御の輪、chunk の置き場に残す 1 MiB、送信の向きのバッチの台帳の輪([数えの規則](wgstack-batching.md#数えの規則))を数えます。
 空きの list は枠や行を使うと短くなりますが、配列は作成の時の大きさのまま残るので、UDP の管理の配列の空きの list とともに作成の時の大きさで数えます。
 接続の枠 1 つが表の外に持つ構造も M_fix に数えます。
@@ -593,7 +593,7 @@ wgstack の accept の待ち行列は Device 全体で Q 本なので、この�
   区間の表を移すときは区間の写し(`setIntervals`)を一時に作ります。
   どちらも floor の区間の数で抑えられ、切り上げて 4 KiB 以下です。
   したがって 1 本の接続の一時の保持は約 272 KiB + 8 KiB で、f_s + f_r の 512 KiB 以下です。
-  Device の `Bound` は、B × (f_s + f_r) の 8 MiB を式の和とは別の `Transient` として返します
+  Device の `Bound` は、B × (f_s + f_r) を式の和とは別の `Transient` として返します([`Transient` の行](wgstack-bound-table.md#bound-transient))
 - Go のランタイムの費用:GC が回収を待つ間の余裕、span の断片化、ランタイムの管理の構造です。
   RSS は生きているヒープより大きく、その係数は[フロー数とメモリのソフト上限](flow-limits.md)と[上界に含めない保持点](memory-limits.md)の数え方で扱います
 - OS のソケット:LAN の宛先への TCP と UDP のソケット、WireGuard の UDP のソケットのバッファです

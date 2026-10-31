@@ -83,5 +83,6 @@ go test ./cmd/wgft -run TestCLIDocUpToDate -update
 テストはヘルプとの一致と、実行可能なコマンドの使用例を検査します。
 ヘルプの挙動はラボで確認したことだけを書きます。
 README はコマンド一覧を重複させず、`docs/cli.md` と `wgft <command> --help` に案内します。
+wgstack の上界の値は設計文書に書き写さず、`go test ./internal/wgstack -run TestBoundDocUpToDate -update` で生成する[上界の表](docs/design/userspace/wgstack-bound-table.md)を参照します。
 Web UI のテンプレート、文言、サンプルデータを変更した場合は `scripts/screenshot-ui.sh` で撮り直し、`git diff --stat` で差分の大きさを確認してからコミットします。
 前提と手順はスクリプトの冒頭に従います。

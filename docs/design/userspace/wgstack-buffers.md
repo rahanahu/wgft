@@ -9,7 +9,7 @@
 
 目的は、wgstack の保持の上界を半分以下にすることです。
 上界は今と同じく保持する量から導き、ソフト上限には頼りません。
-既定の K の 2048 では、今の `Device.Bound` の `Total` は約 1,498.1 MiB で、別に `Transient` の 8 MiB があります([上界の式](wgstack.md#上界の式))。
+既定の K の 2048 では、今の `Device.Bound` の `Total` は約 1.5 GiB で、別に `Transient` があります([上界の式](wgstack.md#上界の式)、[生成した上界の表](wgstack-bound-table.md#bound-total))。
 この設計では `Total` が約 630 MiB になり、`Transient` は無くなります([上界の計算](#上界の計算))。
 上界は上限の設定値ではなく、プロセスが実際に持てる量で数えます。
 上限を下げても持っている分は解放されないので、予算に借りを返すのは chunk と配列を手放した後だけにします。
@@ -42,8 +42,8 @@
 ## 今の上界の内訳
 
 既定の K の 2048 と Q の 512 では、接続の枠は N_c = 2,560 本です。
-今の `Total` の内訳は、M_fix が約 25.2 MiB、floor の項が約 1,335.0 MiB、boost の項が約 125.4 MiB、UDP の予算と再組み立ての表と echo の表が約 12.6 MiB です。
-floor の項は、接続の枠 1 つあたり送信と受信の floor の 512 KiB、floor の記録の輪の 18,432 byte、floor の区間の表の 4,096 byte の和(546,816 byte)に N_c を掛けた値で、`Total` の約 89% を占めます。
+今の `Total` の内訳は[生成した上界の表](wgstack-bound-table.md#構成ごとの上界)にあります。
+floor の項は、接続の枠 1 つあたりの送信と受信の floor、floor の記録の輪、floor の区間の表の和([枠 1 つの floor の和](wgstack-bound-table.md#slot-floor))に N_c を掛けた値で、`Total` の約 9 割を占めます。
 需要の無い接続も、この floor を確立から閉じるまで予約します。
 上界を半分にするには、この項を減らす必要があります。
 
@@ -257,7 +257,7 @@ G はプロセスで 1 つですが、Device の `Bound` は今の boost の項�
 Device が複数あると、どちらも Device の数だけ数えるので上界は多めになります。
 エージェントの式は今の Device の `Total` と古い世代の M_fix を足すので、置き場を 2 度数えますが、G は 1 度だけです。
 始めの段の値は、確保の丸めを含めて f_s = f_r = 65,536 byte、r_f = 4,864 byte(139 件 × 32 byte)、h_f = 1,024 byte(62 個 × 16 byte)です。
-接続の枠 1 つの予約は 136,960 byte で、今の 546,816 byte の約 25% です。
+接続の枠 1 つの予約は 136,960 byte で、今の[枠 1 つの floor の和](wgstack-bound-table.md#slot-floor)の約 25% です。
 M_fix には、保有者の list の頭、予算の数、段の配列の置き場が加わります。
 置き場に段ごとに 2 本ずつ残すなら、128 KiB から 4 MiB までの段の配列の和の 2 倍で約 1.4 MiB です。
 c_conn には、段、借りの量、保有者の list の節が加わります。
@@ -265,27 +265,28 @@ c_conn には、段、借りの量、保有者の list の節が加わります�
 ここでは合わせて 2 MiB 以下と推定します。
 
 既定の K の 2048(N_c = 2,560)での値は次のとおりです。
-単位は MiB です。
+「今」の欄は、[生成した上界の表](wgstack-bound-table.md#構成ごとの上界)の `agent-k2048` の列の行を指します。
+この設計の値の単位は MiB です。
 
 | 項 | 今 | この設計 |
 |---|---|---|
-| M_fix | 約 25.2 | 約 25.2 と増分(推定 2 以下) |
-| 接続の枠の予約 | 約 1,335.0(2,560 × 546,816 byte) | 約 334.4(2,560 × 136,960 byte) |
-| boost の項か予算 | 約 125.4 | 256.0 |
-| UDP の予算、再組み立ての表、echo の表 | 約 12.6 | 約 12.6 |
-| `Total` | 約 1,498.1 | 約 628.1 と増分で、約 630 |
-| `Transient` | 8 | 0 |
+| M_fix | [`Fix`](wgstack-bound-table.md#bound-fix) | 今の M_fix と増分(推定 2 以下) |
+| 接続の枠の予約 | [`FloorConn`](wgstack-bound-table.md#bound-floor) | 約 334.4(2,560 × 136,960 byte) |
+| boost の項か予算 | [`Boost`](wgstack-bound-table.md#bound-boost) | 256.0 |
+| UDP の予算、再組み立ての表、echo の表 | [`UDPRx`、`UDPTx`、`Frag`、`Ping`](wgstack-bound-table.md#bound-udp-rx) | 今と同じ |
+| `Total` | [`Total`](wgstack-bound-table.md#bound-total) | 約 630 |
+| `Transient` | [`Transient`](wgstack-bound-table.md#bound-transient) | 0 |
 
-`Total` は約 630 MiB で、今の約 1,498.1 MiB の約 42% です。
-`Transient` を含めた和でも、約 1,506.1 MiB の約 42% です。
-半分の約 749 MiB との差は約 119 MiB で、M_fix と c_conn の増分の推定が外れる分と、ほかの未実装の設計の項([バッチ](wgstack-batching.md#上界の式への項)の ACK の控えは K が 2048 で約 0.94 MiB)を収めます。
+`Total` は約 630 MiB で、今の `Total`(約 1.5 GiB)の約 42% です。
+`Transient` を含めた和で比べても約 42% です。
+今の `Total` の半分との差は約 120 MiB で、M_fix と c_conn の増分の推定が外れる分と、ほかの未実装の設計の項([バッチ](wgstack-batching.md#上界の式への項)の ACK の控えは K が 2048 で約 0.94 MiB)を収めます。
 
-K が 1024、512、256 では、`Total` は約 488、418、383 MiB(今は約 957.6、687.3、552.2 MiB)になります。
+K が 1024、512、256 では、`Total` は約 488、418、383 MiB になります(今の値は[生成した上界の表](wgstack-bound-table.md#bound-total))。
 G は K によらない定数なので、K が小さいほど減る割合は小さくなります。
 
-[wgstack を使うエージェントの上界](memory-agent-host.md#wgstack-を使うエージェントの上界)の数え方では、既定の上限で L が 1 のとき、ほかの項の和は CPU が 4 個なら約 451.1 MiB です。
+[wgstack を使うエージェントの上界](memory-agent-host.md#wgstack-を使うエージェントの上界)の数え方では、既定の上限で L が 1 のとき、ほかの項の和は CPU が 4 個なら約 450 MiB です。
 ほかの項は、[送信の向きの予算](wgstack-batching.md#送信の向きの予算)の W_tx(P_max) を含みます。
-エージェントの生きているヒープの上界は約 1,957 MiB から約 1,081 MiB に、プロセスの上界は約 3.99 GiB から約 2.24 GiB になります。
+エージェントの生きているヒープの上界は約 1.9 GiB から約 1.1 GiB に、プロセスの上界は約 4.0 GiB から約 2.2 GiB になります。
 プロセスの上界は、生きているヒープの 2.05 倍に、goroutine のスタックの約 67.6 MiB と 10 MiB を足した値です。
 
 ## RSS と上界の比

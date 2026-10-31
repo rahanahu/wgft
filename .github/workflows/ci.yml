@@ -50,19 +50,22 @@ name: CI
 #   docs_only -> gates build-test (A1, A2, A5, A6, A7) the other way round: that job is
 #               skipped only when every file the change touches is a Markdown document or an
 #               image under docs/images/. This is docs/testing.md's own definition of a change
-#               that is not code, and the exception it names applies here too: docs/cli.md is
+#               that is not code, and the exceptions it names apply here too: docs/cli.md is
 #               generated from cmd/wgft/helptext.go and compared against it by
-#               TestCLIDocUpToDate, so a change touching it is a code change and does not
-#               count as docs_only.
+#               TestCLIDocUpToDate, and docs/design/userspace/wgstack-bound-table.md is
+#               generated from internal/wgstack and compared against it by
+#               TestBoundDocUpToDate, so a change touching either is a code change and does
+#               not count as docs_only.
 #
 #     Unlike go_code, this is an allowlist evaluated over every changed path, so anything the
 #     list does not name runs the job. That direction is what makes it safe to skip a job whose
-#     `go test ./...` reads files that are not Go source: besides docs/cli.md, the Web UI
-#     templates and static files that internal/vpsd/admin embeds with go:embed, lab/suite.txt
-#     that tools/labhost's suite_test.go loads, and the testdata directories under
-#     internal/policy and internal/dataplane/linuxkernel/nft. None of those is a Markdown file
-#     or an image under docs/images/, so none of them can be skipped by mistake, and a new one
-#     added later cannot either. A change that mixes a document with anything else runs the job.
+#     `go test ./...` reads files that are not Go source: besides docs/cli.md and the wgstack
+#     bound table, the Web UI templates and static files that internal/vpsd/admin embeds with
+#     go:embed, lab/suite.txt that tools/labhost's suite_test.go loads, and the testdata
+#     directories under internal/policy and internal/dataplane/linuxkernel/nft. The filter
+#     names the two generated documents, and none of the others is a Markdown file or an image
+#     under docs/images/, so none of them can be skipped by mistake, and a new one added later
+#     cannot either. A change that mixes a document with anything else runs the job.
 #
 # lint-output (A8) is not gated at all: it is what catches full-width punctuation in README.md
 # and docs/*.md, which is exactly the kind of change docs_only describes.
@@ -184,14 +187,15 @@ jobs:
           echo "run_all=$run_all" >> "$GITHUB_OUTPUT"
 
           # A change is documents only when it touches at least one file and every one of
-          # them is a Markdown document other than the generated docs/cli.md, or an image
-          # under docs/images/. See the header comment for why the test is written as an
-          # allowlist over the whole list.
+          # them is a Markdown document other than the generated docs/cli.md and wgstack
+          # bound table, or an image under docs/images/. See the header comment for why the
+          # test is written as an allowlist over the whole list.
           docs_only=false
           if [ "$run_all" = "false" ] && [ -n "$CHANGED_FILES" ]; then
             if printf '%s' "$CHANGED_FILES" | jq -e '
                   length > 0 and all(
                     . != "docs/cli.md"
+                    and . != "docs/design/userspace/wgstack-bound-table.md"
                     and (endswith(".md") or startswith("docs/images/"))
                   )' > /dev/null; then
               docs_only=true
