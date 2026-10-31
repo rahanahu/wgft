@@ -75,6 +75,43 @@ func newHolePair(t *testing.T, mtu int, h *holeFilter) *tcpPair {
 	return p
 }
 
+// holeRTO は、穴の後ろの書き込みの間だけ送り手に置く RTO とその下限。穴を開けている間、送り手の
+// SndUna は穴に留まるので、再送の時計は穴の segment を送った時点から止まらずに進み、SACK では
+// 延びない。gVisor の既定の下限 200 ms では、負荷の下で書いた分を送り終える前に RTO が来て、窓が
+// 1 segment に戻り、捨て続ける穴の segment だけを送り直すので、順序外はそこで止まる(負荷の
+// 下で一度 5 segment)。gVisor は RTO より長く送らなかった送り手の窓を初期値に戻すので、この値は
+// syncWindow の待ちの後の窓も保つ。接続を作るときに下限を上げる方法(TCPMinRTOOption)は、穴の前の
+// bulk の損失の回復も遅くし、負荷の下で bulk が予算を超えたので使わない。書き込み全体を 1 回の窓で
+// 送れるまで往復で輻輳の窓を広げる方法は、負荷の下では受け手の入力の溢れで窓が広がらず使わない
+// (openCwnd は初期値の窓までだけ広げる)。試験が確かめる受け手の
+// 受け入れ(rcvMemUsed と B)は送り手の RTO に依らない。
+const holeRTO = 3 * time.Second
+
+// setSenderRTO は試験のためだけに、送り手 c の今の RTO と RTO の下限を書き換え、元の下限を返す。
+// gVisor は endpoint の錠を持って読み書きするので、同じ錠を持って書く。名前か型が合わなければ落とす
+// (go.mod の固定の版の gVisor が前提)。
+func setSenderRTO(t *testing.T, c net.Conn, rto, minRTO time.Duration) (oldMin time.Duration) {
+	t.Helper()
+	e := connOf(c).ep.(*tcp.Endpoint)
+	e.LockUser()
+	defer e.UnlockUser()
+	snd := reflect.ValueOf(e).Elem().FieldByName("snd").Elem()
+	field := func(name string) reflect.Value {
+		f := snd.FieldByName(name)
+		if !f.IsValid() || f.Type() != reflect.TypeFor[time.Duration]() {
+			t.Fatalf("setup: gVisor's sender has no %s of type time.Duration", name)
+		}
+		return reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem()
+	}
+	r, m := field("RTO"), field("minRTO")
+	oldMin = time.Duration(m.Int())
+	m.SetInt(int64(minRTO))
+	if rto > 0 {
+		r.SetInt(int64(rto))
+	}
+	return oldMin
+}
+
 // sndNxtOf は試験のためだけに、送り手の次に送る順序番号(SndNxt)を読む。gVisor は endpoint の錠を
 // 持って書き換えるので、同じ錠を持って読む。
 func sndNxtOf(c net.Conn) uint32 {
@@ -263,32 +300,46 @@ func readProgress(r net.Conn, n int, idle func() time.Duration) (int, error) {
 // 順序外として積ませる。積み終わったら、以後 c からのデータを穴を埋めるまですべて捨て、受け手が
 // 受け取った segment をすべて処理し終えた後の受信のメモリを返す。時間だけで積み終わりを判断しない。
 // 遅い環境では、送り手が送り始める前や送る途中で、受け手のメモリが一時的に変わらないことがある。
-func makeHole(t *testing.T, p *tcpPair, h *holeFilter, c, s net.Conn, ooo int) int {
+// need は、試験の主張が求める穴の後ろのデータの byte 数で、ooo 以下である。送り手が need(受け手の
+// 窓が小さければその窓)より 1 segment 以上手前で止まれば、その場面は作れていないので setup で落とす。
+func makeHole(t *testing.T, p *tcpPair, h *holeFilter, c, s net.Conn, ooo, need int) int {
 	t.Helper()
+	oldMin := setSenderRTO(t, c, holeRTO, holeRTO)
 	syncWindow(t, c, s)
-	seg, flight := openCwnd(t, p, c, s, ooo)
+	seg := p.a.mtu - header.IPv4MinimumSize - header.TCPMinimumSize - 12 // 12 は timestamp の option
+	openCwnd(t, c, s, seg)
+	timeouts := senderTimeouts(c)
 	h.start(c)
 	c.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if _, err := c.Write(make([]byte, ooo)); err != nil {
 		t.Fatalf("setup: write %d: %v; %s", ooo, err, holeDiag(t, p, c, s))
 	}
 	c.SetWriteDeadline(time.Time{})
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
-		if _, n := pendingOf(s); n > 0 {
+	// 送り手が need まで送るのを待つ。穴を開けている間 SndUna は穴に留まるので、その時点の窓 SndWnd
+	// が穴の後ろに送れる byte 数の上限である。比べるのはその時点の窓で、書き込みの前に読んだ窓では
+	// ない(書き込みの間に受け手の窓は縮みうる)。時間では打ち切らず、送った byte 数が holeIdle の間
+	// 増えないか、送り手の RTO が来たときだけ、場面が作れなかったとして落とす。RTO の後の送り手は
+	// 捨て続ける穴の segment だけを送り直すので、順序外はそれ以上増えない
+	sent := func() int { return int(sndNxtOf(c) - h.holeSeq.Load()) }
+	for last, since := sent(), time.Now(); ; time.Sleep(20 * time.Millisecond) {
+		n, wnd := sent(), int(tcpStateOf(c, "snd", "SndWnd")[0])
+		if n >= min(need, wnd)-seg {
 			break
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("setup: no out-of-order data behind the hole within 10s: %s", holeDiag(t, p, c, s))
+		if senderTimeouts(c) != timeouts {
+			t.Fatalf("setup: the sender timed out after %d bytes behind the hole, with a window of %d; the case needs %d: %s", n, wnd, min(need, wnd), holeDiag(t, p, c, s))
+		}
+		if n != last {
+			last, since = n, time.Now()
+		} else if time.Since(since) > holeIdle {
+			t.Fatalf("setup: the sender stopped at %d bytes behind the hole for %v, with a window of %d; the case needs %d: %s", n, holeIdle, wnd, min(need, wnd), holeDiag(t, p, c, s))
 		}
 	}
-	// 送り手が送り終え、受け手が積み終えるまで待つ
+	// 受け手が積み終えるまで待つ
 	settle(t, "setup: the burst behind the hole", func() [3]int { return [3]int{recvMemOf(t, s), int(sndNxtOf(c)), 0} })
 	h.frozen.Store(true)
-	// openCwnd の後は、少なくとも flight byte が 1 回の輻輳の窓で出る。それより手前で止まった
-	// 送り手は、比べる M を試験の想定より小さくする
-	if sent := int(sndNxtOf(c) - h.holeSeq.Load()); sent < flight-seg {
-		t.Fatalf("setup: the sender sent %d of the %d bytes behind the hole before it stopped, want at least the %d bytes of one congestion window: %s", sent, ooo, flight, holeDiag(t, p, c, s))
-	}
+	// 穴を埋める再送は、書き込みの間に動いた再送の時計のまま来る。その後の転送は元の下限で RTO を測る
+	setSenderRTO(t, c, 0, oldMin)
 	// 捨て始める前に渡った segment を受け手が処理し終えると、受信のメモリは順序外のキューの byte に
 	// 等しく、受信のキューは空になる。以後は何も届かないので、この値は穴を埋めるまで変わらない
 	v := settle(t, "setup: the receiver", func() [3]int { pb, _ := pendingOf(s); return [3]int{recvMemOf(t, s), pb, recvQueue(s)} })
@@ -302,47 +353,47 @@ func makeHole(t *testing.T, p *tcpPair, h *holeFilter, c, s net.Conn, ooo int) i
 	return m
 }
 
-// openCwnd は、送り手 c が大きさ ooo の書き込みを輻輳の窓の 1 回分で送れるようにしてから戻る。
-// 穴を開けている間、送り手の SndUna は進まないので、再送の時計は穴の segment を送った時点から
-// 止まらずに進む。窓が小さいと、送り手は SACK を受けながら少しずつ先を送り、負荷の下では書いた分を
-// 送り終える前に RTO が来る。RTO の後は窓が 1 segment に戻り、捨て続ける穴の segment だけを送り
-// 直すので、順序外はそこで止まり、試験が想定するより小さい順序外で B と M を比べることになる。
-// gVisor は RTO より長く送らなかった送り手の窓を初期値の 10 segment に戻す(syncWindow の待ちで
-// 起きうる)ので、1 segment を送って今の窓を確かめ、足りなければ転送で広げ、窓を知らせ直してから
-// 確かめ直す。確かめた直後に穴の書き込みを送る。求める輻輳の窓は、書き込みと受け手の窓の小さい方を
-// 運べる大きさで、openCwndMax segment を上限にする。上限の窓 1 回分は floor と 200 KiB の書き込みを
-// 超えるので、それより大きい書き込みの残りが SACK に合わせて出る途中で RTO が来ても、M は試験の
-// 想定の側に残る。遅い runner の送り手は、転送を重ねても窓を受け手の窓の大きさまで広げないことがある
-// (macOS の CI で 349 segment)。返すのは 1 segment の大きさの見積もりと、確かめた窓 1 回で出る byte 数である。
-func openCwnd(t *testing.T, p *tcpPair, c, s net.Conn, ooo int) (seg, flight int) {
+// openCwnd は、送り手 c の輻輳の窓が gVisor の初期値の 10 segment 以上になるまで、窓 1 回分ずつの
+// 往復を続ける。穴の前の転送で RTO が来た送り手は窓が 1 segment から始まり、穴の後ろに 1 segment
+// しか送れなければ、受け手の重複 ACK は 1 つで、送り手は回復に入らず先も送らないまま次の RTO を待つ
+// (負荷の下のパッケージ全体の実行で、2680 byte で RTO が来た)。窓が 10 segment あれば、穴の後ろの
+// segment の SACK が回復と先の送信を進める。時間では打ち切らず、窓が最大を更新しない往復が 64 回
+// 続いたときだけ落とす。
+func openCwnd(t *testing.T, c, s net.Conn, seg int) {
 	t.Helper()
-	seg = p.a.mtu - header.IPv4MinimumSize - header.TCPMinimumSize - 12 // 12 は timestamp の option
 	var ti tcpip.TCPInfoOption
-	for deadline := time.Now().Add(time.Minute); ; {
-		c.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		_, err := c.Write(make([]byte, seg))
+	cwnd := func() int { connOf(c).ep.GetSockOpt(&ti); return int(ti.SndCwnd) }
+	for best, stalled := 0, 0; ; {
+		cw := cwnd()
+		if cw >= tcp.InitialCwnd {
+			return
+		}
+		if cw > best {
+			best, stalled = cw, 0
+		} else if stalled++; stalled >= 64 {
+			t.Fatalf("setup: the sender's congestion window stayed at %d segments (best %d) for %d round trips, want %d", cw, best, stalled, tcp.InitialCwnd)
+		}
+		n := max(cw, 1) * seg
+		c.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		_, err := c.Write(make([]byte, n))
 		c.SetWriteDeadline(time.Time{})
 		if err != nil {
-			t.Fatalf("setup: write one segment: %v", err)
+			t.Fatalf("setup: write one window of %d bytes: %v", n, err)
 		}
-		if _, err := readAllErr(s, seg, 10*time.Second); err != nil {
-			t.Fatalf("setup: read one segment: %v", err)
+		if _, err := readAllErr(s, n, 10*time.Second); err != nil {
+			t.Fatalf("setup: read one window of %d bytes: %v", n, err)
 		}
-		wnd := int(tcpStateOf(c, "snd", "SndWnd")[0])
-		want := min((min(ooo, wnd)+seg-1)/seg+2, openCwndMax)
-		if connOf(c).ep.GetSockOpt(&ti); int(ti.SndCwnd) >= want {
-			return seg, min(ooo, wnd, (want-2)*seg)
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("setup: the sender's congestion window stayed at %d segments within 1m, want %d to send %d bytes, with a window of %d, at once", ti.SndCwnd, want, ooo, wnd)
-		}
-		bulk(t, c, s, max(2*ooo, 1<<20))
-		syncWindow(t, c, s)
+		waitFor(t, 10*time.Second, "setup: the sender's window acknowledged", func() bool {
+			v := tcpStateOf(c, "snd", "SndUna", "SndNxt")
+			return v[0] == v[1]
+		})
 	}
 }
 
-// openCwndMax は openCwnd が求める輻輳の窓の上限(segment)。
-const openCwndMax = 256
+// senderTimeouts は送り手 c の RTO が来た回数。
+func senderTimeouts(c net.Conn) uint64 {
+	return connOf(c).ep.Stats().(*tcp.Stats).SendErrors.Timeouts.Value()
+}
 
 // gVisor の rcvMemUsed の名前と型が、このビルドの前提と合う(go.mod の固定の版)。gVisor を更新して
 // 合わなくなれば、回収は止まり、この試験が落ちる。
@@ -421,7 +472,7 @@ func TestGVisorShrinkBoundary(t *testing.T) {
 			if !boosted(c) || !boosted(s) {
 				t.Fatal("setup: not boosted")
 			}
-			m := makeHole(t, p, h, c, s, tc.ooo)
+			m := makeHole(t, p, h, c, s, tc.ooo, tc.ooo)
 			pb, n := pendingOf(s)
 			seg := pb / n
 			if tc.mtu > 1500 && seg < 60<<10 {
@@ -519,7 +570,13 @@ func TestTCPReclaimWithHole(t *testing.T) {
 			if !boosted(c) || !boosted(s) {
 				t.Fatal("setup: not boosted")
 			}
-			m := makeHole(t, p, h, c, s, tc.ooo)
+			// over the floor は M > floor を求めるので、floor を超える byte を送れば足りる。within は
+			// 書いた分すべてで場面になる
+			need := tc.ooo
+			if !tc.demoted {
+				need = tcpRecvFloor + 1
+			}
+			m := makeHole(t, p, h, c, s, tc.ooo, need)
 			if (m <= tcpRecvFloor) != tc.demoted {
 				t.Fatalf("setup: rcvMemUsed %d is on the wrong side of the floor", m)
 			}
