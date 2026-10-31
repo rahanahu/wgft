@@ -117,13 +117,18 @@ fuzz() {
 # not depend on the order. When a shard fails, the others are interrupted, as one process stops at
 # its first failure. A failing input goes to the testdata of the tree copy, as with fuzz.
 #
+# When the step is stopped, the process group usually gets TERM, which ends the shards at once;
+# their cache entries are on disk already, as Go writes each one when found, and this function
+# merges them if its own shell survives the signal. If only this shell gets the signal, it
+# interrupts the shards first.
+#
 # Every shard minimizes the new inputs it finds, so the minimization is bounded by executions:
 # by default it may take 60 seconds, the shard makes no progress meanwhile, and a minimization that
 # runs out of time can be killed with its executions left uncounted. The bound covers a failing
 # input's minimization too.
 fuzz_shards() {
   local target=$1 total=$2 k=$3 step=${FUZZ_STEP:-fuzz} i n rc=0 bin shared cache log t0 secs
-  local execs found sum=0 done_pid status first="" f
+  local execs found sum=0 done_pid status first="" f src
   local pids=() running=() failed=()
   local -A shard_of=()
   need_test ./internal/wgstack "$target"
@@ -132,36 +137,46 @@ fuzz_shards() {
     fuzz "$target" "${total}x" "$k"
     return
   fi
+  src=$PWD
   copy_tree "$logdir/$target-tree" && cd "$tmp" || return 1
   bin=$tmp/$target.test
   go test -c -fuzz "^$target\$" -o "$bin" ./internal/wgstack || return 1
   shared=$(go env GOCACHE)/fuzz/$(go list -f '{{.ImportPath}}' ./internal/wgstack)/$target
-  mkdir -p "$shared" && rm -f "$shared"/.*.tmp || return 1
+  mkdir -p "$shared" || return 1
+  # Temporary files that a merge killed in the middle left beside the target's directory. Only old
+  # ones go, so that a gate merging at the same time keeps its own.
+  find "${shared%/*}" -maxdepth 1 -name ".$target.*.tmp" -mmin +60 -delete 2>/dev/null
   echo "$k shards of one worker and GOMAXPROCS=1, $total execs in all, starting from the $(find "$shared" -type f | wc -l) inputs in $shared"
   for ((i = 0; i < k; i++)); do
     cache=$logdir/$step.shard$i.cache
     rm -rf "$cache" && mkdir -p "$cache/$target" && cp -R "$shared/." "$cache/$target/" || return 1
   done
   # merge_shards copies the shards' new cache entries into the shared cache, each through a
-  # temporary name beside the target's directory, so that no partial entry is ever in it.
+  # unique temporary name beside the target's directory, so that no partial entry is ever in it
+  # and gates merging the same entry at the same time do not share a file.
   merge_shards() {
-    local i f name merged=0
+    local i f name merged=0 t
     for ((i = 0; i < k; i++)); do
       for f in "$logdir/$step.shard$i.cache/$target"/*; do
         name=${f##*/}
         [[ -f $f && ! -e $shared/$name ]] || continue
-        cp "$f" "${shared%/*}/.$target.$name.tmp" && mv -f "${shared%/*}/.$target.$name.tmp" "$shared/$name" && merged=$((merged + 1))
+        t=$(mktemp "${shared%/*}/.$target.XXXXXX.tmp") || continue
+        if cp "$f" "$t" && chmod 644 "$t" && mv -f "$t" "$shared/$name"; then merged=$((merged + 1)); else rm -f "$t"; fi
       done
       rm -rf "$logdir/$step.shard$i.cache"
     done
     echo "copied $merged new inputs from the shards into $shared"
   }
-  trap 'echo "stopped; interrupting the shards and keeping what they found"; kill -INT "${pids[@]}" 2>/dev/null; wait; merge_shards; exit 1' TERM INT
+  # On a timeout, timeout(1) and stop send TERM to the whole process group; Go does not handle
+  # TERM, so the shards die at once, and the entries they found are already on disk, as Go writes
+  # each one when it finds it. When only this shell gets the signal, the shards are interrupted.
+  trap 'echo "stopped; interrupting the shards if they still run, and keeping what they found"; kill -INT "${pids[@]}" 2>/dev/null; wait; merge_shards; exit 1' TERM INT
   t0=$(date +%s)
   for ((i = 0; i < k; i++)); do
     n=$((total / k + (i < total % k ? 1 : 0)))
     cache=$logdir/$step.shard$i.cache
-    (cd internal/wgstack && GOMAXPROCS=1 exec "$bin" -test.run '^$' -test.fuzz "^$target\$" \
+    # fuzzseed=N would give every shard the same mutator seed, so most executions would repeat.
+    (cd internal/wgstack && GODEBUG=$(sed -E 's/(^|,)fuzzseed=[^,]*//g; s/^,//' <<<"${GODEBUG:-}") GOMAXPROCS=1 exec "$bin" -test.run '^$' -test.fuzz "^$target\$" \
       -test.fuzztime "${n}x" -test.fuzzminimizetime 5000x -test.parallel 1 -test.fuzzcachedir "$cache") >"$logdir/$step.shard$i.log" 2>&1 &
     pids+=($!)
     shard_of[$!]=$i
@@ -202,6 +217,13 @@ fuzz_shards() {
     f=$(sed -n 's/.*Failing input written to \(testdata\/fuzz\/[^ ]*\).*/\1/p' "$log" | tail -1)
     [[ -z $f ]] || echo "the failing input of shard $i is $tmp/internal/wgstack/$f"
   done
+  if ((${#failed[@]})); then
+    # Another shard may have found a crasher before the interrupt reached it.
+    echo "all inputs under $tmp/internal/wgstack/testdata/fuzz/$target that the source tree does not have:"
+    for f in "$tmp/internal/wgstack/testdata/fuzz/$target"/*; do
+      [[ -f $f && ! -e $src/internal/wgstack/testdata/fuzz/$target/${f##*/} ]] && echo "  $f"
+    done
+  fi
   ((secs > 0)) && echo "NOTE: $sum execs in ${secs}s, $((sum / secs))/s, $k shards"
   return $rc
 }
