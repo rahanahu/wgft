@@ -26,3 +26,4 @@
 - [wgstack の性能の段階(未実装)](wgstack-performance.md)
 - [wgstack のバッチと segment のまとめ(未実装)](wgstack-batching.md)
 - [wgstack の需要で育つバッファ(未実装)](wgstack-buffers.md)
+- [wgstack の dial の側(未実装)](wgstack-dial.md)
