@@ -75,7 +75,7 @@ func rustToken(rs []rune, i int) (kind, end int, lit []rune) {
 	case c == '\'':
 		// 文字リテラルか、ライフタイムか。
 		if i+1 < n && rs[i+1] == '\\' {
-			j := i + 2
+			j := i + 3 // 逃げた 1 文字 ('\'' を含む) を飛ばして閉じを探す
 			for j < n && rs[j] != '\'' {
 				j++
 			}
@@ -169,10 +169,13 @@ func rustAttribute(rs []rune, i int) (end int, text string, inner bool) {
 }
 
 // rustSkipItem は i から始まる項目を読み飛ばし、その次の位置を返す。
-// 括弧の外で最初に現れる `;` か、`{` に対応する `}` までが項目の終わり。
+// 括弧と山括弧の外で最初に現れる `;` か `,` (どちらも読み込む) か、`{` に対応する `}` までが
+// 項目の終わり。構造体のフィールド、enum の変種、関数の引数に付いた属性のために、
+// 外側を閉じる `}` `)` `]` に当たったら、それを読まずに戻る。
 func rustSkipItem(rs []rune, i int) int {
 	n := len(rs)
 	paren := 0
+	angle := 0
 	for i < n {
 		kind, end, _ := rustToken(rs, i)
 		if kind == tokOther {
@@ -180,9 +183,21 @@ func rustSkipItem(rs []rune, i int) int {
 			case '(', '[':
 				paren++
 			case ')', ']':
-				paren--
-			case ';':
 				if paren <= 0 {
+					return i
+				}
+				paren--
+			case '}':
+				return i
+			case '<':
+				angle++
+			case '>':
+				// `->` と `=>` の `>` は山括弧ではない。
+				if angle > 0 && !(i > 0 && (rs[i-1] == '-' || rs[i-1] == '=')) {
+					angle--
+				}
+			case ';', ',':
+				if paren <= 0 && angle <= 0 {
 					return end
 				}
 			case '{':
