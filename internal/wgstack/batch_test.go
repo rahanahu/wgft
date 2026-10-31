@@ -751,6 +751,86 @@ func TestSendBatchReadPublishesItsSeq(t *testing.T) {
 	}
 }
 
+// Read の約束(wgstack-batching.md の「Device の約束」と「印を書ける条件」)を Device の Read で確かめる。
+// 件数は min(len(bufs), len(sizes), k_eff) と作れる packet の数で決まり、印の余地の無い後の buffer の手前で
+// 止まり、最初の buffer に余地が無ければ印を書かずに 1 個だけ作る。台帳の L は返した個数だけ増える。
+func TestSendBatchReadContract(t *testing.T) {
+	const k = 8
+	for _, tc := range []struct {
+		name      string
+		queued    int // 送る UDP の datagram の数
+		nbufs     int
+		nsizes    int
+		short     int // 印の余地より 1 byte 短い buffer の位置。-1 は無し
+		want      int
+		wantTag   bool
+		wantHeldL int64
+	}{
+		{"full batch", k, k, k, -1, k, true, k},
+		{"fewer packets than the limit", 5, k, k, -1, 5, true, 5},
+		{"short later buffer", k, k, k, 3, 3, true, 3},
+		{"short first buffer", k, k, k, 0, 1, false, 0},
+		{"fewer sizes than buffers", k, k, 3, -1, 3, true, 3},
+		{"one packet", 1, k, k, -1, 1, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			n := newTestNet(t, smallLimits())
+			d := n.d
+			d.s.txb = sendLedger{}
+			d.s.txb.init(SendBatch{Packets: 1 << 10, Size: k, Callers: 3, BufferSize: 65535}, d.s.mtu)
+			if !d.Batching() {
+				t.Fatal("batching is off")
+			}
+			pc := listenUDP(t, n, 5000)
+			to := net.UDPAddrFromAddrPort(netip.AddrPortFrom(peerAddr, 6000))
+			for range tc.queued {
+				if _, err := pc.WriteTo(make([]byte, 100), to); err != nil {
+					t.Fatal(err)
+				}
+			}
+			const offset = 16
+			edge := offset + d.s.mtu + sealOverhead + tagSize
+			bufs := make([][]byte, tc.nbufs)
+			for i := range bufs {
+				size := 65535
+				if i == tc.short {
+					size = edge - 1
+				}
+				bufs[i] = make([]byte, size)
+			}
+			sizes := make([]int, tc.nsizes)
+			got, err := d.Read(bufs, sizes, offset)
+			if err != nil || got != tc.want {
+				t.Fatalf("Read = %d, %v; want %d packets", got, err, tc.want)
+			}
+			for i := range got {
+				if sizes[i] == 0 {
+					t.Fatalf("sizes[%d] is 0", i)
+				}
+				tail := bufs[i][len(bufs[i])-tagSize:]
+				seq := binary.LittleEndian.Uint64(tail)
+				if tc.wantTag && seq != 1 {
+					t.Fatalf("buffer %d carries seq %d, want 1", i, seq)
+				}
+				if !tc.wantTag && (seq != 0 || binary.LittleEndian.Uint64(tail[8:]) != 0) {
+					t.Fatalf("buffer %d without room for the tag carries one", i)
+				}
+			}
+			l := &d.s.txb
+			if l.held != tc.wantHeldL {
+				t.Fatalf("L = %d after a Read of %d packets, want %d", l.held, got, tc.wantHeldL)
+			}
+			wantIssued := uint64(0)
+			if tc.wantTag {
+				wantIssued = 1
+			}
+			if l.issued.Load() != wantIssued {
+				t.Fatalf("issued %d, want %d", l.issued.Load(), wantIssued)
+			}
+		})
+	}
+}
+
 // UDP の送信の予約の空きを待つ書き手は、Read が datagram を送って予約を返すと起き、期限を変えても起きる。
 // 待つ書き手がいなければ channel を作り直さない(wakeTx)。
 func TestUDPBlockedWriterWakes(t *testing.T) {
@@ -792,6 +872,26 @@ func TestUDPBlockedWriterWakes(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the writer was not woken when a reservation returned")
+	}
+	// 起こした後は待つ書き手がいないので、次に予約を返しても channel を作り直さない
+	n.d.s.udp.mu.Lock()
+	waited, space := n.d.s.udp.txWaited, n.d.s.udp.txSpace
+	n.d.s.udp.mu.Unlock()
+	if waited {
+		t.Fatal("txWaited is still set after the waiting writer was woken")
+	}
+	if n.d.Poll(n.buf) == 0 {
+		t.Fatal("nothing to send after the woken write")
+	}
+	n.d.s.udp.mu.Lock()
+	same := n.d.s.udp.txSpace == space
+	n.d.s.udp.mu.Unlock()
+	if !same {
+		t.Fatal("a returned reservation recreated the wake channel with no writer waiting")
+	}
+	// 返した予約を埋め直し、次の書き手がまた空きを待つようにする
+	if _, err := pc.WriteTo(make([]byte, 10), to); err != nil {
+		t.Fatal(err)
 	}
 	go func() {
 		_, err := pc.WriteTo(make([]byte, 10), to)
