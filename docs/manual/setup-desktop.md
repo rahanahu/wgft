@@ -22,8 +22,10 @@ $env:WGFT_JOIN = '<join string>'
 ```
 
 Replace `<join string>` with the issued value.
-Windows Defender Firewall may ask for inbound access on the first start. On the verified Windows 11 machine, the outbound tunnel and forwarding worked whether the prompt was allowed or cancelled.
+Windows Defender Firewall may ask for inbound access on the first start.
+On the verified Windows 11 machine, the outbound tunnel and forwarding worked whether the prompt was allowed or cancelled.
 Credentials are stored in `%ProgramData%\wgft\agent.json`; later starts need only `.\wgft.exe agent run`.
+
 wgft does not include a Windows service or automatic startup.
 The binary is unsigned.
 On the machine used for verification, starting it from PowerShell did not show a SmartScreen warning, but an organization policy may prevent execution.
@@ -65,8 +67,10 @@ tail -f ~/Library/Logs/wgft-agent.log
 
 Use `sudo launchctl bootout system/io.github.rahanahu.wgft.agent` to stop it.
 The retained plist starts it again at the next boot.
+
 On a Mac with FileVault enabled, it started after the first login.
 Startup before login and operation after logout have not been verified.
+
 This setup follows an observed failure to reach LAN targets from a LaunchAgent.
 
 [日本語](setup-desktop.ja.md)

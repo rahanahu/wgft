@@ -2,7 +2,7 @@
 
 VPS と自宅側の agent で、それぞれ使う環境の手順を選びます。
 VPS と Linux の agent には、カーネルモードを推奨します。
-ユーザー空間モードは、カーネルモードを使えない環境で使うモードです。
+ユーザー空間モードは、カーネルモードを使えない環境のためのモードです。
 転送の保証はカーネルモードより弱く、wgft のプロセスが止まると転送も止まります。
 ユーザー空間モードの制約は[ユーザー空間の設計](../design/userspace/README.md)にあります。
 どの組み合わせでも、最後に[転送ルールを追加](setup.ja.md#4-転送ルールを追加する)します。
@@ -23,9 +23,10 @@ VPS と Linux の agent には、カーネルモードを推奨します。
 - root 権限のない VPS: [ユーザー空間モードの CLI](setup-server-userspace.ja.md#root-権限なしで起動する)
 - Docker の VPS: [コンテナ内の CLI](setup-docker.ja.md#vps-の-server)
 
-## Linux の agent を前面で試す
+<a id="linux-の-agent-を前面で試す"></a>
+## Linux の agent をフォアグラウンドで試す
 
-[バイナリをダウンロード](setup.ja.md#1-バイナリをインストールする)して次を実行します。
+[バイナリをダウンロード](setup.ja.md#1-バイナリをインストールする)し、次のコマンドを実行します。
 arm64 では、以下のファイル名も `amd64` から `arm64` に置き換えてください。
 
 ```sh
@@ -35,7 +36,7 @@ mv wgft-linux-amd64 ~/.local/bin/wgft
 WGFT_JOIN='<join string>' ~/.local/bin/wgft agent run --data-dir ~/.wgft
 ```
 
-発行した接続文字列を `<join string>` に入れます。
+`<join string>` は発行した接続文字列に置き換えます。
 初回登録後は `wgft agent run --data-dir ~/.wgft` で起動できます。
 
 [English](setup-alternatives.md)

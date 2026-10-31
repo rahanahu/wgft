@@ -9,7 +9,7 @@
 
 - <a id="環境別の導入"></a> [環境別の導入](manual/setup-alternatives.ja.md#環境別の導入)
 - <a id="接続文字列の発行"></a> [接続文字列の発行](manual/setup-alternatives.ja.md#接続文字列の発行)
-- <a id="linux-の-agent-を前面で試す"></a> [Linux の agent を前面で試す](manual/setup-alternatives.ja.md#linux-の-agent-を前面で試す)
+- <a id="linux-の-agent-を前面で試す"></a> [Linux の agent をフォアグラウンドで試す](manual/setup-alternatives.ja.md#linux-の-agent-をフォアグラウンドで試す)
 
 </details>
 
