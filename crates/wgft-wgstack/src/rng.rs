@@ -159,7 +159,14 @@ pub(crate) struct Seeds {
     pub(crate) ip_id: u32,
     /// 残りの乱数 (challenge ACK の揺らぎ、区間の treap の優先度の種) を引く生成器です。
     pub(crate) rng: ChaCha8,
+    /// SYN cookie の MAC の鍵。ISN の鍵から用途の印で導きます。生成器から引かないので、Go と同じ乱数の列を
+    /// 保ちます (Go の wgstack は SYN cookie を持ちません)。
+    pub(crate) cookie_key: SipKey,
 }
+
+/// SYN cookie の鍵を ISN の鍵から導く時の用途の印です。2 語目の上位 32 bit に置きます。ISN の hash の 2 語目
+/// (ポートの組) の上位 32 bit は常に 0 なので、導いた鍵が ISN の hash の値と重なることはありません。
+const COOKIE_KEY_TAG: u64 = 0x6b6f_6f63 << 32; // "cook" の little endian
 
 impl Seeds {
     /// Go の `newStack` と同じ順で種を配分し、生成器から値を引きます。
@@ -180,12 +187,17 @@ impl Seeds {
             k1: rng.next_u64(),
         };
         let ip_id = rng.next_u64() as u32;
+        let isn_key = SipKey::from_le_bytes(isn);
         Self {
-            isn_key: SipKey::from_le_bytes(isn),
+            isn_key,
             table_key: SipKey::from_le_bytes(table),
             ts_key,
             ip_id,
             rng,
+            cookie_key: SipKey {
+                k0: isn_key.sum(0, COOKIE_KEY_TAG),
+                k1: isn_key.sum(1, COOKIE_KEY_TAG),
+            },
         }
     }
 }
