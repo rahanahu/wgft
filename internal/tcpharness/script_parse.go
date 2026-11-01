@@ -104,7 +104,7 @@ type ScriptError struct {
 
 // The kinds of ScriptError.
 const (
-	KindLayout           = "layout"            // a tab, or a string literal left open at the end of a line
+	KindLayout           = "layout"            // a tab, a line that is not UTF-8, or a string literal left open at the end of a line
 	KindHeader           = "header"            // the scenario, refs: and linux: lines
 	KindBlock            = "block"             // if, else and end, and stop with something after it
 	KindTemplate         = "template"          // what: and got: lines and {expr} parts
@@ -146,10 +146,20 @@ type srcLine struct {
 }
 
 type parser struct {
-	file string
-	ls   []srcLine
-	i    int
+	file  string
+	ls    []srcLine
+	i     int
+	depth int // the if blocks open around the current line
 }
+
+// The nesting limits. Both parsers stop at the same depth with the same error, so the Rust parser,
+// whose stack does not grow like a goroutine's, stays within a 1 MiB stack in a debug build on any
+// input; a Rust test parses the fixtures at each limit on such a stack.
+const (
+	maxIfDepth   = 16  // if blocks inside if blocks
+	maxExprDepth = 32  // levels of an expression, the top level included: parentheses, calls, index brackets and unary operators inside each other
+	maxTokens    = 256 // tokens in one statement or one {expr}, which bounds the depth of a + b + ...
+)
 
 func (p *parser) errf(line int, kind, format string, args ...any) error {
 	return &ScriptError{File: p.file, Line: line, Kind: kind, Msg: fmt.Sprintf(format, args...)}
@@ -160,6 +170,9 @@ func (p *parser) errf(line int, kind, format string, args ...any) error {
 func (p *parser) lines(src string) error {
 	for i, raw := range strings.Split(src, "\n") {
 		raw = strings.TrimRight(raw, " \t\r")
+		if !utf8.ValidString(raw) {
+			return p.errf(i+1, KindLayout, "the line is not valid UTF-8")
+		}
 		if strings.ContainsRune(raw, '\t') {
 			return p.errf(i+1, KindLayout, "tab character; indent with spaces")
 		}
@@ -268,6 +281,10 @@ func (p *parser) block() ([]*Stmt, string, error) {
 			}
 		}
 		if st.Verb == "if" {
+			if p.depth == maxIfDepth {
+				return nil, "", p.errf(l.n, KindBlock, "if blocks nest deeper than %d", maxIfDepth)
+			}
+			p.depth++
 			then, end, err := p.block()
 			if err != nil {
 				return nil, "", err
@@ -285,6 +302,7 @@ func (p *parser) block() ([]*Stmt, string, error) {
 			} else if end != "end" {
 				return nil, "", p.errf(l.n, KindBlock, "if without end")
 			}
+			p.depth--
 		}
 		out = append(out, st)
 	}
@@ -573,6 +591,9 @@ func lex(s string) ([]token, error) {
 			}
 		}
 		space = false
+		if len(out) > maxTokens {
+			return nil, fmt.Errorf("more than %d tokens", maxTokens)
+		}
 	}
 	return out, nil
 }
@@ -628,9 +649,21 @@ func lexString(s string) ([]byte, int, error) {
 // Expressions.
 
 type exprParser struct {
-	toks []token
-	i    int
+	toks  []token
+	i     int
+	depth int
 }
+
+// enter counts one more level of nesting, up to maxExprDepth; leave undoes it.
+func (p *exprParser) enter() error {
+	if p.depth == maxExprDepth {
+		return fmt.Errorf("the expression nests deeper than %d", maxExprDepth)
+	}
+	p.depth++
+	return nil
+}
+
+func (p *exprParser) leave() { p.depth-- }
 
 func (p *exprParser) done() bool { return p.i >= len(p.toks) }
 func (p *exprParser) next() token {
@@ -720,6 +753,10 @@ out:
 func bin(op string, l, r *Expr) *Expr { return &Expr{Kind: "bin", Name: op, Args: []*Expr{l, r}} }
 
 func (p *exprParser) or() (*Expr, error) {
+	if err := p.enter(); err != nil {
+		return nil, err
+	}
+	defer p.leave()
 	l, err := p.and()
 	for err == nil && p.accept("||") {
 		var r *Expr
@@ -741,6 +778,10 @@ func (p *exprParser) and() (*Expr, error) {
 
 func (p *exprParser) not() (*Expr, error) {
 	if p.accept("!") {
+		if err := p.enter(); err != nil {
+			return nil, err
+		}
+		defer p.leave()
 		x, err := p.not()
 		return &Expr{Kind: "un", Name: "!", Args: []*Expr{x}}, err
 	}
@@ -822,6 +863,10 @@ func (p *exprParser) mul() (*Expr, error) {
 
 func (p *exprParser) unary() (*Expr, error) {
 	if p.accept("-") {
+		if err := p.enter(); err != nil {
+			return nil, err
+		}
+		defer p.leave()
 		x, err := p.unary()
 		return &Expr{Kind: "un", Name: "-", Args: []*Expr{x}}, err
 	}

@@ -108,7 +108,7 @@ B 類の契機は、次のテストを選ぶために使います。
 | `agent-platform` | `internal/agent/**`、`internal/flock/**`、`internal/dataplane/userspace/relay/**`、`internal/dataplane/userspace/tunnel/**`、`cmd/wgft/**`、`*_windows.go`、`*_darwin.go` | B4、B8 | L1、L14、L16、L17、L18 |
 | `deploy` | `deploy/*.service`、`deploy/*.conf`、`deploy/*.plist`、`deploy/server.env.example`、`cmd/wgft/config.go`、`cmd/wgft/server.go`、`cmd/wgft/agent.go` (設定の読み込みと終了コード) | B2、B9 | L7 |
 | `build` | `.goreleaser.yaml`、`scripts/build-release.sh`、`scripts/goreleaser-checksum.sh`、`scripts/third-party-licenses.sh`、`scripts/check-release-assets.sh`、`scripts/docker-smoke.sh`、`deploy/Dockerfile.*`、`deploy/*.compose.yaml`、`go.mod`、`go.sum`、`.github/workflows/**` | B5、B6、B10 | 無し |
-| `rust` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml` | B13、B14、B15 | 無し |
+| `rust` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、`internal/tcpharness/scripts/**` | B13、B14、B15 | 無し |
 | `rust-agent` | `crates/**` のうち `crates/wgft-wireguard-tun/**` 以外、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` | 無し | ラボの一式の `rust` の組を積みの先頭で 1 回。「wgstack の上の agent」の段までは報告だけで、その後はマージの関門 ([マージの前に流すテスト](#マージの前に流すテスト)) |
 | `dataplane-net` | `internal/dataplane/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` の転送の経路 | 無し (C1 と C5 は次の段階の完了時に流し直す) | L1 |
 | `phase` | 関係する実装の段階の完了 | C 類 | すべて |
@@ -189,7 +189,8 @@ B6 は `build` の契機に加えて、Go のソースファイルの変更で�
 これは前節の表の `build` だけに絞った記述より広い判定です。
 
 Rust のワークスペース (`crates/` 以下) の B13 から B15 は、前節の表の `rust` の契機どおりに絞ります。
-B13 から B15 と Go のジョブは入力を共有しません。
+B13 から B15 と Go のジョブが共有する入力は、適合の台本と構文の fixture (`internal/tcpharness/scripts/**`) だけです。
+Go と Rust の構文解析器が同じ fixture と照らすので、この directory の変更は `rust` の契機にも当たります。
 Go だけの変更では B13 から B15 を流しません。
 Rust だけの変更では B4、B5、B6、B8 を流しません。
 ツールチェーンは `rust-toolchain.toml` の固定に従い、CI とホストで同じコンパイラを使います。

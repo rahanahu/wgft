@@ -1,0 +1,13 @@
+# 試験の道具 (docs/design/v2/test-tooling.md)。製品のバイナリに入らず、配布しない。
+[package]
+name = "wgft-tcpharness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

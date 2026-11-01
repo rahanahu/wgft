@@ -141,7 +141,8 @@ device の層と核を組み、UDP のソケットとタイマーを回す駆動
 - unsafe:`wgft-wgstack` は `#![forbid(unsafe_code)]` にします。
   checksum も `as_chunks` と `u64::from_be_bytes` の安全なコードで書きます
 - 製品の木:CI の `cargo tree` の検査が、`wgft` のバイナリの依存の木に `wgft-tcpharness` と `wgft-wgstack-dut` が無いこと、測定用の feature が有効でないことを確かめます。
-  この検査は、試験の道具の crate を足す段で足します
+  今の `rust-check` は crate の検査を、すべての target と feature を有効にした依存の木で行います。
+  feature の検査は、測定用の feature を足す段で足します
 - I7 の隔離:後で作る agent のカーネルモードの crate が、推移的にも `wgft-wgstack` に依らないことを、製品の木と同じ `cargo tree` の検査で確かめます。
   カーネルモードの agent は wgstack を作りません
 
@@ -896,8 +897,8 @@ T の段の中身と大きさは[試験の道具の設計の段階の計画](tes
 | 7 | `feat(wgstack-rs): async handles over the core` | A | `wgft-netstack`:TCP、UDP、ping の非同期の handle、waker の表、操作の知らせ、hook の LAN 側のソケットの表 | 約 1,500 行 | 4b と 6 |
 | T1a、T1b | 台本の言語と Go の runner、残りの台本の移し替え | T | 段階の計画のとおり | 約 2,000 行、約 +900 と -1,300 行 | 1 |
 | T2a、T2b | DUT の frame と `dutserve` と `rustdut`、Go の wgstack の記録 | T | 段階の計画のとおり | 約 4,300 行、約 1,800 行と記録 (約 4.7 MB) | 1 |
-| T3a、T3b | `wgft-tcpharness` の crate、Rust の runner と `harness-rust-go` の job | T | 段階の計画のとおり | 約 1,500 行、約 2,000 行 | T2a、T1b |
-| T3c | `wgstack-dut` と記録の照合 | T | 段階の計画のとおり | 約 1,200 行 | T2b、T3b、4a |
+| T3a、T3b | `wgft-tcpharness` の crate と構文解析器、Rust の runner と `harness-rust-go` の job | T | 段階の計画のとおり | 約 2,400 行、約 3,000 行 | T1b、T2a |
+| T3c | `wgstack-dut` と記録の照合 | T | 段階の計画のとおり | 約 1,500 行 | T2b、T3b、4a |
 | T4 | fuzz の target と敵対的な保持の試験 | T | 段階の計画のとおり。故障の一覧を含みます | 約 3,000 行。段ごとに分けます | 3 から。4a から 6 に合わせて足します |
 | 8 | qbench の `wgstack-rs` の engine | T と A | `wgstack-dut` の実時間の形、socketpair の `tun.Device`、判定の切り替え | 約 1,000 行 | 5 と 7 |
 
