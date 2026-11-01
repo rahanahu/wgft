@@ -1,0 +1,5 @@
+scenario x
+refs: parser fixture
+
+listen_udp u 5301
+udp_write u "x"

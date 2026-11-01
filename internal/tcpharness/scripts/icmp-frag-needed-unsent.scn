@@ -1,0 +1,33 @@
+# An error that quotes a sequence number beyond SND.NXT.
+scenario icmp-frag-needed-unsent
+refs: RFC 5927 4.1; wgstack.md, ICMP errors
+
+# The DUT sends four full segments and the testbench acknowledges the first two, so SND.UNA is
+# the third segment's start and SND.NXT the fourth's end. The handshake's RTT is near zero, so a
+# tail loss probe may follow the flight at once; burst takes it before the error.
+listen l 8103
+connect p l 8103 syn=opts_standard()
+flight p p.conn 4 8103%256 -> fl
+burst p -> b0
+set p.rcv_nxt = fl.segs[1].seq + fl.segs[1].len
+send_ack p
+
+# The error, then 200 ms of what the DUT sends, then the whole flight acknowledged and four more
+# segments written.
+inject_icmp_error frag_needed(PEER_ADDR, wire(with(fl.segs[3], seq=fl.segs[3].seq+100000)), 1000)
+collect_flow p 200ms -> after
+let largest = max_of(filter(after, is_data(s)), wire_len(s))
+measure resent-largest largest
+let last = fl.segs[len(fl.segs) - 1]
+set p.rcv_nxt = last.seq + last.len
+send_ack p
+write p.conn pattern(4 * seg_size(p), 0xb1)
+burst p -> more
+let largest = max(largest, max_of(more.segs, wire_len(s)))
+let df = any(more.segs, s.df)
+require second-flight len(more.segs) > 0
+  what: the application's second write leaves
+  got: {len(more.segs)} segments
+check ignored largest > 1000
+  what: an error quoting data never sent leaves the MTU alone
+  got: {pmtu_desc(largest)}

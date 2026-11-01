@@ -1,0 +1,39 @@
+# The largest UDP datagram IPv4 carries, in MTU-sized fragments, and the application sends it
+# back.
+scenario udp-large
+refs: RFC 768, RFC 791 3.2; udp-accounting.md, UDP fragmentation on send
+
+listen_udp u 5302
+let dst = addrport(DUT_ADDR, 5302)
+let src = addrport(PEER_ADDR, 41002)
+let msg = pattern(65507, 0x66)
+inject_ip fragments_every(udp(src, dst, 201, msg), 1400)
+udp_read u 2s -> r
+check delivered r.err == none && r.data == msg
+  what: the application reads all 65,507 bytes
+  got: {len(r.data)} bytes, equal {r.data == msg}, error {err_kind(r.err)}
+
+udp_write u msg to=src -> w
+if w.err != none
+  check reply.written false
+    what: WriteTo takes 65,507 bytes
+    got: {err_kind(w.err)}
+else
+  await_datagram 3s match=(to_peer(s) && s.proto == 17) -> back
+  let pu = parse_udp(back.packet)
+  check reply.reassembles back.done && pu.err == none && pu.checksum != 0 && pu.payload == msg
+    what: the fragments of the reply reassemble into the 65,507 bytes with a valid, nonzero checksum
+    got: {reply_desc(back.done, pu, msg)}
+  check reply.df-clear !back.df
+    what: no fragment carries DF
+    got: {yes_no(back.df, "DF set", "DF clear")}
+  check reply.id-nonzero !back.zero_id
+    what: the fragments carry a nonzero IP ID
+    got: {yes_no(back.zero_id, "ID 0", "nonzero")}
+  measure reply-fragments back.frags
+end
+
+udp_write u zeros(65508) to=src -> w
+check oversize-refused w.err != none
+  what: WriteTo refuses 65,508 bytes
+  got: {err_kind(w.err)}

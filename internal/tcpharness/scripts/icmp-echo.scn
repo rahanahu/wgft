@@ -1,0 +1,40 @@
+# Echo replies: a small request, one that fills the MTU, one larger than the MTU that arrives in
+# fragments, and one with a wrong checksum. wgstack.md lists the reply to the one larger than the
+# MTU among the choices not checked against Linux.
+scenario icmp-echo
+refs: RFC 792, RFC 1122 3.2.2.6; wgstack.md, the echo request over the MTU
+
+let small = pattern(56, 0xa1)
+echo 601 0x1234 1 small -> m
+check reply m.good
+  what: an echo request draws a reply with its identifier, sequence and data
+  got: {m.desc}
+if m.ok
+  # Linux answers from a socket whose path MTU discovery is off, IP_PMTUDISC_DONT
+  # (v6.1:net/ipv4/icmp.c:1499), so its replies carry no DF
+  check reply.df-clear !m.df
+    what: as Linux, the reply carries no DF
+    got: {yes_no(m.df, "DF set", "DF clear")}
+end
+
+let full = pattern(DUT_MTU-28, 0xa2)
+echo 602 0x1234 2 full -> m
+check full-mtu m.good && m.frags == 1
+  what: a request that fills the MTU draws one unfragmented reply
+  got: {m.desc}, {m.frags} packets
+
+let big = pattern(3000, 0xa3)
+echo 603 0x1234 3 big cuts=list(1400,2800) -> m
+check oversized m.good
+  what: RFC 1122 3.2.2.6: a request reassembled from fragments draws the whole reply, fragmented as the MTU needs
+  got: {m.desc}
+if m.ok
+  measure oversized-reply-packets m.frags
+end
+
+# an echo request (type 8) whose checksum is wrong
+inject_ip corrupt(icmp(PEER_ADDR,DUT_ADDR,604,8,0,0x12340004,pattern(56,0xa4)),10,0xff)
+await_ip 300ms match=(to_peer(s) && s.proto == 1) -> r
+check bad-checksum !r.ok
+  what: a request with a wrong checksum draws nothing
+  got: {yes_no(r.ok, "a reply", "nothing")}

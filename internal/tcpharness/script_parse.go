@@ -61,7 +61,7 @@ var (
 	idVerbs   = map[string]bool{"check": true, "require": true, "measure": true, "alive": true, "delivered": true}
 	exprVerbs = map[string]bool{"check": true, "require": true, "measure": true, "if": true}
 	// bindFirst lists the verbs that bind their first argument, which must be a bare name.
-	bindFirst = map[string]bool{"listen": true, "connect": true, "handshake": true, "peer": true, "accept": true, "reincarnate": true}
+	bindFirst = map[string]bool{"listen": true, "connect": true, "handshake": true, "peer": true, "accept": true, "reincarnate": true, "listen_udp": true}
 	tmplVerbs = map[string]bool{"check": true, "require": true}
 )
 
@@ -74,14 +74,20 @@ var scriptVerbs = map[string]bool{
 	"write": true, "read": true, "close": true, "close_write": true, "abort": true,
 	"check": true, "require": true, "measure": true, "log": true,
 	"alive": true, "delivered": true, "recv": true,
+	"collect_flow": true, "flight": true, "burst": true, "at_once": true,
+	"listen_udp": true, "udp_read": true, "udp_write": true,
+	"inject_ip": true, "inject_icmp_error": true, "await_ip": true, "await_datagram": true, "echo": true,
 }
 
 // scriptConsts are the names every script may read without binding them.
 var scriptConsts = map[string]bool{
 	"SYN": true, "FIN": true, "RST": true, "PSH": true, "ACK": true,
-	"PEER_ADDR": true, "DUT_ADDR": true, "MTU": true,
+	"PEER_ADDR": true, "DUT_ADDR": true, "MTU": true, "DUT_MTU": true,
 	"now": true, "prompt": true, "none": true, "true": true, "false": true,
 }
+
+// predicateNamed are the named statement arguments evaluated once per candidate with s bound.
+var predicateNamed = map[string]bool{"match": true, "until": true}
 
 // predicateArg names, per function, the argument evaluated once per element with s bound.
 var predicateArg = map[string]int{"first": 1, "filter": 1, "any": 1, "max_of": 1, "sum_of": 1}
@@ -964,7 +970,7 @@ func bindBlock(file string, body []*Stmt, bound map[string]bool) (map[string]boo
 		}
 		for _, k := range sortedKeys(st.Named) {
 			var extra map[string]bool
-			if k == "match" {
+			if predicateNamed[k] {
 				extra = map[string]bool{"s": true}
 			}
 			if err := readErr(st.Named[k], extra); err != nil {

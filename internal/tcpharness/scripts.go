@@ -3,7 +3,6 @@ package tcpharness
 import (
 	"embed"
 	"fmt"
-	"strings"
 )
 
 // The scenario scripts of docs/design/v2/test-tooling.md. A converted scenario keeps its place in
@@ -33,65 +32,4 @@ func loadScript(file string) (*Script, error) {
 		return nil, err
 	}
 	return ParseScript(file, string(src))
-}
-
-// CheckLines keeps the lines of a trace that a real-time DUT gives the same way on every run:
-// each check's outcome, key, expectation and observation, every recorded failure, and the names
-// of the measured values without the values. Segment lines carry the engine's own random numbers and
-// are left out.
-func CheckLines(lines []string) []string {
-	var out []string
-	for _, l := range lines {
-		if strings.HasPrefix(l, "recorded: ") {
-			out = append(out, l) // every failure, a Fatalf outside a check included
-			continue
-		}
-		for _, p := range []string{"PASS  ", "FAIL  ", "KNOWN DIFFERENCE  ", "CHANGED DIFFERENCE  ", "UNEXPECTED PASS  "} {
-			if strings.HasPrefix(l, p) {
-				out = append(out, l)
-			}
-		}
-		// MEASURE engine=NAME scenario/name=value: keep everything before the value
-		if engine, rest, ok := strings.Cut(l, " "); ok && engine == "MEASURE" {
-			eng, rest, _ := strings.Cut(rest, " ")
-			name, _, _ := strings.Cut(rest, "=")
-			out = append(out, "MEASURE "+eng+" "+name)
-		}
-	}
-	return out
-}
-
-// DiffLines returns the first line where want and got differ, or "" when they are equal.
-func DiffLines(want, got []string) string {
-	for i := range max(len(want), len(got)) {
-		var w, g string
-		if i < len(want) {
-			w = want[i]
-		}
-		if i < len(got) {
-			g = got[i]
-		}
-		if w != g {
-			return fmt.Sprintf("line %d differs\n    Go: %s\nscript: %s", i, w, g)
-		}
-	}
-	return ""
-}
-
-// Passed reports whether a recorded run passed: it did not fail in any way, a Fatalf outside a
-// check included, and every check passed or met its expected difference. A side-by-side pair is
-// evidence only when the Go function's run passed: two runs that fail the same way, such as on a
-// DUT left in a bad state, match without showing anything.
-func Passed(outcome map[string][]string, failed bool) bool {
-	if failed {
-		return false
-	}
-	for _, os := range outcome {
-		for _, o := range os {
-			if o != OutcomePass && o != OutcomeKnown {
-				return false
-			}
-		}
-	}
-	return true
 }

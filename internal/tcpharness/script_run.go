@@ -233,8 +233,11 @@ func (in *interp) stmt(st *Stmt) bool {
 			v.l.Close()
 		case Conn:
 			v.Close()
+		case *udpconnv:
+			v.closed = true
+			v.c.Close()
 		default:
-			in.failf("close takes a listener or a connection, not %s", typeName(v))
+			in.failf("close takes a listener, a connection or a UDP socket, not %s", typeName(v))
 		}
 	case "close_write":
 		if err := in.conn(arg(0)).CloseWrite(); err != nil {
@@ -263,7 +266,9 @@ func (in *interp) stmt(st *Stmt) bool {
 		got, dups, maxLen := receiveMax(in.peer(arg(0)).p, int(in.count(arg(1))), in.dur(arg(2)))
 		bind(&recordv{name: "recv", fields: map[string]any{"data": got, "dups": int64(dups), "max_len": int64(maxLen)}})
 	default:
-		in.failf("statement %s is not implemented", st.Verb)
+		if !in.netStmt(st, arg, bind) {
+			in.failf("statement %s is not implemented", st.Verb)
+		}
 	}
 	return true
 }
@@ -353,12 +358,12 @@ func wrapErr(err error) any {
 
 // predicate compiles a match= expression: s is the candidate. Outer names keep the values they
 // had when the statement started.
-func (in *interp) predicate(e *Expr) func(*segv) bool {
+func (in *interp) predicate(e *Expr) func(any) bool {
 	frozen := make(map[string]any, len(in.vars))
 	for k, v := range in.vars {
 		frozen[k] = snapshot(v)
 	}
-	return func(s *segv) bool {
+	return func(s any) bool {
 		saved := in.vars
 		in.vars = frozen
 		defer func() { in.vars = saved }()
@@ -466,6 +471,8 @@ func (in *interp) constant(name string) (any, bool) {
 		return in.h.DUT.Addr(), true
 	case "MTU":
 		return int64(MTU), true
+	case "DUT_MTU":
+		return int64(in.h.DUT.MTU()), true
 	case "now":
 		return in.h.Now(), true
 	case "prompt":
@@ -695,6 +702,10 @@ func (in *interp) field(x any, name string) any {
 		}
 	case nil:
 		in.failf("none has no field %s", name)
+	default:
+		if v, ok := in.netField(x, name); ok {
+			return v
+		}
 	}
 	in.failf("%s has no field %s", typeName(x), name)
 	return nil
@@ -944,6 +955,16 @@ func typeName(v any) string {
 		return "error"
 	case *recordv:
 		return "result"
+	case *ipv:
+		return "ipv4"
+	case *udpv:
+		return "udp"
+	case *icmpv:
+		return "icmp"
+	case *quotev:
+		return "quote"
+	case *udpconnv:
+		return "udp socket"
 	}
 	return fmt.Sprintf("%T", v)
 }

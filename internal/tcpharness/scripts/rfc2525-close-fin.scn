@@ -1,0 +1,15 @@
+# Write three segments, hold their ACK back and close. RFC 2525 2.15, failure to send FIN
+# notification promptly: the FIN goes at once after the data, within the window, not after the
+# data is acknowledged.
+scenario rfc2525-close-fin
+refs: RFC 2525 2.15
+
+listen l 8306
+connect p l 8306 syn=opts_standard()
+flight p p.conn 3 0xd6 -> fl
+let end_seq = fl.segs[0].seq + len(fl.data)
+close p.conn
+await p prompt match=is_fin(s) -> f
+check fin-prompt f.ok && f.seq + f.len == end_seq || f.ok && f.seq == end_seq
+  what: RFC 2525 2.15: Close sends the FIN at once after the unacknowledged data
+  got: {seg_desc(f)}

@@ -1,0 +1,36 @@
+# A half-close while the testbench's window is 0. The FIN takes a sequence number, so it lies
+# beyond a zero window; wgstack.md sends it anyway. The run measures whether the DUT sends the
+# FIN before the window opens, and checks that it sends it once the window opens.
+scenario fin-zero-window
+refs: RFC 9293 3.8.6.1; wgstack.md: the FIN while the window is 0
+
+listen l 8021
+connect p l 8021 syn=opts_standard()
+write p.conn "0123456789"
+await p 1s match=(is_data(s) && s.seq == p.rcv_nxt) -> d
+require data d.ok
+  what: the data arrives
+  got: {seg_desc(d)}
+set p.rcv_nxt = p.rcv_nxt + d.len
+set p.window = 0
+# takes the data and closes the window in one ACK
+send_ack p
+send_data p "z"
+await p 1s match=(is_pure_ack(s) && s.ack == p.snd_nxt) -> za
+require zero-window-taken za.ok
+  what: the DUT acknowledges a byte sent after the zero-window ACK
+  got: {seg_desc(za)}
+close_write p.conn
+collect_flow p 1s until=is_fin(s) -> seen
+let fin = any(seen, is_fin(s))
+measure fin-into-zero-window yes_no(fin, "sent before the window opened", "held until the window opens")
+measure zero-window.segments seg_descs(seen)
+if !fin
+  set p.window = 512
+  send_ack p
+  await p 1s match=is_fin(s) -> f
+  let fin = f.ok && f.seq == p.rcv_nxt
+end
+check fin-sent fin
+  what: the FIN is sent by the time the window opens
+  got: {yes_no(fin, "FIN", "no FIN")}

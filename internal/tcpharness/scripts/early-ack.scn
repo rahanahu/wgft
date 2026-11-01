@@ -1,0 +1,24 @@
+# The ACK of the first data segment: Linux acknowledges it at once in quickack mode, wgstack by
+# the delayed-ACK rule, a difference the design accepts. The run also measures the window after
+# the handshake and the IPv4 IDs.
+scenario early-ack
+refs: RFC 1122 4.2.3.2, RFC 9293 3.8.6.3; wgstack.md, the choices not yet checked against Linux: quickack, the window after the handshake, the IP ID
+
+listen l 8017
+connect p l 8017 syn=opts_standard()
+measure synack.ip-id p.synack.id
+let start = now
+send_data p pattern(100, 0x91)
+await p 500ms match=acks(s, p.snd_nxt) -> a
+check first-data.acked a.ok
+  what: the first data segment is acknowledged within the 500 ms delayed-ACK bound
+  got: {seg_desc(a)}
+if a.ok
+  measure first-data.ack_ms ms(now - start)
+  measure first-data.ack-ip-id a.id
+  measure first-data.window p.dut_window
+end
+read p.conn 100 1s -> r
+check first-data.delivered r.err == none && len(r.data) == 100
+  what: the application reads the data
+  got: {len(r.data)} bytes, error {err_kind(r.err)}

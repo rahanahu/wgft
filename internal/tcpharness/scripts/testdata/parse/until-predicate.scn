@@ -1,0 +1,8 @@
+# s is bound inside until= as inside match=, and shadows an outer s there.
+scenario until-predicate
+refs: parser fixture
+
+let s = 1
+peer p 8000
+collect_flow p 1s until=(is_fin(s) && s.len == 0) -> l
+let t = s + 1

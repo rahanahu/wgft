@@ -1,0 +1,27 @@
+# Close on a connection that holds only out-of-order data. No in-order data is unread, so the
+# close is a FIN, as wgstack.md chose; data the testbench sends after the application closed then
+# draws a RST.
+scenario close-ooo-only
+refs: RFC 9293 3.6, RFC 2525 2.17; wgstack.md: Close with only out-of-order data
+
+listen l 8020
+connect p l 8020 syn=opts_standard()
+send p segment(p, ACK|PSH, p.snd_nxt + 1000, pattern(500, 0x92))
+await p prompt match=is_pure_ack(s) -> a
+require ooo.dupack a.ok && a.ack == p.snd_nxt
+  what: the out-of-order segment is acknowledged at once
+  got: {ack_desc(a, p.snd_nxt)}
+close p.conn
+await p 1s match=(is_rst(s) || is_fin(s)) -> r
+check fin-not-rst r.ok && is_fin(r) && !is_rst(r)
+  what: Close with only out-of-order data sends a FIN
+  got: {seg_desc(r)}
+if r.ok && is_fin(r)
+  set p.rcv_nxt = r.seq + 1
+  send_ack p
+end
+send_data p "new"
+await p 1s match=is_rst(s) -> r
+check new-data.rst r.ok
+  what: data after the application closed draws a RST
+  got: {seg_desc(r)}

@@ -43,6 +43,19 @@ var verbSigs = map[string]verbSig{
 	"alive":          {2, 2, nil, false},
 	"delivered":      {1, 1, nil, false},
 	"recv":           {3, 3, nil, true},
+
+	"collect_flow":      {2, 2, []string{"until"}, true},
+	"flight":            {4, 4, nil, true},
+	"burst":             {1, 1, nil, true},
+	"at_once":           {1, 1, nil, true},
+	"listen_udp":        {2, 2, nil, false},
+	"udp_read":          {2, 2, nil, true},
+	"udp_write":         {2, 2, []string{"to"}, true},
+	"inject_ip":         {1, 1, nil, false},
+	"inject_icmp_error": {1, 1, nil, false},
+	"await_ip":          {1, 1, []string{"match"}, true},
+	"await_datagram":    {1, 1, []string{"match"}, true},
+	"echo":              {4, 4, []string{"cuts"}, true},
 }
 
 // funcSig is a function's argument count; only with takes named arguments.
@@ -58,6 +71,18 @@ var funcSigs = map[string]funcSig{
 	"segment": {3, 4}, "raw": {3, 3}, "syn": {2, 2}, "with": {1, 1},
 	"seg_desc": {1, 2}, "ack_desc": {2, 3}, "sack_desc": {2, 3}, "synack_desc": {2, 3},
 	"err_kind": {1, 1}, "err_string": {1, 1}, "quote": {1, 1},
+
+	"list": {0, 1 << 16}, "max": {2, 2}, "zeros": {1, 1}, "addr": {1, 1}, "addrport": {2, 2}, "with_port": {2, 2},
+	"seg_size": {1, 1}, "wire": {1, 1}, "wire_len": {1, 1},
+	"udp": {4, 4}, "icmp": {7, 7}, "fragments": {1, 1 << 16}, "fragments_every": {2, 2}, "frag": {3, 3},
+	"frag_needed": {3, 3}, "corrupt": {3, 3}, "set_bytes": {3, 3},
+	"to_peer": {1, 1}, "icmp_type": {1, 1}, "parse_udp": {1, 1}, "parse_icmp": {1, 1}, "parse_quote": {1, 1},
+	"reply_desc": {3, 3}, "pmtu_desc": {1, 1}, "seg_descs": {1, 1}, "seconds_text": {2, 2},
+}
+
+// requiredNamed are the named arguments a statement cannot do without.
+var requiredNamed = map[string]string{
+	"reincarnate": "iss", "udp_write": "to", "await_ip": "match", "await_datagram": "match",
 }
 
 func checkStatic(file string, body []*Stmt) error {
@@ -81,8 +106,10 @@ func checkStatic(file string, body []*Stmt) error {
 				return errf(KindBind, "%s gives no result to bind with ->", st.Verb)
 			}
 		}
-		if st.Verb == "reincarnate" && st.Named["iss"] == nil {
-			return errf(KindNamedArgument, "reincarnate needs iss=")
+		for verb, need := range requiredNamed {
+			if st.Verb == verb && st.Named[need] == nil {
+				return errf(KindNamedArgument, "%s needs %s=", verb, need)
+			}
 		}
 		exprs := append([]*Expr{}, st.Args...)
 		for _, k := range sortedKeys(st.Named) {

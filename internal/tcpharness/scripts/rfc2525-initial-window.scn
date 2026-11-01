@@ -1,0 +1,52 @@
+# Write far more than an initial window and count what leaves before any ACK. RFC 2525 2.1, no
+# initial slow start: the burst stays within RFC 6928's ten segments, the initial window Linux and
+# wgstack use. 2.3, uninitialized CWND: with an MSS of 536 the window counts in 536-byte segments,
+# not in the MSS the stack would have used before it knew the peer's.
+scenario rfc2525-initial-window
+refs: RFC 2525 2.1 and 2.3, RFC 6928
+
+listen l 8301
+
+# the MSS for wgft's MTU, as a modern client sends it; the IDs below name its value, 1380, so the
+# expected-difference lists keep their keys
+let mss = MTU - 40
+connect p l 8301 syn=with(opts_standard(),mss=mss)
+write p.conn pattern(30*mss, 0xd1)
+burst p -> b
+at_once b.segs -> segs
+let sent = sum_of(segs, s.len)
+let later = len(b.segs) - len(segs)
+measure mss1380-later-new-segments later
+# one later segment is a tail loss probe of new data; more would be a second window
+check mss1380.one-probe-at-most later <= 1 && len(b.segs) <= 11
+  what: after the first window, at most one more new segment comes before any ACK: a tail loss probe
+  got: {later} later segments, {len(b.segs)} in all
+let largest = max_of(segs, s.len)
+check mss1380.at-most-iw10 len(segs) <= 10 && sent <= 10 * mss
+  what: RFC 2525 2.1 and 2.3: the first burst is at most ten segments of at most {mss} bytes
+  got: {len(segs)} segments, {sent} bytes, the largest {largest}
+check mss1380.segment-size largest <= mss
+  what: no segment carries more than the peer's MSS
+  got: the largest {largest} bytes
+measure mss1380-initial-segments len(segs)
+abort p.conn
+
+connect p l 8301 syn=with(opts_standard(),mss=536)
+write p.conn pattern(30*536, 0xd1)
+burst p -> b
+at_once b.segs -> segs
+let sent = sum_of(segs, s.len)
+let later = len(b.segs) - len(segs)
+measure mss536-later-new-segments later
+check mss536.one-probe-at-most later <= 1 && len(b.segs) <= 11
+  what: after the first window, at most one more new segment comes before any ACK: a tail loss probe
+  got: {later} later segments, {len(b.segs)} in all
+let largest = max_of(segs, s.len)
+check mss536.at-most-iw10 len(segs) <= 10 && sent <= 10 * 536
+  what: RFC 2525 2.1 and 2.3: the first burst is at most ten segments of at most 536 bytes
+  got: {len(segs)} segments, {sent} bytes, the largest {largest}
+check mss536.segment-size largest <= 536
+  what: no segment carries more than the peer's MSS
+  got: the largest {largest} bytes
+measure mss536-initial-segments len(segs)
+abort p.conn
