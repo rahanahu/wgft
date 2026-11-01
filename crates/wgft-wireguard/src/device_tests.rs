@@ -11,6 +11,7 @@ use crate::device::{Device, Event, Held, Transmit};
 use crate::drops::DropReason;
 use crate::ip::tests::ipv4_packet;
 use crate::keys::{PrivateKey, PublicKey};
+use crate::protocol::Protocol;
 use zeroize::Zeroizing;
 
 const AGENT_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 2);
@@ -760,6 +761,26 @@ fn padded_packets_are_delivered_at_their_own_size() {
         assert_eq!(p.len(), 21);
     }
     assert_eq!(n.a.held(), Held::default());
+}
+
+#[test]
+fn a_too_short_send_buffer_is_counted_and_leaves_no_gap_in_the_counters() {
+    let mut n = Net::new();
+    n.connect();
+    let now = n.now();
+    let packet = ipv4_packet(SERVER_IP, AGENT_IP, &[3; 100]);
+    // 詰め物を含めた暗号文より 1 byte 短い buffer では、送らずに数える
+    let mut short = vec![0u8; Protocol::sealed_len(packet.len()) - 1];
+    assert_eq!(n.b.handle_packet(now, &packet, &mut short), None);
+    assert_eq!(n.b.drops().get(DropReason::Internal), 1);
+    // 足りる buffer なら送れて、A が受け取る。暗号の番号は短い呼び出しで使っていない
+    let mut full = vec![0u8; n.b.max_transmit_len()];
+    let out = n.b.handle_packet(now, &packet, &mut full).unwrap();
+    let mut plain = vec![0u8; usize::from(u16::MAX)];
+    let len =
+        n.a.handle_datagram(now, n.b_addr, &full[..out.len], &mut plain);
+    assert_eq!(len, Some(packet.len()));
+    assert_eq!(n.a.drops().total(), 0);
 }
 
 #[test]

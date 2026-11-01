@@ -20,7 +20,7 @@ use super::{Command, Local, Settings, SocketBuffers, Status, Upper, clock, durat
 
 /// 受ける datagram の buffer と、復号の行き先の長さ。UDP の datagram の最大の長さで、起動の時に 1 回だけ
 /// 確保する。メモリの上界の `device` の項が数える ([`crate::memory`])。
-const DATAGRAM_BUF: usize = u16::MAX as usize;
+pub(super) const DATAGRAM_BUF: usize = u16::MAX as usize;
 const _: () = assert!(DATAGRAM_BUF == crate::relay::UDP_BUF);
 
 /// 送り出しの先。製品はソケットで、試験は記録する。
@@ -66,6 +66,12 @@ impl Outbox {
             pending: None,
             send_errors: 0,
         }
+    }
+
+    /// 確保した buffer の長さの和。メモリの上界の項の試験が使う。
+    #[cfg(test)]
+    pub(super) fn buffer_bytes(&self) -> usize {
+        self.buf.len() + self.sealed.len()
     }
 
     /// `sealed` の先頭の `len` byte を `to` へ送る。ソケットが受け付けなければ控えて `false`。

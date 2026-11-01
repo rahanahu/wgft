@@ -754,6 +754,24 @@ fn a_full_socket_stops_the_pulling_and_keeps_the_datagram() {
     assert_eq!(t.stub.out.len(), 1);
     assert!(t.outbox.pending.is_some());
     assert_eq!(t.a.held().transmit_packets, 0);
+    // 書けるようになったら、控えた packet 9 がそのまま先に出て、その後に packet 10 が出る。B が復号する
+    t.sink.block = false;
+    assert!(!t.pump(64));
+    assert!(t.outbox.pending.is_none());
+    assert!(t.stub.out.is_empty());
+    let mut plain = vec![0u8; usize::from(u16::MAX)];
+    let mut got = Vec::new();
+    for d in t.sink.sent.drain(..) {
+        if let Some(len) = t.b.handle_datagram(
+            clock::now(),
+            A_ADDR.parse().unwrap(),
+            &d.payload,
+            &mut plain,
+        ) {
+            got.push(seq(&plain[..len]));
+        }
+    }
+    assert_eq!(got, [0, 1, 2, 3, 4, 9, 10]);
 }
 
 #[test]

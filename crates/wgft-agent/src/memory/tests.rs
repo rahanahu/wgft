@@ -60,9 +60,10 @@ fn the_data_plane_buffers_term_matches_the_device() {
     let device = Device::new(config, std::time::Instant::now(), std::time::Duration::ZERO).unwrap();
     assert_eq!(device.mtu(), MAX_MTU);
     assert_eq!(device.max_transmit_len(), MAX_MTU + DATA_OVERHEAD);
+    // 駆動が確保する buffer の和と一致する。buffer の大きさを変えたら、項が合わなくなって落ちる
     assert_eq!(
         data_plane_buffers(),
-        2 * UDP_BUF + device.mtu() + device.max_transmit_len()
+        crate::dataplane::driver_buffer_bytes(device.mtu(), device.max_transmit_len())
     );
 }
 

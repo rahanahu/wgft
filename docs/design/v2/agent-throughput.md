@@ -320,7 +320,7 @@ packet あたりの値は次のとおりです。
 - 受ける向き:datagram ごとに 1 回の `recvfrom` を呼び、復号の前に datagram ごとに 1 回 `calloc` を呼びます。
   `calloc` は WireGuard の device の層の受信 (`Protocol::receive`) の packet の確保で、零で埋める分を含みます
 - 送る向きの `calloc` は、device の層の暗号化 (`Device::handle_packet` の encapsulate) の packet の確保です
-- これらの確保と写しは (最初の段階の前の値。段階 1 でやめました)、sanstun ではなく wgft 自身の `wgft-wireguard` のコードにありました。
+- これらの確保と写しは (最初の段階の前の値)、sanstun ではなく wgft 自身の `wgft-wireguard` のコードにありました。
   受信は `Protocol::receive` が datagram ごとに零で埋めた buffer を確保して復号し (`protocol.rs`)、`Device` が詰め物を除いた平文を `to_vec` で別の buffer に写して待ち行列に積みます (`device.rs`)。
   送信は `Device::handle_packet` が packet を `to_vec` で写し (`device.rs`)、`Protocol` が暗号文の buffer を確保します (`protocol.rs`)
 - `memset` の大半は wgstack の受信と送信の輪の `trim` で、16 KiB の chunk を返す時の零埋めです。
@@ -431,24 +431,23 @@ byte あたりの CPU が 0.8 倍なら、速さは約 1.25 倍です。
   データの経路に atomic と錠を置きません。
   CPU の側の値に設定を設けません
 - packet ごとに確保しない:データの経路 (トンネルの受信と送信、TCP と UDP の中継) は、定常の状態で packet ごとにヒープを確保しません。
-  最初の段階の前の事実 (2026-11-02 のコードの読み取り):packet ごとの確保は device の層だけにあり、受けた datagram 1 つにつき 2 回、送る packet 1 つにつき 2 回でした。
+  最初の段階の前は、packet ごとの確保が device の層だけにあり、受けた datagram 1 つにつき 2 回、送る packet 1 つにつき 2 回でした (2026-11-02 のコードの読み取り)。
   場所は、受信の復号の行き先 (`protocol.rs` の datagram ごとの buffer)、受信の平文の写し (`device.rs` の待ち行列に積む `to_vec`)、送信の側の写し (`device.rs` の `handle_packet` の `to_vec`)、送信の暗号文の buffer (`protocol.rs`) の 4 つです。
-  中継の経路、`wgft-netstack`、wgstack の核は packet ごとに確保しませんでした。
-  最初の段階の状態:この 4 つをやめました。
-  device の層は呼び手の buffer を受け取る形にしました。
+  中継の経路、`wgft-netstack`、wgstack の核は packet ごとに確保しません。
+  最初の段階の状態は次のとおりです。
+  device の層は呼び手の buffer を受け取る形で、4 つの場所は packet ごとに確保しません。
   受けた datagram は呼び手の buffer に復号して、その先頭の長さを返します。
   送る packet は呼び手の buffer に暗号化して、宛先と長さを返します。
   データの packet は、待ち行列にも一時の `Vec` にも入りません。
-  ハンドシェイクと cookie の message、ハンドシェイクを待っていた packet の暗号文は、定常の経路ではないので、今までどおり device の有限のキューを通します。
-  同じ段階で、データプレーンのスレッドでのヒープの確保が packet あたり 0 であることを確かめる試験を、トンネルの受信と送信、TCP と UDP の中継について足しました。
-  試験は許容 0 で通ります。
+  ハンドシェイクと cookie の message、ハンドシェイクを待っていた packet の暗号文は、定常の経路ではないので、device の有限のキューを通ります。
+  データプレーンのスレッドでのヒープの確保が packet あたり 0 であることを、トンネルの受信と送信、TCP と UDP の中継の試験が許容 0 で確かめます。
   最初の段階は、この試験が通ったので閉じます
 - 確保の数え方:試験だけが使う crate `wgft-alloc-count` の割り当て器で、成功した `alloc`、`alloc_zeroed`、`realloc` の呼び出しをスレッドごとに数えます。
   数は device を通った datagram の数で割り、datagram の数は台本の相手の側で数えます。
   ACK の数は起床の時機で変わるので、message ごとの数は決まった値になりません。
   遅延 ACK のタイマーが切れた後に数を読み、最後の ACK の分を含めます。
   PR #771 (マージせずに閉じた) に試しの実装があり、参考にできます (使わなくても構いません)
-- device の層の使い回しのバッファ:バッチの段が入るとき、データプレーンが device の層に渡す使い回しのバッファ (最初の段階で入れました。受ける datagram、復号の行き先、核が書く packet、暗号文の行き先の 4 つ) がバッチの置き場になります。
+- device の層の使い回しのバッファ:バッチの段が入るとき、データプレーンが device の層に渡す使い回しのバッファ (受ける datagram、復号の行き先、核が書く packet、暗号文の行き先の 4 つ) がバッチの置き場になります。
   device の層の API は呼び手の buffer を取るので、バッチでは同じ呼び出しに、バッチの配列の 1 枠を渡します。
   起動の時に 1 回、`WGFT_AGENT_BATCH_MIB` の内の上限のある置き場として確保し、`batch` の項に正確な項として数えます。
   バッチの段の最初の段階 (確保をやめ、まだ 1 packet ずつ送受信する間)は、この 4 つを `device` の項に数えます (`data_plane_buffers`)。
