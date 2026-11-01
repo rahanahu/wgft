@@ -676,10 +676,17 @@ mod stamp {
                     Err(e) => e,
                     _ => "out of range".into(),
                 };
-                crate::logf!(
-                    "the handshake clock in {} is unreadable: {why}; starting from the wall clock",
-                    file.display()
-                );
+                // 開けないファイルの誤りの文はパスを含むので、行にパスを重ねない
+                let path = file.display().to_string();
+                if why.contains(&path) {
+                    crate::logf!(
+                        "the handshake clock is unreadable: {why}; starting from the wall clock"
+                    );
+                } else {
+                    crate::logf!(
+                        "the handshake clock in {path} is unreadable: {why}; starting from the wall clock"
+                    );
+                }
                 Duration::ZERO
             }
         })
@@ -716,17 +723,47 @@ mod stamp {
         if margin {
             secs += SAVE_MARGIN.as_secs();
         }
-        if read(file).is_ok_and(|saved| saved.is_some_and(|s| s.as_secs() == secs)) {
-            return;
+        let r = if read(file).is_ok_and(|saved| saved.is_some_and(|s| s.as_secs() == secs)) {
+            Ok(())
+        } else {
+            credentials::replace_private_file(file, "handshake clock", FILE_LIMIT, |w| {
+                writeln!(w, "{secs}")
+            })
+        };
+        let mut failing = FAILING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(line) = record_line(&mut failing, file, r) {
+            crate::logf!("{line}");
         }
-        let r = credentials::replace_private_file(file, "handshake clock", FILE_LIMIT, |w| {
-            writeln!(w, "{secs}")
-        });
-        if let Err(e) = r {
-            crate::logf!(
-                "cannot record the handshake clock in {}: {e}",
-                file.display()
-            );
+    }
+
+    /// 記録の失敗の文。定期の保存は 30 秒ごとに書くので、同じ失敗を毎回出さない。
+    static FAILING: Mutex<Option<String>> = Mutex::new(None);
+
+    /// 記録の結果 `r` のうち、ログに出す行。失敗が始まったときと失敗の文が変わったとき、失敗から戻った
+    /// ときだけ返す。`last` は前の失敗の文で、ここで更新する。
+    fn record_line(
+        last: &mut Option<String>,
+        file: &Path,
+        r: Result<(), String>,
+    ) -> Option<String> {
+        match r {
+            Ok(()) => last.take().map(|_| {
+                format!(
+                    "the handshake clock in {} is recorded again",
+                    file.display()
+                )
+            }),
+            Err(e) if last.as_deref() == Some(e.as_str()) => None,
+            Err(e) => {
+                let line = format!(
+                    "cannot record the handshake clock in {}: {e}",
+                    file.display()
+                );
+                *last = Some(e);
+                Some(line)
+            }
         }
     }
 
@@ -754,6 +791,26 @@ mod stamp {
             assert!(floor(Some(&f)).await < Duration::from_secs(1 << 40));
             record(Some(&f), Duration::from_secs(10), true).await;
             assert!(read(&f).unwrap().unwrap() < Duration::from_secs(1 << 40));
+        }
+
+        /// 記録の失敗の行は、失敗が始まったときと文が変わったとき、戻ったときだけ出す。
+        #[test]
+        fn a_failing_record_is_logged_once_per_change() {
+            let f = Path::new("/data/agent.json.clock");
+            let mut last = None;
+            let fail = |e: &str| Err(e.to_owned());
+            assert_eq!(record_line(&mut last, f, Ok(())), None);
+            assert_eq!(
+                record_line(&mut last, f, fail("disk full")).as_deref(),
+                Some("cannot record the handshake clock in /data/agent.json.clock: disk full")
+            );
+            assert_eq!(record_line(&mut last, f, fail("disk full")), None);
+            assert!(record_line(&mut last, f, fail("read-only")).is_some());
+            assert_eq!(
+                record_line(&mut last, f, Ok(())).as_deref(),
+                Some("the handshake clock in /data/agent.json.clock is recorded again")
+            );
+            assert_eq!(record_line(&mut last, f, Ok(())), None);
         }
 
         /// 記録のファイルの場所にある通常のファイルでないものは、読まずに使わず、置き換えもしない。FIFO
