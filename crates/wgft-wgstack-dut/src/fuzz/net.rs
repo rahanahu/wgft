@@ -30,13 +30,16 @@ pub fn small_limits() -> Limits {
     }
 }
 
-/// Go の `fuzzLimits` です。`small_limits` から、FuzzCore が触れない再組み立ての表も小さくした値です。
+/// Go の `fuzzLimits` です。`small_limits` から、FuzzCore が触れない UDP の枠と再組み立ての表も小さくした
+/// 値です。
 pub fn fuzz_limits() -> Limits {
     Limits {
         max_flows: 8,
         accept_queue: 4,
         frag_entries: 4,
         frag_pieces: 8,
+        udp_rx_datagrams: 8,
+        udp_tx_datagrams: 8,
         ..small_limits()
     }
 }
@@ -229,6 +232,13 @@ impl<H: Hook> Net<H> {
             "reassembly holds {} bytes over its bound {}",
             h.frag_bytes,
             b.frag
+        );
+        assert!(
+            h.udp_rx_bytes as u64 <= b.udp_rx
+                && h.udp_tx_bytes as u64 <= b.udp_tx
+                && h.udp_rx_datagrams <= l.udp_rx_datagrams
+                && h.udp_tx_datagrams <= l.udp_tx_datagrams,
+            "UDP beyond its budget: {h:?} bound {b:?} limits {l:?}"
         );
         assert!(
             h.boosted <= self.slots,

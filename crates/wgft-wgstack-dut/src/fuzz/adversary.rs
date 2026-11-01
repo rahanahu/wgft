@@ -9,11 +9,10 @@
 //! - Go は各段で接続の送り手の内部の欄を確かめます。SND.UNA ≤ SND.NXT ≤ SND.MAX、cwnd が 0 でないこと、
 //!   pipe ≤ 2 × flight + 1、scoreboard の数え直し (再送した byte、SACK 済み、その先の欄)、損失の列と再送の
 //!   位置の範囲、list のつながり、損失の列と再送の途中の位置 (`qMid` と `qOff`、`rxtMid` と `rxtOff`) です。
-//!   今の核の `check_invariants` はこれらを確かめないので、この target はまだこれらを各段で確かめていません。
-//!   ここにあるのは `check_invariants` (表、予約、上界) と、外から見える出力の確かめだけです。DUT の data は
-//!   書いた byte の範囲の中にあり、中身は stream と同じで、FIN は stream の終わりにあることを確かめます。
-//!   このため、例えば再送した byte の数えのずれは段の中では見えず、相手が stream を受け取れなくなった時か、
-//!   記録の照合で初めて落ちます。送り手の確かめが核の `check_invariants` に入ったら、各段で呼びます
+//!   核の `check_invariants` は使っている接続ごとに送り手の確かめ (`check_sender`) を行い、これらと Go の
+//!   `checkScoreboard` を写します。この target は各段の後に `check_invariants` を呼ぶので、Go と同じ確かめを
+//!   各段で受けます。加えて外から見える出力を確かめます。DUT の data は書いた byte の範囲の中にあり、中身は
+//!   stream と同じで、FIN は stream の終わりにあることです
 //! - 嘘の SACK の block の範囲と ICMP の引く番号は、Go は DUT の SND.UNA と SND.MAX から取ります。ここでは
 //!   相手が知る値 (累積の確認と、見た DUT の segment の最も先の番号) から取ります
 //! - Go の boost の切り替え (`tryBoost` と `demote` を試験が直接呼ぶ) は frame に無い内部の操作です。ここでは

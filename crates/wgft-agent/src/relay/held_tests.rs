@@ -111,14 +111,11 @@ async fn core_bytes(peer: &Peer) -> usize {
     h.record_bytes
         + h.interval_bytes
         + h.chunk_bytes
-        + h.pool_chunks * CORE_CHUNK
+        + h.pool_bytes
         + h.frag_bytes
         + h.udp_rx_bytes
         + h.udp_tx_bytes
 }
-
-/// 核の chunk の大きさ (wgstack の `Chunk`)。
-const CORE_CHUNK: usize = 16 << 10;
 
 fn sessions(m: &Manager) -> usize {
     m.listener_stats()

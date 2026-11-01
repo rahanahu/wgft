@@ -4,9 +4,8 @@
 //! 入力ごとに 1 つの試験で、核の公開の API だけを使います。保持は設定の上限でなく、実際に持つ量で確かめます。
 //!
 //! - 確保の数え (`wgft-alloc-count`):核を作った後に生きている byte の増えた分が、核の会計 (`Held`) の
-//!   chunk、送信の記録、区間の表、再組み立ての写しの和と、置き場に残した chunk の分に一致すること。boost の枠を
-//!   借りた接続がある間は、借りた輪と表 (`Budget` が先に確保したもの) が会計にだけ出るので、差が借りた枠の
-//!   boost の項の内にあることを確かめます。核を閉じた
+//!   chunk、送信の記録、区間の表、再組み立ての写し、UDP の chunk、置き場の chunk の byte の和から、借りている
+//!   boost の配列 (`Budget` が先に確保したもの) の byte を引いた値にちょうど一致すること (`Held` の文書の式)。核を閉じた
 //!   後に、核を作る前の値へ戻ること。生きている byte と最大値が上界 (`Bound`) の内にあること
 //! - 会計:表の行の数が表の大きさの内にあり、入力ごとの項 (接続の枠の floor の項など) を超えないこと
 //! - 入力ごとの確かめ:洪水の間に保持が増えないこと、上限で捨てた数が数えられること、入力が止まった後に
@@ -16,8 +15,8 @@
 //! 試験の側の確保が数えに混ざらないように、試験の集まりは測る前に容量を取り、確かめは出力の列を捨てた後に
 //! します。
 //!
-//! 核の段:この版は PR 4b の核 (TCP の受動の open とデータの経路) の入力を持ちます。SACK と boost の入力は
-//! PR 5、断片と UDP の入力は PR 6 の段で足します。
+//! 核の段:PR 4b の核 (TCP の受動の open とデータの経路) の入力に、PR 5 の SACK と boost の入力と、PR 6 の
+//! 断片と UDP の入力を足しています。
 
 #![expect(
     clippy::many_single_char_names,
@@ -29,16 +28,13 @@ use std::time::Duration;
 
 use libtest_mimic::{Arguments, Failed, Trial};
 use wgft_alloc_count::{CountingAlloc, live_bytes, peak_bytes, reset_peak};
-use wgft_tcpharness::packet::{ACK, FIN, Options, RST, SYN, Segment};
-use wgft_wgstack::{ConnId, Error, Held, Limits, ListenerId, NoHook};
-use wgft_wgstack_dut::fuzz::{DUT, Net, PeerConn, small_limits};
+use wgft_tcpharness::ip;
+use wgft_tcpharness::packet::{ACK, FIN, Options, RST, SYN, SackBlock, Segment};
+use wgft_wgstack::{BoostPolicy, Config, ConnId, Error, Held, Limits, ListenerId, NoHook};
+use wgft_wgstack_dut::fuzz::{DUT, Net, PEER, PeerConn, small_limits};
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
-
-/// 置き場の chunk の大きさです。wgstack の Rust 版の設計の「確保の規則」が 16 KiB と定めます。核が値を公開
-/// したら、その値に替えます。数えから求めると、漏れた分も chunk の大きさに見えてしまうためです。
-const CHUNK: usize = 16 << 10;
 
 /// 試験の側の一時の確保 (出力の列、組み立てた packet) の上限です。最大値の確かめだけに足します。
 const TEST_SLACK: usize = 1 << 20;
@@ -55,11 +51,16 @@ struct Hold {
 
 impl Hold {
     fn new(limits: Limits) -> Self {
+        Self::with(Net::<NoHook>::config(limits))
+    }
+
+    fn with(config: Config) -> Self {
+        let limits = config.limits;
         // Budget はスレッドごとに 1 つ作って使い回すので、測る前にこのスレッドで作っておく
-        Net::new(Net::<NoHook>::config(limits), NoHook).finish();
+        Net::new(config, NoHook).finish();
         let base = live_bytes();
         reset_peak();
-        let n = Net::new(Net::<NoHook>::config(limits), NoHook);
+        let n = Net::new(config, NoHook);
         let created = live_bytes();
         Self {
             n,
@@ -88,31 +89,20 @@ impl Hold {
         self.n.check();
         let h = self.held();
         let g = self.growth();
-        let counted = h.chunk_bytes
+        // `Held` の文書の式:借りている boost の配列は Budget が先に確保したものなので引く
+        let counted = (h.chunk_bytes
             + h.record_bytes
             + h.interval_bytes
             + h.frag_bytes
-            + h.pool_chunks * CHUNK;
-        if h.boosted > 0 {
-            // 借りている boost の輪と表は Budget が作った時に確保したもので、会計には出ても核の確保は増えない。
-            // 会計はその内訳を持たないので、差が boost の枠の項の内にあることだけを確かめる
-            let per_slot = self.n.bound().boost / self.n.slots() as u64;
-            let lent = counted.checked_sub(g).unwrap_or_else(|| {
-                panic!(
-                    "{what}: the stack grew {g} bytes, over the {counted} it accounts for: {h:?}"
-                )
-            });
-            assert!(
-                lent as u64 <= h.boosted as u64 * per_slot,
-                "{what}: {lent} accounted bytes beyond the growth exceed {} boost slots of {per_slot}: {h:?}",
-                h.boosted
-            );
-        } else {
-            assert_eq!(
-                g, counted,
-                "{what}: the stack grew {g} bytes but accounts for {counted}: {h:?}"
-            );
-        }
+            + h.udp_rx_bytes
+            + h.udp_tx_bytes
+            + h.pool_bytes)
+            .checked_sub(h.lent_array_bytes)
+            .unwrap_or_else(|| panic!("{what}: the lent arrays exceed the accounted bytes: {h:?}"));
+        assert_eq!(
+            g, counted,
+            "{what}: the stack grew {g} bytes but accounts for {counted}: {h:?}"
+        );
         let total = self.n.bound().total;
         let live = (live_bytes() - self.base) as u64;
         assert!(
@@ -582,6 +572,207 @@ fn output_stall() {
     h.finish();
 }
 
+/// SACK の block を持つ ACK の洪水:送り残しの多い接続に、飛んでいる範囲の中の嘘の SACK の block を持つ ACK
+/// を送り続けても、保持が増えません。
+fn sack_ack_flood() {
+    let mut h = Hold::new(small_limits());
+    let l = h.listen(80);
+    let (p0, sa) = PeerConn::connect(&mut h.n, 40000, 80, 7, true, true);
+    assert!(sa.opts.sack_permitted, "the stack agrees to SACK");
+    let mut p = p0;
+    let now = h.now();
+    let (c, _) = h.n.stack().accept(now, l).expect("accept");
+    h.fill(c);
+    let mut hi = p.rcv;
+    for o in h.n.drain() {
+        hi = hi.max(
+            o.seq
+                .wrapping_add(u32::try_from(o.payload.len()).expect("below 4 GiB")),
+        );
+    }
+    h.check("filled");
+    let before = h.growth();
+    let una = p.rcv;
+    let span = hi.wrapping_sub(una).max(2);
+    for i in 0..20_000u32 {
+        let mut s = p.seg(ACK, Vec::new());
+        s.ack = una;
+        let a = una.wrapping_add(1 + (i.wrapping_mul(2_654_435_761) % (span - 1)));
+        let b = a.wrapping_add(1 + i % 1400);
+        s.opts.sack = vec![SackBlock { left: a, right: b }];
+        h.n.inject(&s);
+        drop(s);
+        if i % 100 == 0 {
+            h.drop_output();
+            h.check("sack flood");
+            assert!(
+                h.growth() <= before,
+                "the flood grew the stack from {before} to {}",
+                h.growth()
+            );
+        }
+    }
+    let now = h.now();
+    h.n.stack().abort(now, c);
+    h.drop_output();
+    h.check("after the flood");
+    h.finish();
+}
+
+/// 需要の無いまま boost の枠を持つ接続:別の接続が枠を求めると、黙った保有者は枠を返します。
+fn idle_boost_holders() {
+    let limits = Limits {
+        max_flows: 64,
+        accept_queue: 8,
+        ..small_limits()
+    };
+    let config = Config {
+        boost: BoostPolicy::AtAccept,
+        ..Net::<NoHook>::config(limits)
+    };
+    let mut conns = Vec::with_capacity(limits.conns());
+    let mut h = Hold::with(config);
+    let slots = h.n.slots();
+    assert!(
+        slots + 4 <= limits.max_flows,
+        "{slots} boost slots need more flows"
+    );
+    let l = h.listen(80);
+    for i in 0..slots + 4 {
+        let (c, _) = h.establish(l, 6000 + u16::try_from(i).expect("small"));
+        conns.push(c);
+        h.drop_output();
+        h.check("accepted");
+        assert!(h.held().boosted <= slots, "{:?}", h.held());
+    }
+    for _ in 0..30 {
+        h.advance(Duration::from_millis(100));
+        h.drop_output();
+    }
+    // 黙った保有者の後に来た接続は、1 秒の後に枠を得ます
+    for i in 0..4 {
+        let (c, _) = h.establish(l, 7000 + i);
+        conns.push(c);
+        h.drop_output();
+    }
+    for _ in 0..30 {
+        h.advance(Duration::from_millis(100));
+        h.drop_output();
+        h.check("reclaim");
+    }
+    assert!(
+        h.n.stack().stats().boost_reclaimed > 0,
+        "idle holders return their slots"
+    );
+    for &c in &conns {
+        let now = h.now();
+        h.n.stack().abort(now, c);
+    }
+    h.drop_output();
+    h.check("after the holders");
+    assert_eq!(
+        h.held().boosted,
+        0,
+        "the aborted connections return their slots"
+    );
+    h.finish();
+    drop(conns);
+}
+
+/// 断片の洪水:完成しない最初の断片を多数の送信元から送っても、再組み立ての表が上界で止まり、期限の後に空に
+/// 戻ります。
+fn fragment_flood() {
+    let mut h = Hold::new(small_limits());
+    for i in 0..5000u32 {
+        let [_, b, c, d] = i.to_be_bytes();
+        let src = SocketAddrV4::new(Ipv4Addr::new(172, 16 + b, c, d), 5353);
+        let dg = ip::udp_packet(
+            src,
+            SocketAddrV4::new(DUT, 53),
+            u16::try_from(i % 65536).expect("below 65536"),
+            &[0x77; 1200],
+        );
+        let first = ip::frag(&dg, 0, 600);
+        h.n.write(&first.marshal());
+        drop((dg, first));
+        if i % 100 == 0 {
+            h.drop_output();
+            h.check("fragment flood");
+            let b = h.n.bound();
+            assert!(h.held().frag_bytes as u64 <= b.frag, "{:?}", h.held());
+        }
+    }
+    assert!(
+        h.n.stack().stats().fragments_dropped > 0,
+        "the fragments past the table are counted"
+    );
+    for _ in 0..120 {
+        h.advance(Duration::from_secs(1));
+        h.drop_output();
+    }
+    h.check("after the flood");
+    assert_eq!(
+        h.held().frag_bytes,
+        0,
+        "the table empties after its timeout"
+    );
+    h.finish();
+}
+
+/// 読まない UDP の endpoint への洪水:endpoint の上限 (予算の 4 分の 1) と核の予算で止まり、断った数が数えられ、
+/// 読むと予約が返ります。
+fn udp_flood() {
+    let mut h = Hold::new(small_limits());
+    let now = h.now();
+    let u =
+        h.n.stack()
+            .bind_udp(now, SocketAddrV4::new(DUT, 53))
+            .expect("bind");
+    for i in 0..10_000u32 {
+        let dg = ip::udp_packet(
+            SocketAddrV4::new(PEER, 5000 + u16::try_from(i % 100).expect("below 100")),
+            SocketAddrV4::new(DUT, 53),
+            u16::try_from(i % 65536).expect("below 65536"),
+            &[0x55; 1000],
+        );
+        h.n.write(&dg.marshal());
+        drop(dg);
+        if i % 100 == 0 {
+            h.drop_output();
+            h.check("udp flood");
+            let held = h.held();
+            assert!(
+                held.udp_rx_datagrams <= h.limits.udp_rx_datagrams / 4,
+                "{held:?}"
+            );
+        }
+    }
+    let st = h.n.stack().stats();
+    assert!(
+        st.udp_endpoint_full > 0,
+        "the datagrams past the endpoint's share are counted: {st:?}"
+    );
+    let mut buf = [0u8; 2048];
+    loop {
+        let now = h.now();
+        match h.n.stack().recv_from(now, u, &mut buf) {
+            Ok(_) => {}
+            Err(Error::WouldBlock) => break,
+            Err(e) => panic!("recv_from: {e}"),
+        }
+    }
+    h.check("read");
+    let held = h.held();
+    assert!(
+        held.udp_rx_bytes == 0 && held.udp_rx_datagrams == 0,
+        "reading returns the reservation: {held:?}"
+    );
+    let now = h.now();
+    h.n.stack().close_udp(now, u);
+    h.check("closed");
+    h.finish();
+}
+
 fn trial(name: &'static str, f: fn()) -> Trial {
     Trial::test(name, move || {
         f();
@@ -603,6 +794,10 @@ fn main() {
         trial("unmatched_flood", unmatched_flood),
         trial("small_writes_slow_reader", small_writes_slow_reader),
         trial("output_stall", output_stall),
+        trial("sack_ack_flood", sack_ack_flood),
+        trial("idle_boost_holders", idle_boost_holders),
+        trial("fragment_flood", fragment_flood),
+        trial("udp_flood", udp_flood),
     ];
     libtest_mimic::run(&args, trials).exit();
 }
