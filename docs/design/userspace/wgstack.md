@@ -860,7 +860,8 @@ ECN は交渉しません。
 - 待ち受けへの SYN と FIN の組(理由を付けて受け入れる):SYN と FIN の両方を持つ segment にも握手の途中の行を作ります。
   Linux はこの segment を捨てると読めます。
   RFC 9293 3.10.7.2 は LISTEN の SYN のほかの制御を後で処理するとし、行は握手の途中の表の上限と期限で抑えられます。
-  台本はありません
+  台本はありません。
+  Rust 版はこの組を捨てます ([待ち受けへの SYN と FIN の組](../v2/wgstack-rs.md#待ち受けへの-syn-と-fin-の組))
 - TIME_WAIT の 4 つ組の使い直し(閉じた):前の接続が timestamp を使い、SYN が timestamp を持つときは、timestamp が大きいことだけを求めます([RFC 6191](#time_wait-の表))。
   Linux は番号か timestamp のどちらかが大きければ受け入れると読めます。
   Linux で確かめた結果、台本の場合(timestamp が新しく番号が大きい、timestamp が新しく番号が小さい、どちらも古い)の応答は Linux と同じです(`timewait-reuse`)

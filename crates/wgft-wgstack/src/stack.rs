@@ -29,7 +29,7 @@ use crate::tcp::{NUM_TIMERS, NUM_TIMERS32};
 use crate::time::Time;
 use crate::udp::{Udp, UdpId};
 use crate::wheel::{NO_TICK, TICK_NS, Wheel};
-use crate::wire::{self, FLAG_ACK, FLAG_RST, FLAG_SYN, Ipv4Drop, PayloadDrop};
+use crate::wire::{self, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, Ipv4Drop, PayloadDrop};
 pub use api::{Error, Event, ListenerId};
 use core::fmt;
 pub use shared::{LogKind, LogLine, Stats};
@@ -511,12 +511,14 @@ impl<H: Hook> Stack<H> {
                 return;
             }
             let listening = self.s.listeners.by_port(seg.tup.lport).is_some();
-            if listening && seg.flags & (FLAG_SYN | FLAG_ACK | FLAG_RST) == FLAG_SYN {
+            if listening && seg.flags & (FLAG_SYN | FLAG_ACK | FLAG_RST | FLAG_FIN) == FLAG_SYN {
                 self.s.new_syn_row(seg, now, reuse);
                 return;
             }
             if listening && seg.has(FLAG_SYN) && !seg.has(FLAG_ACK) {
-                return; // SYN と RST の両方を持つ segment は捨てます
+                // SYN と RST、SYN と FIN の組を持つ segment は捨てます。SYN と FIN の組は凍結した Go の
+                // wgstack と違います (wgstack-rs.md の「待ち受けへの SYN と FIN の組」)。
+                return;
             }
             self.s.reply_rst(seg);
             return;
