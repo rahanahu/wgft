@@ -19,7 +19,7 @@ use crate::controlapi::{
     DoctorResponse, DoctorRule, DoctorRuntimeState, DoctorSocketBuffers, DoctorStream,
     DoctorTunnel, DoctorUdpAccounting, DoctorWatchdog, clip_text,
 };
-use crate::ctlserver::{DoctorRequest, RotateKeyRequest, RotateState};
+use crate::ctlserver::{DoctorRequest, RotateKeyRequest};
 use crate::flowpool;
 use crate::logf;
 use crate::relay::{ListenerStat, Manager};
@@ -52,28 +52,49 @@ pub(crate) fn spawn_doctor(ctx: Context, mut rx: tokio::sync::mpsc::Receiver<Doc
     });
 }
 
-/// `rotate-key` の要求を 1 つ処理する。受け口が取り下げた要求は、鍵を変えずに捨てる。
-pub(crate) async fn serve_rotate_key(agent: &Shared, req: RotateKeyRequest) {
+/// `rotate-key` の要求を 1 つ処理し、止める合図 `shutdown` で終わったときに真を返す。受け口が取り下げた
+/// 要求は、鍵を変えずに捨てる。合図と並べて待つのは、排他の待ちと、鍵を保存した後のトンネルの作り直し
+/// だけである。排他を待つ間に合図が来れば、鍵を変えずに応答の送り手を落とし、受け口は応答の前に止まったと
+/// 返す。鍵を保存した後に合図が来れば、作り直しを落として新しい公開鍵を応答する。鍵は保存済みで、次の
+/// 起動がその鍵でトンネルを立て、次の stream の接続で server に届くので、鍵が変わったのに止まったとは
+/// 返さない。排他を取ってから保存までに await は無い。
+pub(crate) async fn serve_rotate_key(
+    agent: &Shared,
+    req: RotateKeyRequest,
+    shutdown: &mut (impl Future<Output = ()> + Unpin),
+) -> bool {
     if req.state.abandoned() {
-        return;
+        return false;
     }
-    if let Some(r) = rotate_key(agent, &req.state).await {
-        let _ = req.reply.send(r);
-    }
-}
-
-/// 鍵の対を作り直して保存し、トンネルを新しい鍵で作り直し、stream に新しい公開鍵で繋ぎ直させる。
-/// 取り下げられていれば `None` を返し、何も変えない。
-async fn rotate_key(agent: &Shared, state: &RotateState) -> Option<Result<String, String>> {
-    let mut a = agent.lock().await;
+    // どちらも準備ができていれば、合図を先に見る
+    let mut a = tokio::select! {
+        biased;
+        () = &mut *shutdown => return true,
+        a = agent.lock() => a,
+    };
     // 排他を取った後に始める。受け口が先に取り下げていれば、鍵を変えない
-    if !state.start() {
-        return None;
+    if !req.state.start() {
+        return false;
     }
-    Some(rotate_key_locked(&mut a).await)
+    let public = match save_new_key(&mut a) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = req.reply.send(Err(e));
+            return false;
+        }
+    };
+    let stopped = tokio::select! {
+        biased;
+        () = &mut *shutdown => true,
+        () = rebuild_with_new_key(&mut a) => false,
+    };
+    let _ = req.reply.send(Ok(public));
+    stopped
 }
 
-async fn rotate_key_locked(a: &mut Agent) -> Result<String, String> {
+/// 鍵の対を作り直して保存し、今の鍵にする。新しい公開鍵を返す。保存に失敗すれば、メモリの上の 2 つの
+/// 鍵も元に戻す。使われていない新しい鍵を今の鍵に残さない。
+fn save_new_key(a: &mut Agent) -> Result<String, String> {
     let key = tunnel::generate_private_key()?;
     let public = tunnel::public_key(&key)?;
     let (old, old_prev) = (
@@ -83,15 +104,19 @@ async fn rotate_key_locked(a: &mut Agent) -> Result<String, String> {
     a.creds.keep_previous_key();
     a.creds.wg_private_key.clone_from(&key);
     if let Err(e) = a.save() {
-        // メモリの上の 2 つの鍵も元に戻す。使われていない新しい鍵を今の鍵に残さない
         a.creds.wg_private_key = old;
         a.creds.previous_wg_private_key = old_prev;
         return Err(e.to_string());
     }
     a.private_key = key;
+    logf!("regenerated wg key pair; public key: {public}");
+    Ok(public)
+}
+
+/// 新しい鍵でトンネルを作り直し、stream に新しい公開鍵で繋ぎ直させる。
+async fn rebuild_with_new_key(a: &mut Agent) {
     let last = a.creds.last_state.clone();
     a.close().await;
-    logf!("regenerated wg key pair; public key: {public}");
     if let Some(st) = last {
         match a.apply(&st).await {
             Ok(()) => logf!("wireguard: tunnel rebuilt with the new key"),
@@ -100,7 +125,6 @@ async fn rotate_key_locked(a: &mut Agent) -> Result<String, String> {
     }
     // stream を張り直すと、新しい公開鍵を送る
     a.reconnect.send_modify(|n| *n = n.wrapping_add(1));
-    Ok(public)
 }
 
 /// `doctor` の応答を組む。実行時の排他は `wait` まで待ち、取れなければ `runtime_state` を欠いた応答を
@@ -593,6 +617,17 @@ mod tests {
         assert_eq!(st.budgets.len(), 2);
     }
 
+    /// `rotate-key` の要求を 1 つ、止める合図の無いまま処理させ、応答を返す。
+    async fn rotate(agent: &Shared) -> Option<Result<String, String>> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let req = RotateKeyRequest {
+            reply: tx,
+            state: std::sync::Arc::new(crate::ctlserver::RotateState::default()),
+        };
+        assert!(!serve_rotate_key(agent, req, &mut std::future::pending()).await);
+        rx.try_recv().ok()
+    }
+
     #[tokio::test]
     async fn rotate_key_saves_a_new_key_and_asks_the_stream_to_reconnect() {
         let d = tempfile::tempdir().unwrap();
@@ -600,10 +635,7 @@ mod tests {
         a.opts.data_dir = d.path().to_owned();
         let ctx = context(a);
         let mut seen = ctx.agent.lock().await.reconnect.subscribe();
-        let public = rotate_key(&ctx.agent, &RotateState::default())
-            .await
-            .unwrap()
-            .unwrap();
+        let public = rotate(&ctx.agent).await.unwrap().unwrap();
         assert!(seen.has_changed().unwrap());
         seen.mark_unchanged();
         let saved = crate::credentials::Credentials::load(&d.path().join("agent.json")).unwrap();
@@ -619,12 +651,7 @@ mod tests {
             a.creds.mode = "kernel".into();
             a.creds.previous_wg_private_key = "PREVIOUS".into();
         }
-        assert!(
-            rotate_key(&ctx.agent, &RotateState::default())
-                .await
-                .unwrap()
-                .is_err()
-        );
+        assert!(rotate(&ctx.agent).await.unwrap().is_err());
         let a = ctx.agent.lock().await;
         assert_eq!(a.creds.wg_private_key, before);
         assert_eq!(a.creds.previous_wg_private_key, "PREVIOUS");
@@ -641,7 +668,7 @@ mod tests {
         a.opts.data_dir = d.path().to_owned();
         let ctx = context(a);
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        let state = std::sync::Arc::new(RotateState::default());
+        let state = std::sync::Arc::new(crate::ctlserver::RotateState::default());
         // 受け口の取り下げは、実行時の側が始める前でなければ通らない
         let held = ctx.agent.lock().await;
         let agent = std::sync::Arc::clone(&ctx.agent);
@@ -649,12 +676,14 @@ mod tests {
             reply: tx,
             state: std::sync::Arc::clone(&state),
         };
-        let task = tokio::spawn(async move { serve_rotate_key(&agent, req).await });
+        let task = tokio::spawn(async move {
+            serve_rotate_key(&agent, req, &mut std::future::pending()).await
+        });
         tokio::time::sleep(Duration::from_millis(20)).await;
         // 実行時の側が排他を待つ間に、受け口が取り下げる
         assert!(crate::ctlserver::abandon_for_test(&state));
         drop(held);
-        task.await.unwrap();
+        assert!(!task.await.unwrap());
         assert!(rx.try_recv().is_err(), "no reply for an abandoned request");
         assert!(!d.path().join("agent.json").exists());
         assert_eq!(ctx.agent.lock().await.creds.wg_private_key, "");
