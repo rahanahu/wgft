@@ -260,12 +260,18 @@ pub(super) async fn drive<U: Upper>(
             waker.wake();
         }
         let blocked = outbox.pending.is_some();
+        if more {
+            // 上限で止めたので、同じスレッドの中継の task (accept と読み書き) に順を譲ってから続ける。下の
+            // select の中では譲れない。ソケットが読める間は読める枝がすぐに選ばれ、task は coop の予算を
+            // 使い切るまで起床を繰り返すので、その間に核の accept の待ち行列が溢れる
+            tokio::task::yield_now().await;
+        }
         tokio::select! {
             ready = socket.readable() => ready?,
             ready = socket.writable(), if blocked => ready?,
             () = clock::sleep_until_some(deadline) => {}
             () = local.0.wake.woken() => {}
-            () = tokio::task::yield_now(), if more => {}
+            () = std::future::ready(()), if more => {}
             command = commands.recv() => match command {
                 None | Some(Command::Stop) => break,
                 Some(Command::Status(reply)) => {

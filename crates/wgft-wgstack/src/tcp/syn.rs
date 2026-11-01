@@ -39,6 +39,8 @@ pub(crate) enum RowSend {
     None,
     SynAck,
     Ack,
+    /// cookie の値の行が SYN-ACK の再送を使い切った後の RST です。送ったら行を外します。
+    Rst,
 }
 
 /// 握手の途中の 1 つの行です。
@@ -71,7 +73,9 @@ pub(crate) struct SynRow {
     pub(crate) ts_ok: bool,
     /// SYN-ACK を再送しました。
     pub(crate) rtx: bool,
-    /// cookie から取り戻した値です。表には入れず、`Stack::establish_cookie` が接続の枠に移します。
+    /// cookie から取り戻した値です。`Stack::establish_cookie` が接続の枠に移し、移せなければ
+    /// [`Shared::defer_cookie`] が表に入れます。相手は握手を終えて接続を開いたと思っているので、表の行は
+    /// SYN-ACK の再送を使い切ったら黙って消さずに RST を送ります。
     pub(crate) cookie: bool,
     pub(crate) used: bool,
     pub(crate) pending: RowSend,
@@ -275,8 +279,8 @@ impl Shared {
     }
 
     /// 待ち受けへの SYN から行を作り、SYN-ACK を送ります。表が満杯か、待ち受けが N_syn の半分を使っていれば、
-    /// 行を作らずに cookie の SYN-ACK で応えます (`cookie`)。`reuse` は TIME_WAIT の 4 つ組を使い直す時の前の
-    /// 接続の SND.NXT で、呼び手は行を作れる時だけ渡します。
+    /// 行を作らずに cookie の SYN-ACK で応え (`cookie`)、accept の待ち行列にも空きが無ければ捨てます。
+    /// `reuse` は TIME_WAIT の 4 つ組を使い直す時の前の接続の SND.NXT で、呼び手は行を作れる時だけ渡します。
     pub(crate) fn new_syn_row(&mut self, seg: &Segment<'_>, now: i64, reuse: Option<u32>) {
         let port = seg.tup.lport;
         let Some(l) = self.listeners.by_port(port) else {
@@ -287,6 +291,10 @@ impl Shared {
                 // 呼び手が行を作れることを確かめた後なので来ません。cookie の ISN は前の接続の番号の先に
                 // 置けないので、来ても cookie で応えません。
                 self.refused(LogKind::SynFull, now);
+            } else if !self.accept_room(l) {
+                // accept の待ち行列に空きが無ければ、cookie で応えずに SYN を捨てます。相手は SYN を送り直し、
+                // その時に空きがあれば握手を終えます (wgstack-rs.md の「使う時」)。
+                self.refused(LogKind::SynAcceptFull, now);
             } else {
                 self.send_cookie(seg, now);
             }
@@ -318,6 +326,40 @@ impl Shared {
             l.syn_count += 1;
         }
         self.queue_row(id);
+    }
+
+    /// cookie の値 `r` で握手の途中の行を作り、作れたかを返します。accept の待ち行列か接続の枠が満杯で、
+    /// cookie が通った最後の ACK から接続を作れない時に使います。行は SYN-ACK をすぐには送らず、最初の再送の
+    /// 期限に送ります。握手を終えた相手は SYN-ACK の写しに ACK を返し、その ACK が空きのできた待ち行列に
+    /// 行を移します。表の全体が満杯なら作りません。
+    pub(crate) fn defer_cookie(&mut self, r: &SynRow, now: i64) -> bool {
+        // 待ち受けの分は見ません。cookie を使うのはその分が満杯の時なので、分を守るとほぼすべてが RST になります。
+        // 行を作れるのは握手を終えた相手だけで、経路の外から表を埋められません。
+        // 1 つの待ち受けが表のすべての行を持ちうるので、待ち受けの数の上限も確かめます。
+        if !self.syn.has_free()
+            || self
+                .listeners
+                .by_port(r.listener)
+                .is_none_or(|l| l.syn_count == u16::MAX)
+        {
+            return false;
+        }
+        debug_assert!(r.cookie, "only a recovered cookie becomes a deferred row");
+        // `cookie` が TSecr からの RTT の標本を止め、`sent_at` は cookie の SYN-ACK の時刻を持ちません。`rtx` は
+        // 偽で始め、最初の再送の前に接続を作れた時は、輻輳の窓を 1 MSS に下げません。再送した後は普通の行と同じ
+        // く真になります。
+        let row = SynRow {
+            deadline: time(now + SYNACK_RTO),
+            pending: RowSend::None,
+            ..*r
+        };
+        if self.syn.insert(row).is_none() {
+            return false;
+        }
+        if let Some(l) = self.listeners.by_port_mut(r.listener) {
+            l.syn_count += 1;
+        }
+        true
     }
 
     /// 行を外して空きに返します。
@@ -398,12 +440,11 @@ impl Shared {
     /// 待ち受け `port` の accept の待ち行列の枠を 1 つ予約し、予約できたかを返します。待ち受けの分 (Q の半分)、
     /// 全体の Q、空きの接続の枠のどれかが尽きていれば、数えて偽を返します。
     pub(crate) fn reserve_accept(&mut self, port: u16, now: i64) -> bool {
-        let q = self.config.limits.accept_queue;
-        let full = self
+        let room = self
             .listeners
             .by_port(port)
-            .is_none_or(|l| usize::from(l.qlen) >= q / 2);
-        if full || self.queued >= q || self.conn_free.is_empty() {
+            .is_some_and(|l| self.accept_room(l));
+        if !room {
             self.refused(LogKind::AcceptOverflow, now);
             return false;
         }
@@ -412,6 +453,13 @@ impl Shared {
             l.qlen += 1;
         }
         true
+    }
+
+    /// 待ち受け `l` の accept の待ち行列に 1 つ入る空きがあるかです。待ち受けの分 (Q の半分)、全体の Q、空きの
+    /// 接続の枠のどれも尽きていない時に真です。
+    pub(crate) fn accept_room(&self, l: &Listener) -> bool {
+        let q = self.config.limits.accept_queue;
+        usize::from(l.qlen) < q / 2 && self.queued < q && !self.conn_free.is_empty()
     }
 
     /// 予約した accept の待ち行列の枠を返します。接続の枠を取れなかったときに使います。
@@ -444,6 +492,17 @@ impl Shared {
                     break;
                 }
                 if usize::from(r.retries) >= SYNACK_RETRIES {
+                    if r.cookie {
+                        // 相手は握手を終えて接続を開いたと思っているので、黙って消さずに RST で切ります。RST は
+                        // 行の出力で送り、送った時に行を外します。制御の輪と違って溢れないので、RST を失いません。
+                        self.syn.list_remove(id);
+                        let row = self.syn.row_mut(id);
+                        row.deadline = time(now + (SYNACK_RTO << row.retries));
+                        row.pending = RowSend::Rst;
+                        self.syn.list_push(id);
+                        self.queue_row(id);
+                        continue;
+                    }
                     self.remove_syn_row(id);
                     continue;
                 }
@@ -467,6 +526,23 @@ impl Shared {
         let r = *self.syn.row(id);
         if !r.used || r.pending == RowSend::None {
             return 0;
+        }
+        if r.pending == RowSend::Rst {
+            if b.len() < IP_HEADER_LEN + TCP_HEADER_LEN {
+                return 0; // 行は残り、次の期限にもう一度 RST を積みます
+            }
+            let h = TcpHeader {
+                tup: r.tup,
+                seq: r.iss.wrapping_add(1),
+                ack: r.irs.wrapping_add(1),
+                flags: FLAG_RST | FLAG_ACK,
+                wnd: 0,
+            };
+            let ip_id = self.next_id();
+            wire::write_tcp(b, ip_id, &h, None, 0);
+            self.stats.syn_cookies_reset += 1;
+            self.remove_syn_row(id);
+            return wire::finish_tcp(b);
         }
         let row = self.syn.row_mut(id);
         row.pending = RowSend::None;

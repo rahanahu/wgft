@@ -383,8 +383,10 @@ impl<H: Hook> Stack<H> {
             return Err("the reservations exceed the bound".into());
         }
         let mut queued = 0;
+        let mut syn_rows = 0;
         let mut bad = None;
         s.listeners.for_each_open(|port, l| {
+            syn_rows += usize::from(l.syn_count);
             match listen::check_queue(l, port, &s.qlinks, |i| {
                 self.conns.tcb(i).state != State::Free
             }) {
@@ -394,6 +396,9 @@ impl<H: Hook> Stack<H> {
         });
         if let Some(e) = bad {
             return Err(e.into());
+        }
+        if syn_rows != s.syn.len() {
+            return Err("the listeners' half-open counts disagree with the table".into());
         }
         if queued != s.queued || s.queued > s.config.limits.accept_queue {
             return Err("the accept queue lengths disagree with the total".into());
@@ -548,20 +553,31 @@ impl<H: Hook> Stack<H> {
 
     /// 待ち受けへの ACK を cookie として確かめ、通れば接続を作って accept の待ち行列に入れます。cookie が
     /// 通ったかを返します。偽なら呼び手が捨てるか RST を返します。`row` は同じ 4 つ組の握手の途中の行で、
-    /// 接続を作れたら外します。
+    /// cookie が通れば外します。
     ///
-    /// accept の待ち行列か接続の枠が満杯なら、握手の途中の行の最後の ACK と同じく ACK を捨てて真を返します。
-    /// 相手が ACK かデータを送り直した時に cookie がまだ通れば、その時に接続を作ります。
+    /// 相手はこの ACK で握手を終えたので、cookie が通った接続を黙って捨てません。accept の待ち行列か接続の
+    /// 枠が満杯なら、cookie の値で握手の途中の行を作り、行の SYN-ACK の再送が相手の ACK を引き出した時に
+    /// 接続を作ります。行も作れなければ、中身の無い ACK には RST を返し、中身か FIN を持つ ACK は相手の再送を
+    /// 待って捨てます (wgstack-rs.md の「確かめ」)。
     fn establish_cookie(&mut self, seg: &wire::Segment<'_>, now: i64, row: Option<u32>) -> bool {
         let Some(r) = self.s.check_cookie(seg, now) else {
             return false;
         };
-        if !self.s.reserve_accept(r.listener, now) {
+        if self.s.reserve_accept(r.listener, now) && self.open_from_row(&r, row, seg, now) {
+            self.s.stats.syn_cookies_accepted += 1;
             return true;
         }
-        if self.open_from_row(&r, row, seg, now) {
-            self.s.stats.syn_cookies_accepted += 1;
+        // 同じ 4 つ組の行は相手の知らない ISN を持つので、cookie の値の行に替えます。
+        if let Some(row) = row {
+            self.s.remove_syn_row(row);
         }
+        if self.s.defer_cookie(&r, now) {
+            self.s.stats.syn_cookies_deferred += 1;
+        } else if seg.seq_len() == 0 {
+            self.s.stats.syn_cookies_reset += 1;
+            self.s.reply_rst(seg);
+        }
+        // 中身か FIN を持つ ACK は捨てます。相手はそれを送り直すので、その時にもう一度 cookie を確かめます。
         true
     }
 
@@ -569,7 +585,9 @@ impl<H: Hook> Stack<H> {
     /// データと FIN を処理します (Go の `promote`)。
     fn promote(&mut self, row: u32, seg: &wire::Segment<'_>, now: i64) {
         let r = *self.s.syn.row(row);
-        self.open_from_row(&r, Some(row), seg, now);
+        if self.open_from_row(&r, Some(row), seg, now) && r.cookie {
+            self.s.stats.syn_cookies_accepted += 1;
+        }
     }
 
     /// 握手の途中の行の値 `r` から接続を作り、作れたかを返します。accept の待ち行列の枠は呼び手が予約済み

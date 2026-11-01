@@ -41,6 +41,10 @@ struct Stub {
     logs: VecDeque<String>,
     /// 真なら次の `poll_log` で panic する。駆動の task が呼ぶ核の中の panic の代わり。
     panic_in_poll_log: bool,
+    /// 同じスレッドの local の task が走った回数。試験の task が増やす。
+    task_runs: u32,
+    /// 受けた packet ごとの、受けた時の `task_runs`。
+    runs_at_packet: Vec<u32>,
 }
 
 impl Stub {
@@ -55,6 +59,8 @@ impl Stub {
             ready: Vec::new(),
             logs: VecDeque::new(),
             panic_in_poll_log: false,
+            task_runs: 0,
+            runs_at_packet: Vec::new(),
         }
     }
 
@@ -89,6 +95,7 @@ impl Upper for Stub {
 
     fn handle_packet(&mut self, _now: Instant, packet: &[u8]) {
         self.got.push(packet.to_vec());
+        self.runs_at_packet.push(self.task_runs);
         if self.echo {
             let mut reply = packet.to_vec();
             reply[12..20].rotate_left(4);
@@ -286,6 +293,80 @@ async fn an_operation_wakes_the_driver_and_readiness_wakes_a_local_task() {
         .expect("the echo woke the waiting task")
         .unwrap();
     assert_eq!(got(&b).await, vec![0, 7]);
+    a.stop().await;
+    b.stop().await;
+}
+
+#[tokio::test]
+async fn a_backlog_on_the_socket_lets_local_tasks_run_between_wake_ups() {
+    const BURST: u32 = 400;
+    let (a, b) = pair(1).await;
+    wait_for("the first echo", async || got(&a).await.len() == 1).await;
+    // server の側のスレッドに、packet を受けるたびに起こされて走った回数を数える task を置く。中継の
+    // accept の task の代わりで、駆動の task が上限で止めた起床の間に順を譲れば、上限ごとに 1 回走る
+    b.call(|l| {
+        let l = l.clone();
+        tokio::task::spawn_local(async move {
+            poll_fn(|cx| {
+                l.with(|s| {
+                    s.task_runs += 1;
+                    let next = s.got.len() + 1;
+                    s.watchers.push((next, cx.waker().clone()));
+                });
+                Poll::<()>::Pending
+            })
+            .await;
+        });
+    })
+    .await
+    .unwrap();
+    // server の側のスレッドを止めている間に送り、ソケットに上限より多い datagram を溜める
+    let (started, start) = tokio::sync::oneshot::channel();
+    let stall = b.call(move |_| {
+        let _ = started.send(());
+        std::thread::sleep(Duration::from_millis(300));
+    });
+    let send = async {
+        start.await.unwrap();
+        a.call(|l| {
+            l.operate(|s| {
+                s.out
+                    .extend((1..=BURST).map(|i| packet(AGENT_IP, SERVER_IP, i)));
+            });
+        })
+        .await
+        .unwrap();
+    };
+    let (stalled, ()) = tokio::join!(stall, send);
+    stalled.unwrap();
+    let mut last = 0;
+    wait_for("the server to stop receiving", async || {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let n = got(&b).await.len();
+        let done = n == last;
+        last = n;
+        done
+    })
+    .await;
+    let runs = b
+        .call(|l| l.with(|s| s.runs_at_packet[1..].to_vec()))
+        .await
+        .unwrap();
+    let cap = Settings::default().max_datagrams_per_wake;
+    assert!(
+        runs.len() > 2 * cap,
+        "the socket held only {} datagrams of the burst",
+        runs.len()
+    );
+    let longest = runs
+        .chunk_by(|x, y| x == y)
+        .map(<[u32]>::len)
+        .max()
+        .unwrap_or(0);
+    assert!(
+        longest <= cap,
+        "{longest} datagrams in a row arrived without the local task running; the cap is {cap}"
+    );
     a.stop().await;
     b.stop().await;
 }

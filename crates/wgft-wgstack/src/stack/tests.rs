@@ -119,6 +119,7 @@ fn close_returns_everything() {
             ..SynRow::default()
         })
         .unwrap();
+    s.s.listeners.get(80, g).unwrap().syn_count += 1;
     s.s.tw.insert(TwRow {
         tup: tup(3000),
         ..TwRow::default()
