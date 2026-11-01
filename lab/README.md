@@ -276,6 +276,7 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --direction up rate rust wgstack
 WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --base origin/main fast wgstack base:wgstack
 WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --tool iperf3 --streams 4 fast rust kernel
 WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --tool iperf3 --udp-ping --direction up fast rust gvisor
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --tool iperf3 --udp-ping --kernel-rmem-max 1048576 --direction up fast rust kernel
 ```
 
 経路は `lab/tcpquality-cpu.sh` の `fast` か `rate` で、`--direction up` でエージェントが受ける向きにします。
@@ -288,9 +289,11 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --tool iperf3 --udp-ping --direct
 `--streams N` は iperf3 の並行の TCP 接続の数です。
 iperf3 は送り手と受け手の byte あたりの CPU が `tcpquality.py` より小さいので、カーネルの速さの腕でも測る道具の CPU が値を占めません。
 `--udp-ping` は、`--tool iperf3` の実行ごとに、同じエージェントの UDP の規則を通る 100 byte の datagram の往復の時間を、何もしていない時と TCP の転送の間に測ります。
-解析の `LAT` の行が腕ごとの p50、p99、最大、jitter と失った数を、`LATRATIO` の行が p99 と jitter の比を出します。
+解析の `LAT` の行が腕ごとの p50、p99、最大、jitter と失った数を、`LATRATIO` の行が転送の間の p50、p99、jitter と、何もしていない時の p99 と jitter の比を出します。
 `--bulk-mbit N` は iperf3 の stream ごとの速さを N Mbit/s で頭打ちにし、2 つの腕に同じ負荷を掛けます。
 `--agent-gso on` は、`fast` の経路で、エージェントの `eth0` の UDP の segmentation offload を切らずに測ります。
+`--kernel-rmem-max BYTES` は、`kernel` の腕だけで、データを読む側 (受ける向きは LAN のホスト、送る向きは client) の namespace の `net.ipv4.tcp_rmem` の最大を BYTES に下げます。
+カーネルの TCP の受信の窓の自動調整が広げる窓をその大きさで抑えた比べの相手で、[受信の窓の段](../docs/design/v2/agent-throughput.md#受信の窓の段)の判定に使います。
 解析の `MBITRATIO` の行は、組にした速さの比です。
 `base:<モード>` は、`--base` の commit の build で同じモードを動かします。
 `--base` は commit をホストの `~/.cache/wgft-lab/` の一時的な worktree に取り出し、`wgft` を `bin/base/` に作ります。
