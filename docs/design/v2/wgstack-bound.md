@@ -29,8 +29,8 @@ MTU は 1420 で、K のほかの表の大きさは既定の値です。
 - `udp_rx`:UDP の受信の byte の予算、受信の datagram の管理の配列、chunk の管理の配列の半分で、M_udp_rx です
 - `udp_tx`:UDP の送信の byte の予算、送信の datagram の管理の配列、chunk の管理の配列の残りの半分で、M_udp_tx です
 - `ping`:ping の endpoint の行と応答の置き場で、N_ping × c_ping です
-- `total`:`fix`、`floor_conn`、`boost`、`frag`、`udp_rx`、`udp_tx`、`ping` の和です
-- `transient`:段を変える間の一時の保持で、式に含めない項です
+- `total`:`fix`、`floor_conn`、`boost`、`frag`、`udp_rx`、`udp_tx`、`ping` の和です。
+  段を変える間の一時の保持は、段を変える接続の boost の枠の予約の内にあるので、別の行を持ちません ([上界の式の写し方](wgstack-rs.md#上界の式の写し方))
 
 <!-- BEGIN GENERATED TABLE -->
 | term | K = 256 | K = 2048 | K = 8192 |
@@ -54,7 +54,6 @@ MTU は 1420 で、K のほかの表の大きさは既定の値です。
 | `udp_tx` | 4241920 (4.0) | 4241920 (4.0) | 4241920 (4.0) |
 | `ping` | 23104 (0.0) | 23104 (0.0) | 23104 (0.0) |
 | `total` | 581077320 (554.2) | 1569109512 (1496.4) | 4956746760 (4727.1) |
-| `transient` | 8388608 (8.0) | 8388608 (8.0) | 8388608 (8.0) |
 <!-- END GENERATED TABLE -->
 
 [wgstack の Rust 版](wgstack-rs.md)

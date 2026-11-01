@@ -44,12 +44,28 @@ pub struct Bound {
     pub udp_tx: u64,
     /// N_ping × c_ping:ping の endpoint の行と応答の置き場です。
     pub ping: u64,
-    /// 項の和です。
+    /// 項の和です。段を変える間の一時の保持は、段を変える接続が持つ boost の枠の予約の内にあるので、別の項を
+    /// 持ちません ([`STAGE_CHANGE_FITS`])。
     pub total: u64,
-    /// 段を変える間の一時の保持で、式に含めない項です。1 本の接続の操作の中で起きるので、同時に起きる数は boost の
-    /// 枠の数以下で、B × (f_s + f_r) で抑えます。
-    pub transient: u64,
 }
+
+/// 段を変える間の一時の保持が、その接続の boost の予約の内にあることです (wgstack-rs.md の「上界の式の写し方」)。
+///
+/// 段を変えるのは枠を持つ接続だけで、枠は段を移した後に初めて返し、移す前に受け取ります (`try_boost`、`grow_recv`、
+/// `demote`)。核は 1 つのスレッドで動くので、1 回の移しは 1 本の接続の 1 回の呼び出しの中で終わり、その間にほかの
+/// 接続が枠や chunk を取ることはありません。移す間の 1 つの向きの輪は、古い輪と新しい輪の chunk を合わせて持ちます。
+/// 写すのは生きている範囲で、floor に上がる時も floor に戻る時も floor 以下なので、それぞれの輪は floor の chunk の数に
+/// 境目のずれの 1 つを足した数以下です。その和は boost の段の 1 つの向きの chunk の数以下で、boost の項はその接続の
+/// 枠に両方の向きの boost の段を数えます。
+pub(crate) const STAGE_CHANGE_FITS: bool = {
+    let floor = (if SEND_FLOOR > RECV_FLOOR {
+        SEND_FLOOR
+    } else {
+        RECV_FLOOR
+    }) / CHUNK_SIZE as u64;
+    2 * (floor + 1) <= BOOST_SIZE / CHUNK_SIZE as u64
+};
+const _: () = assert!(STAGE_CHANGE_FITS);
 
 /// 項の内訳です。生成する表が使います。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -157,7 +173,6 @@ impl Bound {
             udp_tx,
             ping,
             total: fix + floor_conn + boost + frag + udp_rx + udp_tx + ping,
-            transient: b(BOOST_SLOTS) * (SEND_FLOOR + RECV_FLOOR),
         }
     }
 }

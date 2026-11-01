@@ -120,10 +120,9 @@ impl Hold {
         assert_eq!(live_bytes(), base, "closing returns every allocation");
         let peak = (peak_bytes() - base) as u64;
         assert!(
-            peak <= bound.total + bound.transient + TEST_SLACK as u64,
-            "the peak {peak} exceeds the bound {} with the transient {}",
-            bound.total,
-            bound.transient
+            peak <= bound.total + TEST_SLACK as u64,
+            "the peak {peak} exceeds the bound {}",
+            bound.total
         );
     }
 

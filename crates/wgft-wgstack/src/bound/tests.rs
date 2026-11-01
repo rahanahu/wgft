@@ -44,7 +44,7 @@ fn table() -> String {
         w.push_str(" ---: |");
     }
     w.push('\n');
-    let rows: [(&str, &dyn Fn(usize) -> u64); 20] = [
+    let rows: [(&str, &dyn Fn(usize) -> u64); 19] = [
         ("`stack`", &|i| parts[i].stack),
         ("`conn_slots`", &|i| parts[i].conn_slots),
         ("`conn_index`", &|i| parts[i].conn_index),
@@ -64,7 +64,6 @@ fn table() -> String {
         ("`udp_tx`", &|i| bounds[i].udp_tx),
         ("`ping`", &|i| bounds[i].ping),
         ("`total`", &|i| bounds[i].total),
-        ("`transient`", &|i| bounds[i].transient),
     ];
     for (name, f) in rows {
         write!(w, "| {name} |").unwrap();
@@ -187,7 +186,7 @@ fn bound_does_not_depend_on_use() {
         .write(0, &[1; 1000], &mut s.s.chunks)
         .unwrap();
     assert_eq!(s.bound(), before);
-    assert!(before.floor_conn > 0 && before.transient > 0);
+    assert!(before.floor_conn > 0 && before.boost > 0);
     let _ = s.close(Time::ZERO);
 }
 
