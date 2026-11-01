@@ -54,5 +54,6 @@ v1.x は Go のまま保守だけを続けます。
 Go の wgstack は参照実装として凍結し、移行の間に機能を足さず、Rust の実装が追いついた後に消します。
 v2 では `WGFT_AGENT_NETSTACK=gvisor` を受け付け、wgstack の Rust 版を動かして 1 行の通知を出します。
 この挙動は未実装です。
+Rust 版の構造、API、メモリ、検証、作業の順は [wgstack の Rust 版](wgstack-rs.md) にあります。
 
 [日本語の設計の索引](../README.ja.md)
