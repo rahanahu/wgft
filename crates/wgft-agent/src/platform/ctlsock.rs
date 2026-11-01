@@ -186,10 +186,20 @@ impl Stream {
             .checked_duration_since(Instant::now())
             .filter(|d| !d.is_zero())
             .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "control socket deadline"))?;
-        if write {
+        let set = if write {
             self.socket.set_write_timeout(Some(left))
         } else {
             self.socket.set_read_timeout(Some(left))
+        };
+        match set {
+            Ok(()) => Ok(()),
+            // macOS: 送受信の両方を閉じた socket には、XNU がどの setsockopt も EINVAL で拒む。AF_UNIX の
+            // stream は相手が閉じるとすぐこの状態になり、受け取り済みの応答がまだ読めるのに期限を設定できない。
+            // この状態の socket は止まらない (読みは残りのデータか終わりを、書きは EPIPE をすぐ返す) ので、
+            // 前の期限のまま読み書きして、その結果を返す
+            #[cfg(target_vendor = "apple")]
+            Err(e) if e.raw_os_error() == Some(libc::EINVAL) => Ok(()),
+            Err(e) => Err(e),
         }
     }
 
@@ -321,6 +331,27 @@ mod tests {
             BufReader::new(&mut c).read_line(&mut got).unwrap();
             assert_eq!(got, "echo x\n");
         });
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 相手が応答を書いて閉じた後に読み始めても、応答を読める。macOS は閉じた相手の socket への
+    /// setsockopt を EINVAL で拒むので、読みの前の期限の設定がこの順序で失敗していた。
+    #[test]
+    fn reads_the_response_after_the_peer_closed() {
+        let d = short_dir("closed");
+        let p = d.join("a.sock");
+        let l = Listener::bind(&p).unwrap();
+        let mut c = connect(&p, Duration::from_secs(5)).unwrap();
+        c.write_all(b"z\n").unwrap();
+        // 相手が書いて閉じるのを待ってから読む
+        std::thread::scope(|sc| sc.spawn(|| echo_once(&l)).join().unwrap());
+        let mut got = String::new();
+        BufReader::new(&mut c).read_line(&mut got).unwrap();
+        assert_eq!(got, "echo z\n");
+        let mut rest = Vec::new();
+        c.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty(), "the peer closed after the response");
+        drop(l);
         let _ = std::fs::remove_dir_all(&d);
     }
 

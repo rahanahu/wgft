@@ -1,7 +1,7 @@
 //! 認証情報 (`agent.json`)。Go の `internal/agent/credentials` と同じファイルを読み書きする。
 //!
 //! Go の v1 の agent が書いたファイルをそのまま読み、Rust の agent が書いたファイルを Go の v1 の agent が
-//! 読めるようにする。カーネルモードの記録のように試作が使わない項目は、形を持たずに保存し直す。
+//! 読めるようにする。カーネルモードの記録のように Rust の agent が使わない項目は、形を持たずに保存し直す。
 //! 知らないキーも捨てずに保存し直す。
 
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -49,16 +49,16 @@ pub struct Credentials {
     /// 転送の方式の記録。空はユーザー空間モード。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mode: String,
-    /// カーネルモードの 1 つ前の秘密鍵。試作は使わず保存し直すだけ。捨てるときに 0 で消す。
+    /// カーネルモードの 1 つ前の秘密鍵。Rust の agent は使わず保存し直すだけ。捨てるときに 0 で消す。
     #[serde(default, skip_serializing_if = "is_empty_secret")]
     pub previous_wg_private_key: Zeroizing<String>,
-    /// カーネルモードの記録。試作は使わず保存し直すだけ。
+    /// カーネルモードの記録。Rust の agent は使わず保存し直すだけ。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip_forward_enabled_at: Option<Value>,
-    /// カーネルモードの記録。試作は使わず保存し直すだけ。
+    /// カーネルモードの記録。Rust の agent は使わず保存し直すだけ。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel_publication: Option<Value>,
-    /// カーネルモードの記録。試作は使わず保存し直すだけ。
+    /// カーネルモードの記録。Rust の agent は使わず保存し直すだけ。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel_unconverged: Option<Value>,
     /// 登録で割り当てられたトンネルのアドレスの記録。
@@ -486,7 +486,7 @@ fn keep_owner(tmp: &File, old: Option<&fs::Metadata>) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Windows では持ち主を変えない。ファイルの ACL は試作では扱わない。
+/// Windows では持ち主を変えない。ファイルの ACL は扱わない。
 #[cfg(not(unix))]
 #[expect(
     clippy::unnecessary_wraps,

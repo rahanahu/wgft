@@ -1,6 +1,6 @@
 [package]
 name = "wgft-agent"
-description = "wgft agent control plane prototype for the v2 Rust migration"
+description = "The wgft agent: control plane, data plane and relays"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

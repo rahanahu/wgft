@@ -39,20 +39,20 @@ use crate::tunnel::Net;
 
 /// The idle timeout when the full state gives none or an unusable value (Go's default). The log
 /// line names it the way Go prints it, `2m0s`.
-pub const DEFAULT_UDP_IDLE: Duration = Duration::from_secs(120);
+pub(crate) const DEFAULT_UDP_IDLE: Duration = Duration::from_secs(120);
 
 /// The largest `wg.udp_timeout_stream` the agent takes, in seconds: the server keeps the value as a
 /// 32-bit int (Go's `udpTimeoutStreamMaxSeconds`).
 const UDP_IDLE_MAX_SECS: i64 = i32::MAX as i64;
 
 /// The floor of the idle sweep's interval (Go's `minSweepInterval`).
-pub const MIN_SWEEP: Duration = Duration::from_millis(20);
+pub(crate) const MIN_SWEEP: Duration = Duration::from_millis(20);
 
 /// The idle timeout from the full state's `wg.udp_timeout_stream` seconds (Go's
 /// `secondsToDuration`): 0 is the default without a word, as an older server sends no value; a
 /// negative value or one above the 32-bit range is the default with a log line.
 #[must_use]
-pub fn udp_idle_timeout(seconds: i64) -> Duration {
+pub(crate) fn udp_idle_timeout(seconds: i64) -> Duration {
     match seconds {
         0 => DEFAULT_UDP_IDLE,
         1..=UDP_IDLE_MAX_SECS => Duration::from_secs(seconds.unsigned_abs()),
@@ -68,7 +68,7 @@ pub fn udp_idle_timeout(seconds: i64) -> Duration {
 /// The idle sweep's interval for an idle timeout: a quarter of it, at least [`MIN_SWEEP`] (Go's
 /// `sweepInterval`).
 #[must_use]
-pub fn sweep_interval(idle: Duration) -> Duration {
+pub(crate) fn sweep_interval(idle: Duration) -> Duration {
     (idle / 4).max(MIN_SWEEP)
 }
 

@@ -3,7 +3,7 @@
 //! 接続の組と行の組は packet を待ち行列に積まず、送るものがある枠と行の番号を順番の list に並べ、
 //! `poll_transmit` の時に先頭の 1 つが packet を 1 つ作ります。list の節は固定の配列に置くので、出力の保持は
 //! 接続と行の数で決まります。制御の組だけが、MTU の大きさの枠を固定の数だけ持つ輪に packet を積みます。
-//! 組の選び方 (deficit round robin) は核の段 (PR 4a) が足します。
+//! 組の選び方 (deficit round robin) は [`crate::stack`] の送り出しが持ちます。
 
 use crate::bitset::BitSet;
 use crate::fixed_vec::{AllocError, FixedVec};
@@ -40,6 +40,7 @@ impl Dlist {
         nodes * 2 * size_of::<u32>() + BitSet::bytes_for(nodes)
     }
 
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.next.heap_bytes() + self.prev.heap_bytes() + self.in_list.heap_bytes()
     }
@@ -167,6 +168,7 @@ impl CtlRing {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.buf.heap_bytes() + self.lens.heap_bytes()
     }
