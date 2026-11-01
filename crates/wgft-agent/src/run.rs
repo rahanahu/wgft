@@ -1,7 +1,6 @@
 //! agent の起動と、全体状態の適用とハートビートの組み立て。
 
 use crate::logf;
-use std::fmt::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -530,7 +529,7 @@ pub(crate) async fn main_loop(
     let mut shutdown = std::pin::pin!(shutdown);
     let mut tick = tokio::time::interval(tick_every);
     tick.tick().await;
-    let mut last_status = String::new();
+    let mut last_status = Vec::new();
     // 終わった JoinHandle をもう一度待つと panic するので、stream の task が終わったかを覚える
     let mut stream_done = false;
     let result = 'main: loop {
@@ -601,24 +600,32 @@ async fn timed<T>(what: &str, f: impl std::future::Future<Output = T>) -> T {
     r
 }
 
-/// 30 秒ごとの見回りと、状態が変わったときの状態の行。
-async fn tick_and_report(agent: &Shared, last_status: &mut String) {
+/// 30 秒ごとの見回りと、状態が変わったときの状態の行。ルール ID と理由は改行を含みうるので、行に
+/// 分けてから比べてログに出す。
+async fn tick_and_report(agent: &Shared, last_status: &mut Vec<String>) {
     tick_round(agent).await;
     let a = agent.lock().await;
     let hb = a.heartbeat().await;
-    let mut s = format!(
-        "generation {} tunnel={} {} endpoint={}",
-        hb.generation, hb.tunnel.state, hb.tunnel.reason, hb.tunnel.endpoint
-    );
-    for r in &hb.rules {
-        let _ = write!(s, "\nrule {} {} {}", r.id, r.state, r.reason);
-    }
+    let s = status_lines(&hb);
     if s != *last_status {
-        for l in s.lines() {
+        for l in &s {
             logf!("{l}");
         }
         *last_status = s;
     }
+}
+
+/// 状態の行。1 行目がトンネル、続く行がルールごとである。
+fn status_lines(hb: &Heartbeat) -> Vec<String> {
+    let mut s = Vec::with_capacity(1 + hb.rules.len());
+    s.push(format!(
+        "generation {} tunnel={} {} endpoint={}",
+        hb.generation, hb.tunnel.state, hb.tunnel.reason, hb.tunnel.endpoint
+    ));
+    for r in &hb.rules {
+        s.push(format!("rule {} {} {}", r.id, r.state, r.reason));
+    }
+    s
 }
 
 /// 30 秒ごとの見回り。排他の中で見回りの前半を行い、宛先の試し接続は排他を放して走らせ、結果を
@@ -879,6 +886,25 @@ pub(crate) fn test_agent() -> Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rule_id_with_a_line_break_stays_on_its_own_status_line() {
+        let hb = Heartbeat {
+            generation: 3,
+            rules: vec![wgft_proto::RuleStatus {
+                id: "r_1\n2026/11/01 00:00:00 forged".into(),
+                state: STATUS_OK.into(),
+                reason: String::new(),
+            }],
+            ..Heartbeat::default()
+        };
+        let lines = status_lines(&hb);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            crate::logging::terminal_safe(&lines[1]),
+            "rule r_1\\n2026/11/01 00:00:00 forged ok "
+        );
+    }
 
     #[test]
     fn registered_address_forms() {

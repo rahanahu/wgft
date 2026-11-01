@@ -23,6 +23,51 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use tokio::sync::{Semaphore, watch};
 use tokio::time::Instant;
 
+/// DNS の名前として引ける形か (Go の `net.isDomainName`)。Go の静的な build の resolver はこの形でない
+/// 名前を問い合わせずに `no such host` で断る。`getaddrinfo` は `/etc/hosts` などから任意の文字列を
+/// 引けるので、Go と同じ名前だけを渡すために先に確かめる。長さは 253 byte まで (末尾の点があれば
+/// 254)、ラベルは 1 から 63 byte で、文字は英字、数字、`_`、`-` だけである。`-` はラベルの先頭と末尾に
+/// 置けず、数字だけの名前は名前としない。
+#[must_use]
+pub fn is_domain_name(s: &str) -> bool {
+    if s == "." {
+        return true;
+    }
+    let b = s.as_bytes();
+    let l = b.len();
+    if l == 0 || l > 254 || (l == 254 && b[l - 1] != b'.') {
+        return false;
+    }
+    let mut last = b'.';
+    let mut non_numeric = false;
+    let mut part = 0;
+    for &c in b {
+        match c {
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
+                non_numeric = true;
+                part += 1;
+            }
+            b'0'..=b'9' => part += 1,
+            b'-' => {
+                if last == b'.' {
+                    return false;
+                }
+                part += 1;
+                non_numeric = true;
+            }
+            b'.' => {
+                if last == b'.' || last == b'-' || part > 63 || part == 0 {
+                    return false;
+                }
+                part = 0;
+            }
+            _ => return false,
+        }
+        last = c;
+    }
+    last != b'-' && part <= 63 && non_numeric
+}
+
 /// 宛先の名前を同時に引く数。
 pub const TARGET_PERMITS: usize = 8;
 /// WireGuard のエンドポイントの名前を同時に引く数。引き直しは同じ名前で相乗りするので、応答しない
@@ -167,6 +212,16 @@ impl Resolver {
     }
 
     async fn lookup(&self, kind: Kind, host: &str, deadline: Instant) -> Outcome {
+        // DNS の名前でない名前は、Go の resolver と同じく引かずに断る。IP のリテラル (IPv6 の zone の
+        // 付いた形を含む) は Go と同じく名前として調べない
+        let literal = host
+            .split_once('%')
+            .map_or(host, |(a, _)| a)
+            .parse::<IpAddr>()
+            .is_ok();
+        if !literal && !is_domain_name(host) {
+            return Err(format!("lookup {host}: no such host"));
+        }
         let mut rx = self.join(kind, host);
         // Go の resolver が期限で打ち切ったときと同じ語にする
         match tokio::time::timeout_at(deadline, rx.wait_for(Option::is_some)).await {
@@ -565,6 +620,92 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    /// DNS の名前でない名前は、OS の resolver に渡さずに断る。
+    #[tokio::test]
+    async fn names_that_are_not_domain_names_are_not_looked_up() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let r = Resolver::with_lookup(
+            8,
+            1,
+            Arc::new(move |_h: &str, _| {
+                counter.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(vec![ip("192.0.2.1")])
+            }),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for name in ["evil\nname", "a b", "x\u{1b}[2J"] {
+            assert_eq!(
+                r.lookup_target(name, deadline).await,
+                Err(format!("lookup {name}: no such host"))
+            );
+            assert_eq!(
+                r.lookup_endpoint(name, deadline).await,
+                Err(format!("lookup {name}: no such host"))
+            );
+        }
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+        assert!(r.lookup_target("nas.lan", deadline).await.is_ok());
+        assert!(r.lookup_target("127.0.0.1", deadline).await.is_ok());
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    /// Go の `TestDNSNames` の例と、長さの境目。
+    #[test]
+    fn domain_names_like_go() {
+        let ok = [
+            "foo.com",
+            "_xmpp-server._tcp.google.com",
+            "foo.com.",
+            "a.b-c.de",
+            "a_b.c",
+            "1.2.3.example",
+            ".",
+            &format!(
+                "{}.{}.{}.{}",
+                "a".repeat(63),
+                "b".repeat(63),
+                "c".repeat(63),
+                "d".repeat(61)
+            ),
+            &format!(
+                "{}.{}.{}.{}.",
+                "a".repeat(63),
+                "b".repeat(63),
+                "c".repeat(63),
+                "d".repeat(61)
+            ),
+        ];
+        for n in ok {
+            assert!(is_domain_name(n), "{n}");
+        }
+        let bad = [
+            "",
+            "..",
+            "a..b",
+            "-foo.com",
+            "foo-.com",
+            "foo.com-",
+            "foo bar",
+            "foo\nbar",
+            "\u{1b}[2J",
+            "ex\u{e4}mple.com",
+            "1.2.3.4",
+            "123",
+            &"a".repeat(64),
+            &format!(
+                "{}.{}.{}.{}",
+                "a".repeat(63),
+                "b".repeat(63),
+                "c".repeat(63),
+                "d".repeat(62)
+            ),
+        ];
+        for n in bad {
+            assert!(!is_domain_name(n), "{n:?}");
+        }
     }
 
     /// Go の `TestSortByRFC6724` の例 (RFC 6724 の 10.2 節と Go の issue 13283)。
