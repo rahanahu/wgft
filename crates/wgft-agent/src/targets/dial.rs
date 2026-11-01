@@ -221,15 +221,7 @@ pub(crate) fn errno_text(e: &io::Error) -> String {
         K::PermissionDenied => return "permission denied".to_owned(),
         _ => {}
     }
-    let s = e.to_string();
-    let s = match s.rfind(" (os error ") {
-        Some(i) if s.ends_with(')') => &s[..i],
-        _ => &s,
-    };
-    let mut c = s.chars();
-    c.next().map_or_else(String::new, |f| {
-        f.to_lowercase().chain(c).collect::<String>()
-    })
+    crate::oserror::lower_first(&crate::oserror::os_text(e))
 }
 
 #[cfg(test)]
