@@ -4,7 +4,7 @@
 対象は、Rust の wgstack 自身を除くすべてです。
 契約は [agent と server の境目の仕様](../spec/README.md) です。
 この文書は、その契約を Rust の agent でどう満たすかと、どの順で作るかを書きます。
-実装済みの段は「設定の層」、「platform の層」、「agent の device の殻」、「宛先と予算」、「制御ソケット」、「agent doctor の骨組み」、[ラボの切り替え](#ラボの切り替え)です。ほかの内容は未実装です。
+実装済みの段は「設定の層」、「platform の層」、「agent の device の殻」、「宛先と予算」、「制御ソケット」、「agent doctor の骨組み」、「agent doctor の稼働中の検査」、[ラボの切り替え](#ラボの切り替え)です。ほかの内容は未実装です。
 
 ## 範囲と完成の条件
 
@@ -28,12 +28,8 @@ event loop とスレッドの形は、#681 の `docs/design/v2/wgstack-rs.md` �
 どの確認が条件に入るかは[ラボの切り替え](#ラボの切り替え)に書きます。
 製品の経路は root も TUN も使いません。
 
-段の途中で `feat/v2-rust` に入れ、main へ入れる前に解く制約は次のとおりです。
+段の途中で `feat/v2-rust` に入れ、後の段で解く制約は次のとおりです。
 
-- `agent doctor` の中継の検査:agent の応答がフロー数の予算を持つまで、`relay.listeners`、`relay.sessions`、`relay.refusals` は Rust の agent に対して `no_relay` の SKIPPED です。
-  `relay.listeners` は総合判定を動かす検査なので、この間は待ち受けを開けないルールがあっても、トンネルが立っていれば終了コードは 0 です。
-  「agent doctor の稼働中の検査」の段が応答に予算を載せて解きます。
-  予算の代わりの値を作って載せることはしません
 - v2.0.0 の前に解く制約:`agent doctor` と `agent teardown` は、カーネルモードの記録を持つデータディレクトリを終了コード 3 で拒みます。
   agent のカーネルモードを移す段で外します
 
@@ -97,8 +93,8 @@ Go の v1 の agent と仕様に対して、今の Rust の agent に無いも�
 
 | 項目 | 仕様 | 今の Rust | 段 |
 | --- | --- | --- | --- |
-| 制御ソケット | [control-socket.md](../spec/control-socket.md)。`rotate-key` と `doctor` | 済み。応答の中身のうちフロー数の予算と宛先の試し接続の値は無い ([応答の中身の今の範囲](#応答の中身の今の範囲)) | 「制御ソケット」 |
-| `agent doctor` | [control-socket.md の agent doctor --json](../spec/control-socket.md#agent-doctor---json) と [検査の一覧](../diagnosis/agent-evidence.md#検査の一覧と証拠の出どころ) | CLI の検査はすべて済み。agent の応答のフロー数の予算と宛先の試し接続の値は無い | 「agent doctor の骨組み」と「agent doctor の稼働中の検査」 |
+| 制御ソケット | [control-socket.md](../spec/control-socket.md)。`rotate-key` と `doctor` | 済み。応答の中身のうちソケットのバッファと UDP の会計は無い ([応答の中身の今の範囲](#応答の中身の今の範囲)) | 「制御ソケット」 |
+| `agent doctor` | [control-socket.md の agent doctor --json](../spec/control-socket.md#agent-doctor---json) と [検査の一覧](../diagnosis/agent-evidence.md#検査の一覧と証拠の出どころ) | CLI の検査と、agent の応答のフロー数の予算、セッションとフローの数、宛先の誤りは済み。ソケットのバッファと UDP の会計は無い | 「agent doctor の骨組み」と「agent doctor の稼働中の検査」 |
 
 ### CLI と設定
 
@@ -567,11 +563,9 @@ TUN の試作の agent の応答は、Go の v1 の応答と同じ形で、次�
 - `tunnel.socket_buffers`:「wgstack の上の agent」がデータプレーンの測った値を載せます。
   それまで CLI は `socket_buffers_not_reported` を示します
 - `tunnel.udp_accounting`:[段と値の出どころ](#段と値の出どころ)のとおりです
-- `budgets`:フロー数の pool が「宛先と予算」の段で入るまで載せません。
-  それまで CLI は `relay.listeners`、`relay.sessions`、`relay.refusals` を中継が無い場合の `no_relay` で SKIPPED にします。
-  `relay.listeners` は総合判定を動かす検査なので、この間の `agent doctor` は待ち受けの誤りを総合判定に反映しません
-- ルールの `sessions` と `flows`:0 を載せます。数えるのはフロー数の pool です
-- ルールの `target_errors`:宛先の試し接続が「宛先と予算」の段で入るまで 0 です
+
+試作の中継は TCP だけを開くので、UDP のルールは待ち受けを持たない `error` のルールとして載り、UDP の予算はフローを持ちません。
+「UDP の中継」の段が UDP の待ち受けを足すと、同じ集計に入ります。
 
 ### DoctorResponse
 
@@ -635,7 +629,7 @@ Go の v1 のユーザー空間モードと同じです。
 CLI の検査は DoctorResponse だけを読む関数なので、骨組みの段ですべて移しました。
 稼働中の agent の検査の結果は、Go の CLI と Rust の CLI のどちらで読んでも同じになります。
 骨組みの段で、どの応答が来ても Go の v1 にない理由の符号を出さないためでもあります。
-2 つ目の段で足すのは agent の側の値で、それまでの応答の扱いは[応答の中身の今の範囲](#応答の中身の今の範囲)にあります。
+2 つ目の段で足すのは agent の側の値で、今も載せない値は[応答の中身の今の範囲](#応答の中身の今の範囲)にあります。
 
 骨組みで決めたことは次のとおりです。
 
@@ -651,6 +645,25 @@ CLI の検査は DoctorResponse だけを読む関数なので、骨組みの段
   Go の並びと違う OS があっても、人向けの文だけが変わります
 - カーネルモードの拒否:`agent.json` の記録か稼働中の agent の応答の `mode` が `kernel` なら、検査を組む前に拒みます。
   記録が `userspace` でも `kernel` でもない値なら、その値を名指して同じ種別と対象で拒みます
+
+稼働中の検査で決めたことは次のとおりです。
+
+- 1 回の読み:ルールの状態とリスナーの集計は、中継のリスナーの状態を 1 回読んだ値から作ります。
+  ハートビートのルールの状態も同じ関数で作るので、`doctor` の `state` と `reason` はハートビートと同じ判定です。
+  Go の `usermode.Read` と同じです
+- リスナーの並び:Go の `Manager.Status` と同じく、リスナーの名前 (`tcp/<port>`) の文字列の順に並べます。
+  ルールの状態の理由と `bind_error`、`target_error` は、この順で最初の誤りから取ります。
+  `tcp/10` は `tcp/9` より前なので、範囲のルールで理由に出るポートが Go と同じになります
+- 誤りの分け方:待ち受けを開けていないリスナーは `bind_errors` に数え、理由は bind の失敗か IP リテラルの宛先の拒否です。
+  開いている待ち受けで宛先の誤りを持つリスナーは `target_errors` に数え、理由は試し接続の失敗か、接続のときの宛先の拒否です
+- `sessions`:中継が持つ接続の数で、トンネルの側は枠を取った後に、宛先の側は繋がった後に数え、中継が終われば両方を引きます。
+  Go の `tcpServer.conns` と同じ数え方です。
+  Go は中継の終わりに送り残しを届けるまで枠を持ちますが、`conns` からは先に外すので、この数には入りません
+- `flows`:フロー数の pool の待ち受けごとの枠の数をそのまま読みます。上限の判定の対象と同じ量です
+- `budgets`:TCP と UDP の順に、pool を 1 回の排他で読みます。
+  Go は値ごとに排他を取りますが、1 回で読むほうが値の組が揃います。
+  拒否は 0 でないものだけを、ルール ID と理由の語の順に並べます
+- `refusals_since`:中継はトンネルと一緒に作り直すので、`tunnel.started_at` と同じ時刻です
 
 wgstack の内部に依るのは `tunnel.udp_accounting` だけです。
 `tunnel.socket_buffers` と `tunnel.transfer` は WireGuard の device とその殻に、`relay.*` は中継とフロー数の pool に依ります。

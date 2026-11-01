@@ -224,6 +224,23 @@ pub enum Denied {
 /// ルールごとの拒否の数。添字は [`Reason::ALL`] の順。
 pub type RefusalCounts = [u64; 5];
 
+/// `agent doctor` に示す予算の読み。記号は [`Ledger`] と同じ。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reading {
+    /// T。
+    pub total: usize,
+    /// u。
+    pub in_use: usize,
+    /// C。
+    pub rule_cap: usize,
+    /// m。応答の名前は Go と同じ `reserve`。
+    pub reserve: usize,
+    /// N。
+    pub rules: usize,
+    /// 0 でない拒否の数。ルール ID、理由、数の組を、ルール ID と理由の語の順に並べる。
+    pub refusals: Vec<(String, Reason, u64)>,
+}
+
 /// 帳簿の読み出し。試験が帳簿を照合し、`agent doctor` が予算を示すのに使う。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ledger {
@@ -470,6 +487,32 @@ impl Pool {
     #[must_use]
     pub fn refusals(&self) -> BTreeMap<String, RefusalCounts> {
         self.lock().refusals.clone()
+    }
+
+    /// `agent doctor` に示す値を 1 回の排他で読む。
+    #[must_use]
+    pub fn reading(&self) -> Reading {
+        let g = self.lock();
+        let mut refusals: Vec<(String, Reason, u64)> = g
+            .refusals
+            .iter()
+            .flat_map(|(rule, counts)| {
+                Reason::ALL
+                    .iter()
+                    .filter(|r| counts[r.index()] > 0)
+                    .map(|r| (rule.clone(), *r, counts[r.index()]))
+            })
+            .collect();
+        // Go の `doctorBudget` と同じく、ルール ID と理由の語の順に並べる
+        refusals.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.as_str().cmp(b.1.as_str())));
+        Reading {
+            total: g.total,
+            in_use: g.in_use,
+            rule_cap: g.rule_cap,
+            reserve: g.minimum,
+            rules: g.regs.len(),
+            refusals,
+        }
     }
 
     /// 待ち受け 1 つ分の枠を登録する。登録した時点で新しいフローを受け付けている。
