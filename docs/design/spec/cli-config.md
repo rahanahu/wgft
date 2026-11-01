@@ -326,6 +326,9 @@ wgstack の送信の向きのバッチの予算を MiB で表します([P_max �
   上限は CPU の数で決まるので、上限を超える値は誤りにせず丸めます。
   Go 以外の実装は、受け付ける値の集合と誤りの文面を同じにします。
   値から何を導くかは、その実装の送信の経路に合わせて決めます。
+- Rust の agent:値はトンネルの受信と送信の両方の向きのバッチの置き場の予算で、空の値の式は Go と同じです。
+  起動の行は、後述の送信の向きのバッチの行の代わりに `tunnel batching:` の行を書きます。
+  決め方は [WGFT_AGENT_BATCH_MIB の意味](../v2/agent-throughput.md#wgft_agent_batch_mib-の意味) にあります
 
 ### WGFT_AGENT_ALLOW_TARGETS
 

@@ -978,8 +978,7 @@ wgstack はそれらを自分で扱うので、[トンネルの中の約束](../
   `gvisor` のときは使わない旨を英語の 1 行で出します
 - `WGFT_MAX_TCP_FLOWS`:Go と同じく K として受け取り、接続の枠の数 N_c = K + Q を導きます
 - `WGFT_AGENT_BATCH_MIB`:仕様は、受け付ける値の集合と誤りの文面を Go と同じにし、値から何を導くかは実装の送信の経路で決めるとしています ([WGFT_AGENT_BATCH_MIB](../spec/cli-config.md#wgft_agent_batch_mib))。
-  提案:値は 1 回の起床で作る packet の数の上限に使い、`0` は 1 件ずつ送ることにします。
-  導く式は送信の経路を測ってから決めます
+  値はトンネルの受信と送信のバッチの置き場の予算にし、`0` は 1 つずつ送受信することにしました ([WGFT_AGENT_BATCH_MIB の意味](agent-throughput.md#wgft_agent_batch_mib-の意味))
 
 ## 待ち受けの守り
 
@@ -2028,7 +2027,6 @@ agent の置き換えが終わった後に、次の作業を順に決めます�
 - device の層との受け渡し:`Device::poll_packet` と `Device::poll_transmit` が packet ごとに確保する形を、呼び手の buffer に書く形に替えるか。
   呼び手の buffer に書く形を採りました ([決めたこと](#決めたこと))
 - 受け付けるアドレスが増えたときの待ち受けと UDP の endpoint の表の持ち方 (dial の側を足すときに決めます)
-- 1 回の起床の上限:1 回に作る packet の数と、`WGFT_AGENT_BATCH_MIB` から導く式
 - glibc に動的に結ぶ build:バッチの段で写しを減らした後に、musl の静的な build との差を測り直して決めます ([決めたこと](#決めたこと))
 - 割り当て器の丸めの係数:OS の標準の割り当て器の係数を測ります
 

@@ -130,7 +130,7 @@ pub(crate) fn platform(input: &Input) -> Check {
     };
     let bound = wgft_agent::memory::MemoryBound::for_limits(
         caps,
-        wgft_agent::batching::Batching::derived(caps),
+        wgft_agent::batching::Batching::new(input.batch_mib, caps),
     );
     c.detail = format!(
         "{head}; the memory bound would be {} MiB, computed here from the flow caps {} UDP and {} TCP, not read from the running agent",

@@ -169,7 +169,7 @@ pub struct RunArgs {
         overrides_with = "agent_netstack"
     )]
     pub agent_netstack: Option<String>,
-    /// send batch budget in MiB, env WGFT_AGENT_BATCH_MIB; 0 turns it off
+    /// tunnel batch budget in MiB for receive and send, env WGFT_AGENT_BATCH_MIB; unset derives it from the flow caps, and 0 turns batching off
     #[arg(
         long = "agent-batch-mib",
         allow_hyphen_values = true,

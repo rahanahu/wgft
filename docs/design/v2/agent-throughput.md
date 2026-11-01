@@ -499,9 +499,18 @@ byte あたりの CPU が 0.8 倍なら、速さは約 1.25 倍です。
 - 受け付ける値、丸め、誤りの文面:[WGFT_AGENT_BATCH_MIB](../spec/cli-config.md#wgft_agent_batch_mib) の今の規則のままです
 - 起動の時に 1 回だけ読み、動いている間は変えません
 
-今の Rust の agent は値を受けて、まだ使っていないことを 1 行出します ([CLI と設定](agent-parity.md#cli-と設定))。
-バッチの段の変更は、この行を外し、ヘルプの文 (`send batch budget in MiB ...`) を両方の向きのバッチの予算を表す文に直し、生成するリファレンスを同じ変更で作り直します。
-誤りの文面の `0 turns send batching off` を変えるなら、仕様を同じ変更で直します。
+バッチの段で、Rust の agent は値を使うようにしました。
+
+- 起動の行:まだ使っていないことを知らせる行を外し、Go の `send batch budget:` の行の代わりに、メモリの上界の行の後に `tunnel batching:` の行を書きます。
+  枠の数、置き場の MiB、出所 (`derived from the flow caps; set WGFT_AGENT_BATCH_MIB to override`、`from WGFT_AGENT_BATCH_MIB`、`from WGFT_AGENT_BATCH_MIB, lowered to the most this build uses`) を書き、`0` ではバッチを切ったことを書きます。
+  Windows と macOS では、値を使わないことを書きます
+- ヘルプ:`--agent-batch-mib` の 1 行の説明を、受信と送信の両方の向きの予算を表す文に直しました。
+  生成するリファレンスの `docs/cli.md` は Go の v1 の `wgft` のヘルプから作るもので、Go の製品は変えないので作り直しません。
+  Rust のヘルプとの照合 (`crates/wgft/tests/cli_doc.rs`) はフラグの名前、型、既定の値を比べ、フラグの説明の文は比べません
+- 誤りの文面:`0 turns send batching off` は変えません。
+  仕様は Go と Go 以外の実装の誤りの文面を同じにすることを求め、Go の v1 の文面は変えないためです
+- `agent doctor`:メモリの上界の値は、設定ファイルの `WGFT_AGENT_BATCH_MIB` も読んで導きます。
+  値が誤りなら、`agent run` が拒むので、doctor は空の値の式で数えます
 
 ### バッチの作り
 
