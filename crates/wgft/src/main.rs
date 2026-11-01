@@ -5,9 +5,9 @@
 
 use std::process::ExitCode;
 
-use wgft::agent_run;
 use wgft::cli::{self, Parsed};
 use wgft::failure::Failure;
+use wgft::{agent_keys, agent_run};
 use wgft_agent::config::{LogLine, ProcessEnv, agent::host_os};
 use wgft_agent::credentials;
 
@@ -38,6 +38,22 @@ fn execute() -> Result<(), Failure> {
             Ok(())
         }
         Parsed::AgentRun { global, run } => run_agent(&global, &run),
+        Parsed::AgentPubkey { global } => Ok(agent_keys::pubkey(
+            &global,
+            &ProcessEnv,
+            &mut std::io::stdout(),
+        )?),
+        Parsed::AgentRotateKey { global } => Ok(agent_keys::rotate_key(
+            &global,
+            &ProcessEnv,
+            &mut std::io::stdout(),
+        )?),
+        Parsed::AgentTeardown { global, args } => Ok(agent_keys::teardown(
+            &global,
+            &args,
+            &ProcessEnv,
+            host_os(),
+        )?),
     }
 }
 

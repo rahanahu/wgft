@@ -183,6 +183,19 @@ impl Drop for Listener {
     }
 }
 
+/// リスナー 1 つの状態。試作の中継は TCP だけを開く。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListenerStat {
+    /// 属するルールの ID。
+    pub rule_id: String,
+    /// `tcp/<port>` の形の名前。
+    pub key: String,
+    /// 待ち受けを開けているか。
+    pub listening: bool,
+    /// 開けなかった理由か、開いている待ち受けの宛先の誤り。開けなかった理由が先。
+    pub err: Option<String>,
+}
+
 /// 中継の全体。トンネルと一緒に作り、一緒に閉じる。リスナーはポートで区別するので、数は TCP の
 /// ポートの数を超えない。v1 もルールの範囲の幅に上限を置かない。フロー数の予算もトンネルごとに作るので、
 /// 拒否の数はトンネルを作り直すと 0 に戻る。
@@ -469,6 +482,20 @@ impl Manager {
         self.listeners.values().filter(|l| l.task.is_some()).count()
     }
 
+    /// リスナーごとの状態。`agent doctor` の応答がルールごとに数え直す。並びはポートの順。
+    #[must_use]
+    pub fn listener_stats(&self) -> Vec<ListenerStat> {
+        self.listeners
+            .values()
+            .map(|l| ListenerStat {
+                rule_id: l.rule_id.clone(),
+                key: format!("tcp/{}", l.port),
+                listening: l.task.is_some(),
+                err: l.err(),
+            })
+            .collect()
+    }
+
     /// ルールごとの状態。1 つでも誤りのリスナーがあればそのルールは `error`。
     #[must_use]
     pub fn status(&self) -> Vec<RuleStatus> {
@@ -645,12 +672,26 @@ mod tests {
         }
     }
 
+    /// 今は空いていて、試験が手放した後に他が取りにくいポート。ポート 0 の bind が割り当てる一時の
+    /// ポートの範囲 (Linux の既定は 32768 から、macOS と Windows は 49152 から) の下から選ぶ。一時の
+    /// ポートを手放して使い直すと、並行に走る試験のポート 0 の bind が間で同じポートを取りうるためである。
+    /// 始まりの位置はプロセスごとに乱し、nextest の別のプロセスと重なりにくくする。
     fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+        use std::hash::{BuildHasher, RandomState};
+        use std::sync::atomic::{AtomicU16, Ordering};
+        const LOW: u16 = 20000;
+        const SPAN: u16 = 10000;
+        static NEXT: AtomicU16 = AtomicU16::new(0);
+        let seed = RandomState::new().hash_one(std::process::id());
+        for _ in 0..SPAN {
+            let i = NEXT.fetch_add(1, Ordering::Relaxed);
+            let offset = seed.wrapping_add(u64::from(i)) % u64::from(SPAN);
+            let port = LOW + u16::try_from(offset).unwrap_or(0);
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return port;
+            }
+        }
+        panic!("no free port below the ephemeral range");
     }
 
     /// 接続ごとに読んだものを返す echo の宛先。
@@ -883,8 +924,8 @@ mod tests {
 
     #[tokio::test]
     async fn reports_unsupported_unusable_and_failed_listeners() {
-        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = taken.local_addr().unwrap().port();
+        let port = free_port();
+        let taken = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
         let target = echo().await;
         let mut m = manager();
         m.apply(&[

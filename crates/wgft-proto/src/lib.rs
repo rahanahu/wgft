@@ -4,6 +4,7 @@
 //! 形は Go の `encoding/json` が書き読みするものに合わせる。合わせ方と、合わせていない細部は
 //! `docs/design/v2/agent-control.md` に書く。
 
+pub mod gojson;
 pub mod gotime;
 pub mod join;
 pub mod register;

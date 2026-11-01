@@ -5,7 +5,10 @@
 //! `dataplane` が扱う。作りは `docs/design/v2/agent-control.md` に書く。
 
 pub mod config;
+mod control;
+pub mod controlapi;
 pub mod credentials;
+mod ctlserver;
 pub mod dataplane;
 pub mod enroll;
 pub mod error;

@@ -3,6 +3,7 @@
 //! 設定の層は `wgft_agent::config` にあり、ここは clap への接続 (`cli`)、設定を読んで入口を通す手順
 //! (`agent_run`)、失敗と終了コード (`failure`) を持つ。
 
+pub mod agent_keys;
 pub mod agent_run;
 pub mod cli;
 pub mod failure;

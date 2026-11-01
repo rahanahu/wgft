@@ -5,6 +5,7 @@
 pub mod ctlsock;
 pub mod fdlimit;
 pub mod paths;
+pub mod procinfo;
 #[cfg(windows)]
 pub mod winsec;
 

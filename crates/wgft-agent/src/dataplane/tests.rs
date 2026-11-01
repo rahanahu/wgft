@@ -464,15 +464,26 @@ async fn a_bad_configuration_returns_the_carry() {
 
 #[tokio::test]
 async fn set_endpoint_moves_the_peer() {
-    let (a, b) = pair(0).await;
+    // 相手は答えない UDP のソケットにする。答える相手と組むと、server の側のデータプレーンも
+    // 応答だけのセッションを持つ間に自分のハンドシェイクを始め、2 つのハンドシェイクが交差する。
+    // 後に済んだ方を確かめる keepalive は、移した後に届くとエンドポイントを送信元へ戻す
+    // (`Roaming::NotByInitiation` が受け付ける data と keepalive)。その時機は負荷で変わるので、
+    // 何も返さない相手で、命令がピアを移すことだけを確かめる
+    let (a_key, b_key) = keys();
+    let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let a = Dataplane::start(
+        agent_config(&a_key, b_key.public_key(), silent.local_addr().unwrap()),
+        loopback(),
+        Carry::first(Duration::ZERO),
+        Stub::from_init,
+    )
+    .await
+    .unwrap();
     let to: SocketAddr = "127.0.0.1:9".parse().unwrap();
     a.set_endpoint(to).await.unwrap();
-    wait_for("the new endpoint", async || {
-        a.status().await.unwrap().peer.unwrap().endpoint == Some(to)
-    })
-    .await;
+    // 命令は順に処理されるので、次の読み出しは移した後の値を返す
+    assert_eq!(a.status().await.unwrap().peer.unwrap().endpoint, Some(to));
     a.stop().await;
-    b.stop().await;
 }
 
 /// 送った datagram を記録する先。`block` の間は `WouldBlock` を、`fail` の間は他の誤りを返す。

@@ -196,7 +196,7 @@ fn batch_mib(v: &str) -> Result<Option<i64>, Refusal> {
 
 /// Linux のカーネルの `dev_valid_name` に合わせ、名前をバイト列として調べる。
 /// 合わせて NUL と `%` も拒む。通すと、宣言した名前と実際に付く名前が食い違う。
-fn validate_interface_name(name: &str) -> Result<(), Refusal> {
+pub fn validate_interface_name(name: &str) -> Result<(), Refusal> {
     const SUBJECT: &str = "WGFT_WG_INTERFACE";
     if name.is_empty() {
         return Err(Refusal::config(

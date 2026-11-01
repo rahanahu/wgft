@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 wgft-agent.workspace = true
 wgft-proto.workspace = true
 

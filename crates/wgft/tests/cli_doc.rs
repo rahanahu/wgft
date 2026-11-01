@@ -25,13 +25,8 @@ const AGENT_COMMANDS: &[&str] = &[
 /// 試験は実際の差の集合とこの表が一致することを求める。新しい差が出れば落ち、段が入って差が消えたのに
 /// この表に残っていても落ちる。段を入れたら該当する行を消す。
 const EXPECTED_DIFFERENCES: &[&str] = &[
-    // 制御ソケットと agent doctor の段で入る
+    // agent doctor の骨組みの段で入る
     "missing command: agent doctor",
-    // agent の鍵の操作の段で入る
-    "missing command: agent pubkey",
-    "missing command: agent rotate-key",
-    // カーネルモードの段で入る。それまでは run が拒む
-    "missing command: agent teardown",
 ];
 
 #[derive(Debug, PartialEq, Eq)]
