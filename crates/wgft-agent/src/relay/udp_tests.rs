@@ -251,7 +251,16 @@ async fn a_port_unreachable_target_closes_the_session_without_icmp_into_the_tunn
     assert_eq!(peer.icmp_errors(), 0);
 }
 
+/// 書き込みの失敗で閉じる道の試験。Linux と macOS のカーネルは、接続した UDP のソケットに残った ICMP の
+/// 拒否を次の書き込みの誤りとして返す。Windows の Winsock は拒否を次の受信の `WSAECONNRESET` として
+/// 渡し、CI の Windows では書き込みは失敗しなかった。そこでは応答の task が受信の誤りでセッションを閉じ、
+/// その道は [`a_port_unreachable_target_closes_the_session_without_icmp_into_the_tunnel`] が全 OS で
+/// 確かめる。書き込みの失敗を Windows で起こす手段が無いので、この試験は Windows では走らせない。
 #[tokio::test]
+#[cfg_attr(
+    windows,
+    ignore = "Winsock reports an ICMP refusal on the next receive, not on the next send"
+)]
 async fn a_failed_write_to_the_target_closes_the_session() {
     let peer = start().await;
     let dead = free_port();
