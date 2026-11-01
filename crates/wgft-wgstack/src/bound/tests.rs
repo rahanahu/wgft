@@ -232,6 +232,7 @@ fn a_full_stack_meets_each_term() {
         let (snd_cap, rcv_cap) = (c.snd.cap(), c.rcv.r.cap());
         (t.snd_cap, t.rcv_cap) = (snd_cap, rcv_cap);
         t.tail_off = snd_cap;
+        t.cwnd = 1;
         c.snd
             .write(0, &data[..snd_cap as usize], &mut s.s.chunks)
             .unwrap();

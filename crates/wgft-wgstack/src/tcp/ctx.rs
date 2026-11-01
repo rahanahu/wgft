@@ -57,6 +57,16 @@ pub(crate) fn lo32(x: u64) -> u32 {
     x as u32
 }
 
+/// 相手へ送る segment の中身の上限です (SACK の block を除く option を引いた値)。
+pub(crate) fn seg_mss(t: &Tcb) -> u32 {
+    // PMTU は 552 以上なので、header を引いても負になりません。
+    let mut m = i64::from(t.peer_mss).min(i64::from(t.pmtu) - i64::from(IP_TCP_HEADERS));
+    if t.ts_ok {
+        m -= i64::from(TS_OPTION_LEN);
+    }
+    u32_of(m.max(1))
+}
+
 impl Conn<'_> {
     fn timer_node(&self, kind: usize) -> u32 {
         self.id * NUM_TIMERS32 + u32::try_from(kind).unwrap_or(0)
@@ -78,15 +88,9 @@ impl Conn<'_> {
         }
     }
 
-    /// 相手へ送る segment の中身の上限です (SACK の block を除く option を引いた値)。
+    /// 相手へ送る segment の中身の上限です ([`seg_mss`])。
     pub(crate) fn seg_mss(&self) -> u32 {
-        let t = &*self.t;
-        // PMTU は 552 以上なので、header を引いても負になりません。
-        let mut m = i64::from(t.peer_mss).min(i64::from(t.pmtu) - i64::from(IP_TCP_HEADERS));
-        if t.ts_ok {
-            m -= i64::from(TS_OPTION_LEN);
-        }
-        u32_of(m.max(1))
+        seg_mss(self.t)
     }
 
     /// 相手から受ける segment の中身の大きさの見積もりです。遅延 ACK と受け手の SWS の回避に使います。

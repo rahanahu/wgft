@@ -73,6 +73,42 @@ pub(crate) fn idx(i: i32) -> usize {
     usize::try_from(i).unwrap_or(0)
 }
 
+/// 失われた byte です。境目より手前の SACK 済みでない byte と、境目から先で RACK が失われたとみなした byte の
+/// 和です。
+pub(crate) fn lost_bytes(t: &Tcb, recs: &RecordRing) -> u32 {
+    let loss = idx(t.loss_idx);
+    let front = if loss < recs.len() {
+        recs.get(loss).seq
+    } else {
+        t.snd_max
+    };
+    front
+        .wrapping_sub(t.snd_una)
+        .wrapping_sub(t.sacked.wrapping_sub(t.beyond_bytes))
+        .wrapping_add(t.rack_lost_beyond)
+}
+
+/// RFC 6675 の送り残しの量を、増減で保つ欄から求めます。SACK を交渉しない接続では、回復の外の重複した ACK 2 つ
+/// までを受け手が受けた segment とみなします (RFC 3042 の Limited Transmit、Linux の tcp_add_reno_sack)。
+pub(crate) fn pipe(t: &Tcb, recs: &RecordRing) -> u32 {
+    let mut p = t
+        .snd_max
+        .wrapping_sub(t.snd_una)
+        .wrapping_sub(t.sacked)
+        .wrapping_sub(lost_bytes(t, recs))
+        .wrapping_add(t.rtx_bytes);
+    if !t.sack_ok && !t.in_recovery && t.dup_acks > 0 {
+        p -= p.min(reno_sacked(t));
+    }
+    p
+}
+
+/// SACK を交渉しない接続で、回復の外の重複した ACK が受け手に届いたとみなす byte です。
+fn reno_sacked(t: &Tcb) -> u32 {
+    let k = t.dup_acks.min(DUP_THRESH - 1);
+    super::ctx::u32_of(k * i64::from(super::ctx::seg_mss(t)))
+}
+
 impl Conn<'_> {
     pub(crate) fn is_sacked(&mut self, i: usize) -> bool {
         let g = self.t.sack_gen;
@@ -98,40 +134,14 @@ impl Conn<'_> {
         (self.t.rxt_idx, self.t.rxt_off, self.t.rxt_mid) = (0, 0, false);
     }
 
-    /// 失われた byte です。境目より手前の SACK 済みでない byte と、境目から先で RACK が失われたとみなした byte の
-    /// 和です。
+    /// 失われた byte です ([`lost_bytes`])。
     pub(crate) fn lost_bytes(&mut self) -> u32 {
-        let t = &*self.t;
-        let loss = idx(t.loss_idx);
-        let front = if loss < self.b.recs.len() {
-            self.b.recs.at(loss).seq
-        } else {
-            t.snd_max
-        };
-        let t = &*self.t;
-        front
-            .wrapping_sub(t.snd_una)
-            .wrapping_sub(t.sacked.wrapping_sub(t.beyond_bytes))
-            .wrapping_add(t.rack_lost_beyond)
+        lost_bytes(self.t, &self.b.recs)
     }
 
-    /// RFC 6675 の送り残しの量です。SACK を交渉しない接続では、回復の外の重複した ACK 2 つまでを受け手が受けた
-    /// segment とみなします (RFC 3042 の Limited Transmit、Linux の tcp_add_reno_sack)。
+    /// RFC 6675 の送り残しの量です ([`pipe`])。
     pub(crate) fn pipe(&mut self) -> u32 {
-        let lost = self.lost_bytes();
-        let t = &*self.t;
-        let mut p = t
-            .snd_max
-            .wrapping_sub(t.snd_una)
-            .wrapping_sub(t.sacked)
-            .wrapping_sub(lost)
-            .wrapping_add(t.rtx_bytes);
-        if !t.sack_ok && !t.in_recovery && t.dup_acks > 0 {
-            let k = t.dup_acks.min(DUP_THRESH - 1);
-            let mss = i64::from(self.seg_mss());
-            p -= p.min(super::ctx::u32_of(k * mss));
-        }
-        p
+        pipe(self.t, &self.b.recs)
     }
 
     /// 開始の番号が `seq` 以上の最初の記録の位置です。記録は番号の順に隙間なく並びます。
@@ -605,7 +615,41 @@ fn gen_flag(t: &Tcb, r: &Record, f: u8) -> bool {
     r.flags & f != 0 && r.rtx_gen == t.rtx_gen
 }
 
-/// 接続の scoreboard の欄を記録から数え直し、増減で保つ値と比べます (`check_invariants`)。記録が SND.UNA から
+/// 使っている接続の送り手の状態を確かめます (`check_invariants`)。Go の敵対的な送り手の試験 (`runAudit`) が
+/// 各段の後に確かめることと `checkScoreboard` を写します。SND.UNA ≤ SND.NXT ≤ SND.MAX と輻輳の窓が 0 でない
+/// ことを確かめ、[`check_scoreboard`] で scoreboard と pipe を数え直し、分けて送っている記録の中の位置
+/// (`q_off`、`rxt_off`) がその記録の長さより小さいことを確かめます。Go の「pipe は送り残しの 2 倍と 1 以下」は
+/// 確かめません。定義どおりの pipe は SACK 済みでない記録の長さの和と再送の印の付いた記録の長さの和の和で、どちらも
+/// 送り残し以下なので、数え直した pipe と一致すればこの上限も満たすためです。
+pub(crate) fn check_sender(t: &Tcb, recs: &RecordRing) -> Result<(), &'static str> {
+    if seq::gt(t.snd_una, t.snd_nxt) || seq::gt(t.snd_nxt, t.snd_max) {
+        return Err("the send sequence numbers are out of order");
+    }
+    if t.cwnd == 0 {
+        return Err("the congestion window is zero");
+    }
+    check_scoreboard(t, recs)?;
+    if t.q_mid {
+        if t.lost_q.n == 0 {
+            return Err("a split lost queue retransmission has no lost queue");
+        }
+        // list の節は check_scoreboard が範囲の内にあることを確かめました。
+        let head = recs.get(t.lost_q.head.wrapping_sub(t.rec_base) as usize);
+        if t.q_off >= u32::from(head.length) {
+            return Err("the split lost queue offset passes its record");
+        }
+    }
+    if t.rxt_mid
+        && let Ok(i) = usize::try_from(t.rxt_idx)
+        && i < recs.len()
+        && t.rxt_off >= u32::from(recs.get(i).length)
+    {
+        return Err("the split retransmission offset passes its record");
+    }
+    Ok(())
+}
+
+/// 接続の scoreboard の欄を記録から数え直し、増減で保つ値と比べます。記録が SND.UNA から
 /// SND.MAX まで隙間なく並ぶこと、SACK 済みの byte と数、境目から先の byte と数、送り残しの再送の byte、境目から先の
 /// RACK の損失の byte、位置の欄の範囲、SACK 済みの記録の飛ばし先、2 つの list の節と印と数と順、SACK 済みでない
 /// 記録がどこかの list にあるか境目の手前で送り直しを待つことを確かめます。手間は記録の数に比例します。
@@ -623,6 +667,8 @@ pub(crate) fn check_scoreboard(t: &Tcb, recs: &RecordRing) -> Result<(), &'stati
     let loss = idx(t.loss_idx);
     let sacked = |r: &Record| r.flags & REC_SACKED != 0 && r.sack_gen == t.sack_gen;
     let (mut by, mut beyond_by, mut rtx, mut lost_beyond) = (0u32, 0u32, 0u32, 0u32);
+    // RFC 6675 の定義どおりの pipe です。
+    let mut def_pipe = 0u64;
     let mut high = None;
     let (mut cnt, mut beyond_cnt) = (0i32, 0i32);
     let mut s = t.snd_una;
@@ -653,6 +699,12 @@ pub(crate) fn check_scoreboard(t: &Tcb, recs: &RecordRing) -> Result<(), &'stati
         }
         if gen_flag(t, r, REC_LOST) && i >= loss {
             lost_beyond = lost_beyond.wrapping_add(l);
+        }
+        if i >= loss && !gen_flag(t, r, REC_LOST) {
+            def_pipe += u64::from(l);
+        }
+        if gen_flag(t, r, REC_RTX) {
+            def_pipe += u64::from(l);
         }
         if in_t && in_q {
             return Err("a send record is in both record lists");
@@ -695,6 +747,12 @@ pub(crate) fn check_scoreboard(t: &Tcb, recs: &RecordRing) -> Result<(), &'stati
     }
     if t.sacked > 0 && high != Some(t.high_sack) {
         return Err("the highest SACKed byte disagrees with the send records");
+    }
+    if !t.sack_ok && !t.in_recovery && t.dup_acks > 0 {
+        def_pipe -= def_pipe.min(u64::from(reno_sacked(t)));
+    }
+    if def_pipe != u64::from(pipe(t, recs)) {
+        return Err("pipe disagrees with the send records");
     }
     check_list(t, recs, t.t_list, REC_IN_T, true)?;
     check_list(t, recs, t.lost_q, REC_IN_Q, false)
@@ -791,13 +849,47 @@ mod tests {
 
     fn check(n: &mut TestNet, i: u32) -> Result<(), &'static str> {
         let c = n.s.conn(i);
-        check_scoreboard(c.t, &c.b.recs)
+        check_sender(c.t, &c.b.recs)
     }
 
     #[test]
     fn each_broken_scoreboard_is_caught() {
         type Break = fn(&mut Conn<'_>);
-        let cases: [(Break, &str); 11] = [
+        let cases: [(Break, &str); 18] = [
+            (
+                |c| c.t.snd_nxt = c.t.snd_max.wrapping_add(1),
+                "the send sequence numbers are out of order",
+            ),
+            (
+                |c| c.t.snd_una = c.t.snd_nxt.wrapping_add(1),
+                "the send sequence numbers are out of order",
+            ),
+            (|c| c.t.cwnd = 0, "the congestion window is zero"),
+            // drop_head や clear_rtx が rtx_bytes を減らし忘れた形です。
+            (
+                |c| c.t.rtx_bytes += 1,
+                "the SACK scoreboard sums disagree with the send records",
+            ),
+            // SACK 済みの記録が再送の印を残すと、和は合っても pipe が定義と合いません。
+            (
+                |c| {
+                    let last = c.b.recs.len() - 1;
+                    let g = c.t.rtx_gen;
+                    let r = c.b.recs.at(last);
+                    (r.flags, r.rtx_gen) = (r.flags | REC_RTX, g);
+                    let l = u32::from(r.length);
+                    c.t.rtx_bytes += l;
+                },
+                "pipe disagrees with the send records",
+            ),
+            (
+                |c| (c.t.q_mid, c.t.q_off) = (true, u32::MAX),
+                "the split lost queue offset passes its record",
+            ),
+            (
+                |c| (c.t.rxt_mid, c.t.rxt_idx, c.t.rxt_off) = (true, 0, u32::MAX),
+                "the split retransmission offset passes its record",
+            ),
             (
                 |c| c.t.loss_idx = 1000,
                 "a scoreboard position is out of range",
@@ -807,7 +899,7 @@ mod tests {
                 "the send records do not cover SND.UNA to SND.MAX",
             ),
             (
-                |c| c.t.snd_max ^= 1,
+                |c| c.t.snd_max = c.t.snd_max.wrapping_add(1),
                 "the send records do not cover SND.UNA to SND.MAX",
             ),
             (
@@ -856,6 +948,14 @@ mod tests {
             brk(&mut n.s.conn(i));
             assert_eq!(check(&mut n, i), Err(want));
         }
+        // 損失の待ち行列が空のまま、その先頭を分けて送っている印です。
+        let (mut n, i, _) = sent_net();
+        check(&mut n, i).unwrap();
+        n.s.conn(i).t.q_mid = true;
+        assert_eq!(
+            check(&mut n, i),
+            Err("a split lost queue retransmission has no lost queue")
+        );
         // 送った時刻の順を崩します。
         let (mut n, i, _) = sent_net();
         let c = n.s.conn(i);

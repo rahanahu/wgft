@@ -347,7 +347,7 @@ impl<H: Hook> Stack<H> {
             if used {
                 reserved += b.snd.cap() + b.rcv.r.cap();
                 check_conn(t, b)?;
-                crate::tcp::sack::check_scoreboard(t, &b.recs)?;
+                crate::tcp::sack::check_sender(t, &b.recs)?;
             }
             for (k, &d) in t.tdl.iter().enumerate() {
                 let node = i * NUM_TIMERS32 + u32::try_from(k).unwrap_or(0);

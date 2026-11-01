@@ -78,6 +78,7 @@ fn close_returns_everything() {
         t.tup = tup(rport);
         t.in_index = true;
         (t.snd_cap, t.rcv_cap) = (crate::buf::SEND_FLOOR, crate::buf::RECV_FLOOR);
+        t.cwnd = 1;
         s.s.conn_idx.insert(tup(rport), i, id.generation);
         c.snd
             .write(0, &[1; 3 * CHUNK_SIZE], &mut s.s.chunks)
@@ -161,6 +162,7 @@ fn invariants_catch_a_broken_count() {
     {
         let t = s.conns.tcb_mut(i);
         (t.snd_cap, t.rcv_cap) = (crate::buf::SEND_FLOOR, crate::buf::RECV_FLOOR);
+        t.cwnd = 1;
     }
     s.conns.bufs_mut(i).boost = Some(3);
     assert!(
