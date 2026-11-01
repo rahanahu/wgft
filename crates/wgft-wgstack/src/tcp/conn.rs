@@ -25,7 +25,7 @@ use crate::buf::{
 };
 use crate::fixed_vec::{AllocError, FixedVec};
 use crate::output::NIL;
-use crate::wire::Tuple;
+use crate::wire::{SackBlock, Tuple};
 
 /// 接続の handle です。接続の枠の番号と 64 bit の世代の組で、核への参照を持たない `Copy` の値です。
 /// 枠が別の接続に使われた後の handle は、核の操作で古い handle として扱われます。
@@ -119,6 +119,10 @@ pub(crate) struct Tcb {
     pub(crate) rcv_wscale: u8,
     pub(crate) ack_now: bool,
     pub(crate) ack_delayed: bool,
+    /// 次の ACK の先頭に載せる D-SACK の block (RFC 2883) があります。ACK を作るたびに読むので、受け手の欄の
+    /// 行に置きます。
+    pub(crate) dsack_pending: bool,
+    pub(crate) dsack: SackBlock,
     pub(crate) tdl: [i64; crate::tcp::NUM_TIMERS],
 
     // 受け手の ACK と窓
@@ -211,10 +215,34 @@ pub(crate) struct Tcb {
     pub(crate) rtx_bytes: u32,
     pub(crate) t_list: RecList,
     pub(crate) lost_q: RecList,
+
+    // SACK による回復と RACK-TLP (Go の scoreboard.go、rack.go の欄)。ACK ごとに触ります。
+    pub(crate) prior_una: u32,
+    pub(crate) prior_cwnd: u32,
+    pub(crate) rack_end: u32,
+    pub(crate) rack_fack: u32,
+    pub(crate) tlp_end: u32,
+    pub(crate) tlp_cut_seq: u32,
+    pub(crate) rack_xmit: i64,
+    pub(crate) rack_rtt: i64,
+    /// RACK の並べ替えの窓の倍率 (RFC 8985 6.2 の reo_wnd_mult) です。上限は 255 です。
+    pub(crate) reo_wnd_mult: u8,
+    pub(crate) rack_ok: bool,
+    pub(crate) rack_fack_ok: bool,
+    pub(crate) reorder_seen: bool,
+    pub(crate) orig_delivered: bool,
+    pub(crate) tlp_cut: bool,
+
+    /// CUBIC の状態です。NewReno を選んだ核では使いません。輻輳の回避の ACK ごとに触るので、ここに置きます。
+    pub(crate) cubic: crate::tcp::cc::Cubic,
 }
 
 /// まれにしか触らない接続の欄です。確立の時に 0 から始めます。
 #[derive(Clone, Copy, Debug, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the fields follow the Go code"
+)]
 pub(crate) struct ConnCold {
     // 不要な再送の取り消し (Go の undo.go)
     pub(crate) undo_marker: bool,
@@ -225,8 +253,22 @@ pub(crate) struct ConnCold {
     pub(crate) undo_retrans: i32,
     pub(crate) retrans_ts: u32,
     pub(crate) total_retrans: u32,
-    // boost の需要 (Go の boost.go の lastDemand)
+    /// D-SACK で知らされた重複の累計 (Linux の dsack_dups) です。
+    pub(crate) dsack_dups: u32,
+    // PRR (RFC 6937)。SACK による回復の間だけ触ります。
+    pub(crate) prr_delivered: u32,
+    pub(crate) prr_out: u32,
+    pub(crate) recover_fs: u32,
+    // RACK の並べ替えの窓の倍率を保つ回復の数と、倍率を上げた往復の終わり (Go の rack.go)
+    pub(crate) dsack_round: u32,
+    pub(crate) reo_persist: u8,
+    pub(crate) dsack_round_on: bool,
+    // boost (Go の boost.go)
+    /// 受信の向きも boost の段に移しました。
+    pub(crate) rcv_boost: bool,
     pub(crate) last_demand: i64,
+    pub(crate) rdem: crate::tcp::boost::Demand,
+    pub(crate) wdem: crate::tcp::boost::Demand,
 }
 
 /// 接続の送受信の輪と記録の輪です。`repr(C)` で小さな管理の欄を前に、輪の chunk の pointer の配列を後ろに

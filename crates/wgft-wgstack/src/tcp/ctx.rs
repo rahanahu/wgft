@@ -361,8 +361,7 @@ impl Conn<'_> {
         self.b.snd.release(pool);
         self.b.rcv.r.release(pool);
         self.b.rcv.clear_intervals();
-        // boost の枠の返却は boost の取得を入れる段 (PR 5) が足します。
-        debug_assert!(self.b.boost.is_none());
+        self.release_boost();
         self.b.recs.clear();
     }
 

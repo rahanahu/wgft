@@ -8,6 +8,8 @@
 //! `abort` は元の接続の行が表に残っていれば行を外して RST を送ります。
 
 use super::{Hook, Stack};
+use crate::config::BoostPolicy;
+use crate::tcp::boost::Dir;
 use crate::tcp::conn::{ConnError, ConnId, State};
 use crate::tcp::listen;
 use crate::time::Time;
@@ -140,7 +142,13 @@ impl<H: Hook> Stack<H> {
         debug_assert!(t.state != State::Free, "a queued slot is in use");
         t.accepted = true;
         let peer = SocketAddrV4::new(Ipv4Addr::from_bits(t.tup.raddr), t.tup.rport);
-        Ok((self.conns.id(head), peer))
+        let id = self.conns.id(head);
+        if self.s.config.boost == BoostPolicy::AtAccept {
+            let now = self.s.now;
+            self.conn(head).k.last_demand = now;
+            self.try_boost(id, Dir::Recv, now);
+        }
+        Ok((id, peer))
     }
 
     /// 待ち受けを閉じます。accept の待ち行列の接続と握手の途中の行に RST を送って返し、ポートをその場で空けます。
@@ -199,7 +207,11 @@ impl<H: Hook> Stack<H> {
             c.rcv_space_adjust(now);
             c.ack_on_drain();
             c.window_update();
+            let boost = c.k.rdem.add(now, n) && c.note_demand(Dir::Recv, now);
             c.after_input(now);
+            if boost {
+                self.try_boost(id, Dir::Recv, now);
+            }
             return Ok(n);
         }
         if c.t.fin_rcvd || (c.t.state == State::Closed && c.t.err.is_none()) {
@@ -240,7 +252,11 @@ impl<H: Hook> Stack<H> {
             return Err(Error::NoMemory);
         }
         c.t.tail_off += n as u64;
+        let boost = c.k.wdem.add(now, n) && c.note_demand(Dir::Send, now);
         c.after_input(now);
+        if boost {
+            self.try_boost(id, Dir::Send, now);
+        }
         Ok(n)
     }
 

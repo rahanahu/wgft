@@ -283,8 +283,7 @@ impl Shared {
             peer_mss: seg.opt.mss.filter(|&m| m != 0).unwrap_or(536),
             ws_ok: seg.opt.wscale.is_some(),
             snd_wscale: seg.opt.wscale.unwrap_or(0),
-            // SACK は SACK の段 (PR 5) まで交渉しません。SYN-ACK に SACK-permitted を載せません。
-            sack_ok: false,
+            sack_ok: seg.opt.sack_ok,
             ts_ok,
             ts_recent: ts.map_or(0, |(v, _)| v),
             ts_offset: if ts_ok { self.ts_offset(seg.tup) } else { 0 },

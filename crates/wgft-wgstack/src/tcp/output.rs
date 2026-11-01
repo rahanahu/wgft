@@ -7,14 +7,14 @@ use super::conn::{ConnError, State, TMR_DELACK};
 use super::ctx::{Conn, u32_of};
 use super::rack::Which;
 use super::sack::{Pick, Src};
-use super::{DELACK_TIMEOUT, INITIAL_WINDOW_SEGS, IP_TCP_HEADERS, ts_clock};
+use super::{DELACK_TIMEOUT, INITIAL_WINDOW_SEGS, IP_TCP_HEADERS, RTX_TLP, ts_clock};
 use crate::buf::records::{REC_IN_T, REC_RETRANSMITTED, REC_RTX, Record};
 use crate::seq;
 use crate::stack::shared::LogKind;
 use crate::stack::time;
 use crate::wire::{
-    self, FLAG_ACK, FLAG_FIN, FLAG_PSH, IP_HEADER_LEN, MAX_OPTION_LEN, OptWriter, TCP_HEADER_LEN,
-    TcpHeader,
+    self, FLAG_ACK, FLAG_FIN, FLAG_PSH, IP_HEADER_LEN, MAX_OPTION_LEN, OptWriter, SackBlock,
+    TCP_HEADER_LEN, TcpHeader,
 };
 
 impl Conn<'_> {
@@ -43,10 +43,10 @@ impl Conn<'_> {
         if self.t.fast_rtx || self.t.probe_pending || self.t.ack_now || self.t.tlp_probe {
             return true;
         }
-        let o = self.options(0);
+        let o = self.options(0, false);
         let pc = self.payload_cap(&o, i64::from(self.t.pmtu));
         if let Some(p) = self.pick_rule1()
-            && self.resend_allowed(p, pc)
+            && self.resend_allowed(p, pc, false)
         {
             return true;
         }
@@ -55,17 +55,29 @@ impl Conn<'_> {
             return true;
         }
         self.pick_rule3()
-            .is_some_and(|p| self.resend_allowed(p, pc))
+            .is_some_and(|p| self.resend_allowed(p, pc, false))
     }
 
-    /// segment の option を作ります。SACK の block は SACK の段 (PR 5) が足します。
-    pub(crate) fn options(&self, now: i64) -> OptWriter {
+    /// segment の option を作ります。`sack` が真なら、順序外の区間か D-SACK の block があるときに SACK の block を
+    /// 足します。D-SACK は先頭の block です (RFC 2883)。
+    pub(crate) fn options(&self, now: i64, sack: bool) -> OptWriter {
         let mut o = OptWriter::default();
-        if self.t.ts_ok {
-            o.ts(
-                ts_clock(now).wrapping_add(self.t.ts_offset),
-                self.t.ts_recent,
-            );
+        let t = &*self.t;
+        if t.ts_ok {
+            o.ts(ts_clock(now).wrapping_add(t.ts_offset), t.ts_recent);
+        }
+        if sack && t.sack_ok && (self.b.rcv.intervals_len() > 0 || t.dsack_pending) {
+            let mut blocks = [SackBlock::default(); 4];
+            let mut n = 0;
+            if t.dsack_pending {
+                blocks[0] = t.dsack;
+                n = 1;
+            }
+            n += self
+                .b
+                .rcv
+                .sack_blocks(&mut blocks[n..], t.irs.wrapping_add(1));
+            o.sack(&blocks[..n]);
         }
         o.pad();
         o
@@ -146,9 +158,16 @@ impl Conn<'_> {
         }
         if self.t.state != State::TimeWait {
             // 作る処理が会計の不整合で接続を閉じたら、残りの処理を続けません。続けると閉じた接続の欄で次の segment
-            // を作り、不整合を重ねて数え、RST を重ねて送ります。TLP の probe は SACK の段 (PR 5) が足します。
+            // を作り、不整合を重ねて数え、RST を重ねて送ります。
+            if self.t.tlp_probe {
+                self.t.tlp_probe = false;
+                let n = self.build_tlp(b, space, now);
+                if n > 0 || self.ended() {
+                    return n;
+                }
+            }
             let p = self.pick_rule1();
-            let n = self.build_resend(b, space, now, p);
+            let n = self.build_resend(b, space, now, p, false);
             if n > 0 || self.ended() {
                 return n;
             }
@@ -157,7 +176,7 @@ impl Conn<'_> {
                 return n;
             }
             let p = self.pick_rule3();
-            let n = self.build_resend(b, space, now, p);
+            let n = self.build_resend(b, space, now, p, false);
             if n > 0 || self.ended() {
                 return n;
             }
@@ -223,7 +242,9 @@ impl Conn<'_> {
         }
         t.ack_delayed = false;
         t.ack_now = false;
-        // PR 5 adds: D-SACK の block を載せた印 (dsackPending) を消すこと。
+        if t.dsack_pending {
+            t.dsack_pending = false; // 印の無い ACK で行を書き換えません
+        }
         t.rcv_since_ack = 0;
         self.disarm(TMR_DELACK);
         self.t.last_ack_sent = self.t.rcv_nxt;
@@ -231,19 +252,21 @@ impl Conn<'_> {
 
     /// 中身の無い ACK を作ります。窓の probe は `seq` に SND.UNA - 1 を渡します (Linux と同じ)。
     fn build_bare(&mut self, b: &mut [u8], seq: u32, now: i64) -> usize {
-        let mut o = self.options(now);
+        let mut o = self.options(now, true);
         self.emit(b, seq, 0, &mut o, 0, 0, now)
     }
 
-    /// SND.MAX から新しいデータを segment にします (RFC 6675 の NextSeg の規則 2)。
+    /// SND.MAX から新しいデータを segment にします (RFC 6675 の NextSeg の規則 2)。`force` は `next_new` と同じです。
     fn build_new(&mut self, b: &mut [u8], space: i64, now: i64, force: bool) -> usize {
-        // 黙った後の輻輳の窓 (RFC 5681 4.1)。送り残しが無い時に黙った時間だけ CUBIC の epoch をずらす規則は
-        // CUBIC の段 (PR 5) が足します。NewReno は何もしません。
-        if self.t.snd_una == self.t.snd_max && now - self.t.last_send_at > self.cur_rto() {
-            let iw = INITIAL_WINDOW_SEGS * self.seg_mss();
-            self.t.cwnd = self.t.cwnd.min(iw);
+        // 黙った後の輻輳の窓 (RFC 5681 4.1)
+        if self.t.snd_una == self.t.snd_max {
+            if now - self.t.last_send_at > self.cur_rto() {
+                let iw = INITIAL_WINDOW_SEGS * self.seg_mss();
+                self.t.cwnd = self.t.cwnd.min(iw);
+            }
+            self.cc_on_idle(now - self.t.last_send_at, now);
         }
-        let mut o = self.options(now);
+        let mut o = self.options(now, true);
         self.t.cwnd_blocked = false;
         let pc = self.payload_cap(&o, space);
         let (n, fin) = self.next_new(pc, force);
@@ -267,8 +290,10 @@ impl Conn<'_> {
             length += 1;
             self.t.fin_sent = true;
         }
-        // PR 5 adds: 回復の中の PRR の送った量 (prrOut += length)。
         let t = &mut *self.t;
+        if t.in_recovery {
+            self.k.prr_out = self.k.prr_out.wrapping_add(length);
+        }
         if n > 0 && t.rcvd_data && now - t.last_data_rcvd < DELACK_TIMEOUT {
             t.pingpong = true; // 受けた直後に応える対話の流れ (Linux の tcp_event_data_sent)
         }
@@ -301,8 +326,9 @@ impl Conn<'_> {
         self.emit(b, seq, flags, &mut o, off, n, now)
     }
 
-    /// 選んだ記録の再送を窓と輻輳の窓が許すかを返します。`pay_cap` は segment の中身の上限です。
-    pub(crate) fn resend_allowed(&mut self, p: Pick, pay_cap: i64) -> bool {
+    /// 選んだ記録の再送を窓と輻輳の窓が許すかを返します。`pay_cap` は segment の中身の上限です。`force` が真なら
+    /// 輻輳の窓を見ません (TLP の probe)。
+    pub(crate) fn resend_allowed(&mut self, p: Pick, pay_cap: i64, force: bool) -> bool {
         let i = p.i;
         let off = self.pick_off(p);
         let (mut n, fin) = self.resend_len(i, off, pay_cap);
@@ -322,7 +348,7 @@ impl Conn<'_> {
         let pipe = self.pipe();
         let t = &*self.t;
         // F-RTO の RTO の後の先頭の再送は輻輳の窓によらず送ります (RFC 5682 の 1 の段)。
-        pipe == 0 || t.cwnd >= pipe.wrapping_add(n) || (t.frto == 1 && i == 0)
+        force || pipe == 0 || t.cwnd >= pipe.wrapping_add(n) || (t.frto == 1 && i == 0)
     }
 
     /// 記録 (NextSeg の規則 1 か 3 が選んだ記録) を再送します。記録は SND.UNA から番号の順に選ばれ、SACK 済みの
@@ -331,14 +357,21 @@ impl Conn<'_> {
         clippy::many_single_char_names,
         reason = "the names follow the Go code"
     )]
-    fn build_resend(&mut self, b: &mut [u8], space: i64, now: i64, p: Option<Pick>) -> usize {
+    fn build_resend(
+        &mut self,
+        b: &mut [u8],
+        space: i64,
+        now: i64,
+        p: Option<Pick>,
+        force: bool,
+    ) -> usize {
         let Some(p) = p else {
             return 0;
         };
         let i = p.i;
-        let mut o = self.options(now);
+        let mut o = self.options(now, true);
         let pc = self.payload_cap(&o, space);
-        if !self.resend_allowed(p, pc) {
+        if !self.resend_allowed(p, pc, force) {
             return 0;
         }
         let off = self.pick_off(p);
@@ -388,13 +421,20 @@ impl Conn<'_> {
                 }
                 !t.q_mid
             }
+            Src::Tlp => true,
         };
         if to_t {
             self.unlink_rec(i);
             self.list_append(Which::T, i, REC_IN_T);
         }
-        // PR 5 adds: 回復の中の PRR の送った量 (prrOut += length) と、TLP の probe の再送の原因。
-        let cause = self.t.resend_cause;
+        if self.t.in_recovery {
+            self.k.prr_out = self.k.prr_out.wrapping_add(length);
+        }
+        let cause = if p.src == Src::Tlp {
+            RTX_TLP
+        } else {
+            self.t.resend_cause
+        };
         self.note_retransmit(now);
         self.s.stats.retrans[usize::from(cause)] += 1;
         if (self.t.rto_at == 0 || i == 0) && !self.t.persist {
@@ -407,12 +447,47 @@ impl Conn<'_> {
         self.emit(b, seq, flags, &mut o, at, n, now)
     }
 
+    /// TLP の probe を 1 つ送ります (RFC 8985 7.3)。窓が許せば新しいデータを、許さなければ最も番号の大きい記録を
+    /// 送ります。どちらも輻輳の窓を見ません。probe の確認を待つ間は次の probe を張りません (I5)。probe の後は RTO を
+    /// 張り直します。
+    fn build_tlp(&mut self, b: &mut [u8], space: i64, now: i64) -> usize {
+        let mut retrans = false;
+        let mut n = self.build_new(b, space, now, true);
+        if self.ended() {
+            return 0;
+        }
+        if n == 0 {
+            let len = self.b.recs.len();
+            if len == 0 || self.is_sacked(len - 1) {
+                return 0;
+            }
+            let p = Pick {
+                i: len - 1,
+                src: Src::Tlp,
+            };
+            n = self.build_resend(b, space, now, Some(p), true);
+            retrans = true;
+        }
+        if n > 0 {
+            let t = &mut *self.t;
+            (t.tlp_active, t.tlp_retrans, t.tlp_end) = (true, retrans, t.snd_max);
+            t.tlp_sampled = false;
+            t.tlp_at = 0;
+            self.s.stats.tlp_probes += 1;
+            // probe の後は RTO を今から張り直します (RFC 8985 7.3、Linux の tcp_send_loss_probe)。前の累積の確認から
+            // 数えた期限のままだと、SRTT が RTO の 3 分の 1 を超える経路では probe の確認が届く前に RTO が起きます。
+            let at = now + self.cur_rto();
+            self.set_rto(at);
+        }
+        n
+    }
+
     /// SND.UNA からの 1 segment を再送します (SACK を交渉しない接続の高速の再送と NewReno の部分の確認)。
     fn build_rtx(&mut self, b: &mut [u8], space: i64, now: i64) -> usize {
         if self.t.snd_una == self.t.snd_max {
             return 0;
         }
-        let mut o = self.options(now);
+        let mut o = self.options(now, true);
         let pc = self.payload_cap(&o, space);
         if pc <= 0 {
             return 0;

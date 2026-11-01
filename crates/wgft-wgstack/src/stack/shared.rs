@@ -130,6 +130,26 @@ pub struct Stats {
     pub hystart_exits: u64,
     /// 再送が不要だったと分かり輻輳の窓を戻した回数です。
     pub spurious_undos: u64,
+    /// RTO の後の回復で、RTO が不要だったと分かった回数です。
+    pub spurious_rtos: u64,
+    /// 相手が SACK 済みのデータを捨てたとみなし、SACK の印を消した回数です。
+    pub sack_reneging: u64,
+    /// RACK が失われたとみなした記録の数です。
+    pub rack_lost: u64,
+    /// RACK の並べ替えの期限が来た回数です。
+    pub reorder_timeouts: u64,
+    /// 送った TLP の probe の数です。
+    pub tlp_probes: u64,
+    /// TLP の probe が損失を直したとみなして輻輳の窓を下げた回数です。
+    pub tlp_recoveries: u64,
+    /// 並べ替えの窓の倍率を上げた D-SACK の数です。
+    pub dsacks_in: u64,
+    /// boost を得た回数です。
+    pub boost_granted: u64,
+    /// 需要の無い保有者を floor に戻した回数です。
+    pub boost_reclaimed: u64,
+    /// floor に戻す時に取り消した順序外の byte の数です。
+    pub boost_reneged_bytes: u64,
 }
 
 /// 1 分に 1 回までの門を通るログの種類です。

@@ -5,7 +5,7 @@ wgstack は wgft 自身の TCP/IP の stack です。
 agent のユーザー空間モードは、トンネルの中の TCP、UDP、ICMP をこの stack で終えます。
 このため Rust の agent は root の権限も TUN も要りません。
 段を踏んで実装しています。
-PR 4a と 4b の範囲 (受動の open、閉じる手順と TIME_WAIT、アプリケーションの操作と知らせ、データの送受信、RTO、NewReno、窓の probe) まで実装しました。
+PR 5 の範囲 (受動の open、閉じる手順と TIME_WAIT、アプリケーションの操作と知らせ、データの送受信、RTO、窓の probe、SACK による回復と D-SACK、RACK-TLP、不要な再送の取り消し、CUBIC と NewReno、boost の取得と回収) まで実装しました。
 構造、境目、メモリ、作業の順をここで決め、値と細部は[実装の時に決めること](#実装の時に決めること)に残します。
 
 ## この文書の読み方
@@ -487,6 +487,8 @@ PR 4a で次の形にしました。
 - `send_segment/N`:N 本の接続を順に回し、1 segment 分を書き、核が送る segment を取り出し、相手が確認します
 - `rig_overhead/build_and_parse`:道具だけの費用です。同じ大きさの相手の packet を組み立てて checksum を計算し、
   ACK の大きさの packet を解きますが、核は呼びません
+- `recv_segment_sack/N`、`send_segment_sack/N`:同じ負荷を、相手が SYN で SACK-permitted を示した接続で流します。
+  ACK ごとの RACK の状態の更新と TLP の期限の張り直しを含みます
 
 どの回も、駆動の層と同じく時刻を進めて `handle_timeout` を呼びます。
 `recv_segment` と `send_segment` は相手の packet の組み立てと checksum を含むので、核の費用の目安は
@@ -536,6 +538,33 @@ perf stat の数 (1,000 命令あたり) は、どちらの配置でも LLC の 
 L1 の miss も配置によって増える場合と減る場合がありました。
 分けた配置を選んだ理由は、測った速さではなく、`Tcb` の行が輪の配列と boost の段の大きさに左右されないことです。
 接続の数が L2 を超える負荷 (数千本の接続と大きな受信の窓) での差は測っていません。
+
+PR 5 の後に、同じ車線で PR 4b の頭 (NewReno と boost を求めない既定) と PR 5 の頭 (CUBIC と需要による boost の既定) を比べました。
+値は criterion の中央の推定です。
+PR 5 の値は、記録の輪の添字の変更の前に、#705 のレビューで測り方 (時刻を進めて `handle_timeout` を呼ぶこと) を変える前のベンチで測りました。
+このため上の表の値とは比べられません。
+
+| ベンチ | PR 4b | PR 5 | PR 5 の SACK の組 |
+| --- | ---: | ---: | ---: |
+| `recv_segment/1` | 676.7 ns | 652.9 ns | 647.1 ns |
+| `recv_segment/64` | 676.6 ns | 683.0 ns | 691.1 ns |
+| `recv_segment/1024` | 679.4 ns | 697.5 ns | 729.0 ns |
+| `send_segment/1` | 595.5 ns | 611.4 ns | 613.3 ns |
+| `send_segment/64` | 616.7 ns | 629.8 ns | 633.0 ns |
+| `send_segment/1024` | 662.4 ns | 678.8 ns | 670.4 ns |
+
+SACK の無い接続の差は 3% 以内でした。
+SACK の組は 1024 本の受信で 5% ほど遅くなりました。
+`Tcb` が 2 行広がったことと ACK ごとの RACK の処理のどちらが効くかは、perf stat で分けていません。
+1 本の受信は、需要で boost を得るので、既定の違いを含みます。
+
+D-SACK の欄を受け手の行に移し、PRR の欄を `ConnCold` に移した後に、#705 のレビューの後のベンチで前後を比べました。
+criterion の中央の推定は、同じコードを流し直しても 5% ほど揺れ、前後の差はその揺れの内でした
+(`recv_segment_sack/1024` は 694 ns と 730 ns、`send_segment_sack/1024` は 652 ns と 680 ns、どちらも前、後の順)。
+perf stat の 1,000 命令あたりの L1 の miss は、`recv_segment_sack/1024` で 11.6 から 10.2 に減り、`send_segment_sack/1024` で 12.3 と 12.1、
+`recv_segment/1024` で 11.2 と 12.3 でした。
+LLC の miss は 1,000 命令あたり 0.2 未満で変わりませんでした。
+受け手だけの接続が ACK ごとに後ろの行を書かなくなったことは L1 の miss の減りに見えますが、時間の差は測れませんでした。
 
 ### 上界の式の写し方
 
@@ -778,7 +807,7 @@ Go の wgstack の記録がすべて一致することは、ラボの一式で�
   Go と Rust で数の内訳と型の大きさが同じになる理由が無いためです
 - 段ごとの照合:PR 4b からは、相手が SACK も timestamp も示さず、輻輳の制御に NewReno を、boost の与え方に boost を求めない方針 (Go の `BoostNever`) を選んだ記録が、握手の後のデータの転送まで一致します。
   受信の窓の自動調整と受け手の ACK の規則を PR 4b に入れるのはこのためです。
-  timestamp に頼る不要な再送の取り消しと boost の取得は PR 5 で入るので、timestamp と boost を使う記録は PR 5 から照らします
+  timestamp に頼る不要な再送の取り消しと boost の取得は PR 5 で入ったので、timestamp と boost を使う記録は PR 5 から照らします
 - 照らす範囲の広がり:PR 5 で SACK、timestamp、CUBIC、boost の印の記録、PR 6 で UDP と ICMP と断片と ping の印の記録が加わります
 - 段の表:核に入った段は `crates/wgft-wgstack-dut/stages.json` の `landed` が持ちます。
   段を入れる PR は `landed` にその段を足し、その段の印の記録が一致することと、その段の台本が通ることを同じ PR で確かめます
@@ -799,7 +828,8 @@ Go の wgstack の記録がすべて一致することは、ラボの一式で�
   このため記録は linux/amd64 の `GOAMD64=v1` で作り、記録の meta に `GOARCH` と `GOAMD64` を残します。
   Rust は `mul_add` を使わず、コンパイラも積和をまとめません
 - 3 乗根:Go の `math.Cbrt` と同じ値を返す実装が要ります。
-  Rust の `f64::cbrt` は OS の数学ライブラリを呼ぶので、値が最後の桁で違いうるためです
+  Rust の `f64::cbrt` は OS の数学ライブラリを呼ぶので、値が最後の桁で違いうるためです。
+  PR 5 で Go の実装を写しました ([PR 5 で決めたこと](#pr-5-で決めたこと))
 - 再組み立ての表の追い出し:管理領域を Go の型の大きさで数えます ([上界の式の写し方](#上界の式の写し方))
 - 浮動小数点の比べと変換:Go の `min` と `max` の NaN と -0 の扱いと、浮動小数点から符号なしの整数への変換を、Rust の既定の挙動に頼らずに明示して写します。
   Rust の `as` は範囲の外の値を飽和させますが、Go の変換の結果は target に依るので、linux/amd64 の結果を写すか、範囲の外の値が来ないことを試験で示します
@@ -965,16 +995,14 @@ Go の試験を変える PR は、規則どおり wgstack の関門を流しま�
   通ります。
   分けると 4a に使い捨ての代わりの規則 (再送の無い送信、固定の窓) が要るためです。
   ベンチの crate は積んだ別の PR にしました
-- SACK の交渉:PR 5 までは SACK を交渉しません。
-  SYN-ACK に SACK-permitted を載せず、`sack_ok` は偽です。
+- SACK の交渉:PR 4a と 4b の核は SACK を交渉しませんでした。
   SACK の印付けと回復の無い核が SACK を交渉すると、Go と違う経路 (高速の再送の無い回復) を通るためです。
-  SACK を示す記録は PR 5 から照らすので、照らす範囲は変わりません
+  PR 5 から Go と同じく相手の SYN の SACK-permitted に応えます
 - HyStart++:Go の HyStart++ は輻輳の制御の種類によらず最初の slow start で働きます。
   NewReno の記録と同じ出力を返すため、PR 5 でなく PR 4b に入れました
 - 輻輳の制御と boost の与え方:`Config` に `congestion` と `boost` を足しました。
-  PR 5 までは既定を NewReno と boost を求めない方針にし、CUBIC と boost を求める方針は設定の誤り
-  (`ConfigError::Unsupported`) にします。
-  PR 5 が既定を Go と同じ CUBIC と需要による boost に戻します
+  PR 4a と 4b の核は NewReno と boost を求めない方針だけを受け付けました。
+  PR 5 で既定を Go と同じ CUBIC と需要による boost にし、`ConfigError::Unsupported` を消しました
 - 時刻の算術:TCP の規則の中の時刻は Go と同じ符号つきの 64 bit の ns で持ち、0 を「無し」にします。
   Go は `now - curRTO()` のように負になりうる値を 0 と区別して使うので、飽和する `Time` の算術では同じ出力に
   なりません
@@ -991,7 +1019,69 @@ Go の試験を変える PR は、規則どおり wgstack の関門を流しま�
   書き込みは `Error::NoMemory` を返します
 - 白箱の試験:Go の `tcp_test.go`、`ackpolicy_test.go`、`orphan_test.go`、`reuse_refused_test.go`、
   `hystart_test.go` などのうち、この段の範囲の試験を移しました。
-  SACK、D-SACK、boost、受信の窓の boost の段を使う試験 (`rcvwin_test.go` の多く) は、その段が移します
+  SACK、D-SACK、boost、受信の窓の boost の段を使う試験 (`rcvwin_test.go` の多く) は PR 5 が移しました
+
+### PR 5 で決めたこと
+
+実装の担当が決めた点です。
+理由と共に挙げ、所有者か監督が変えるときはこの節を直します。
+
+- 欄の置き場所:RACK の状態、TLP の縮小の印、次の ACK に載せる D-SACK の block、CUBIC の状態は ACK ごとに触るので `Tcb` に置きました。
+  D-SACK で倍率を上げた往復と倍率を保つ回復の数、D-SACK の累計、PRR、boost の需要と受信の段の印は、D-SACK と回復と boost の事象でだけ触るので `ConnCold` に置きました。
+  並べ替えの窓の倍率は上限が 255 なので `u8` で持ちます。
+  `Tcb` は 576 byte から 704 byte になり、上界の表を生成し直しました
+- 試験だけの数え:Go の `scoreSteps` と `rackChanges` は欄に足しません。
+  型の大きさを試験の build でも製品の build と同じに保つためです。
+  `scoreSteps` は、試験の build だけにある thread の値 (`tcp::sack::steps`) で Go と同じ所で数え、ACK 1 つの手間の上界の試験に使います。
+  `rackChanges` を読む試験は、ACK の前後の RACK の状態を試験の中で比べて数えます
+- 3 乗根:Go の `math.Cbrt` (fdlibm の `s_cbrt.c` から来た Go のコード) を `tcp::cc::cbrt` に写し、Go の BSD-3-Clause の通知と元の C のコードの通知を source に残しました。
+  同じ算法を持つ crate を使う案は、核の crate の依存を空に保つ規則で採りません。
+  `GOAMD64=v1` の Go が書き出した値の表と bit の単位で一致することを単体の試験で確かめました
+- CUBIC の浮動小数点:Go は定数の式を正確に計算してから丸めます。
+  このため Reno と公平な領域の係数 3 (1 - β) / (1 + β) は、9/17 を 1 回の割り算で丸めた値にします。
+  Go の `min` と `max` は NaN と -0 の扱いを明示した関数で写しました。
+  窓の値の範囲では、Rust の `as` の変換は Go の変換と同じ値を返します
+- boost の段の移し方:Go の輪は確保に失敗しませんが、Rust の輪は chunk の確保が失敗しえます。
+  段を移す処理は新しい輪をすべて作ってから古い輪と替えるので、確保に失敗したら段を変えません。
+  取得の時に送信の輪を作れなければ枠を返し、受信の輪を作れなければ受信を floor の段のままにして次の需要で試し直します。
+  floor に戻す時は、送信と受信の新しい floor の輪を両方作ってから、古い輪をどちらも返します。
+  このため一時に新旧の輪を合わせて持ちますが、新しい floor の輪はそれぞれ floor の量 (16 個の chunk) までで、floor に戻すのは一度に 1 本の接続だけなので、上界の一時の項 (8 MiB) に収まります。
+  取り消しとその数えは輪を作る前に行うので、輪を作れずに boost の段のままにした時も取り消しは残ります。
+  取り消したデータは相手が再送します。
+  このため `may_return` が真を返しても、`boost_returned` が呼ばれるとは限りません
+- boost の hook の順:Go の `OnBoost(false)` は問い合わせと知らせを兼ねます。
+  Rust は取り消しの前に `may_return` を呼び、floor に戻した後に `boost_returned` を呼びます。
+  `boost_granted` は送信の段を移した後、書き込みの知らせの前に呼びます。
+  Go の `OnBoost` は登録の時に今の状態でも呼びますが、Rust の hook は変化だけを伝えます
+- 枠の取り合い:Go は錠を `TryLock` で取れない保有者を飛ばしますが、Rust の核は錠を持たないので、枠の順にすべての保有者を調べます
+- floor の区間の表の入れ直し:Go は受信が floor の段のまま floor に戻すときも、同じ表で `setIntervals` を呼び、区間を入れ直して優先度の数え上げを進めます。
+  Rust も同じ数だけ数え上げを進めて入れ直します (`RecvBuf::rebuild_intervals`)。
+  区間の木の形は出力に出ませんが、Go と同じ形に保ちます
+- 書き込みと boost:Go の `Write` は boost を得た後に、同じ呼び出しの中で広がった空きに書き続けます。
+  Rust の `write` は 1 回で書けた量を返し、広がった空きは次の `write` が使います。
+  待つことは handle の層が持つためです ([アプリケーションの操作](#アプリケーションの操作))
+- PMTU:Fragmentation Needed による PMTU の引き下げ (Go の `pmtuDrop` と `markLostLonger`) は ICMP を入れる PR 6 が足します。
+  Go の PMTU の試験もその段が移します
+- 不変条件:`check_invariants` は、使っている接続ごとに scoreboard を記録から数え直して比べ (`tcp::sack::check_scoreboard`)、boost の無い接続が floor の受信の予約を持つことを確かめます。
+  Go の試験は数え直しを `checkScoreboard` で行います。
+  Rust は Go の試験が見逃した 2 つの変異 (最も右の SACK 済みの byte を更新しないことと、損失の境目を越えた記録を送った時刻の順の list に残すこと) も捉えるよう、SACK 済みの byte があれば最も右の SACK 済みの記録の端が `high_sack` と等しいこと、境目より手前の SACK 済みでない記録が list にあるなら今の世代で再送したものであることも確かめます。
+  検出の 1 つずつに、壊した状態を渡す試験があります。
+  boost の段を移す処理の確保の失敗 (取得の送信の輪、受信の輪、floor に戻す輪) は、chunk の確保の失敗を注入する試験で確かめます
+- `Tcb` の行:次の ACK に載せる D-SACK の block と印は受け手の欄の行に置き、ACK を送るたびに印を書かず、立っている時だけ消します。
+  受け手だけの接続が ACK ごとに後ろの行を書き換えないためです。
+  PRR の欄と RecoverFS は SACK による回復の間だけ触るので `ConnCold` に置きました
+- 記録の輪の添字:記録の輪の容量は 2 の冪でないので、剰余を割り算の命令にしないよう、先頭からの位置を 1 回の引き算で折り返します。
+  意味は変わりません
+- 試験:Go の `sack_test.go`、`scoreboard_test.go`、`prr_test.go`、`lostq_audit_test.go`、`dsack_test.go`、`cwndval_test.go`、`lazyegress_test.go`、`tlp_rto_test.go`、`rack_test.go`、`undo_test.go`、`cc_test.go`、`boost_test.go`、`rcvwin_test.go` を移しました。
+  Go の試験が大きさ 1 の枠の集まりを作る所は、Rust の `Budget` の枠の数が固定なので、ほかの枠を別の接続で埋めてから取り合いを起こします
+  試験は毎回 `check_invariants` を呼ぶので、ワークスペースの `Cargo.toml` で `wgft-wgstack` を dev と test の build でも `opt-level = 2` で作ります。
+  溢れの検査と `debug_assert` は残ります。
+  RACK の期限の敵対的な ACK の試験は Go と同じ ACK の数で流します。
+  SACK の洪水の試験は Go の 20000 の ACK では 18 秒かかるので 5000 にし、ACK 1 つの手間の上界も確かめます。
+  上界の式は ACK の数に比例するので、確かめる比は同じです
+- 記録の照合:`crates/wgft-wgstack-dut/stages.json` の `landed` に 5 を足し、SACK、timestamp、CUBIC、boost の印の記録を照合に入れました。
+  4b と 5 の段の印の記録はすべて Go の応答と byte の単位で一致し、2 節の台本もすべて通ります。
+  意図した違いの一覧に足した行はありません
 
 ### 後の段
 
@@ -1008,10 +1098,6 @@ agent の置き換えが終わった後に、次の段を順に決めます。
 
 - 写さずに読み書きする口:`read_slices` と `write_slices` を足すか。CPU を測ってから決めます
 - device の層との受け渡し:`Device::poll_packet` と `Device::poll_transmit` が packet ごとに確保する形を、呼び手の buffer に書く形に替えるか
-- 3 乗根:Go の `math.Cbrt` と同じ値を出す実装を wgft の中で書くか、条件に合う crate を使うか。
-  Go の実装を写す場合は Go の license の通知が要ります。
-  CUBIC を入れる PR 5 で決めます。
-  ChaCha8 は仕様から wgft の中で書きました ([時刻と乱数](#時刻と乱数))
 - 受け付けるアドレスが増えたときの待ち受けと UDP の endpoint の表の持ち方 (dial の側の段で決めます)
 - 1 回の起床の上限:1 回に作る packet の数と、`WGFT_AGENT_BATCH_MIB` から導く式
 - 割り当て器:OS の標準と mimalloc のどちらにするか (測ってから)。選んだ割り当て器の丸めの係数

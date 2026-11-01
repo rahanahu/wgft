@@ -1,7 +1,7 @@
 //! 接続の枠の ACK の欄の処理と RTT (Go の `ack.go`、RFC 9293、RFC 5681、RFC 6582、RFC 6298)。
 
 use super::conn::State;
-use super::ctx::Conn;
+use super::ctx::{Conn, u32_of};
 use super::sack::DUP_THRESH;
 use super::{MS, RTO_MAX, RTO_MIN, RTX_FAST, RTX_PARTIAL, ts_clock};
 use crate::buf::records::REC_RETRANSMITTED;
@@ -49,8 +49,7 @@ impl Conn<'_> {
         r
     }
 
-    /// ACK の欄を処理します (RFC 9293、RFC 5681、RFC 6582)。SACK の印付けと SACK による回復は SACK の段
-    /// (PR 5) が足します。
+    /// ACK の欄を処理します (RFC 9293、RFC 5681、RFC 6582、RFC 6675、RFC 8985)。
     pub(crate) fn process_ack(&mut self, seg: &Segment<'_>, now: i64) {
         let ack = seg.ack;
         if self.hystart_on() {
@@ -63,9 +62,15 @@ impl Conn<'_> {
             self.t.retrans_start = 0; // 相手は probe に応えています
         }
         let wnd_changed = self.update_send_window(seg);
-        // PR 5 adds: PRR、RACK、F-RTO が使う priorUna、priorCwnd、origDelivered の記録と、SACK で届いた量。
+        // RFC 6937 の DeliveredData は SND.UNA の差と SACK 済みの byte の差の和です。累積の確認が先に SACK した
+        // byte を覆うと SACK 済みの byte は減るので、差は確認の前の値から取ります。
+        let mut delivered: i64 = 0;
+        let sacked_before = self.t.sacked;
+        self.t.orig_delivered = false;
         let advanced = seq::gt(ack, self.t.snd_una);
+        (self.t.prior_una, self.t.prior_cwnd) = (self.t.snd_una, self.t.cwnd);
         if advanced {
+            delivered = i64::from(ack.wrapping_sub(self.t.snd_una));
             self.new_ack(seg, ack, now);
         } else if ack == self.t.snd_una
             && seg.payload.is_empty()
@@ -78,7 +83,25 @@ impl Conn<'_> {
         if matches!(self.t.state, State::Free | State::Closed) {
             return;
         }
-        if self.t.rto_episode && seq::ge(self.t.snd_una, self.t.recover) {
+        let newly = self.mark_sack(seg, now);
+        delivered += i64::from(self.t.sacked) - i64::from(sacked_before);
+        if self.t.sack_ok {
+            self.rack_detect(now);
+            if self.t.frto != 0 && seq::lt(self.t.snd_una, self.t.recover) {
+                let dup = newly > 0 || (!advanced && self.t.snd_una != self.t.snd_max);
+                self.frto_after_ack(seg, advanced, dup);
+            } else if self.t.rto_episode && seq::ge(self.t.snd_una, self.t.recover) {
+                self.rto_recovered(seg);
+            }
+            self.tlp_on_ack(ack, advanced, newly);
+            self.sack_after_ack(u32_of(delivered.max(0)));
+            if advanced {
+                self.schedule_tlp(now);
+            } else if self.t.in_recovery {
+                self.t.tlp_at = 0;
+            }
+            self.rearm_retrans();
+        } else if self.t.rto_episode && seq::ge(self.t.snd_una, self.t.recover) {
             // SACK を交渉しない接続の RTO の後の回復の終わり。SND.UNA が recover から 2^31 先へ進んだ後に、番号の
             // 比べで回復の中に戻ったとみなさないように、印を消します。
             self.t.rto_episode = false;
@@ -112,13 +135,17 @@ impl Conn<'_> {
         let acked = ack.wrapping_sub(self.t.snd_una);
         let (sample, rtx_acked) = self.retire_acked(ack, now);
         self.t.snd_una = ack;
+        if self.t.tlp_cut && seq::ge(ack, self.t.tlp_cut_seq) {
+            // 縮小が覆う窓のデータはすべて確認されました。番号が 1 周した後に古い番号と比べません。
+            self.t.tlp_cut = false;
+        }
         if seq::lt(self.t.snd_nxt, ack) {
             self.t.snd_nxt = ack;
         }
         let ack_rtt = self.rtt_on_ack(seg, sample, rtx_acked, now);
         self.t.backoff = 0;
         self.t.retrans_start = 0;
-        self.cwnd_on_ack(seg, ack, acked, ack_rtt);
+        self.cwnd_on_ack(seg, ack, acked, ack_rtt, now);
         self.t.dup_acks = 0;
         self.retrans_timer_on_ack(now);
         self.fin_acked_state(now);
@@ -151,7 +178,7 @@ impl Conn<'_> {
             } else {
                 rtx_acked = true;
             }
-            self.drop_head();
+            self.drop_head(now);
             self.b.recs.pop();
             self.t.rec_base = self.t.rec_base.wrapping_add(1);
         }
@@ -176,20 +203,27 @@ impl Conn<'_> {
 
     /// 累積の確認で輻輳の窓を進めます。回復の中では回復の終わりか部分の確認を処理し、回復の外では slow start か
     /// 輻輳の回避で窓を増やします。SND.UNA を `ack` に進めた後に呼びます。
-    fn cwnd_on_ack(&mut self, seg: &Segment<'_>, ack: u32, acked: u32, ack_rtt: i64) {
+    fn cwnd_on_ack(&mut self, seg: &Segment<'_>, ack: u32, acked: u32, ack_rtt: i64, now: i64) {
         let mss = self.seg_mss();
         let flight = self.t.snd_max.wrapping_sub(self.t.snd_una);
         if self.t.in_recovery {
             if seq::ge(ack, self.t.recover) {
-                // 回復の終わり。SACK が無ければ RFC 6582 3.2 の 3 です。
+                // 回復の終わり。SACK では RFC 6937 の cwnd = ssthresh、SACK が無ければ RFC 6582 3.2 の 3 です。
+                self.t.in_recovery = false;
+                self.rack_recovery_done();
                 let t = &mut *self.t;
-                t.in_recovery = false;
-                // PR 5 adds: rackRecoveryDone と、SACK の接続の cwnd = ssthresh。
-                t.cwnd = t.ssthresh.min(flight.max(mss) + mss);
+                t.cwnd = if t.sack_ok {
+                    t.ssthresh
+                } else {
+                    t.ssthresh.min(flight.max(mss) + mss)
+                };
                 if self.may_undo(seg) {
                     self.undo(); // 回復の再送は不要でした (Linux の tcp_try_undo_recovery)
                 }
                 self.k.undo_marker = false;
+            } else if self.t.sack_ok {
+                // SACK による回復の部分の確認。再送は NextSeg が選び、窓は PRR が決めます。
+                self.s.stats.partial_acks += 1;
             } else {
                 // 部分の確認 (RFC 6582 3.2 の 5):次の穴を再送し、確認された分だけ窓を縮め、1 SMSS 以上を確認したら
                 // SMSS を足し戻します。
@@ -208,7 +242,7 @@ impl Conn<'_> {
         } else if self.t.cwnd < self.t.ssthresh {
             self.slow_start_ack(ack, acked, ack_rtt);
         } else {
-            self.cong_avoid(acked);
+            self.cong_avoid(acked, now);
         }
         self.t.cwnd = self.t.cwnd.min(1 << 30);
     }
@@ -223,7 +257,7 @@ impl Conn<'_> {
         } else {
             let at = now + self.cur_rto();
             self.set_rto(at);
-            // PR 5 adds: 先頭の記録が SACK 済みのままなら RTO を早める規則 (Go の renegeTimer)。
+            self.renege_timer(now);
         }
     }
 
@@ -245,7 +279,7 @@ impl Conn<'_> {
         self.s.stats.dup_acks_in += 1;
         self.t.dup_acks += 1;
         if self.t.sack_ok {
-            return; // 回復に入るかは SACK の段 (PR 5) の規則が決めます
+            return; // 回復に入るかは sack_after_ack が決めます
         }
         let mss = self.seg_mss();
         if self.t.in_recovery {

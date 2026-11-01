@@ -69,24 +69,37 @@ impl RecordRing {
         self.n == self.recs.len()
     }
 
+    /// 先頭から `i` 番目の記録の配列の位置です。`head` と `i` は容量より小さいので、割り算の代わりに 1 回の引き算で
+    /// 折り返します。容量は 2 の冪でないので、剰余は割り算の命令になるためです。
+    fn slot(&self, i: usize) -> usize {
+        let j = self.head + i;
+        let len = self.recs.len();
+        if j >= len { j - len } else { j }
+    }
+
     /// 先頭から `i` 番目の記録です。
     pub(crate) fn at(&mut self, i: usize) -> &mut Record {
-        let len = self.recs.len();
-        &mut self.recs[(self.head + i) % len]
+        let j = self.slot(i);
+        &mut self.recs[j]
+    }
+
+    /// 先頭から `i` 番目の記録を読みます。
+    pub(crate) fn get(&self, i: usize) -> &Record {
+        &self.recs[self.slot(i)]
     }
 
     /// 末尾に記録を足します。呼び手は満杯でないことを確かめます。
     pub(crate) fn push_back(&mut self, rec: Record) {
         debug_assert!(!self.full());
-        let len = self.recs.len();
-        self.recs[(self.head + self.n) % len] = rec;
+        let j = self.slot(self.n);
+        self.recs[j] = rec;
         self.n += 1;
     }
 
     /// 先頭の記録を外します。
     pub(crate) fn pop(&mut self) {
         debug_assert!(self.n > 0);
-        self.head = (self.head + 1) % self.recs.len();
+        self.head = self.slot(1);
         self.n -= 1;
     }
 

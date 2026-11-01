@@ -1,5 +1,5 @@
 {
-  "landed": ["4b"],
+  "landed": ["4b", "5"],
   "stages": {
     "4b": ["ws", "newreno", "boost-never"],
     "5": ["sack", "ts", "cubic", "boost-on-demand", "boost-at-accept", "boost-hook"],

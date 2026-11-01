@@ -417,6 +417,15 @@ impl RecvBuf {
         self.nrecent += 1;
     }
 
+    /// 最近触れた区間の始まり (offset) を新しい順に `f` に渡します。試験が、取り消しの後に印が残した区間の始まりだけを
+    /// 指すかを確かめるために使います。
+    #[cfg(test)]
+    pub(crate) fn for_each_recent(&self, f: &mut dyn FnMut(u64)) {
+        for &x in &self.recent[..self.nrecent] {
+            f(self.full(x));
+        }
+    }
+
     /// offset が `drop` に当たる最近の区間の印を順を保って外します。
     fn forget_recent(&mut self, drop: impl Fn(u64) -> bool) {
         let mut k = 0;
@@ -457,6 +466,30 @@ impl RecvBuf {
             res.is_ok()
         });
         res
+    }
+
+    /// 容量 `cap` の新しい輪に書いた範囲を写して返します。この輪は変えません (`Ring::resized`)。
+    pub(crate) fn resized_ring(&self, cap: u64, pool: &mut ChunkPool) -> Result<Ring, AllocError> {
+        self.r.resized(cap, pool, |f| self.for_each_written(f))
+    }
+
+    /// 区間を同じ表の中で入れ直します。Go が同じ表で `setIntervals` を呼ぶ時と同じく、区間を始まりの順に入れ直し、
+    /// 優先度の数え上げを区間の数だけ進めます。`scratch` は一時の置き場で、区間の数以上の長さを持ちます。返す値は
+    /// `scratch` です。
+    pub(crate) fn rebuild_intervals(&mut self, scratch: FixedVec<Interval>) -> FixedVec<Interval> {
+        let ctr = self.ctr;
+        let table = match self.set_intervals(scratch) {
+            Ok(t) => t,
+            Err(scratch) => return scratch,
+        };
+        self.ctr = ctr;
+        match self.set_intervals(table) {
+            Ok(scratch) => scratch,
+            Err(table) => {
+                debug_assert!(false, "the intervals fit the table they came from");
+                table
+            }
+        }
     }
 
     /// 輪を容量 `cap` に移し、書いた範囲を写します。確保に失敗したら輪を変えずに誤りを返します。

@@ -215,6 +215,21 @@ impl Ring {
         if new_cap == self.cap {
             return Ok(());
         }
+        let next = self.resized(new_cap, pool, written)?;
+        self.release(pool);
+        *self = next;
+        Ok(())
+    }
+
+    /// 容量 `new_cap` の新しい輪を作り、`written` が渡す範囲の中身を写して返します。この輪は変えません。呼び手は
+    /// 新しい輪を使うときにこの輪の chunk を返します。2 つの輪を移す処理が、両方の確保が済んでから輪を替えるために
+    /// 使います。確保に失敗したら新しい輪の chunk を返して誤りを返します。
+    pub(crate) fn resized(
+        &self,
+        new_cap: u64,
+        pool: &mut ChunkPool,
+        written: impl Fn(&mut dyn FnMut(u64, u64) -> Result<(), AllocError>) -> Result<(), AllocError>,
+    ) -> Result<Ring, AllocError> {
         let mut next = Ring::new(new_cap);
         let copied = written(&mut |lo, hi| {
             let mut buf = [0u8; 1024];
@@ -231,9 +246,7 @@ impl Ring {
             next.release(pool);
             return Err(e);
         }
-        self.release(pool);
-        *self = next;
-        Ok(())
+        Ok(next)
     }
 }
 

@@ -2,6 +2,7 @@
 //!
 //! 接続の数を 1 本と多数で測ります。多数の接続を順に回すと、同じ接続の欄を触る間隔が長くなります。
 //! 値は相手の packet の組み立てと checksum を含むので、その費用を `rig_overhead` で別に測ります。
+//! `_sack` の付く組は SACK を交渉した接続で、ACK ごとの RACK の状態の更新と TLP の期限の張り直しを含みます。
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -10,10 +11,15 @@ use wgft_wgstack_bench::{MSS, Rig};
 const CONNS: [usize; 3] = [1, 64, 1024];
 
 fn recv(c: &mut Criterion) {
-    let mut g = c.benchmark_group("recv_segment");
+    recv_group(c, "recv_segment", false);
+    recv_group(c, "recv_segment_sack", true);
+}
+
+fn recv_group(c: &mut Criterion, name: &str, sack: bool) {
+    let mut g = c.benchmark_group(name);
     g.throughput(Throughput::Bytes(MSS as u64));
     for n in CONNS {
-        let mut rig = Rig::new(n);
+        let mut rig = Rig::with_sack(n, sack);
         let mut k = 0;
         g.bench_function(BenchmarkId::from_parameter(n), |b| {
             b.iter(|| {
@@ -27,10 +33,15 @@ fn recv(c: &mut Criterion) {
 }
 
 fn send(c: &mut Criterion) {
-    let mut g = c.benchmark_group("send_segment");
+    send_group(c, "send_segment", false);
+    send_group(c, "send_segment_sack", true);
+}
+
+fn send_group(c: &mut Criterion, name: &str, sack: bool) {
+    let mut g = c.benchmark_group(name);
     g.throughput(Throughput::Bytes(MSS as u64));
     for n in CONNS {
-        let mut rig = Rig::new(n);
+        let mut rig = Rig::with_sack(n, sack);
         let mut k = 0;
         g.bench_function(BenchmarkId::from_parameter(n), |b| {
             b.iter(|| {
