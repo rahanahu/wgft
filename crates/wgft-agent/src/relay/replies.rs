@@ -17,10 +17,10 @@ use std::time::Instant;
 use tokio::sync::{Semaphore, SemaphorePermit};
 
 /// The reply buffers lent at once across the process (Go's `replySlots`).
-pub const REPLY_SLOTS: usize = 64;
+pub(crate) const REPLY_SLOTS: usize = 64;
 
 /// The size of one UDP buffer: a reply buffer and a listener's receive buffer (Go's `udpBufMax`).
-pub const UDP_BUF: usize = 65535;
+pub(crate) const UDP_BUF: usize = 65535;
 
 /// プロセス全体の枠。どの世代の中継もこれを使う。
 pub(crate) static REPLIES: LazyLock<Replies> = LazyLock::new(|| Replies::new(REPLY_SLOTS));
@@ -42,7 +42,7 @@ pub(crate) struct Replies {
 }
 
 /// 待ちの観測の読み。試験だけが読む。
-#[cfg_attr(not(test), expect(dead_code, reason = "read only by tests"))]
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Waits {
     pub(crate) count: u64,
@@ -96,7 +96,7 @@ impl Replies {
     }
 
     /// 今の待ちの観測。
-    #[cfg_attr(not(test), expect(dead_code, reason = "read only by tests"))]
+    #[cfg(test)]
     pub(crate) fn waits(&self) -> Waits {
         Waits {
             count: self.waits.load(Ordering::Relaxed),
@@ -107,7 +107,7 @@ impl Replies {
     }
 
     /// 作ったバッファのうち、今誰も借りていない数。
-    #[cfg_attr(not(test), expect(dead_code, reason = "read only by tests"))]
+    #[cfg(test)]
     pub(crate) fn spare(&self) -> usize {
         self.spare
             .lock()
@@ -116,7 +116,7 @@ impl Replies {
     }
 
     /// 今空いている枠の数。
-    #[cfg_attr(not(test), expect(dead_code, reason = "read only by tests"))]
+    #[cfg(test)]
     pub(crate) fn available(&self) -> usize {
         self.slots.available_permits()
     }

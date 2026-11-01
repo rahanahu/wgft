@@ -123,7 +123,7 @@ fn manager_with(peer: &Peer, targets: Arc<Targets>, limits: Limits) -> Manager {
         peer.agent().handle(),
         targets,
         limits,
-        super::DEFAULT_UDP_IDLE,
+        super::udp::DEFAULT_UDP_IDLE,
     )
 }
 

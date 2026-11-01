@@ -43,7 +43,7 @@ fn manager_with(peer: &Peer, limits: Limits, idle: Duration) -> Manager {
 }
 
 fn manager(peer: &Peer) -> Manager {
-    manager_with(peer, Limits::default(), super::DEFAULT_UDP_IDLE)
+    manager_with(peer, Limits::default(), super::udp::DEFAULT_UDP_IDLE)
 }
 
 /// 受けた datagram をそのまま返し、送信元を数える宛先。
@@ -293,7 +293,11 @@ async fn the_flow_budget_drops_new_sources_silently_and_keeps_existing_ones() {
     let peer = start().await;
     let (target, _) = echo().await;
     // 予算 16 でルールが 1 本なら、予備の 4 を除いた 12 まで
-    let mut m = manager_with(&peer, Limits { udp: 16, tcp: 16 }, super::DEFAULT_UDP_IDLE);
+    let mut m = manager_with(
+        &peer,
+        Limits { udp: 16, tcp: 16 },
+        super::udp::DEFAULT_UDP_IDLE,
+    );
     m.apply(&udp("r_u", 2456, &target.to_string())).await;
     let mut held = Vec::new();
     for _ in 0..12 {
@@ -392,7 +396,7 @@ async fn an_ip_literal_target_outside_the_allow_list_keeps_the_listener_closed()
         peer.agent().handle(),
         targets("10.0.0.0/8", vec![]),
         Limits::default(),
-        super::DEFAULT_UDP_IDLE,
+        super::udp::DEFAULT_UDP_IDLE,
     );
     m.apply(&udp("r_u", 2456, "192.0.2.1:2456")).await;
     assert_eq!(m.listening(), 0);
@@ -410,7 +414,7 @@ async fn a_host_name_denied_at_dial_time_is_reported_and_dropped() {
         peer.agent().handle(),
         targets("10.0.0.0/8", vec![("game.lan", "192.0.2.1")]),
         Limits::default(),
-        super::DEFAULT_UDP_IDLE,
+        super::udp::DEFAULT_UDP_IDLE,
     );
     m.apply(&udp("r_u", 2456, "game.lan:2456")).await;
     assert_eq!(m.listening(), 1);
@@ -430,7 +434,7 @@ fn the_idle_timeout_and_the_sweep_follow_the_fixture() {
     .unwrap();
     let def = fixture["default_udp_idle_seconds"].as_u64().unwrap();
     let div = u32::try_from(fixture["udp_sweep_divisor"].as_u64().unwrap()).unwrap();
-    assert_eq!(super::DEFAULT_UDP_IDLE, Duration::from_secs(def));
+    assert_eq!(super::udp::DEFAULT_UDP_IDLE, Duration::from_secs(def));
     for bad in [0, -1, i64::from(i32::MAX) + 1, i64::MAX] {
         assert_eq!(super::udp_idle_timeout(bad), Duration::from_secs(def));
     }
@@ -440,9 +444,9 @@ fn the_idle_timeout_and_the_sweep_follow_the_fixture() {
         Duration::from_secs(u64::from(i32::MAX.unsigned_abs()))
     );
     let idle = Duration::from_secs(def);
-    assert_eq!(super::sweep_interval(idle), idle / div);
+    assert_eq!(super::udp::sweep_interval(idle), idle / div);
     assert_eq!(
-        super::sweep_interval(Duration::from_millis(40)),
-        super::MIN_SWEEP
+        super::udp::sweep_interval(Duration::from_millis(40)),
+        super::udp::MIN_SWEEP
     );
 }

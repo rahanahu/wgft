@@ -21,14 +21,14 @@ use tokio::time::Instant;
 use wgft_netstack::{Access, TcpStream};
 
 /// The buffer a direction holds while idle (Go's `idleBufSize`).
-pub const IDLE_BUF: usize = 2048;
+pub(crate) const IDLE_BUF: usize = 2048;
 
 /// The buffer a direction borrows while data flows (Go's `bulkBufSize`).
-pub const BULK_BUF: usize = 32 << 10;
+pub(crate) const BULK_BUF: usize = 32 << 10;
 
 /// How long a direction keeps the bulk buffer without data before it gives it back (Go's
 /// `bulkWait`).
-pub const BULK_WAIT: Duration = Duration::from_millis(200);
+pub(crate) const BULK_WAIT: Duration = Duration::from_millis(200);
 
 /// 1 つの向きのバッファ。
 struct Buf {
@@ -74,7 +74,7 @@ impl Drop for Buf {
 
 /// The most bulk buffers a data plane thread keeps for reuse; beyond it, returned buffers are
 /// freed.
-pub const BULK_KEEP: usize = 16;
+pub(crate) const BULK_KEEP: usize = 16;
 
 thread_local! {
     /// スレッドごとの大きいバッファの置き場。データが流れ始めるたびに確保と解放を繰り返さないため。

@@ -34,10 +34,11 @@ use wgft_alloc_count::live_bytes;
 use wgft_proto::Proto;
 
 use super::pipe::BULK_ALIVE;
+use super::pipe::BULK_WAIT;
 use super::replies::{REPLIES, REPLY_SLOTS, UDP_BUF};
 use super::testpeer::{self, Outcome, Peer};
 use super::tests::{rule, targets, wait_for};
-use super::{BULK_BUF, BULK_KEEP, BULK_WAIT, Kind, Manager};
+use super::{BULK_BUF, BULK_KEEP, Kind, Manager};
 use crate::flowpool::Limits;
 use crate::memory::{MemoryBound, TCP_RELAY_CONN, UDP_SESSION};
 
