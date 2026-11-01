@@ -15,6 +15,8 @@
 //! 持つ。中継が終わった後は、Go の agent と同じく、両側が送り残しを届け終えるまで枠を持つ。UDP の
 //! 中継は [`udp`] にあり、送信元ごとのセッションを無通信の期限で閉じる。
 
+#[cfg(test)]
+mod held_tests;
 mod lansock;
 mod pipe;
 mod replies;

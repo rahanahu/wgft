@@ -179,10 +179,20 @@ agent_limit() {
 agent_limit_text() {
   if [ "$AGENT_WGFT" = wgft ]; then echo "soft limit $1 MiB, margin $2 MiB"; else echo "memory bound $1 MiB, margin $2 MiB"; fi
 }
-# agent_limit_checks <what> <rss> <limit> <margin> <agent log> <soft limit name>: the RSS stays under
-# the limit plus the margin while flooded past <what>, and the agent logged the limit at start
+# agent_relay_terms <agent log>: the Rust agent's TCP and UDP relay terms of its memory bound in MiB,
+# summed, from its "memory bound terms:" start line; empty when the line is missing
+agent_relay_terms() {
+  local line; line=$(grep -m1 'memory bound terms:' "$1" 2>/dev/null)
+  local t u; t=$(grep -oE 'tcp relay [0-9]+ MiB' <<< "$line" | grep -oE '[0-9]+'); u=$(grep -oE 'udp relay [0-9]+ MiB' <<< "$line" | grep -oE '[0-9]+')
+  [ -n "$t" ] && [ -n "$u" ] && echo $((t + u))
+}
+# agent_limit_checks <what> <rss> <limit> <margin> <agent log> <soft limit name> <rss at start>: the
+# RSS stays under the limit plus the margin while flooded past <what>, and the agent logged the limit
+# at start. The Rust agent's bound is dominated by the core's per-connection floors and sits far above
+# the RSS, so its RSS growth from the start sample is also held to the bound's relay terms plus the
+# margin: a leak in the relays shows there long before it reaches the whole bound.
 agent_limit_checks() {
-  local what=$1 rss=$2 lim=$3 mar=$4 log=$5 name=$6
+  local what=$1 rss=$2 lim=$3 mar=$4 log=$5 name=$6 rss0=${7:-}
   if [ "$AGENT_WGFT" = wgft ]; then
     okcheck "agent RSS stays under the $name plus margin while flooded past $what" \
       "$([ -n "$rss" ] && [ "$rss" -le "$((lim + mar))" ] && echo 1 || echo 0)"
@@ -191,6 +201,10 @@ agent_limit_checks() {
     okcheck "agent RSS stays under its memory bound plus $mar MiB while flooded past $what" \
       "$([ -n "$rss" ] && [ "$lim" != - ] && [ "$rss" -le "$((lim + mar))" ] && echo 1 || echo 0)"
     check "agent logs its memory bound at start" "memory bound: " "$(grep 'memory bound:' "$log")"
+    local rel; rel=$(agent_relay_terms "$log")
+    echo "   agent RSS after start, before the floods: ${rss0:-unknown} MiB; the bound's relay terms: ${rel:-unknown} MiB"
+    okcheck "agent RSS grows by at most its relay terms plus $mar MiB while flooded past $what" \
+      "$([ -n "$rss" ] && [ -n "$rss0" ] && [ -n "$rel" ] && [ $((rss - rss0)) -le $((rel + mar)) ] && echo 1 || echo 0)"
   fi
 }
 
@@ -1412,6 +1426,8 @@ check5_agent_memory() {
       wait_until 10 tcp_probe_ok 39996
       wait_until 10 udp_probe_ok 27041
       local apid; apid=$(find_wgft_pid 'agent run')
+      # the RSS after start, with the tunnel and both listeners open and before any flood
+      local rss0; rss0=$(rss_mib "$apid")
 
       local udp_out; udp_out=$(ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" udp 198.51.100.1 27041 "$addrs" 260)
       echo "   $udp_out"
@@ -1441,7 +1457,7 @@ check5_agent_memory() {
       local udp_att udp_ans; udp_att=$(field attempted "$udp_out"); udp_ans=$(field answered "$udp_out")
       okcheck "agent: one rule's udp flood fills the flow budget but the spare and is refused beyond it (answered $udp_ans of $udp_att)" \
         "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((C5_UDP_BUDGET - 196)) ] && [ "$udp_ans" -le $((C5_UDP_BUDGET - 4)) ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
-      agent_limit_checks "its flow budget" "${rss:-}" "$lim" "$mar" $W/wgft-lifecycle-c5a-agent.log "soft limit"
+      agent_limit_checks "its flow budget" "${rss:-}" "$lim" "$mar" $W/wgft-lifecycle-c5a-agent.log "soft limit" "${rss0:-}"
     fi
   fi
 
@@ -1614,6 +1630,8 @@ check5b_agent_default_memory() {
       vps wgft rule add --agent home --tcp 39999 --to 192.168.50.3:25598 --admin "$ADMIN" >/dev/null
       wait_until 10 tcp_probe_ok 39999
       wait_until 10 udp_probe_ok 27051
+      # the RSS after start, with the tunnel and both listeners open and before any flood
+      local rss0; rss0=$(rss_mib "$agent_pid")
 
       local udp_out; udp_out=$(ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" udp 198.51.100.1 27051 "$addrs" 260)
       echo "   $udp_out"
@@ -1634,7 +1652,7 @@ check5b_agent_default_memory() {
       local udp_att udp_ans; udp_att=$(field attempted "$udp_out"); udp_ans=$(field answered "$udp_out")
       okcheck "agent: one rule's udp flood fills the default flow budget but the spare and is refused beyond it (answered $udp_ans of $udp_att)" \
         "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((DEFAULT_UDP_BUDGET - 392)) ] && [ "$udp_ans" -le $((DEFAULT_UDP_BUDGET - 4)) ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
-      agent_limit_checks "the default flow budget" "${rss:-}" "$lim" "$mar" "$W/wgft-lifecycle-c5ba-agent.log" "default soft limit"
+      agent_limit_checks "the default flow budget" "${rss:-}" "$lim" "$mar" "$W/wgft-lifecycle-c5ba-agent.log" "default soft limit" "${rss0:-}"
     fi
   fi
 

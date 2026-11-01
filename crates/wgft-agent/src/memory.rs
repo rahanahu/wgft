@@ -18,8 +18,11 @@ use crate::relay::{BULK_BUF, BULK_KEEP, LanConn, REPLY_SLOTS, UDP_BUF};
 use crate::targets::resolve::{ENDPOINT_PERMITS, TARGET_PERMITS};
 
 /// The fixed base: the executable's pages, the tokio runtimes and their threads, the control
-/// socket's threads, the stream and TLS state. An estimate; not measured yet.
-pub const BASE: usize = 16 << 20;
+/// socket's threads, the stream and TLS state. It is the RSS measured in the lab right after start
+/// with the tunnel and two listeners open (32 MiB at the caps UDP 4096 and TCP 1024, 37 MiB at the
+/// default caps), rounded up. That RSS also holds the touched part of the core's and the netstack's
+/// tables, which their own terms count again, so the base overcounts.
+pub const BASE: usize = 40 << 20;
 
 /// One tokio task's own allocation beyond its future: the header, the scheduler's handle and the
 /// trailer, aligned to a cache line pair. Tests check the future sizes; this covers tokio's part.
@@ -47,7 +50,7 @@ pub const RESOLVER_THREAD: usize = (2 << 20) + (64 << 10);
 /// The WireGuard device's queues at the largest MTU, for the agent's one peer: staged packets,
 /// datagrams to send and packets to deliver, with a vector header per queued item, and the one
 /// datagram buffer a call uses while it decrypts.
-fn device_bytes() -> usize {
+pub(crate) fn device_bytes() -> usize {
     let l = wgft_wireguard::Limits::default();
     let item = size_of::<Vec<u8>>() + size_of::<std::net::SocketAddr>();
     l.staged_packets * (MAX_MTU + item)
@@ -84,10 +87,17 @@ pub struct MemoryBound {
 }
 
 impl MemoryBound {
-    /// The bound for the flow caps `limits`.
+    /// The bound for the flow caps `limits`, with the core's tables that `WGFT_MAX_TCP_FLOWS`
+    /// makes.
     #[must_use]
     pub fn for_limits(limits: flowpool::Limits) -> Self {
-        let core_limits = CoreLimits::with_max_flows(limits.tcp);
+        Self::with_core(limits, CoreLimits::with_max_flows(limits.tcp))
+    }
+
+    /// The bound for the flow caps `limits` over a core with the tables `core_limits`, at the
+    /// largest MTU. Tests use it with their small cores.
+    #[must_use]
+    pub fn with_core(limits: flowpool::Limits, core_limits: CoreLimits) -> Self {
         let conns = core_limits.conns();
         let core =
             usize::try_from(Bound::for_limits(&core_limits, MAX_MTU).total).unwrap_or(usize::MAX);
@@ -124,6 +134,48 @@ impl MemoryBound {
     #[must_use]
     pub fn mib(&self) -> usize {
         self.total.div_ceil(1 << 20)
+    }
+
+    /// The terms that the relays hold for their flows: the TCP and UDP relay terms. The lab's
+    /// growth check compares the RSS growth under a flood with it.
+    #[must_use]
+    pub fn relays(&self) -> usize {
+        self.tcp.saturating_add(self.udp)
+    }
+
+    /// The terms without the fixed base and the resolver threads: what a test that counts the
+    /// heap can compare with, since the base is mostly not heap and the threads' stacks are not
+    /// allocations.
+    #[must_use]
+    pub fn heap_terms(&self) -> usize {
+        [
+            self.core,
+            self.tables,
+            self.driver,
+            self.device,
+            self.tcp,
+            self.udp,
+        ]
+        .into_iter()
+        .fold(0, usize::saturating_add)
+    }
+
+    /// The second start line, with the terms in MiB rounded up. The lab reads the relay terms
+    /// from it; its form is not guaranteed.
+    #[must_use]
+    pub fn terms_line(&self) -> String {
+        let m = |b: usize| b.div_ceil(1 << 20);
+        format!(
+            "memory bound terms: base {} MiB, core {} MiB, tables {} MiB, driver {} MiB, device {} MiB, tcp relay {} MiB, udp relay {} MiB, resolver {} MiB",
+            m(self.base),
+            m(self.core),
+            m(self.tables),
+            m(self.driver),
+            m(self.device),
+            m(self.tcp),
+            m(self.udp),
+            m(self.resolver)
+        )
     }
 
     /// The start line.
