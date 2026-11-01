@@ -103,7 +103,7 @@ fn registered(generation: u64) -> Credentials {
         name: "home".into(),
         endpoint: "203.0.113.1:8443".into(),
         cert_sha256: "3f1c9a5e7b2d0123456789abcdef0123456789abcdef0123456789abcdef0123".into(),
-        permanent_token: "secret".into(),
+        permanent_token: String::from("secret").into(),
         used_join_token_sha256: "35c2c54181850123456789abcdef".into(),
         last_state: Some(serde_json::from_value(state).unwrap()),
         ..Credentials::default()

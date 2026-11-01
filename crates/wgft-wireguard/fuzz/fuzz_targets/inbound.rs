@@ -60,8 +60,8 @@ struct Keys {
 fn keys() -> &'static Keys {
     static KEYS: OnceLock<Keys> = OnceLock::new();
     KEYS.get_or_init(|| {
-        let a_key = PrivateKey::generate([0xa1; 32]);
-        let b_key = PrivateKey::generate([0xb2; 32]);
+        let a_key = PrivateKey::generate(&[0xa1; 32]);
+        let b_key = PrivateKey::generate(&[0xb2; 32]);
         Keys {
             a_pub: a_key.public_key(),
             b_pub: b_key.public_key(),

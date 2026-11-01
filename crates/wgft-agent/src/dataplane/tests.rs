@@ -150,8 +150,8 @@ fn seq(p: &[u8]) -> u32 {
 
 fn keys() -> (PrivateKey, PrivateKey) {
     (
-        PrivateKey::generate([0xa1; 32]),
-        PrivateKey::generate([0xb2; 32]),
+        PrivateKey::generate(&[0xa1; 32]),
+        PrivateKey::generate(&[0xb2; 32]),
     )
 }
 

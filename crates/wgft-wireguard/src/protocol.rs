@@ -426,8 +426,8 @@ mod tests {
     /// 開始の message の TAI64N の印の秒。sanstun の相手として受け、認証した開始から読む。
     fn stamped_seconds(unix: Duration) -> u64 {
         let now = Instant::now();
-        let agent = PrivateKey::generate([0xa1; 32]);
-        let server = PrivateKey::generate([0xb2; 32]);
+        let agent = PrivateKey::generate(&[0xa1; 32]);
+        let server = PrivateKey::generate(&[0xb2; 32]);
         let mut proto = Protocol::new(
             &agent,
             &[(server.public_key(), None)],

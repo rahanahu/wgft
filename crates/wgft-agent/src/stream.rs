@@ -310,7 +310,7 @@ async fn connect(agent: &Shared, obs: &SharedObs) -> Result<Ws, End> {
         (
             a.creds.endpoint.clone(),
             a.creds.cert_sha256.clone(),
-            zeroize::Zeroizing::new(a.creds.permanent_token.clone()),
+            a.creds.permanent_token.clone(),
             a.private_key.clone(),
         )
     };
@@ -334,8 +334,12 @@ async fn connect(agent: &Shared, obs: &SharedObs) -> Result<Ws, End> {
     let mut req = format!("wss://{endpoint}/api/v1/agents/stream")
         .into_client_request()
         .map_err(|e| End::Other(e.to_string()))?;
-    let mut auth = HeaderValue::from_str(&format!("Bearer {}", token.as_str()))
-        .map_err(|_| End::Other("credentials file: permanent_token is invalid".into()))?;
+    // HeaderValue の中の写しは消せないので、印を付けてログと Debug に出さないことだけを守る
+    let mut auth = HeaderValue::from_str(&zeroize::Zeroizing::new(format!(
+        "Bearer {}",
+        token.as_str()
+    )))
+    .map_err(|_| End::Other("credentials file: permanent_token is invalid".into()))?;
     auth.set_sensitive(true);
     req.headers_mut().insert("Authorization", auth);
     let config = WebSocketConfig::default()

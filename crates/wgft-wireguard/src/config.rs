@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn agent_config_has_one_peer_with_the_server_host_route() {
-        let key = PrivateKey::from_bytes([1; 32]);
+        let key = PrivateKey::from_bytes(&[1; 32]);
         let server = PublicKey::from_bytes([2; 32]);
         let cfg = DeviceConfig::agent(
             key,

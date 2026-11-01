@@ -12,6 +12,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 time = { workspace = true, features = ["formatting", "parsing"] }
 unicode-general-category.workspace = true
+zeroize = { workspace = true, features = ["serde"] }
 
 [lints]
 workspace = true

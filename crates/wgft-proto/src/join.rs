@@ -50,8 +50,8 @@ pub struct Join {
     pub host: String,
     /// `endpoint` のポート。
     pub port: u16,
-    /// 1 回限りの登録トークン。秘密。
-    pub token: String,
+    /// 1 回限りの登録トークン。秘密。捨てるときに 0 で消す。
+    pub token: zeroize::Zeroizing<String>,
     /// エージェント用 API の leaf の証明書の DER の SHA-256。
     pub pin: [u8; 32],
 }
@@ -107,7 +107,7 @@ impl Join {
             endpoint: utf8(&u.host)?,
             host: utf8(host)?,
             port,
-            token: utf8(tok)?,
+            token: zeroize::Zeroizing::new(utf8(tok)?),
             pin,
         })
     }
@@ -178,6 +178,13 @@ struct Url {
     host: Vec<u8>,
     path: Vec<u8>,
     fragment: Vec<u8>,
+}
+
+/// path はトークンを持つので、捨てるときに 0 で消す。
+impl Drop for Url {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.path);
+    }
 }
 
 /// Go の `url.Parse`。`ParseJoin` が見る scheme、host、path、fragment を、Go の文字列と同じく
@@ -412,7 +419,9 @@ enum Mode {
 /// Go の `unescape`。
 fn unescape(s: &str, mode: Mode) -> Option<Vec<u8>> {
     let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
+    // 入力はトークンと userinfo を含みうるので、途中で断ったときも書いた分を 0 で消す。容量を先に取るので
+    // 伸ばして前の領域を残すことはない
+    let mut out = zeroize::Zeroizing::new(Vec::with_capacity(b.len()));
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' {
@@ -438,7 +447,7 @@ fn unescape(s: &str, mode: Mode) -> Option<Vec<u8>> {
             i += 1;
         }
     }
-    Some(out)
+    Some(std::mem::take(&mut *out))
 }
 
 /// Go の `shouldEscape(c, encodeHost)` (encodeZone も同じ)。0x80 以上は常に真。
@@ -487,7 +496,7 @@ mod tests {
         assert_eq!(j.endpoint, "203.0.113.1:8443");
         assert_eq!(j.host, "203.0.113.1");
         assert_eq!(j.port, 8443);
-        assert_eq!(j.token, "tok_ABC-def");
+        assert_eq!(*j.token, "tok_ABC-def");
         assert_eq!(j.pin_hex(), PIN);
     }
 

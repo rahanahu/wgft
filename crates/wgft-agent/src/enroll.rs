@@ -152,10 +152,17 @@ pub fn host_of(endpoint: &str) -> &str {
 ///
 /// 登録できなければ誤りを返す。
 pub async fn register(j: &Join, name: &str) -> Result<RegisterResponse, AgentError> {
-    let body = serde_json::to_vec(&RegisterRequest {
-        name: name.to_owned(),
-        token: j.token.clone(),
-    })
+    // 本文は登録トークンを含むので、送った後に 0 で消す。容量を先に取り、書く途中で伸ばして前の領域を
+    // 消さずに手放さないようにする
+    let mut body =
+        zeroize::Zeroizing::new(Vec::with_capacity(64 + 6 * (name.len() + j.token.len())));
+    serde_json::to_writer(
+        &mut *body,
+        &RegisterRequest {
+            name: name.to_owned(),
+            token: j.token.clone(),
+        },
+    )
     .map_err(|e| AgentError::Other(e.to_string()))?;
     // Go の agent の pinned client の 15 秒の期限が、接続から本文の読みまでの全体にかかる。
     // 接続を回すタスクは、期限で打ち切った後も残らないよう最後に止める
@@ -171,7 +178,7 @@ pub async fn register(j: &Join, name: &str) -> Result<RegisterResponse, AgentErr
         let req = hyper::Request::post("/api/v1/agents/register")
             .header(hyper::header::HOST, j.endpoint.as_str())
             .header(hyper::header::CONTENT_TYPE, "application/json")
-            .body(Full::new(Bytes::from(body)))
+            .body(Full::new(Bytes::from_owner(body)))
             .map_err(|e| AgentError::Other(e.to_string()))?;
         let resp = send
             .send_request(req)
@@ -188,7 +195,8 @@ pub async fn register(j: &Join, name: &str) -> Result<RegisterResponse, AgentErr
     }
     let (status, data) = done
         .map_err(|_| AgentError::Other("cannot reach the registration API: timed out".into()))??;
-    let text = String::from_utf8_lossy(&data).trim().to_owned();
+    // 応答の本文は恒久トークンを含みうるので、誤りの文に使うときだけ写す
+    let text = || String::from_utf8_lossy(&data).trim().to_owned();
     match status {
         401 => Err(Refusal::conflict(
             "WGFT_JOIN",
@@ -198,14 +206,16 @@ pub async fn register(j: &Join, name: &str) -> Result<RegisterResponse, AgentErr
         400 => Err(Refusal::config(
             "WGFT_NAME",
             format!(
-                "the registration API rejected the request: HTTP 400, {text}; an agent name may hold only lowercase letters, digits and hyphens, at most 32 of them, and may not begin or end with a hyphen"
+                "the registration API rejected the request: HTTP 400, {}; an agent name may hold only lowercase letters, digits and hyphens, at most 32 of them, and may not begin or end with a hyphen",
+                text()
             ),
         )
         .into()),
         409 => Err(Refusal::conflict(
             "WGFT_JOIN",
             format!(
-                "an agent is already registered under the name this join string carries: HTTP 409, {text}. If that agent is running, on this host with another data directory or on another host, point WGFT_DATA_DIR at its directory instead; revoking it on the VPS cuts it off. Otherwise revoke it with wgft agent revoke <name>, or issue a join string for another name"
+                "an agent is already registered under the name this join string carries: HTTP 409, {}. If that agent is running, on this host with another data directory or on another host, point WGFT_DATA_DIR at its directory instead; revoking it on the VPS cuts it off. Otherwise revoke it with wgft agent revoke <name>, or issue a join string for another name",
+                text()
             ),
         )
         .into()),
@@ -217,12 +227,13 @@ pub async fn register(j: &Join, name: &str) -> Result<RegisterResponse, AgentErr
             }
             Ok(out)
         }
-        s => Err(AgentError::Other(format!("registration API: HTTP {s}: {text}"))),
+        s => Err(AgentError::Other(format!("registration API: HTTP {s}: {}", text()))),
     }
 }
 
-async fn read_prefix(body: hyper::body::Incoming, limit: usize) -> Vec<u8> {
-    let mut out = Vec::new();
+/// 本文の先頭 `limit` byte。恒久トークンを含みうるので捨てるときに 0 で消し、容量を先に取って伸ばさない。
+async fn read_prefix(body: hyper::body::Incoming, limit: usize) -> zeroize::Zeroizing<Vec<u8>> {
+    let mut out = zeroize::Zeroizing::new(Vec::with_capacity(limit));
     let mut body = body;
     while out.len() < limit {
         match body.frame().await {
