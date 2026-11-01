@@ -8,18 +8,21 @@
 //! 落ちた状態のまま動き続けるより、プロセスが落ちて同梱の unit が立て直すほうがよいためである (Go の v1 と
 //! 同じ判断)。受け口が待つのを諦めた要求は処理しない。
 
+use std::collections::HashMap;
 use std::sync::PoisonError;
 use std::time::{Duration, Instant, SystemTime};
 
 use wgft_proto::GoTime;
 
 use crate::controlapi::{
-    DOCTOR_LOCK_WAIT, DoctorAllowTargets, DoctorProcess, DoctorResponse, DoctorRule,
-    DoctorRuntimeState, DoctorStream, DoctorTunnel, DoctorWatchdog, clip_text,
+    DOCTOR_LOCK_WAIT, DoctorAllowTargets, DoctorBudget, DoctorProcess, DoctorRefusal,
+    DoctorResponse, DoctorRule, DoctorRuntimeState, DoctorStream, DoctorTunnel, DoctorWatchdog,
+    clip_text,
 };
 use crate::ctlserver::{DoctorRequest, RotateKeyRequest, RotateState};
+use crate::flowpool;
 use crate::logf;
-use crate::relay::ListenerStat;
+use crate::relay::{ListenerStat, Manager};
 use crate::run::{Agent, Shared};
 use crate::stream::{SharedObs, StreamObs};
 use crate::tunnel;
@@ -171,7 +174,7 @@ fn stream(obs: &SharedObs) -> DoctorStream {
 /// 実行時の状態を 1 回に読む。トンネルの状態はハートビートと同じ値で、doctor のための 2 つ目の判定を
 /// 持たない。
 async fn runtime_state(a: &Agent) -> DoctorRuntimeState {
-    let hb = a.heartbeat().await;
+    let ts = a.tunnel_status().await;
     let mut st = DoctorRuntimeState {
         generation: a.generation,
         agent_disabled: a
@@ -183,10 +186,10 @@ async fn runtime_state(a: &Agent) -> DoctorRuntimeState {
     };
     st.tunnel = DoctorTunnel {
         present: a.tunnel.is_some(),
-        state: hb.tunnel.state.clone(),
-        reason: clip_text(&hb.tunnel.reason),
-        endpoint: hb.tunnel.endpoint.clone(),
-        last_handshake: hb.tunnel.last_handshake,
+        state: ts.state,
+        reason: clip_text(&ts.reason),
+        endpoint: ts.endpoint,
+        last_handshake: ts.last_handshake,
         watchdog: DoctorWatchdog {
             rebuild_interval: nanos(a.rebuild_after),
             retry_at: go_time(a.retry_at.map(wall)),
@@ -200,9 +203,48 @@ async fn runtime_state(a: &Agent) -> DoctorRuntimeState {
         st.tunnel.started_at = GoTime::from_system(wall(t.started_at()));
     }
     if let Some(relay) = &a.relay {
-        st.rules = rules(&hb.rules, &relay.listener_stats());
+        relay_state(&mut st, relay);
     }
     st
+}
+
+/// 中継の値を載せる。ルールの状態とリスナーの集計は、リスナーの 1 回の読みから作る (Go の
+/// `usermode.Read`)。ハートビートと同じ判定 ([`Manager::status_of`]) を使い、リスナーを 2 度読まない。
+fn relay_state(st: &mut DoctorRuntimeState, relay: &Manager) {
+    let stats = relay.listener_stats();
+    st.rules = rules(&relay.status_of(&stats), &stats);
+    // 中継とトンネルは一緒に作り直されるので、拒否の累計の起点はトンネルを立てた時刻である
+    st.refusals_since = st.tunnel.started_at;
+    st.budgets = vec![
+        budget("tcp", relay.tcp_pool().reading()),
+        budget("udp", relay.udp_pool().reading()),
+    ];
+}
+
+fn count(n: usize) -> i64 {
+    i64::try_from(n).unwrap_or(i64::MAX)
+}
+
+/// 1 つのプロトコルのフロー数の予算 (Go の `doctorBudget`)。拒否の並びは pool の読みがルール ID と理由の
+/// 語の順に並べている。
+fn budget(proto: &str, r: flowpool::Reading) -> DoctorBudget {
+    DoctorBudget {
+        proto: proto.to_owned(),
+        total: count(r.total),
+        in_use: count(r.in_use),
+        rule_cap: count(r.rule_cap),
+        reserve: count(r.reserve),
+        rules: count(r.rules),
+        refusals: r
+            .refusals
+            .into_iter()
+            .map(|(rule_id, reason, n)| DoctorRefusal {
+                rule_id,
+                reason: reason.as_str().to_owned(),
+                count: n,
+            })
+            .collect(),
+    }
 }
 
 /// リスナーの状態をルール単位にまとめる。リスナー 1 つずつは並べない。
@@ -216,21 +258,38 @@ fn rules(states: &[wgft_proto::RuleStatus], listeners: &[ListenerStat]) -> Vec<D
             ..DoctorRule::default()
         })
         .collect();
+    // 範囲のルールはリスナーが多いので、ルールを ID の表で引く
+    let at: HashMap<&str, usize> = states
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.id.as_str(), i))
+        .collect();
     for l in listeners {
-        let Some(r) = out.iter_mut().find(|r| r.id == l.rule_id) else {
+        let Some(r) = at.get(l.rule_id.as_str()).map(|&i| &mut out[i]) else {
             continue;
         };
         "tcp".clone_into(&mut r.proto);
         r.listeners += 1;
-        if l.listening {
-            r.listening += 1;
-        } else {
-            r.bind_errors += 1;
-            if r.bind_error.is_empty()
-                && let Some(e) = &l.err
-            {
-                r.bind_error = clip_text(&format!("{}: {e}", l.key));
+        r.sessions += count(l.sessions);
+        r.flows += count(l.flows);
+        match (&l.err, l.listening) {
+            // 開けなかった原因はポートの衝突を、届かない原因は宛先の機器を指すので、分けて数える
+            (err, false) => {
+                r.bind_errors += 1;
+                if r.bind_error.is_empty()
+                    && let Some(e) = err
+                {
+                    r.bind_error = clip_text(&format!("{}: {e}", l.key()));
+                }
             }
+            (Some(e), true) => {
+                r.listening += 1;
+                r.target_errors += 1;
+                if r.target_error.is_empty() {
+                    r.target_error = clip_text(&format!("{}: {e}", l.key()));
+                }
+            }
+            (None, true) => r.listening += 1,
         }
     }
     out
@@ -239,6 +298,16 @@ fn rules(states: &[wgft_proto::RuleStatus], listeners: &[ListenerStat]) -> Vec<D
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stat(rule: &str, port: u16, listening: bool, err: Option<&str>) -> ListenerStat {
+        ListenerStat {
+            rule_id: rule.into(),
+            port,
+            listening,
+            err: err.map(Into::into),
+            ..ListenerStat::default()
+        }
+    }
 
     #[test]
     fn rules_count_listeners_per_rule() {
@@ -256,43 +325,109 @@ mod tests {
         ];
         let ls = vec![
             ListenerStat {
-                rule_id: "r_a".into(),
-                key: "tcp/1".into(),
-                listening: true,
-                err: None,
+                sessions: 2,
+                flows: 1,
+                ..stat("r_a", 1, true, None)
             },
+            stat("r_b", 2, false, Some("bind tcp 10.0.0.2:2: in use")),
             ListenerStat {
-                rule_id: "r_b".into(),
-                key: "tcp/2".into(),
-                listening: false,
-                err: Some("bind tcp 10.0.0.2:2: in use".into()),
-            },
-            ListenerStat {
-                rule_id: "r_b".into(),
-                key: "tcp/3".into(),
-                listening: true,
-                err: None,
+                sessions: 3,
+                flows: 2,
+                ..stat("r_b", 3, true, None)
             },
         ];
         let got = rules(&states, &ls);
         assert_eq!(got[0].listeners, 1);
         assert_eq!(got[0].listening, 1);
         assert_eq!(got[0].proto, "tcp");
+        assert_eq!((got[0].sessions, got[0].flows), (2, 1));
         assert_eq!(got[1].listeners, 2);
+        assert_eq!(got[1].listening, 1);
         assert_eq!(got[1].bind_errors, 1);
         assert_eq!(got[1].bind_error, "tcp/2: bind tcp 10.0.0.2:2: in use");
+        assert_eq!((got[1].sessions, got[1].flows), (3, 2));
+        assert_eq!(
+            (got[1].target_errors, got[1].target_error.as_str()),
+            (0, "")
+        );
 
         // 後の開けなかったリスナーは、最初の理由を上書きしない
         let mut more = ls.clone();
-        more.push(ListenerStat {
-            rule_id: "r_b".into(),
-            key: "tcp/4".into(),
-            listening: false,
-            err: Some("bind tcp 10.0.0.2:4: other".into()),
-        });
+        more.push(stat("r_b", 4, false, Some("bind tcp 10.0.0.2:4: other")));
         let got = rules(&states, &more);
         assert_eq!(got[1].bind_errors, 2);
         assert_eq!(got[1].bind_error, "tcp/2: bind tcp 10.0.0.2:2: in use");
+    }
+
+    /// 開いている待ち受けの宛先の誤りは、bind の誤りと分けて数える (Go の `doctorRules`)。
+    #[test]
+    fn rules_count_target_errors_apart_from_bind_errors() {
+        let states = vec![wgft_proto::RuleStatus {
+            id: "r_a".into(),
+            state: "error".into(),
+            reason: "tcp/5: bind tcp 10.0.0.2:5: in use".into(),
+        }];
+        let ls = vec![
+            stat("r_a", 5, false, Some("bind tcp 10.0.0.2:5: in use")),
+            stat("r_a", 6, true, Some("dial tcp 192.0.2.1:80: refused")),
+            stat("r_a", 7, true, Some("dial tcp 192.0.2.1:81: refused")),
+            stat("r_a", 8, true, None),
+            // 属するルールが状態に無いリスナーは数えない
+            stat("r_gone", 9, true, Some("x")),
+        ];
+        let got = rules(&states, &ls);
+        assert_eq!(got.len(), 1);
+        let r = &got[0];
+        assert_eq!((r.listeners, r.listening), (4, 3));
+        assert_eq!(r.bind_errors, 1);
+        assert_eq!(r.target_errors, 2);
+        assert_eq!(r.target_error, "tcp/6: dial tcp 192.0.2.1:80: refused");
+        // 長い理由は応答の上限で切る
+        let long = "x".repeat(600);
+        let got = rules(&states, &[stat("r_a", 6, true, Some(&long))]);
+        assert!(got[0].target_error.len() <= crate::controlapi::DOCTOR_TEXT_MAX_BYTES + 16);
+        assert!(got[0].target_error.starts_with("tcp/6: xxx"));
+    }
+
+    /// 予算の読みは Go の `doctorBudget` の形に写す。拒否はルール ID と理由の語の順に並ぶ。
+    #[test]
+    fn budgets_follow_the_pool() {
+        use flowpool::{Denied, Pool};
+        let pool = Pool::new(16);
+        let a = pool.listener("r_b");
+        let b = pool.listener("r_a");
+        // ルールが 2 本なので、1 本の上限 C は 8
+        let mut held = Vec::new();
+        while let Ok(l) = a.take() {
+            held.push(l);
+        }
+        assert!(matches!(a.take(), Err(Denied::Refused(_))));
+        let _keep = b.take().unwrap();
+        let got = budget("tcp", pool.reading());
+        assert_eq!(got.proto, "tcp");
+        assert_eq!(got.total, 16);
+        assert_eq!(got.rules, 2);
+        assert_eq!(got.rule_cap, 8);
+        assert_eq!(got.in_use, count(held.len() + 1));
+        assert_eq!(got.reserve, count(pool.reading().reserve));
+        let reasons: Vec<(&str, &str)> = got
+            .refusals
+            .iter()
+            .map(|r| (r.rule_id.as_str(), r.reason.as_str()))
+            .collect();
+        assert!(
+            reasons.iter().all(|(rule, _)| *rule == "r_b"),
+            "{reasons:?}"
+        );
+        assert!(got.refusals.iter().all(|r| r.count > 0));
+        let mut sorted = reasons.clone();
+        sorted.sort_unstable();
+        assert_eq!(reasons, sorted);
+        // 拒否の無い予算は refusals を書かない
+        let empty = budget("udp", Pool::new(8192).reading());
+        assert_eq!(empty.refusals, Vec::<DoctorRefusal>::new());
+        let line = serde_json::to_string(&empty).unwrap();
+        assert!(!line.contains("refusals"), "{line}");
     }
 
     fn context(agent: Agent) -> Context {
@@ -333,6 +468,79 @@ mod tests {
         assert!(r.runtime_state.is_none());
         assert_eq!(r.runtime_state_timeout, 30_000_000);
         assert!(r.stream.is_some() && r.allow_targets.is_some() && r.process.is_some());
+    }
+
+    /// 中継があれば、応答はルールの数と予算を載せる。待ち受けを開けないルールは bind の誤りに数え、
+    /// CLI の `relay.listeners` が Go と同じく読める。
+    #[tokio::test]
+    async fn doctor_carries_the_relay_s_rules_and_budgets() {
+        use crate::relay::{Manager, OpenPorts};
+        use crate::targets::Targets;
+        use wgft_proto::{AgentRule, Proto};
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let mut m = Manager::new(
+            std::net::Ipv4Addr::LOCALHOST,
+            std::net::Ipv4Addr::LOCALHOST,
+            None,
+            OpenPorts::default(),
+            std::sync::Arc::new(Targets::new(None)),
+            flowpool::Limits { udp: 64, tcp: 32 },
+        );
+        m.apply(&[AgentRule {
+            id: "r_a".into(),
+            proto: Proto::Tcp,
+            listen_port: port.to_string().parse().unwrap(),
+            target: "127.0.0.1:9".into(),
+            enabled: true,
+        }])
+        .await;
+        let mut a = crate::run::test_agent();
+        a.relay = Some(m);
+        let r = collect(&context(a), Duration::from_secs(2)).await;
+        let st = r.runtime_state.unwrap();
+        assert_eq!(st.rules.len(), 1);
+        let rule = &st.rules[0];
+        assert_eq!(rule.state, "error");
+        assert!(
+            rule.reason.starts_with(&format!("tcp/{port}: bind tcp ")),
+            "{rule:?}"
+        );
+        assert_eq!(
+            (rule.listeners, rule.listening, rule.bind_errors),
+            (1, 0, 1)
+        );
+        assert_eq!(rule.bind_error, rule.reason);
+        let b: Vec<(&str, i64, i64)> = st
+            .budgets
+            .iter()
+            .map(|b| (b.proto.as_str(), b.total, b.rules))
+            .collect();
+        // 開けなかった待ち受けのルールは予算のルールに数えない
+        assert_eq!(b, [("tcp", 32, 0), ("udp", 64, 0)]);
+        // トンネルが無い試験の agent では、起点は時刻のゼロ値である
+        assert_eq!(st.refusals_since, GoTime::ZERO);
+        drop(taken);
+    }
+
+    /// 拒否の累計の起点は、中継と一緒に作り直すトンネルを立てた時刻である。
+    #[test]
+    fn refusals_since_is_the_tunnel_s_start() {
+        let m = Manager::new(
+            std::net::Ipv4Addr::LOCALHOST,
+            std::net::Ipv4Addr::LOCALHOST,
+            None,
+            crate::relay::OpenPorts::default(),
+            std::sync::Arc::new(crate::targets::Targets::new(None)),
+            flowpool::Limits::default(),
+        );
+        let mut st = DoctorRuntimeState::default();
+        st.tunnel.started_at =
+            GoTime::from_system(SystemTime::UNIX_EPOCH + Duration::from_hours(500_000));
+        relay_state(&mut st, &m);
+        assert_ne!(st.refusals_since, GoTime::ZERO);
+        assert_eq!(st.refusals_since, st.tunnel.started_at);
+        assert_eq!(st.budgets.len(), 2);
     }
 
     #[tokio::test]

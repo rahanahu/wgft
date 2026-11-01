@@ -266,8 +266,20 @@ impl Agent {
     pub(crate) async fn heartbeat(&self) -> Heartbeat {
         let mut hb = Heartbeat {
             generation: self.generation,
+            tunnel: self.tunnel_status().await,
             ..Heartbeat::default()
         };
+        if self.tunnel.is_some()
+            && let Some(relay) = &self.relay
+        {
+            hb.rules = relay.status();
+        }
+        hb
+    }
+
+    /// ハートビートのトンネルの状態。`agent doctor` はルールの状態を中継のリスナーの 1 回の読みから
+    /// 自分で作るので、この部分だけを使う。
+    pub(crate) async fn tunnel_status(&self) -> TunnelStatus {
         let Some(t) = &self.tunnel else {
             let reason = if self.retry.is_some() {
                 REASON_NO_TUNNEL_BUILD_RETRYING
@@ -276,31 +288,27 @@ impl Agent {
             } else {
                 REASON_NO_TUNNEL
             };
-            hb.tunnel = TunnelStatus {
+            return TunnelStatus {
                 state: STATUS_ERROR.into(),
                 reason: reason.into(),
                 ..TunnelStatus::default()
             };
-            return hb;
         };
         let r = t.read().await;
-        hb.tunnel = TunnelStatus {
+        let mut ts = TunnelStatus {
             state: STATUS_OK.into(),
             reason: String::new(),
             endpoint: r.endpoint.map(|e| e.to_string()).unwrap_or_default(),
             last_handshake: r.last_handshake.map_or(GoTime::ZERO, GoTime::from_system),
         };
         if let Some(e) = r.err {
-            hb.tunnel.state = STATUS_ERROR.into();
-            hb.tunnel.reason = e;
+            ts.state = STATUS_ERROR.into();
+            ts.reason = e;
         } else if r.last_handshake.is_none() {
-            hb.tunnel.state = STATUS_ERROR.into();
-            hb.tunnel.reason = REASON_HANDSHAKE_PENDING.into();
+            ts.state = STATUS_ERROR.into();
+            ts.reason = REASON_HANDSHAKE_PENDING.into();
         }
-        if let Some(relay) = &self.relay {
-            hb.rules = relay.status();
-        }
-        hb
+        ts
     }
 
     /// 30 秒ごとの見回りのうち排他の中で行う部分。作成に失敗したトンネルを時刻が来たら立て直し、

@@ -1066,3 +1066,50 @@ fn single_flood_maximum() {
         assert_eq!(held.len(), want, "T={t} N={n}");
     }
 }
+
+/// `agent doctor` の読みは、0 でない拒否だけを、ルール ID と理由の語の順 (Go の `doctorBudget`) に並べる。
+/// 語の順 (budget、floor、reserve、rule_cap、spare) は表の添字の順と違うので、並べ替えを外すか添字の順で
+/// 並べると、`r_b` の並びが変わる。
+#[test]
+fn reading_orders_refusals_by_rule_and_reason_word() {
+    let pool = Pool::new(16);
+    {
+        let mut g = pool.lock();
+        // 添字は Reason::ALL の順 (budget、rule_cap、reserve、floor、spare)
+        g.refusals.insert("r_b".into(), [1, 2, 3, 4, 5]);
+        g.refusals.insert("r_a".into(), [0, 7, 0, 0, 6]);
+        g.refusals.insert("r_c".into(), [0; 5]);
+    }
+    let r = pool.reading();
+    let got: Vec<(&str, &str, u64)> = r
+        .refusals
+        .iter()
+        .map(|(rule, reason, n)| (rule.as_str(), reason.as_str(), *n))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("r_a", "rule_cap", 7),
+            ("r_a", "spare", 6),
+            ("r_b", "budget", 1),
+            ("r_b", "floor", 4),
+            ("r_b", "reserve", 3),
+            ("r_b", "rule_cap", 2),
+            ("r_b", "spare", 5),
+        ]
+    );
+}
+
+/// 待ち受けごとのフローの数は、1 回の排他でも待ち受けごとの読みと同じ値になる。
+#[test]
+fn flows_of_matches_each_listener() {
+    let pool = Pool::new(64);
+    let a = pool.listener("r_a");
+    let b = pool.listener("r_b");
+    let _held: Vec<Lease> = (0..3)
+        .map(|_| a.take().unwrap())
+        .chain(std::iter::once(b.take().unwrap()))
+        .collect();
+    assert_eq!(pool.flows_of([&a, &b, &a]), [3, 1, 3]);
+    assert_eq!(pool.flows_of([&b]), [b.flows()]);
+}
