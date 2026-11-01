@@ -1259,3 +1259,28 @@ fn answering_the_server_holds_back_an_own_initiation() {
     );
     assert_eq!(n.a_got, vec![ipv4_packet(SERVER_IP, AGENT_IP, b"hello")]);
 }
+
+#[test]
+fn a_held_back_data_request_keeps_its_earlier_time() {
+    // 打ち切りの後、データの要求は前の開始の 5 秒後に、データの無い要求は休止の後に許される。
+    // 後から来たデータの無い要求が、先に控えたデータの要求を遅らせない
+    let mut n = Net::new();
+    n.b_up = false;
+    n.run(Duration::from_secs(91), Duration::from_millis(100));
+    assert_eq!(
+        Net::count(&n.a_events, |e| matches!(e, Event::PeerExpired { .. })),
+        1
+    );
+    let last = *n.a_sent_at.last().unwrap();
+    n.a_sent_at.clear();
+    n.a_sends(b"data");
+    let now = n.now();
+    let b = n.b_pub();
+    assert!(!n.a.start_handshake(now, &b));
+    n.run(Duration::from_secs(6), Duration::from_millis(100));
+    let first = n.a_sent_at[0];
+    assert!(
+        first <= (last + Duration::from_millis(5100)).max(Duration::from_millis(91_100)),
+        "last {last:?}, first {first:?}"
+    );
+}

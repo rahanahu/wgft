@@ -54,7 +54,8 @@ pub(crate) fn inner_mtu(configured: u16) -> usize {
 /// [`PassiveKeepalive::force`] が公開の `set_keepalive_timeout` で値をその 1 回の timer の呼び出しの
 /// 間だけ最後の受信からの経過に縮め、sanstun の passive keepalive の期限を今にする。
 ///
-/// 消すときは、この型と `protocol` の中の呼び出し (`passive` の印の付いた行) を消す。
+/// 消すときは、この型と、`protocol` の中の呼び出し (`passive` の印の付いた行と
+/// `Protocol::passive_keepalive`) と、`Device::handle_timeout` の `passive_keepalive` の呼び出しを消す。
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct PassiveKeepalive {
     /// 最後の送信の後に受けたデータの、最初と最後の時刻。
@@ -295,5 +296,27 @@ mod tests {
         p.b_to_receive(&d, now);
         assert_eq!(p.b_keepalives(now + Duration::from_secs(9)), 0);
         assert_eq!(p.b_keepalives(now + k), 1);
+    }
+
+    #[test]
+    fn force_does_nothing_without_a_usable_session_but_clears_the_deadline() {
+        // 縮めた値は送信に使うセッションの条件も緩めるので、元の値で使えないときは縮めない
+        let start = Instant::now();
+        let mut p = pair(start, UNIX);
+        p.connect(start);
+        let mut passive = PassiveKeepalive::default();
+        let k = Duration::from_secs(10);
+        for at in [0, 5] {
+            let now = start + Duration::from_secs(at);
+            let d = p.a_sends(b"data", now);
+            p.b_to_receive(&d, now);
+            passive.on_data(now);
+        }
+        assert!(!passive.force(&mut p.b, start + k, k, false));
+        assert_eq!(passive.deadline(k), None);
+        let sent = std::iter::from_fn(|| p.b.poll_event())
+            .filter(|e| matches!(e, Event::SendKeepalive(_)))
+            .count();
+        assert_eq!(sent, 0);
     }
 }

@@ -537,6 +537,8 @@ impl Device {
                     if used && let Some(interval) = p.keepalive {
                         p.paused_until = Some(now + interval);
                     }
+                    // 控えた要求は古いトンネルのもので、待っていた packet も捨てた
+                    p.deferred = None;
                     let key = p.key;
                     self.drops.add(DropReason::NoSession, lost as u64);
                     // 一度も使わなかったトンネル (ハンドシェイクを始めも受けもしていない) の期限切れは

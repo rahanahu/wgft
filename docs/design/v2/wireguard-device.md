@@ -121,7 +121,7 @@ v1 の agent は wireguard-go に次の UAPI の設定を渡します (`tunnel.g
 | `allowed_ip` | `peers[0].allowed_ips` | server のトンネルのアドレスの /32 だけ |
 | `persistent_keepalive_interval` | `peers[0].persistent_keepalive` | server が送る値。既定は 25 秒 |
 | `endpoint` | `peers[0].endpoint` | 解決した server のアドレス |
-| (TUN の MTU) | `mtu` | 1420。送る packet の上限は 16 の倍数に切り下げた 1408 ([MTU と詰め物](#mtu-と詰め物)) |
+| (TUN の MTU) | `mtu` | 1420。送る packet の上限は 16 の倍数に切り下げた 1408 ([MTU と詰め物](#mtu-と詰め物))。v1 で agent の netstack が wg0 と同じ MTU を使うという[ネットワークの設計](../network.md#4-ネットワーク)の記述は、v2 ではこの切り下げた値に読み替えます |
 
 ピアは server の 1 つだけです。
 preshared key は v1 が使わないので持ちません。
@@ -277,6 +277,9 @@ device の層は、自分が始める開始 (`start_handshake`、セッション
   論文の規則 (打ち切りの後は新しいデータまで始めない) に合わせます。
   データの packet は休止の中でも開始を促し、間隔の規則だけを受けます。
   wireguard-go と同じです。
+  ただし agent のデータプレーンはこの道を使いません。
+  セッションが無い間は上の層から packet を引かず、`start_handshake` だけを呼ぶので、打ち切りの後は送るものがあっても keepalive の間隔の休止を待ちます。
+  server が始めたハンドシェイクにはすぐ答えるので、server の側からの回復は休止に止められません。
   keepalive を持たないピアには休止を置きません。
 - 控えた要求:規則で控えた要求は覚えておき、許される時刻に `handle_timeout` が行います。
   `poll_timeout` はその時刻を含みます。
@@ -488,6 +491,9 @@ sanstun を改変 (fork やパッチ) しない所有者の方針に従い、受
   sanstun の試験が sanstun の中で確かめています。
 - 性能 (packet ごとの割り当て、1 秒あたりの packet の数、CPU) は測っていません。
 - device のキューと sanstun の状態を合わせたメモリの保持量は測っていません。
+- MTU の切り下げで、agent が送る 1381 から 1392 バイトの UDP の datagram は、核が断片に分けて送るようになりました。
+  断片に分けた UDP が v1 の server (カーネルモードとユーザー空間モード) を通って相手に届くことは、端から端までは確かめていません。
+  ラボの `e2e.sh` の 3000 バイトの UDP は server から agent への向きだけを断片にし、ラボの echo の返事は短いので、agent が断片に分ける向きは通りません。
 - Windows と macOS では、CI が build と単体の試験を流すだけです。
   実機の相互運用は確かめていません。
 - ホストの一時停止:device は呼び手が渡す `Instant` だけを時計に使うので、停止の間の時間を数えるかは呼び手の時計の選び方で決まります。
