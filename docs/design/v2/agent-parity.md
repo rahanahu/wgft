@@ -66,7 +66,7 @@ Go の v1 の agent と仕様に対して、今の Rust の agent に無いも�
 | WireGuard のソケットのバッファ | [socket-buffers.md](../userspace/socket-buffers.md)。7 MiB を要求し、FORCE も試し、トンネルを立てるたびに測り、条件に届かなければ英語の 1 行を出す | データプレーンが持つ。agent の経路には未接続 | 「agent の device の殻」 |
 | 受信の誤りで止まらないこと | [tunnel.md の受信の goroutine の停止](../spec/tunnel.md#go-の性質受信の-goroutine-の停止)。Windows の `WSAECONNRESET` | データプレーンが Windows で `SIO_UDP_CONNRESET` を切り、受信の誤りを数えて読み続ける。agent の経路には未接続 | 「agent の device の殻」 |
 | サスペンドの間の時計 | [tunnel.md のサスペンドの間の時計](../spec/tunnel.md#go-の性質サスペンドの間の時計)。Windows ではスリープの間も進む時計 | データプレーンの時計が持つ ([時計](#時計))。監視はまだ `Instant` | 「agent の device の殻」。監視は「wgstack の上の agent」 |
-| 新しいハンドシェイクで stream の待ちを打ち切ること | [tunnel.md のハンドシェイクの監視と作り直し](../spec/tunnel.md#ハンドシェイクの監視と作り直し) | 待ちの上限を 10 秒にする扱いはある。待ちの途中で打ち切るかは確かめていない | 「agent の device の殻」で確かめ、無ければ足す |
+| 新しいハンドシェイクで stream の待ちを打ち切ること | [tunnel.md のハンドシェイクの監視と作り直し](../spec/tunnel.md#ハンドシェイクの監視と作り直し) | 見張りが新しいハンドシェイクを観測したら、待ちを打ち切って直ちに繋ぎ、待ちを 1 秒に戻す | 「agent の device の殻」 |
 
 ### 中継
 
@@ -867,8 +867,6 @@ wgstack の口が前提と違えば、wgstack の上の agent と UDP の中継�
 - インタフェースの一覧の取り方:決めました。
   Unix で `getifaddrs`、Windows で `GetAdaptersAddresses` を `hostaddr` が呼びます。
   追加の crate は使わず、`windows-sys` だけです
-- 新しいハンドシェイクで stream の再接続の待ちを打ち切ること:#679 が待ちの途中で打ち切るかを確かめます。
-  打ち切らなければ agent の device の殻の段で足します
 
 ## 未確認の点
 

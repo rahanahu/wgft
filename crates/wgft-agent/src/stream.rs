@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
+use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -72,6 +73,37 @@ impl ReconnectLog {
         self.last = msg;
         self.last_at = Some(Instant::now());
     }
+
+    /// 次の行を前の行と比べずに出させる (Go の `reconnectLog.reset`)。
+    fn reset(&mut self) {
+        self.last.clear();
+    }
+}
+
+/// 接続の試みを終えてから、見張りの観測の受け手を作る。接続していた間の観測は再接続の待ちを
+/// 打ち切らない (仕様 stream.md の再接続)。
+async fn attempt<T>(
+    handshakes: &watch::Sender<u64>,
+    attempt: impl Future<Output = T>,
+) -> (T, watch::Receiver<u64>) {
+    let end = attempt.await;
+    (end, handshakes.subscribe())
+}
+
+/// 再接続の待ち。待ちの間に見張りが新しいハンドシェイクを観測したら、残りを打ち切って `true` を返す
+/// (仕様 stream.md の再接続)。観測の送り手が無くなったら、残りを待ち切る。
+async fn wait_or_handshake(backoff: Duration, seen: &mut watch::Receiver<u64>) -> bool {
+    let deadline = tokio::time::Instant::now() + backoff;
+    tokio::select! {
+        () = tokio::time::sleep_until(deadline) => false,
+        changed = seen.changed() => {
+            if changed.is_ok() {
+                return true;
+            }
+            tokio::time::sleep_until(deadline).await;
+            false
+        }
+    }
 }
 
 /// 1 本の接続の終わり方。
@@ -121,9 +153,10 @@ impl std::fmt::Display for End {
 pub(crate) async fn stream_loop(agent: Shared) -> Result<(), AgentError> {
     let mut backoff = BACKOFF_MIN;
     let mut waits = ReconnectLog::default();
+    let handshakes = agent.lock().await.handshake_seen.clone();
     loop {
         let started = Instant::now();
-        let end = stream_once(&agent).await;
+        let (end, mut seen) = attempt(&handshakes, Box::pin(stream_once(&agent))).await;
         if started.elapsed() > Duration::from_mins(1) {
             backoff = BACKOFF_MIN;
         }
@@ -176,7 +209,14 @@ pub(crate) async fn stream_loop(agent: Shared) -> Result<(), AgentError> {
             ),
         };
         waits.print(msg);
-        tokio::time::sleep(backoff).await;
+        if wait_or_handshake(backoff, &mut seen).await {
+            logf!(
+                "stream: a new wireguard handshake shows the server is reachable; reconnecting now"
+            );
+            waits.reset();
+            backoff = BACKOFF_MIN;
+            continue;
+        }
         backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
     }
 }
@@ -473,6 +513,43 @@ mod tests {
         assert!(End::Closed(4002, String::new()).caps_while_fresh());
         assert!(End::Closed(4004, String::new()).caps_while_fresh());
         assert!(End::Other("x".into()).caps_while_fresh());
+    }
+
+    #[tokio::test]
+    async fn a_new_handshake_ends_the_reconnect_wait() {
+        let seen = watch::Sender::new(0u64);
+        // 接続していた間の観測は、試みの後に作る受け手には届かない
+        let ((), mut rx) = attempt(&seen, async {
+            seen.send_modify(|n| *n += 1);
+        })
+        .await;
+        let start = Instant::now();
+        assert!(!wait_or_handshake(Duration::from_millis(20), &mut rx).await);
+        assert!(start.elapsed() >= Duration::from_millis(20));
+        let bump = seen.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            bump.send_modify(|n| *n += 1);
+        });
+        let start = Instant::now();
+        assert!(wait_or_handshake(Duration::from_secs(30), &mut rx).await);
+        assert!(start.elapsed() < Duration::from_secs(5));
+        // 送り手が無くなっても、待ちを縮めない
+        drop(seen);
+        let start = Instant::now();
+        assert!(!wait_or_handshake(Duration::from_millis(30), &mut rx).await);
+        assert!(start.elapsed() >= Duration::from_millis(30));
+    }
+
+    #[test]
+    fn the_reconnect_log_repeats_a_line_after_a_reset() {
+        let mut log = ReconnectLog::default();
+        log.print("stream: disconnected".into());
+        log.print("stream: disconnected".into());
+        assert_eq!(log.suppressed, 1);
+        log.reset();
+        log.print("stream: disconnected".into());
+        assert_eq!(log.suppressed, 0);
     }
 
     #[test]
