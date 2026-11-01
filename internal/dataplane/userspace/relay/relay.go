@@ -86,16 +86,18 @@ type Desired struct {
 	RuleID string
 }
 
-// targetDialTimeout は、中継が実際の通信のために target へ接続するときの期限(既定の Options.Dial)。
+// TargetDialTimeout は、中継が実際の通信のために target へ接続するときの期限(既定の Options.Dial)。
 // 許可一覧があるときは、解決したアドレスの全体でこの期限を分け合う(設計文書 7 節、dialAddrs)。
-const targetDialTimeout = 10 * time.Second
+// server の疎通確認(internal/vpsd/conncheck)は、様子を見る時間の既定をこの値から導く。
+// 古い server は昔の値(3 秒)のままである。
+const TargetDialTimeout = 10 * time.Second
 
 // targetFallbackDelay は、許可一覧があるときの TCP の接続で、先に試す族のアドレスが繋がらないまま
 // もう一方の族のアドレスを並行して試し始めるまでの待ち。net.Dialer の FallbackDelay の既定と同じ値である。
 const targetFallbackDelay = 300 * time.Millisecond
 
 // targetProbeTimeout は target への到達確認 1 件の期限(設計文書 5.2 節)。
-// 中継が実際の通信のために target へ接続するときの期限(targetDialTimeout)とは別に持つ。
+// 中継が実際の通信のために target へ接続するときの期限(TargetDialTimeout)とは別に持つ。
 // LAN の target の TCP のハンドシェイクは 1 ミリ秒の桁で済むので 2 秒には三桁の余裕があり、
 // 黙って捨てる target 1 つが確認を延ばす長さもこの値で決まる。ハンドシェイクに 2 秒を超える
 // target は、接続を受け付けていても error として報告される。error は報告にだけ使い、中継そのものは
@@ -320,7 +322,7 @@ func New(n Network, opts Options) *Manager {
 	}
 	var dialCtx func(ctx context.Context, network, addr string) (net.Conn, error)
 	if opts.Dial == nil {
-		d := &net.Dialer{Timeout: targetDialTimeout}
+		d := &net.Dialer{Timeout: TargetDialTimeout}
 		if opts.RefuseTarget != nil {
 			d.ControlContext = refuseControl(opts.RefuseTarget)
 		}
@@ -334,7 +336,7 @@ func New(n Network, opts Options) *Manager {
 	if opts.Logf == nil {
 		opts.Logf = log.Printf
 	}
-	return &Manager{net: n, opts: opts, dialCtx: dialCtx, dialTimeout: targetDialTimeout, probeTimeout: targetProbeTimeout, listeners: map[Key]*listener{}, retiring: map[Key]*listener{}, bindFail: map[Key]*bindFailure{}, replies: defaultReplyPool}
+	return &Manager{net: n, opts: opts, dialCtx: dialCtx, dialTimeout: TargetDialTimeout, probeTimeout: targetProbeTimeout, listeners: map[Key]*listener{}, retiring: map[Key]*listener{}, bindFail: map[Key]*bindFailure{}, replies: defaultReplyPool}
 }
 
 // DesiredFromRules は全体状態のルールから、ポートごとの宣言値を計算する。

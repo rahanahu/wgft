@@ -173,7 +173,7 @@ var tr = map[string][2]string{
 	"checkTitle":   {"接続テスト", "Connection test"},
 	"checkRuleVia": {"ルール %s(%s 経由)", "Rule %s via %s"},
 	"checkOK":      {"経路 OK(VPS → 自宅サービス)", "Path OK: VPS → home service"},
-	"checkNote":    {"これは VPS から自宅サービスまでの内側の経路の確認です。外のインターネットからの到達は、実際に外から接続して確かめてください。", "This checks the internal path from the VPS to the home service. Reachability from the public internet must be verified from outside."},
+	"checkNote":    {"これは VPS から自宅サービスまでの内側の経路の確認です。外のインターネットからの到達は、実際に外から接続して確かめてください。クライアントが先に話すまで黙っているサービスは、確認に約 11 秒かかります。", "This checks the internal path from the VPS to the home service. Reachability from the public internet must be verified from outside. A service that waits for the client to speak first takes about 11 seconds to confirm."},
 	"reachAgent":   {"自宅サービスに届きません", "Cannot reach the home service"},
 	"reachNone":    {"エージェントに繋がりません", "Cannot reach the agent"},
 	"reachOther":   {"不達", "Unreachable"},

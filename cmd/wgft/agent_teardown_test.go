@@ -50,3 +50,24 @@ func TestAgentTeardownChecksTheInterfaceName(t *testing.T) {
 		t.Errorf("err = %v, want a config refusal", err)
 	}
 }
+
+// WGFT_DATA_DIR が空のとき、pubkey と rotate-key は agent.json を / やカレントに作らず、種別 config で拒否する。
+func TestAgentKeyCommandsRejectEmptyDataDir(t *testing.T) {
+	for _, sub := range []string{"pubkey", "rotate-key"} {
+		t.Run(sub, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Chdir(dir)
+			root := newRootCmd()
+			root.SetArgs([]string{"agent", sub, "--config", filepath.Join(dir, "none.env"), "--data-dir", ""})
+			root.SetOut(io.Discard)
+			root.SetErr(io.Discard)
+			err := root.Execute()
+			if r := startup.Of(err); r == nil || r.Category != startup.CategoryConfig {
+				t.Fatalf("err = %v, want a config refusal", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, "agent.json")); !os.IsNotExist(statErr) {
+				t.Errorf("agent.json was created in the current directory: %v", statErr)
+			}
+		})
+	}
+}

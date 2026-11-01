@@ -542,3 +542,17 @@ func TestServerCheckOptionsCopiesEveryField(t *testing.T) {
 		}
 	}
 }
+
+// server teardown も、WGFT_DATA_DIR が空なら /wgft.sqlite を指さず、何もせずに種別 config で拒否する。
+// --dry-run を付けるので、検査が無い場合でも何も消さない。
+func TestServerTeardownRejectsEmptyDataDir(t *testing.T) {
+	dir := t.TempDir()
+	root := newRootCmd()
+	root.SetArgs([]string{"server", "teardown", "--dry-run", "--config", filepath.Join(dir, "none.env"), "--data-dir", ""})
+	root.SetOut(io.Discard)
+	root.SetErr(io.Discard)
+	err := root.Execute()
+	if r := startup.Of(err); r == nil || r.Category != startup.CategoryConfig {
+		t.Errorf("err = %v, want a config refusal", err)
+	}
+}

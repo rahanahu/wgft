@@ -266,6 +266,8 @@ trixie-backports は新しい版が出ると古い版を消すので、package �
 固定を上げた後に、前の版で作った VM で `up` が止まった場合は、`lab/lab destroy` と `lab/lab up` で作り直します。
 このカーネルは wgstack の適合の試験の参照の Linux で、版の記録は[参照の Linux の設定](../docs/design/userspace/wgstack-verification.md#参照の-linux-の設定)にあります。
 Debian 13 は `/tmp` を tmpfs にしますが、ラボの VM では Debian 12 と同じくディスクに置きます。
+ラボの VM では、パッケージの一覧の更新などの定時の仕事と、tty1 の getty と polkit を止め、journal を 32 MiB までにします。
+定時の仕事が確認の最中に走って CPU とメモリを使わないようにするためです。
 別のディストリビューションの VM は、イメージと名前を指定して作成します。
 Debian 13 以外のイメージには固定したカーネルを入れず、イメージのカーネルのまま動かします。
 
