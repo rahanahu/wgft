@@ -228,6 +228,82 @@ fuzz_shards() {
   return $rc
 }
 
+# replay_full makes the full set of Go recordings, unless the cache has the set for the tree's recording
+# sources, and replays shard $1 of it (i/n) on the Rust wgstack. The cache key is the git trees of the
+# packages the set is made from; a tree with changes there makes the set in the log directory instead. The
+# set takes the inputs of the Go fuzz cache as they are when it is made. One shard makes the set under an
+# exclusive lock, into a temporary directory renamed into place, and evicts the other keys; the replays
+# hold the lock shared, so no set is removed under a replay. The step runs only when the tree changes the
+# Rust wgstack, the test tooling or the recordings against the merge base with WGFT_GATE_BASE (default
+# origin/feat/v2-rust if it exists, else origin/main), or when WGFT_GATE_REPLAY_FULL=1; the stage gates
+# replay the full set as a whole.
+replay_full() {
+  local shard=$1 paths=(internal/wgstack internal/ipv4frag internal/dutproto internal/tcpharness scripts/wgstack-record.sh scripts/wgstack-reccmp)
+  local root=${XDG_CACHE_HOME:-$HOME/.cache}/wgft/wgstack-rec-full key d base tmp fz
+  command -v cargo >/dev/null || { echo "SKIP: no cargo"; exit 0; }
+  command -v flock >/dev/null || { echo "SKIP: no flock(1)"; exit 0; }
+  [[ -f crates/wgft-wgstack-dut/tests/replay.rs && -x scripts/wgstack-record.sh ]] || { echo "SKIP: no Rust replay in this tree"; exit 0; }
+  [[ "$(uname -s) $(uname -m)" == "Linux x86_64" ]] || { echo "SKIP: recordings are made on Linux on x86-64 only"; exit 0; }
+  if [[ ${WGFT_GATE_REPLAY_FULL:-} != 1 ]]; then
+    local gbase=${WGFT_GATE_BASE:-} mb rust=(crates/wgft-wgstack crates/wgft-wgstack-dut crates/wgft-tcpharness testdata/wgstack-rec Cargo.lock "${paths[@]}")
+    if [[ -z $gbase ]]; then
+      git rev-parse -q --verify origin/feat/v2-rust >/dev/null && gbase=origin/feat/v2-rust || gbase=origin/main
+    fi
+    mb=$(git merge-base HEAD "$gbase" 2>/dev/null) || { echo "SKIP: no merge base with $gbase; set WGFT_GATE_REPLAY_FULL=1 to run"; exit 0; }
+    if git diff --quiet "$mb" -- "${rust[@]}" && [[ -z $(git status --porcelain -- "${rust[@]}") ]]; then
+      echo "SKIP: no change to the Rust wgstack, its test tooling or the recordings since $gbase; set WGFT_GATE_REPLAY_FULL=1 to run"
+      exit 0
+    fi
+  fi
+  if [[ -z $(git status --porcelain -- "${paths[@]}") ]]; then
+    key=$(for p in "${paths[@]}"; do git rev-parse "HEAD:$p"; done | sha256sum | cut -c1-16)
+    base=$root
+  else
+    echo "the recording sources have changes; making the full set in the log directory"
+    key=set base=$logdir/wgstack-rec-full
+  fi
+  d=$base/$key
+  mkdir -p "$base" || return 1
+  (
+    flock -x 9 || exit 1
+    [[ -f $d/.done ]] && exit 0
+    tmp=$base/.making.$$ fz=$logdir/fuzz-cache.$$
+    rm -rf "$tmp" "$fz"
+    # a snapshot, since the Go fuzz steps beside this one add to the cache while the set is made twice
+    if [[ -d $(go env GOCACHE)/fuzz/github.com/rahanahu/wgft/internal/wgstack ]]; then
+      cp -r "$(go env GOCACHE)/fuzz/github.com/rahanahu/wgft/internal/wgstack" "$fz" || exit 1
+    fi
+    WGFT_WGSTACK_RECORD_FUZZ_DIR=$([[ -d $fz ]] && echo "$fz") TMPDIR=$logdir scripts/wgstack-record.sh --set full --out "$tmp" || exit 1
+    rm -rf "$fz"
+    touch "$tmp/.done"
+    find "$base" -mindepth 1 -maxdepth 1 ! -name "$key" ! -name ".making.$$" ! -name .lock -exec rm -rf {} + || exit 1
+    rm -rf "$d" && mv -T "$tmp" "$d"
+  ) 9>"$base/.lock" || return 1
+  echo "replaying shard $shard of the full set in $d"
+  flock -s "$base/.lock" env WGFT_WGSTACK_REPLAY_DIR="$d" WGFT_WGSTACK_REPLAY_SHARD="$shard" \
+    cargo test --release -p wgft-wgstack-dut --locked --test replay
+}
+
+# fuzz_rs runs the Rust wgstack's cargo-fuzz target $1 for $2 executions, without AddressSanitizer and
+# without tracing comparisons, which make a run about twice as slow and safe Rust gains little from. The new
+# inputs go to a corpus in the log directory and a failing input to an artifact beside it.
+fuzz_rs() {
+  local target=$1 runs=$2 fz=crates/wgft-wgstack/fuzz work
+  command -v cargo >/dev/null && cargo +nightly fuzz --version >/dev/null 2>&1 || { echo "SKIP: no nightly cargo with cargo-fuzz"; exit 0; }
+  grep -q "^name = \"$target\"" "$fz/Cargo.toml" 2>/dev/null || { echo "SKIP: no fuzz target $target in this tree"; exit 0; }
+  work=$logdir/fuzz-rs-$target
+  rm -rf "$work" && mkdir -p "$work/corpus" || return 1
+  if [[ $target == replay ]]; then
+    cargo run -q -p wgft-wgstack-dut --locked --example replay_seeds -- "$work/corpus" || return 1
+  fi
+  # core reads two bytes a step for up to 500 steps; libFuzzer's length control would keep its inputs to
+  # a few steps, so core runs at the full length from the start
+  local extra=()
+  [[ $target == core ]] && extra=(-len_control=0 -max_len=1024)
+  (cd crates/wgft-wgstack && cargo +nightly fuzz run -s none --no-trace-compares "$target" "$work/corpus" "fuzz/corpus/$target" -- \
+    -runs="$runs" -artifact_prefix="$work/" "${extra[@]}") || { echo "the failing input is under $work"; return 1; }
+}
+
 # fuzz_rate reads the last progress line of the fuzzing output above it in the step's log, such
 # as "fuzz: elapsed: 1m6s, execs: 205209 (3498/sec)", and prints the run's executions per second.
 fuzz_rate() {
@@ -273,6 +349,23 @@ step harness-rust-go 'command -v cargo >/dev/null || { echo "SKIP: no cargo"; ex
 # Go recordings whose tags the landed stages cover, the scenario scripts in process on run seeds 1 to 5,
 # and the adapter and binary tests. SKIP where there is no cargo or no wgstack-dut crate.
 step wgstack-rs 'command -v cargo >/dev/null || { echo "SKIP: no cargo"; exit 0; }; [[ -d crates/wgft-wgstack-dut ]] || { echo "SKIP: no wgstack-dut in this tree"; exit 0; }; cargo test -p wgft-wgstack-dut --locked || exit 1; for s in 1 2 3 4 5; do WGFT_TEST_TCPHARNESS_SEED=$s cargo test -p wgft-wgstack-dut --locked --test scenarios || exit 1; done'
+# The Rust replay of the full set of Go recordings, the set too large for git (test-tooling.md section 4):
+# every stream and FuzzCore seed of the recording tests, the adversarial seeds of the Go step below, and
+# the inputs of the Go fuzz cache. The set changes only with its sources, which the migration freezes, so it
+# is made once into the user cache and kept; the replay runs in a release build, split into three steps
+# that the scheduler runs beside each other.
+for i in 0 1 2; do
+  step "wgstack-rs-replay-full-$((i + 1))of3" "replay_full $i/3"
+done
+# The Rust adversarial sender (crates/wgft-wgstack-dut/tests/fuzz_corpus.rs) on as many seeds as the Go step
+# below, in a release build: a seed takes about 3 s in a debug build and about 0.1 s in a release one.
+step wgstack-rs-adversarial 'command -v cargo >/dev/null || { echo "SKIP: no cargo"; exit 0; }; [[ -f crates/wgft-wgstack-dut/tests/fuzz_corpus.rs ]] || { echo "SKIP: no Rust adversarial sender in this tree"; exit 0; }; WGFT_WGSTACK_AUDIT_SEEDS=3000 cargo test --release -p wgft-wgstack-dut --locked --test fuzz_corpus'
+# The Rust wgstack's cargo-fuzz targets (docs/design/v2/test-tooling.md section 6) for a fixed number of
+# executions each, sized to stay within about two minutes beside the other steps. replay starts from the requests of
+# every Go recording in git besides its own seeds. SKIP where there is no nightly toolchain or cargo-fuzz.
+for t in parse:2000000 core:2500 replay:20000 adversarial_sender:200; do
+  step "fuzz-rs-${t%%:*}" "fuzz_rs ${t%%:*} ${t#*:}"
+done
 step stream-seeds-full 'WGFT_WGSTACK_STREAM_SEEDS=full go test -count=1 ./internal/wgstack -run "Stream|Scoreboard|RecvBuf"'
 step adversarial-seeds 'need_test ./internal/wgstack TestAdversarialSender; WGFT_WGSTACK_AUDIT_SEEDS=3000 go test -count=1 ./internal/wgstack -run TestAdversarialSender'
 # FuzzCore runs as 4 single-worker shards, which finish the same executions sooner than one process with
@@ -287,7 +380,7 @@ if ((lab)); then
 fi
 
 export logdir
-export -f has_test need_test copy_tree fuzz fuzz_rate fuzz_shards
+export -f has_test need_test copy_tree fuzz fuzz_rate fuzz_shards fuzz_rs replay_full
 
 declare -A start dur result note
 running=()
