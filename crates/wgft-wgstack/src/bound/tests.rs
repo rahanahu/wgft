@@ -13,6 +13,7 @@
 
 use super::*;
 use crate::config::Config;
+use crate::stack::Stack;
 use core::fmt::Write;
 use core::net::Ipv4Addr;
 
@@ -32,7 +33,7 @@ const END: &str = "<!-- END GENERATED TABLE -->\n";
 /// 生成する表です。行の名前は `FixParts` と `Bound` の欄の名前で、説明は文書の手で書いた部分が持ちます。
 fn table() -> String {
     let limits = TABLE_KS.map(Limits::with_max_flows);
-    let parts = limits.map(|l| fix_parts(&l, TABLE_MTU, size_of::<Stack<NoHook>>()));
+    let parts = limits.map(|l| fix_parts(&l, TABLE_MTU, crate::stack::stack_size::<NoHook>()));
     let bounds = limits.map(|l| Bound::for_limits(&l, TABLE_MTU));
     let mut w = String::new();
     w.push_str("| term |");
@@ -123,7 +124,7 @@ fn fix_matches_the_allocated_tables() {
             ..Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420)
         };
         let s = Stack::new(config, Budget::new().unwrap(), &[7; 64], NoHook).unwrap();
-        let p = fix_parts(&limits, config.mtu, size_of::<Stack<NoHook>>());
+        let p = fix_parts(&limits, config.mtu, crate::stack::stack_size::<NoHook>());
         let sh = &s.s;
         assert_eq!(
             p.conn_slots,
@@ -144,7 +145,7 @@ fn fix_matches_the_allocated_tables() {
             p.chunk_pool,
             b(sh.chunks.heap_bytes() + POOL_KEEP * CHUNK_SIZE)
         );
-        assert_eq!(p.stack, b(size_of::<Stack<NoHook>>()));
+        assert_eq!(p.stack, b(crate::stack::stack_size::<NoHook>()));
         let bound = s.bound();
         assert_eq!(bound, Bound::for_limits(&limits, 1420));
         // boost の項は Budget が確保した配列と管理を覆います。

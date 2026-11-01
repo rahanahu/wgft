@@ -41,6 +41,8 @@ pub use bound::{Bound, Held};
 pub use budget::{Budget, BudgetError};
 pub use config::{BoostPolicy, Config, ConfigError, Congestion, Limits, MAX_MTU, MIN_MTU};
 pub use icmp::PingId;
+#[cfg(any(test, feature = "harness"))]
+pub use stack::TouchedCheck;
 pub use stack::{
     Closed, Error, Event, Hook, InvariantError, ListenerId, LogKind, LogLine, NewError,
     NewErrorKind, NoHook, Stack, Stats,
@@ -92,5 +94,7 @@ mod scan_tests;
 mod tcp_tests;
 #[cfg(test)]
 mod testnet_tests;
+#[cfg(test)]
+mod touched_tests;
 #[cfg(test)]
 mod undo_tests;

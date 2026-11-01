@@ -8,6 +8,9 @@
 use crate::fixed_vec::{AllocError, FixedVec};
 use crate::output::Dlist;
 
+/// list と印が合わない時の誤りの文です。
+const BAD: &str = "an event target has bits but is not queued, or the other way round";
+
 /// 対象 1 つの知らせの種類の印です。対象の種類ごとに使う bit を決めます。
 pub(crate) type Bits = u8;
 
@@ -16,6 +19,10 @@ pub(crate) type Bits = u8;
 pub(crate) struct EventList {
     bits: FixedVec<Bits>,
     order: Dlist,
+    /// 印を持つ対象の数です。試験と fuzz の build だけにあり、印を書く唯一の口 [`EventList::set`] が増減で保ちます。
+    /// 書き換えた所だけの確かめが、対象の数の数え直しの代わりに使います。
+    #[cfg(any(test, feature = "harness"))]
+    marked: usize,
 }
 
 impl EventList {
@@ -24,6 +31,8 @@ impl EventList {
         Ok(Self {
             bits: FixedVec::try_filled(targets, |_| 0)?,
             order: Dlist::new(targets)?,
+            #[cfg(any(test, feature = "harness"))]
+            marked: 0,
         })
     }
 
@@ -37,20 +46,31 @@ impl EventList {
         self.order.len()
     }
 
+    /// 対象 `t` の印を `v` にします。印を書く唯一の口です。
+    #[inline]
+    fn set(&mut self, t: u32, v: Bits) {
+        let b = &mut self.bits[t as usize];
+        #[cfg(any(test, feature = "harness"))]
+        {
+            self.marked = self.marked + usize::from(v != 0) - usize::from(*b != 0);
+        }
+        *b = v;
+    }
+
     /// 対象 `t` に印 `bit` を付けます。既に list にあれば順番は変えません。
     pub(crate) fn raise(&mut self, t: u32, bit: Bits) {
         debug_assert!(bit != 0, "an event needs a kind");
-        self.bits[t as usize] |= bit;
+        self.set(t, self.bits[t as usize] | bit);
         self.order.push_back(t);
     }
 
     /// 先頭の対象の最も小さい印を 1 つ外し、対象と印を返します。対象の印が残れば対象は先頭に残ります。
     pub(crate) fn pop(&mut self) -> Option<(u32, Bits)> {
         let t = self.order.front()?;
-        let bits = &mut self.bits[t as usize];
-        let bit = *bits & bits.wrapping_neg();
-        *bits &= !bit;
-        if *bits == 0 {
+        let bits = self.bits[t as usize];
+        let bit = bits.isolate_lowest_one();
+        self.set(t, bits & !bit);
+        if bits & !bit == 0 {
             self.order.remove(t);
         }
         Some((t, bit))
@@ -58,16 +78,16 @@ impl EventList {
 
     /// 対象 `t` の印をすべて外し、list から外します。対象を別の用途に使い直す前に呼びます。
     pub(crate) fn reset(&mut self, t: u32) {
-        self.bits[t as usize] = 0;
+        self.set(t, 0);
         self.order.remove(t);
     }
 
     /// 対象 `t` の印のうち `mask` の印を外し、印が残らなければ list から外します。1 つの対象を種類の違う
     /// 持ち主が分け合うとき (同じポートの TCP の待ち受けと UDP の endpoint) に、片方だけを使い直す前に呼びます。
     pub(crate) fn clear_bits(&mut self, t: u32, mask: Bits) {
-        let bits = &mut self.bits[t as usize];
-        *bits &= !mask;
-        if *bits == 0 {
+        let bits = self.bits[t as usize] & !mask;
+        self.set(t, bits);
+        if bits == 0 {
             self.order.remove(t);
         }
     }
@@ -83,16 +103,43 @@ impl EventList {
     /// list の長さと等しいことを確かめます。list は同じ対象を 2 度持たない ([`Dlist::check`]) ので、2 つの集まりは
     /// 等しくなります。手間は list の長さと対象の数に比例しますが、印の数え上げは対象ごとの分岐を持ちません。
     pub(crate) fn check(&self) -> Result<(), &'static str> {
-        const BAD: &str = "an event target has bits but is not queued, or the other way round";
+        self.check_listed()?;
+        // 128 個ずつ u8 で数えると、byte の比べと足し算が vector の命令になります。塊の中の数は 128 を超えないので、
+        // 溢れの確かめの無い足し算で同じ値です。核の crate は release の build でも溢れの確かめを残すので、確かめの
+        // ある足し算では vector の命令になりません。
+        let (blocks, rest) = self.bits.as_chunks::<128>();
+        let count =
+            |c: &[u8]| usize::from(c.iter().fold(0u8, |a, &b| a.wrapping_add(u8::from(b != 0))));
+        let marked = blocks.iter().map(|c| count(c)).sum::<usize>() + count(rest);
+        if marked != self.order.len() {
+            return Err(BAD);
+        }
+        #[cfg(any(test, feature = "harness"))]
+        if marked != self.marked {
+            return Err("the marked event target count disagrees with the marks");
+        }
+        Ok(())
+    }
+
+    /// list が壊れておらず、list の対象がどれも印を持つことを確かめます。
+    fn check_listed(&self) -> Result<(), &'static str> {
         self.order.check()?;
         let mut unmarked = false;
         self.order
             .for_each(|t| unmarked |= self.bits.get(t as usize).is_none_or(|&b| b == 0));
-        // 128 個ずつ u8 で数えると、byte の比べと足し算が vector の命令になります。
-        let (blocks, rest) = self.bits.as_chunks::<128>();
-        let count = |c: &[u8]| usize::from(c.iter().fold(0u8, |a, &b| a + u8::from(b != 0)));
-        let marked = blocks.iter().map(|c| count(c)).sum::<usize>() + count(rest);
-        if unmarked || marked != self.order.len() {
+        if unmarked {
+            return Err(BAD);
+        }
+        Ok(())
+    }
+
+    /// [`EventList::check`] と同じことを、印を数え直さずに印を持つ対象の数で確かめます。数は印を書く唯一の口が
+    /// 前の値と新しい値から増減するので、印を書く呼び手の誤り (list に入れ忘れる、外し忘れる) に関係なく印を持つ
+    /// 対象の数に等しく、数え直しと同じ答えです。試験と fuzz の build だけにあります。
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn check_counted(&self) -> Result<(), &'static str> {
+        self.check_listed()?;
+        if self.marked != self.order.len() {
             return Err(BAD);
         }
         Ok(())
@@ -138,6 +185,19 @@ mod tests {
         e.bits[1] = 0;
         e.raise(2, 1);
         e.bits[2] = 0;
+        assert_eq!(
+            e.check(),
+            Err("an event target has bits but is not queued, or the other way round")
+        );
+        assert_eq!(
+            e.check_counted(),
+            Err("an event target has bits but is not queued, or the other way round")
+        );
+        // 印を書く口を通らずに印を付けると、数が合わないことを数え直す確かめが捉えます。
+        e.bits[2] = 1;
+        e.check_counted().unwrap();
+        e.bits[3] = 1;
+        e.check_counted().unwrap();
         assert_eq!(
             e.check(),
             Err("an event target has bits but is not queued, or the other way round")

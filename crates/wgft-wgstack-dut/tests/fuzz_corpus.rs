@@ -13,12 +13,15 @@
 //!
 //! 生の packet の敵 (`raw_adversary`) は corpus を持たず、決まった種から作った入力を流します。種の数は
 //! `WGFT_WGSTACK_RAW_SEEDS` (既定は 8) で変えられます。
+//!
+//! fuzz の `Net` を使う target (`core`、`adversarial_sender`、`raw_adversary`) は、各段で書き換えた枠だけの確かめと
+//! すべての枠の確かめを並べ、答えが同じことも確かめます (wgstack-rs.md の「書き換えた所だけの確かめ」)。
 
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
 use libtest_mimic::{Arguments, Trial};
-use wgft_wgstack_dut::fuzz;
+use wgft_wgstack_dut::fuzz::{self, Check};
 
 /// fuzz の target の本体です。
 type Body = fn(&[u8]);
@@ -60,6 +63,13 @@ fn env_u64(name: &str, default: u64) -> u64 {
     })
 }
 
+/// `body` に `data` を、各段で 2 つの確かめを並べて流します。
+fn both(body: Body, data: &[u8]) {
+    let before = fuzz::set_check(Check::Both);
+    body(data);
+    fuzz::set_check(before);
+}
+
 fn main() {
     let args = Arguments::from_args();
     let root = fuzz_dir();
@@ -80,7 +90,7 @@ fn main() {
                 );
                 trials.push(Trial::test(name, move || {
                     let data = fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-                    body(&data);
+                    both(body, &data);
                     Ok(())
                 }));
             }
@@ -92,7 +102,7 @@ fn main() {
         trials.push(Trial::test(
             format!("adversarial_sender/seed/{seed}"),
             move || {
-                fuzz::adversarial_sender_seed(seed);
+                both(fuzz::adversarial_sender, &seed.to_le_bytes());
                 Ok(())
             },
         ));
@@ -102,7 +112,10 @@ fn main() {
         trials.push(Trial::test(
             format!("raw_adversary/seed/{seed}"),
             move || {
-                fuzz::raw_adversary_seed(seed, RAW_LEN);
+                both(
+                    fuzz::raw_adversary,
+                    &fuzz::raw_adversary_input(seed, RAW_LEN),
+                );
                 Ok(())
             },
         ));

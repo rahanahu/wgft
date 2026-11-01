@@ -8,5 +8,11 @@ publish.workspace = true
 
 [dependencies]
 
+[features]
+# 試験と fuzz の道具 (wgft-wgstack-dut) だけが使う。書き換えた枠だけの確かめと核の使い回しの口を開ける。
+# 製品の build (`-p wgft`) はこの feature を付けず、口と欄は製品の build にない (docs/design/v2/wgstack-rs.md の
+# 「boost の hook」の後の規則)
+harness = []
+
 [lints]
 workspace = true

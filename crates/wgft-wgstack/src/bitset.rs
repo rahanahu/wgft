@@ -44,6 +44,14 @@ impl BitSet {
         self.words[(i >> 6) as usize] &= !(1 << (i & 63));
     }
 
+    /// すべての印を外します。試験と fuzz の build だけが使います。
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn clear(&mut self) {
+        for w in self.words.iter_mut() {
+            *w = 0;
+        }
+    }
+
     /// 印の付いた数です。
     pub(crate) fn count(&self) -> usize {
         let ones = |ws: &[u64]| ws.iter().map(|w| w.count_ones() as usize).sum::<usize>();

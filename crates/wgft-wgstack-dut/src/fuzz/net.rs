@@ -1,12 +1,12 @@
 //! 手で進める時計の核と、トンネルの側の出入り口です。Go の試験の補助 `testNet` に当たります。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use wgft_tcpharness::ip::{self, PROTO_TCP};
 use wgft_tcpharness::packet::{self, Segment};
-use wgft_wgstack::{Bound, Budget, Config, Held, Hook, Limits, Stack, Time};
+use wgft_wgstack::{Bound, Budget, Config, Held, Hook, Limits, Stack, Time, TouchedCheck};
 
 /// DUT のアドレスです。Go の試験の `dutAddr` と同じです。
 pub const DUT: Ipv4Addr = Ipv4Addr::new(10, 9, 0, 1);
@@ -44,9 +44,26 @@ pub fn fuzz_limits() -> Limits {
     }
 }
 
+/// 各段の確かめの形です。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Check {
+    /// 前の段から書き換えた接続の枠だけを確かめます ([`Stack::check_invariants_touched`])。fuzz の既定です。
+    Touched,
+    /// すべての枠を確かめ、数をすべて数え直します ([`Stack::check_invariants`])。
+    Full,
+    /// 両方を確かめ、答え (誤りの文を含みます) が違えば panic します。2 つが同じ答えを返すことの試験が使います。
+    Both,
+}
+
 thread_local! {
     /// 入力から入力へ渡す boost の枠の集まりです。
     static BUDGET: RefCell<Option<Budget>> = const { RefCell::new(None) };
+    static CHECK: Cell<Check> = const { Cell::new(Check::Touched) };
+}
+
+/// このスレッドの各段の確かめの形を変え、前の値を返します。
+pub fn set_check(c: Check) -> Check {
+    CHECK.replace(c)
 }
 
 pub(crate) fn take_budget() -> Budget {
@@ -65,6 +82,8 @@ pub(crate) fn put_budget(b: Budget) {
 }
 
 /// 手で進める時計の核です。時刻は核を作ってからの ns で、Go の `ManualClock` と同じ値です。
+///
+/// 各段の確かめは [`set_check`] で選んだ形で行います。
 #[derive(Debug)]
 pub struct Net<H: Hook> {
     stack: Option<Stack<H>>,
@@ -73,15 +92,18 @@ pub struct Net<H: Hook> {
     limits: Limits,
     bound: Bound,
     slots: usize,
+    check: Check,
+    touched: TouchedCheck,
 }
 
 impl<H: Hook> Net<H> {
     /// 表の大きさ `limits` の核を、Go の試験と同じ固定の種 (64 byte の 7) で作ります。
     pub fn new(config: Config, hook: H) -> Self {
+        let check = CHECK.get();
         let budget = take_budget();
         let slots = budget.slots();
         let limits = config.limits;
-        let stack = match Stack::new(config, budget, &[7; 64], hook) {
+        let mut stack = match Stack::new(config, budget, &[7; 64], hook) {
             Ok(s) => s,
             Err(e) => {
                 let kind = e.kind();
@@ -90,6 +112,13 @@ impl<H: Hook> Net<H> {
             }
         };
         let bound = stack.bound();
+        // 数えの控えは作成の時に作ります。保持の試験は核を作った後の確保をすべて核の保持と比べるためです。
+        let mut touched = TouchedCheck::new();
+        if check != Check::Full
+            && let Err(e) = stack.check_invariants_touched(&mut touched)
+        {
+            panic!("invariant of a new stack: {e}");
+        }
         Self {
             stack: Some(stack),
             now: 0,
@@ -97,6 +126,8 @@ impl<H: Hook> Net<H> {
             limits,
             bound,
             slots,
+            check,
+            touched,
         }
     }
 
@@ -204,10 +235,23 @@ impl<H: Hook> Net<H> {
     }
 
     /// 核の不変条件と、保持が表の大きさと上界の内にあることを確かめます。Go の `checkHeld` のうち、公開の
-    /// API で見える部分です。
-    pub fn check(&self) {
-        let stack = self.stack.as_ref().expect("the stack is open");
-        if let Err(e) = stack.check_invariants() {
+    /// API で見える部分です。不変条件は [`set_check`] で選んだ形で確かめます。
+    pub fn check(&mut self) {
+        let stack = self.stack.as_mut().expect("the stack is open");
+        let result = match self.check {
+            Check::Touched => stack.check_invariants_touched(&mut self.touched),
+            Check::Full => stack.check_invariants(),
+            Check::Both => {
+                let full = stack.check_invariants();
+                let touched = stack.check_invariants_touched(&mut self.touched);
+                assert_eq!(
+                    touched, full,
+                    "the touched-slot check and the full check disagree"
+                );
+                full
+            }
+        };
+        if let Err(e) = result {
             panic!("invariant: {e}");
         }
         let h = stack.held();

@@ -140,6 +140,72 @@ impl EventTargets {
     }
 }
 
+/// 接続の枠 1 つの数えです。不変条件の確かめが、表の数と比べる和を作ります。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SlotTally {
+    /// 送受信の輪が持つ chunk の数です。
+    chunks: usize,
+    /// 使っている枠の送受信の輪の容量 (予約) の byte です。
+    reserved: u64,
+    /// boost の枠を借りていれば 1 です。
+    boosted: usize,
+}
+
+impl SlotTally {
+    fn add(&mut self, t: Self) {
+        self.chunks += t.chunks;
+        self.reserved += t.reserved;
+        self.boosted += t.boosted;
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    fn sub(&mut self, t: Self) {
+        self.chunks -= t.chunks;
+        self.reserved -= t.reserved;
+        self.boosted -= t.boosted;
+    }
+}
+
+/// [`Stack::check_invariants_touched`] が呼び出しの間に持つ、接続の枠ごとの数えとその和です。
+///
+/// 核の外の値で、核の型は持ちません。1 つの核に 1 つを使い、核を作り直したら [`TouchedCheck::new`] で作り直します。
+/// 試験と fuzz の build (`cfg(test)` か feature `harness`) だけにあります。
+#[cfg(any(test, feature = "harness"))]
+#[derive(Debug, Default)]
+pub struct TouchedCheck {
+    tally: FixedVec<SlotTally>,
+    sum: SlotTally,
+    /// 書き換えた枠の番号を取り出す場所です。
+    pending: FixedVec<u32>,
+    /// 数えが前の呼び出しの状態と合っています。偽なら次の呼び出しがすべての枠を数え直します。
+    primed: bool,
+}
+
+#[cfg(any(test, feature = "harness"))]
+impl TouchedCheck {
+    /// 空の控えです。最初の呼び出しがすべての枠を確かめます。
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+fn slot_u32(i: usize) -> u32 {
+    u32::try_from(i).unwrap_or(u32::MAX)
+}
+
+/// 試験と fuzz の build (`cfg(test)` か feature `harness`) だけにある核の欄の byte です。接続の枠の表の書き換えの印
+/// (`ConnSlots::touched`) と、印を持つ知らせの対象の数 (`EventList::marked`) です。
+#[cfg(any(test, feature = "harness"))]
+const HARNESS_BYTES: usize = size_of::<crate::bitset::BitSet>() + size_of::<usize>();
+
+/// 上界の式が使う核の値の大きさです。製品の核の大きさで数え、試験と fuzz の build だけにある欄を入れません。
+pub(crate) const fn stack_size<H: Hook>() -> usize {
+    let size = size_of::<Stack<H>>();
+    #[cfg(any(test, feature = "harness"))]
+    let size = size - HARNESS_BYTES;
+    size
+}
+
 /// wgstack の核です。1 つの所有者が `&mut` で呼ぶ値で、錠を持ちません。
 pub struct Stack<H: Hook = NoHook> {
     pub(crate) conns: ConnSlots,
@@ -245,7 +311,7 @@ impl<H: Hook> Stack<H> {
 
     /// この核の上界の式の値です。作成の時の設定と型の大きさだけから決まります。
     pub fn bound(&self) -> Bound {
-        Bound::with_stack_size(&self.s.config.limits, self.s.config.mtu, size_of::<Self>())
+        Bound::with_stack_size(&self.s.config.limits, self.s.config.mtu, stack_size::<H>())
     }
 
     /// 枠 `i` の接続の view です。
@@ -314,15 +380,103 @@ impl<H: Hook> Stack<H> {
 
     /// 不変条件を確かめます。予約の和が上界以下であること、表の数と予約が一致すること、chunk と配列の持ち主が
     /// 1 つであることを確かめます。呼んだ時だけ手間がかかり、製品は呼びません。試験と fuzz が各段の後に呼びます。
+    ///
+    /// すべての接続の枠を確かめ、表の数と和をすべて数え直します。各段の後に書き換えた枠だけを確かめる形は
+    /// [`Stack::check_invariants_touched`] で、同じ状態に同じ答えを返します。
     pub fn check_invariants(&self) -> Result<(), InvariantError> {
         let s = &self.s;
-        self.conns.check(&s.conn_free, &s.qlinks)?;
+        self.conns.check_free(&s.conn_free, &s.qlinks)?;
+        let mut sum = SlotTally::default();
+        for i in 0..self.conns.len() {
+            sum.add(self.check_slot(slot_u32(i))?);
+        }
+        self.check_shared(&sum, EventList::check)
+    }
+
+    /// [`Stack::check_invariants`] と同じ不変条件を、前の呼び出しから書き換えた接続の枠だけを確かめて確かめます
+    /// (wgstack-rs.md の「書き換えた所だけの確かめ」)。試験と fuzz が各段の後に呼びます。試験と fuzz の build
+    /// (`cfg(test)` か feature `harness`) だけにあります。
+    ///
+    /// 接続の枠の表は、試験と fuzz の build で、配列を書き換える口を通った枠に印を付けます。この関数は印のある枠
+    /// だけを確かめ直して印を外します。`c` は前の呼び出しまでの枠ごとの数え (chunk、予約、boost) とその和を持ち、
+    /// 書き換えた枠の分だけを入れ替えます。初めての呼び出しと、前の呼び出しが誤りを返した後は、すべての枠を
+    /// 確かめて数え直します。
+    ///
+    /// 枠の配列は表の型の外から見えないので、印の無い枠の欄と輪は前の呼び出しが確かめた時のままです。枠だけを
+    /// 読む確かめ (輪、区間の表、段、送り手と scoreboard) はその時と同じ答えを返し、数えも同じ値なので、この関数は
+    /// 同じ状態に [`Stack::check_invariants`] と同じ答えを返します。枠と共有の表の間の確かめと共有の表の確かめは、
+    /// 毎回すべてを確かめます。知らせの印は数え直さず、印を書く口が増減で保つ数で確かめます。誤りの文も同じです。
+    #[cfg(any(test, feature = "harness"))]
+    pub fn check_invariants_touched(&mut self, c: &mut TouchedCheck) -> Result<(), InvariantError> {
+        let slots = self.conns.len();
+        let ready = c.primed && c.tally.len() == slots;
+        c.primed = false;
+        if c.pending.capacity() < slots {
+            c.pending = FixedVec::try_with_capacity(slots)
+                .map_err(|_| "allocation failed while checking")?;
+        }
+        c.pending.clear();
+        let pending = &mut c.pending;
+        self.conns.take_touched(|i| {
+            let _ = pending.try_push(i);
+        });
+        let s = &self.s;
+        self.conns.check_free(&s.conn_free, &s.qlinks)?;
+        if ready {
+            for k in 0..c.pending.len() {
+                let i = c.pending[k] as usize;
+                let t = self.check_slot(slot_u32(i))?;
+                c.sum.sub(c.tally[i]);
+                c.sum.add(t);
+                c.tally[i] = t;
+            }
+        } else {
+            if c.tally.len() != slots {
+                c.tally = FixedVec::try_filled(slots, |_| SlotTally::default())
+                    .map_err(|_| "allocation failed while checking")?;
+            }
+            c.sum = SlotTally::default();
+            for i in 0..slots {
+                let t = self.check_slot(slot_u32(i))?;
+                c.sum.add(t);
+                c.tally[i] = t;
+            }
+        }
+        self.check_shared(&c.sum, EventList::check_counted)?;
+        c.primed = true;
+        Ok(())
+    }
+
+    /// 枠 `i` の配列の要素と、それが持つ配列だけを読む確かめをし、枠の数えを返します。
+    fn check_slot(&self, i: u32) -> Result<SlotTally, InvariantError> {
+        self.conns.check_slot(i)?;
+        let (t, b) = (self.conns.tcb(i), self.conns.bufs(i));
+        let used = t.state != State::Free;
+        if used {
+            check_conn(t, b)?;
+            crate::tcp::sack::check_sender(t, &b.recs)?;
+        }
+        Ok(SlotTally {
+            chunks: b.held_chunks(),
+            reserved: if used { b.snd.cap() + b.rcv.r.cap() } else { 0 },
+            boosted: usize::from(b.boost.is_some()),
+        })
+    }
+
+    /// 共有の表と、枠と共有の表の間の不変条件を確かめ、枠の数えの和 `sum` を表の数と比べます。知らせの list は
+    /// `events` で確かめます。
+    fn check_shared(
+        &self,
+        sum: &SlotTally,
+        events: fn(&EventList) -> Result<(), &'static str>,
+    ) -> Result<(), InvariantError> {
+        let s = &self.s;
         s.conn_idx.check()?;
         s.syn.check()?;
         s.tw.check()?;
         s.out.conns.check()?;
         s.out.rows.check()?;
-        s.events.check()?;
+        events(&s.events)?;
         s.wheel.check()?;
         s.budget.check()?;
         s.udp.check()?;
@@ -346,25 +500,15 @@ impl<H: Hook> Stack<H> {
         if let Some(e) = bad {
             return Err(e.into());
         }
-        let mut chunks = 0;
-        let mut reserved = 0;
-        let mut boosted = 0;
         for (i, t, b) in self.conns.iter_bufs() {
             let used = t.state != State::Free;
             if used && t.in_index != s.conn_idx.find(t.tup).is_some_and(|(id, _)| id == i) {
                 return Err("a slot's index mark disagrees with the index".into());
             }
-            if let Some(n) = b.boost {
-                if s.budget.holder(n) != Some(self.conns.id(i)) {
-                    return Err("a boosted slot is not the holder of its boost slot".into());
-                }
-                boosted += 1;
-            }
-            chunks += b.held_chunks();
-            if used {
-                reserved += b.snd.cap() + b.rcv.r.cap();
-                check_conn(t, b)?;
-                crate::tcp::sack::check_sender(t, &b.recs)?;
+            if let Some(n) = b.boost
+                && s.budget.holder(n) != Some(self.conns.id(i))
+            {
+                return Err("a boosted slot is not the holder of its boost slot".into());
             }
             for (k, &d) in t.tdl.iter().enumerate() {
                 let node = i * NUM_TIMERS32 + u32::try_from(k).unwrap_or(0);
@@ -378,15 +522,15 @@ impl<H: Hook> Stack<H> {
         }
         let (rx, _) = s.udp.held(crate::udp::RX);
         let (tx, _) = s.udp.held(crate::udp::TX);
-        if chunks + (rx + tx) / CHUNK_SIZE != s.chunks.held() {
+        if sum.chunks + (rx + tx) / CHUNK_SIZE != s.chunks.held() {
             return Err("the chunk pool count disagrees with the rings".into());
         }
-        if boosted != s.budget.lent() {
+        if sum.boosted != s.budget.lent() {
             return Err("the lent boost slots disagree with the boosted connections".into());
         }
         let floors = self.conns.len() as u64 * (SEND_FLOOR + RECV_FLOOR);
         let boosts = s.budget.slots() as u64 * (2 * BOOST_SIZE - SEND_FLOOR - RECV_FLOOR);
-        if reserved > floors + boosts {
+        if sum.reserved > floors + boosts {
             return Err("the reservations exceed the bound".into());
         }
         let mut queued = 0;
