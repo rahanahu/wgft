@@ -162,7 +162,7 @@ pub struct RunArgs {
         overrides_with = "wg_interface"
     )]
     pub wg_interface: Option<String>,
-    /// userspace-mode network stack gvisor or wgstack, env WGFT_AGENT_NETSTACK; accepted and unused in this build
+    /// userspace-mode network stack gvisor or wgstack, env WGFT_AGENT_NETSTACK; this build always runs wgstack
     #[arg(
         long = "agent-netstack",
         allow_hyphen_values = true,

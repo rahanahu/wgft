@@ -15,7 +15,7 @@ use wgft_wireguard::{
 };
 
 use super::driver::{Outbox, Sink, pump};
-use super::{Carry, Dataplane, Generations, Settings, Upper, UpperInit, clock};
+use super::{Carry, Dataplane, Generations, Settings, Upper, UpperError, UpperInit, clock};
 
 const AGENT_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 2);
 const SERVER_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 1);
@@ -26,6 +26,8 @@ struct Budget {
     made: u32,
     closed: u32,
 }
+
+type Made = Result<Stub, UpperError<Budget>>;
 
 struct Stub {
     out: VecDeque<Vec<u8>>,
@@ -56,23 +58,27 @@ impl Stub {
         }
     }
 
-    fn from_init(UpperInit { mtu, budget, .. }: UpperInit<Budget>) -> Self {
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "the shape of a factory of the layer above"
+    )]
+    fn from_init(UpperInit { mtu, budget, .. }: UpperInit<Budget>) -> Made {
         assert_eq!(mtu, 1420);
-        Self::new(budget)
+        Ok(Self::new(budget))
     }
 
-    fn echoing(init: UpperInit<Budget>) -> Self {
-        let mut s = Self::from_init(init);
+    fn echoing(init: UpperInit<Budget>) -> Made {
+        let mut s = Self::from_init(init)?;
         s.echo = true;
         s.logs.push_back("stub: echoing".to_owned());
-        s
+        Ok(s)
     }
 
-    fn with_packets(n: u32) -> impl FnOnce(UpperInit<Budget>) -> Self + Send + 'static {
+    fn with_packets(n: u32) -> impl FnOnce(UpperInit<Budget>) -> Made + Send + 'static {
         move |init| {
-            let mut s = Self::from_init(init);
+            let mut s = Self::from_init(init)?;
             s.out.extend((0..n).map(|i| packet(AGENT_IP, SERVER_IP, i)));
-            s
+            Ok(s)
         }
     }
 }
@@ -460,6 +466,43 @@ async fn a_bad_configuration_returns_the_carry() {
     assert_eq!(e.error.kind(), io::ErrorKind::InvalidInput);
     assert_eq!(e.carry.budget, Some(Budget { made: 3, closed: 3 }));
     assert_eq!(e.carry.unix_high_water, Duration::from_secs(5));
+}
+
+/// 上の層の作成の失敗は、渡した予算を持つ carry と一緒に start の失敗になり、次の試みに予算が渡る。
+#[tokio::test]
+async fn a_failing_layer_above_returns_its_budget() {
+    let (a_key, b_key) = keys();
+    let config = || {
+        agent_config(
+            &a_key,
+            b_key.public_key(),
+            SocketAddr::from(([127, 0, 0, 1], 9)),
+        )
+    };
+    let mut g = Generations::<Stub>::new(Duration::ZERO);
+    g.start(config(), loopback(), Stub::from_init)
+        .await
+        .unwrap();
+    g.stop().await;
+    assert!(g.has_budget());
+    let e = g
+        .start(config(), loopback(), |init: UpperInit<Budget>| -> Made {
+            Err(UpperError {
+                error: io::Error::other("no memory"),
+                budget: init.budget,
+            })
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(e.to_string(), "no memory");
+    assert!(g.current().is_none());
+    assert!(g.has_budget(), "the budget stays for the next attempt");
+    g.start(config(), loopback(), Stub::from_init)
+        .await
+        .unwrap();
+    let st = g.current().unwrap().status().await.unwrap();
+    assert!(st.peer.is_some());
+    g.stop().await;
 }
 
 #[tokio::test]

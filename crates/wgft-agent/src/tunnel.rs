@@ -1,11 +1,15 @@
 //! トンネル。WireGuard の device の層 (`wgft-wireguard`) を扱うのはこの module だけである。
 //!
-//! 試作のトンネルは Linux の TUN とカーネルの TCP/IP を使う。device の層が TUN と UDP のソケットを持ち、
-//! この module は全体状態の wg の節から device の設定を作り、keepalive の ping とハンドシェイクの監視を
-//! 行い、状態を読む。中継はカーネルのソケットをトンネルのアドレスに bind する (`relay`)。
+//! トンネルは TUN を使わない。データプレーン (`dataplane`) のスレッドが device の層と WireGuard の UDP の
+//! ソケットと Rust の wgstack の核を動かし、トンネルの packet はプロセスの中で終わる。root も
+//! `CAP_NET_ADMIN` も要らない。この module は全体状態の wg の節から device の設定を作り、データプレーンの
+//! 世代を立て、keepalive の ping とハンドシェイクの監視を行い、状態を読む。中継は核の待ち受けと接続を
+//! データプレーンのスレッドで動かす (`relay`)。
 
+use crate::dataplane::stack::StackSettings;
+use crate::dataplane::{self, Dataplane, Handle, Local, Settings};
 use crate::logf;
-use crate::relay::OpenPorts;
+use crate::relay::LanConn;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -13,15 +17,23 @@ use std::time::{Duration, Instant, SystemTime};
 
 use zeroize::Zeroizing;
 
-use crate::inbound::{Counts, CountsSnapshot};
-
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use tokio::task::JoinHandle;
+use wgft_netstack::{LanHook, Netstack, Ping};
 use wgft_proto::WgConfig;
+use wgft_wgstack::Limits;
+use wgft_wireguard::{DeviceConfig, PrivateKey, PublicKey};
 
 /// keepalive の既定 (秒の値が範囲の外のとき)。
 pub const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(25);
+
+/// MTU の既定 (値が範囲の外のとき)。
+pub const DEFAULT_MTU: u16 = 1420;
+
+/// 受け付ける MTU の範囲。server が送る範囲で、wgstack の核が受け付ける範囲と同じ。
+const MIN_MTU: usize = wgft_wgstack::MIN_MTU;
+const MAX_MTU: usize = wgft_wgstack::MAX_MTU;
 
 /// keepalive の秒の上限 (Go の `agentdp.KeepaliveMaxSeconds`)。
 pub const KEEPALIVE_MAX_SECONDS: i64 = 65535;
@@ -103,10 +115,11 @@ impl Config {
                 DEFAULT_KEEPALIVE
             }
         };
+        // server が送る範囲を wgstack の核にそのまま渡し、外の値だけを既定にする
         let mtu = u16::try_from(w.mtu)
             .ok()
-            .filter(|m| (576..=9000).contains(m))
-            .unwrap_or(1420);
+            .filter(|m| (MIN_MTU..=MAX_MTU).contains(&usize::from(*m)))
+            .unwrap_or(DEFAULT_MTU);
         Ok(Config {
             server_public_key: w.server_pubkey.clone(),
             endpoint: w.endpoint.clone(),
@@ -165,18 +178,30 @@ pub struct Reading {
     pub tx_bytes: u64,
     /// 名前の解決の失敗などの誤り。
     pub err: Option<String>,
-    /// 最終ハンドシェイクの単調な時計の時刻。device が持つ値で、壁時計が動いても変わらない。
-    pub handshake_observed_at: Option<std::time::Instant>,
+    /// 最終ハンドシェイクのデータプレーンの時計の時刻。device が持つ値で、壁時計が動いても変わらない。
+    pub handshake_observed_at: Option<Instant>,
+    /// WireGuard の UDP のソケットのバッファ。データプレーンがソケットを開いたときに測った値。
+    pub socket_buffers: Option<dataplane::SocketBuffers>,
 }
+
+/// The agent's TCP/IP core: the Rust wgstack and its waker table, with the relay's LAN sockets
+/// as the boost hook.
+pub type Stack = Netstack<LanHook<LanConn>>;
+
+/// The relay tasks' access to the core on the data plane thread.
+pub type Net = Local<Stack>;
+
+/// The data plane generations of the agent's tunnels.
+pub type Generations = dataplane::Generations<Stack>;
 
 /// 動いているトンネル。
 #[derive(Debug)]
 pub struct Tunnel {
     cfg: Config,
     shared: Arc<Mutex<Reading>>,
-    device: Arc<wgft_wireguard_tun::Handle>,
+    dataplane: Handle<Stack>,
     monitor: JoinHandle<()>,
-    counts: Arc<Counts>,
+    /// トンネルを立てた時刻。データプレーンの時計の値。
     started_at: Instant,
     clock: Option<PathBuf>,
     /// device の時計の始まりの値。device は下限より 1 秒新しい値と壁時計の大きい方から数える。
@@ -184,43 +209,64 @@ pub struct Tunnel {
 }
 
 impl Tunnel {
-    /// トンネルを立てる。TUN の名前は `tun_name`。エンドポイントの名前を解決できなくても立て、
-    /// 引き直しに任せる。
+    /// トンネルを立てる。データプレーンの次の世代を `generations` で始め、その上で Rust の wgstack を
+    /// 動かす。エンドポイントの名前を解決できなくても立て、引き直しに任せる。
     ///
     /// # Errors
     ///
-    /// device か TUN を作れなければ誤りを返す。
+    /// 鍵が読めないか、データプレーン (UDP のソケット、スレッド、核) を作れなければ誤りを返す。
     pub async fn start(
         private_key: &str,
-        tun_name: &str,
         cfg: Config,
-        open: OpenPorts,
+        generations: &mut Generations,
+        limits: Limits,
         clock: Option<&Path>,
         dead: Arc<tokio::sync::Notify>,
     ) -> Result<Tunnel, String> {
+        let key =
+            PrivateKey::from_base64(private_key).map_err(|e| format!("wg_private_key: {e}"))?;
+        let server = PublicKey::from_base64(&cfg.server_public_key)
+            .map_err(|e| format!("server_pubkey: {e}"))?;
         let shared = Arc::new(Mutex::new(Reading::default()));
         let ep = resolve(&cfg.endpoint).await;
         set_endpoint(&shared, ep.clone());
-        let counts = Arc::new(Counts::default());
         let floor = stamp::floor(clock);
         let wall = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default();
-        let clock_base = wall.max(floor + Duration::from_secs(1));
-        let device = Arc::new(
-            device::start(
-                private_key,
-                tun_name,
-                &cfg,
-                ep.ok(),
-                open,
-                Arc::clone(&counts),
-                floor,
-            )
-            .await?,
+        generations.raise_floor(floor);
+        let clock_base = wall.max(generations.unix_high_water() + Duration::from_secs(1));
+        let mut dc = DeviceConfig::agent(
+            key,
+            server,
+            ep.ok().map(SocketAddr::V4),
+            cfg.server_address,
+            cfg.keepalive,
         );
+        dc.mtu = cfg.mtu;
+        let stack = StackSettings {
+            addr: cfg.address,
+            limits,
+        };
+        // 核の設定はここで確かめる。データプレーンのスレッドの上の作成で失敗しうるのは確保だけにする
+        wgft_wgstack::Config {
+            limits,
+            ..wgft_wgstack::Config::new(cfg.address, usize::from(cfg.mtu))
+        }
+        .validate()
+        .map_err(|e| format!("TCP/IP settings: {e}"))?;
+        generations
+            .start(dc, Settings::default(), move |init| {
+                dataplane::stack::make(stack, init)
+            })
+            .await
+            .map_err(|e| format!("start the tunnel data plane: {e}"))?;
+        let dataplane = generations
+            .current()
+            .map(Dataplane::handle)
+            .ok_or("the tunnel data plane did not start")?;
         logf!(
-            "tunnel: up addr={} mtu={} endpoint={} tun={tun_name}",
+            "tunnel: up addr={} mtu={} endpoint={}",
             cfg.address,
             cfg.mtu,
             cfg.endpoint
@@ -228,38 +274,36 @@ impl Tunnel {
         let monitor = tokio::spawn(monitor(
             cfg.clone(),
             Arc::clone(&shared),
-            Arc::clone(&device),
-            tun_name.to_owned(),
+            dataplane.clone(),
             dead,
         ));
         Ok(Tunnel {
             cfg,
             shared,
-            device,
+            dataplane,
             monitor,
-            counts,
-            started_at: Instant::now(),
+            started_at: dataplane::clock::now(),
             clock: clock.map(Path::to_path_buf),
             clock_base,
         })
     }
 
-    /// 入口の検査の判定ごとの数。
-    #[must_use]
-    pub fn filter_counts(&self) -> CountsSnapshot {
-        self.counts.snapshot()
-    }
-
-    /// トンネルを立てた時刻 (単調な時計)。
+    /// トンネルを立てた時刻 (データプレーンの時計)。
     #[must_use]
     pub fn started_at(&self) -> Instant {
         self.started_at
     }
 
-    /// device を動かす外殻のタスクが終わっているか。終わっていればトンネルは動いていない。
+    /// データプレーンのスレッドが終わっているか。終わっていればトンネルは動いていない。
     #[must_use]
     pub fn is_finished(&self) -> bool {
-        self.device.is_finished()
+        self.dataplane.is_finished()
+    }
+
+    /// データプレーンへの handle。中継が待ち受けと接続をデータプレーンのスレッドで動かすのに使う。
+    #[must_use]
+    pub fn dataplane(&self) -> &Handle<Stack> {
+        &self.dataplane
     }
 
     /// handshake の時刻の印の高い水位をファイルに残す。
@@ -272,11 +316,14 @@ impl Tunnel {
     }
 
     async fn clock_now(&self) -> Duration {
-        let hw = device::read(&self.device)
+        let hw = self
+            .dataplane
+            .status()
             .await
-            .map(|d| d.unix_high_water)
+            .map(|s| s.unix_high_water)
             .unwrap_or_default();
-        hw.max(self.clock_base + self.started_at.elapsed())
+        let elapsed = dataplane::clock::now().saturating_duration_since(self.started_at);
+        hw.max(self.clock_base + elapsed)
     }
 
     /// 自分のトンネルのアドレス。
@@ -294,32 +341,42 @@ impl Tunnel {
     /// 状態を 1 回読む。
     pub async fn read(&self) -> Reading {
         let mut r = lock(&self.shared).clone();
-        match device::read(&self.device).await {
-            Ok(d) => {
-                r.handshake_observed_at = d.last_handshake_at;
-                r.last_handshake = d.last_handshake;
-                r.rx_bytes = d.rx_bytes;
-                r.tx_bytes = d.tx_bytes;
+        match self.dataplane.status().await {
+            Ok(st) => {
+                r.socket_buffers = Some(st.socket_buffers);
+                if let Some(p) = st.peer {
+                    r.handshake_observed_at = p.last_handshake;
+                    r.last_handshake = p.last_handshake.and_then(wall_time);
+                    r.rx_bytes = p.rx_bytes;
+                    r.tx_bytes = p.tx_bytes;
+                }
             }
-            Err(e) => r.err = Some(e),
+            Err(e) => r.err = Some(format!("read the tunnel data plane: {e}")),
         }
         r
     }
 
-    /// 閉じる。TUN を消す。
-    pub async fn close(self) {
+    /// wgstack の UDP の受信の会計の故障。会計が不変条件の違反で止まっていれば、最初の違反の文を返す。
+    /// `Err` はデータプレーンが止まっていて読めなかったことを示す。
+    pub async fn udp_fault(&self) -> Result<Option<String>, String> {
+        self.dataplane
+            .call(|net| net.with(|ns| ns.core().udp_receive_fault().map(|f| f.to_string())))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// 閉じる。中継は先に閉じておく。データプレーンを止め、核の予算を `generations` に残す。
+    pub async fn close(self, generations: &mut Generations) {
         stamp::record(self.clock.as_deref(), self.clock_now().await, false);
         self.monitor.abort();
         let _ = self.monitor.await;
-        match Arc::try_unwrap(self.device) {
-            Ok(h) => {
-                if let Err(e) = h.stop().await {
-                    logf!("tunnel: stop: {e}");
-                }
-            }
-            Err(_) => logf!("tunnel: stop: the device is still shared"),
-        }
+        generations.stop().await;
     }
+}
+
+/// データプレーンの時計の時刻を壁時計に直す。
+fn wall_time(t: Instant) -> Option<SystemTime> {
+    SystemTime::now().checked_sub(dataplane::clock::now().saturating_duration_since(t))
 }
 
 fn lock(m: &Mutex<Reading>) -> std::sync::MutexGuard<'_, Reading> {
@@ -339,12 +396,12 @@ fn set_endpoint(shared: &Mutex<Reading>, ep: Result<SocketAddrV4, String>) {
 
 /// keepalive ごとに、ハンドシェイクが keepalive の 5 倍の間成功していなければエンドポイントを引き直し、
 /// server のアドレスへ ICMP echo を 1 つ送る (Go の `tunnel.Run`)。ping はデータのパケットなので、
-/// server がセッションを失っていれば鍵の寿命を待たずに新しいハンドシェイクが始まる。
+/// server がセッションを失っていれば鍵の寿命を待たずに新しいハンドシェイクが始まる。ping は wgstack の
+/// ping の endpoint から送る。
 async fn monitor(
     cfg: Config,
     shared: Arc<Mutex<Reading>>,
-    dev: Arc<wgft_wireguard_tun::Handle>,
-    tun_name: String,
+    dp: Handle<Stack>,
     dead: Arc<tokio::sync::Notify>,
 ) {
     let mut tick = tokio::time::interval(cfg.keepalive);
@@ -353,18 +410,22 @@ async fn monitor(
     loop {
         tokio::select! {
             _ = tick.tick() => {}
-            () = dev.finished() => {
-                // 外殻のループが終わった。agent に作り直させる
-                logf!("tunnel: the tunnel device stopped");
+            () = dp.finished() => {
+                // データプレーンのスレッドが終わった。agent に作り直させる
+                logf!("tunnel: the tunnel data plane stopped");
                 dead.notify_one();
                 return;
             }
         }
-        let hs = device::read(&dev)
+        let hs = dp
+            .status()
             .await
             .ok()
-            .and_then(|d| d.last_handshake_at);
-        let stale = hs.is_none_or(|t| t.elapsed() > cfg.keepalive * 5);
+            .and_then(|s| s.peer)
+            .and_then(|p| p.last_handshake);
+        let stale = hs.is_none_or(|t| {
+            dataplane::clock::now().saturating_duration_since(t) > cfg.keepalive * 5
+        });
         if stale {
             let before = lock(&shared).endpoint;
             let ep = resolve(&cfg.endpoint).await;
@@ -372,7 +433,7 @@ async fn monitor(
                 && before != Some(SocketAddr::V4(*a))
             {
                 logf!("tunnel: changed endpoint {before:?} -> {a}");
-                if let Err(e) = dev.set_endpoint(SocketAddr::V4(*a)).await {
+                if let Err(e) = dp.set_endpoint(SocketAddr::V4(*a)).await {
                     logf!("tunnel: set endpoint {a}: {e}");
                 }
             }
@@ -382,14 +443,7 @@ async fn monitor(
             set_endpoint(&shared, ep);
         }
         // 答えの有無が変わったときだけ 1 行出す
-        let answered = match ping(
-            cfg.address,
-            cfg.server_address,
-            Duration::from_secs(2),
-            Some(tun_name.clone()),
-        )
-        .await
-        {
+        let answered = match ping(&dp, cfg.server_address, Duration::from_secs(2)).await {
             Ok(rtt) => {
                 if pinged != Some(true) {
                     logf!(
@@ -417,6 +471,60 @@ async fn monitor(
             }
         };
         pinged = Some(answered);
+    }
+}
+
+/// server のトンネルのアドレスへ ICMP echo を 1 つ送り、往復時間を返す。wgstack の ping の endpoint を
+/// データプレーンのスレッドの local の task で開き、答えか期限まで待つ。
+///
+/// # Errors
+///
+/// endpoint を開けないか、送れないか、期限までに答えが無ければ誤りを返す。期限切れの文は
+/// `timed out` で終わる。
+pub async fn ping(dp: &Handle<Stack>, to: Ipv4Addr, timeout: Duration) -> Result<Duration, String> {
+    let reply = dp
+        .call(move |net| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let net = net.clone();
+            tokio::task::spawn_local(async move {
+                let _ = tx.send(ping_on(&net, to, timeout).await);
+            });
+            rx
+        })
+        .await
+        .map_err(|e| format!("icmp: {e}"))?;
+    reply
+        .await
+        .map_err(|_| "icmp: the tunnel data plane stopped".to_owned())?
+}
+
+/// ping の本体。データプレーンのスレッドで動く。
+async fn ping_on(net: &Net, to: Ipv4Addr, timeout: Duration) -> Result<Duration, String> {
+    let mut p = Ping::open(net, to).map_err(|e| format!("icmp open: {e}"))?;
+    let seq = u16::try_from(
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+            & 0xffff,
+    )
+    .unwrap_or(0);
+    // type 8 code 0、チェックサムと識別子 (核が書く)、seq、本文 "wgft"
+    let mut msg = [8u8, 0, 0, 0, 0, 0, 0, 0, b'w', b'g', b'f', b't'];
+    msg[6..8].copy_from_slice(&seq.to_be_bytes());
+    let start = dataplane::clock::now();
+    let deadline = tokio::time::Instant::now() + timeout;
+    p.send(&msg).map_err(|e| format!("icmp send: {e}"))?;
+    let mut buf = [0u8; 64];
+    loop {
+        let n = tokio::time::timeout_at(deadline, p.recv(&mut buf))
+            .await
+            .map_err(|_| "icmp receive: timed out".to_owned())?
+            .map_err(|e| format!("icmp receive: {e}"))?;
+        // 前の ping の遅れた答えは捨てる
+        if n >= 8 && buf[0] == 0 && buf[6..8] == seq.to_be_bytes() {
+            return Ok(dataplane::clock::now().saturating_duration_since(start));
+        }
     }
 }
 
@@ -486,118 +594,6 @@ async fn resolve(endpoint: &str) -> Result<SocketAddrV4, String> {
         })
         .collect();
     pick(&host, port, v4)
-}
-
-/// server のトンネルのアドレスへ ICMP echo を 1 つ送り、往復時間を返す。カーネルの ICMP の
-/// データグラムのソケットをトンネルのアドレスに bind する。
-///
-/// # Errors
-///
-/// ソケットを作れないか、期限までに答えが無ければ誤りを返す。
-pub async fn ping(
-    from: Ipv4Addr,
-    to: Ipv4Addr,
-    timeout: Duration,
-    device: Option<String>,
-) -> Result<Duration, String> {
-    tokio::task::spawn_blocking(move || ping_blocking(from, to, timeout, device.as_deref()))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-fn ping_blocking(
-    from: Ipv4Addr,
-    to: Ipv4Addr,
-    timeout: Duration,
-    device: Option<&str>,
-) -> Result<Duration, String> {
-    use socket2::{Domain, Protocol, SockAddr, Socket, Type};
-    // ICMP のデータグラムのソケットは net.ipv4.ping_group_range が許す group だけが作れる。この値は
-    // network namespace ごとで、新しい namespace の既定は誰も許さないので、作れなければ raw の
-    // ソケットに切り替える (root か CAP_NET_RAW が要る。トンネルの TUN も同じ特権で作る)
-    let (s, raw) = match Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::ICMPV4)) {
-        Ok(s) => (s, false),
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => (
-            Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))
-                .map_err(|e| format!("icmp socket: {e}"))?,
-            true,
-        ),
-        Err(e) => return Err(format!("icmp socket: {e}")),
-    };
-    // TUN に結び付け、ホストの他の interface から来る答えを受けない
-    #[cfg(target_os = "linux")]
-    if let Some(d) = device {
-        s.bind_device(Some(d.as_bytes()))
-            .map_err(|e| format!("icmp bind to device {d}: {e}"))?;
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = device;
-    s.bind(&SockAddr::from(SocketAddrV4::new(from, 0)))
-        .map_err(|e| format!("icmp bind {from}: {e}"))?;
-    let seq = u16::try_from(
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos()
-            & 0xffff,
-    )
-    .unwrap_or(0);
-    let id = u16::try_from(std::process::id() & 0xffff).unwrap_or(1);
-    // type 8 code 0、チェックサム、ID (データグラムのソケットではカーネルが付け直す)、seq、本文 "wgft"
-    let mut msg = [8u8, 0, 0, 0, 0, 0, 0, 0, b'w', b'g', b'f', b't'];
-    msg[4..6].copy_from_slice(&id.to_be_bytes());
-    msg[6..8].copy_from_slice(&seq.to_be_bytes());
-    let sum = checksum(&msg);
-    msg[2..4].copy_from_slice(&sum.to_be_bytes());
-    let start = std::time::Instant::now();
-    s.send_to(&msg, &SockAddr::from(SocketAddrV4::new(to, 0)))
-        .map_err(|e| format!("icmp send: {e}"))?;
-    loop {
-        let left = timeout
-            .checked_sub(start.elapsed())
-            .filter(|d| !d.is_zero())
-            .ok_or("icmp receive: timed out")?;
-        s.set_read_timeout(Some(left)).map_err(|e| e.to_string())?;
-        let mut buf = [0u8; 1500];
-        let n = std::io::Read::read(&mut &s, &mut buf).map_err(|e| match e.kind() {
-            // 読みの期限の切れは WouldBlock か TimedOut で返る
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
-                "icmp receive: timed out".to_owned()
-            }
-            _ => format!("icmp receive: {e}"),
-        })?;
-        if !raw || is_echo_reply(&buf[..n], to, id, seq) {
-            return Ok(start.elapsed());
-        }
-    }
-}
-
-/// raw のソケットで受けた IPv4 の packet が、`from` からの id と seq の echo reply かどうか。
-fn is_echo_reply(b: &[u8], from: Ipv4Addr, id: u16, seq: u16) -> bool {
-    let Some(&vihl) = b.first() else { return false };
-    if b.get(12..16) != Some(&from.octets()[..]) {
-        return false;
-    }
-    let ihl = usize::from(vihl & 0x0f) * 4;
-    let Some(icmp) = b.get(ihl..) else {
-        return false;
-    };
-    icmp.len() >= 8
-        && icmp[0] == 0
-        && icmp[4..6] == id.to_be_bytes()
-        && icmp[6..8] == seq.to_be_bytes()
-}
-
-fn checksum(b: &[u8]) -> u16 {
-    let mut sum: u32 = 0;
-    for c in b.chunks(2) {
-        let w = u32::from(c[0]) << 8 | u32::from(*c.get(1).unwrap_or(&0));
-        sum = sum.wrapping_add(w);
-    }
-    while sum >> 16 != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-    !(u16::try_from(sum).unwrap_or(0))
 }
 
 /// handshake の時刻の印 (TAI64N) の高い水位。
@@ -721,92 +717,6 @@ mod stamp {
             assert!(!f.exists());
             std::fs::remove_dir_all(dir).unwrap();
         }
-    }
-}
-
-/// device の層との接続部分。`wgft-wireguard` の device を、`wgft-wireguard-tun` の Linux の TUN の外殻で
-/// 動かす。
-mod device {
-    use std::net::{SocketAddr, SocketAddrV4};
-    use std::time::{Instant, SystemTime};
-
-    use wgft_wireguard::{DeviceConfig, PrivateKey, PublicKey};
-    use wgft_wireguard_tun::{Handle, TunSettings};
-
-    use super::Config;
-
-    #[derive(Default)]
-    pub(super) struct DeviceReading {
-        pub(super) last_handshake: Option<SystemTime>,
-        pub(super) last_handshake_at: Option<Instant>,
-        pub(super) unix_high_water: std::time::Duration,
-        pub(super) rx_bytes: u64,
-        pub(super) tx_bytes: u64,
-    }
-
-    pub(super) async fn start(
-        private_key: &str,
-        tun_name: &str,
-        cfg: &Config,
-        endpoint: Option<SocketAddrV4>,
-        open: crate::relay::OpenPorts,
-        counts: std::sync::Arc<crate::inbound::Counts>,
-        unix_floor: std::time::Duration,
-    ) -> Result<Handle, String> {
-        let key =
-            PrivateKey::from_base64(private_key).map_err(|e| format!("wg_private_key: {e}"))?;
-        let server = PublicKey::from_base64(&cfg.server_public_key)
-            .map_err(|e| format!("server_pubkey: {e}"))?;
-        let mut dc = DeviceConfig::agent(
-            key,
-            server,
-            endpoint.map(SocketAddr::V4),
-            cfg.server_address,
-            cfg.keepalive,
-        );
-        dc.mtu = cfg.mtu;
-        // アドレスは /32 で link に付き、server への経路は外殻の専用の経路表に入る
-        let tun = TunSettings::agent(tun_name, cfg.address, cfg.server_address, cfg.mtu);
-        // トンネルの入口の検査。TUN に書く前に、ルールのポートと ping の答えだけを通す
-        let inbound = crate::inbound::Inbound {
-            addr: cfg.address,
-            open,
-            counts,
-        };
-        let filter: wgft_wireguard_tun::InboundFilter = Box::new(move |p| inbound.verdict(p));
-        wgft_wireguard_tun::spawn(
-            dc,
-            tun,
-            SocketAddr::from(([0, 0, 0, 0], 0)),
-            unix_floor,
-            filter,
-        )
-        .await
-        .map_err(|e| format!("start the tunnel device {tun_name}: {e}"))
-    }
-
-    pub(super) async fn read(h: &Handle) -> Result<DeviceReading, String> {
-        let st = h
-            .status()
-            .await
-            .map_err(|e| format!("read the tunnel device: {e}"))?;
-        let Some(p) = st.peer else {
-            return Ok(DeviceReading {
-                unix_high_water: st.unix_high_water,
-                ..DeviceReading::default()
-            });
-        };
-        // 単調な時計の値を壁時計に直す
-        let last_handshake = p.last_handshake.and_then(|t| {
-            SystemTime::now().checked_sub(Instant::now().saturating_duration_since(t))
-        });
-        Ok(DeviceReading {
-            last_handshake,
-            last_handshake_at: p.last_handshake,
-            unix_high_water: st.unix_high_water,
-            rx_bytes: p.rx_bytes,
-            tx_bytes: p.tx_bytes,
-        })
     }
 }
 
@@ -945,26 +855,5 @@ mod tests {
             .step_by(2)
             .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
             .collect()
-    }
-
-    #[test]
-    fn echo_reply_match() {
-        let server = Ipv4Addr::new(10, 200, 0, 1);
-        let mut p = vec![0x45u8; 20];
-        p[12..16].copy_from_slice(&server.octets());
-        p.extend_from_slice(&[0, 0, 0, 0, 0x12, 0x34, 0, 7]);
-        assert!(is_echo_reply(&p, server, 0x1234, 7));
-        assert!(!is_echo_reply(&p, server, 0x1234, 8));
-        assert!(!is_echo_reply(&p, Ipv4Addr::new(10, 200, 0, 9), 0x1234, 7));
-        p[20] = 8;
-        assert!(!is_echo_reply(&p, server, 0x1234, 7));
-    }
-
-    #[test]
-    fn icmp_checksum() {
-        let mut m = [8u8, 0, 0, 0, 0, 1, 0, 1];
-        let c = checksum(&m);
-        m[2..4].copy_from_slice(&c.to_be_bytes());
-        assert_eq!(checksum(&m), 0);
     }
 }

@@ -255,7 +255,12 @@ crate の `crates/wgft-wireguard-tun` は、`Device` を Linux の TUN と UDP �
 ラボの試験と試作だけに使い、配布しません。
 Linux 以外では `spawn` が `Unsupported` の誤りを返します。
 
-試作は、Rust の wgstack ができるまで、この殻の TUN を通してカーネルの TCP/IP stack を使います。
+agent はこの殻を使わなくなりました。
+agent はデータプレーンのスレッドで device の層と Rust の wgstack の核を直接動かします ([Rust の agent の置き換えの設計のデータプレーンのスレッドと送る経路](agent-parity.md#データプレーンのスレッドと送る経路))。
+殻は、device の層を Linux の WireGuard と wireguard-go に照らす `lab/wg-interop.sh` の道具として残し、ラボの一式が Rust の agent で通った後に消すかを決め直します。
+以下はその道具としての作りと、TUN の試作の agent が使っていた間の判断の記録です。
+
+TUN の試作の agent は、Rust の wgstack ができるまで、この殻の TUN を通してカーネルの TCP/IP stack を使いました。
 ラボの VM の中で、agent の中継はカーネルの socket を開きます。
 使い捨てのユーザー空間の TCP の stack は作りません。
 理由は 2 つです。

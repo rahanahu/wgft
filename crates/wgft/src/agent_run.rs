@@ -102,7 +102,6 @@ pub fn prepare_door(
         join: settings.join.clone(),
         name: settings.name.clone(),
         version: crate::version(),
-        tun_name: settings.wg_interface.clone(),
         allow_targets: settings.allow_targets.clone(),
         limits: wgft_agent::flowpool::Limits {
             udp: settings.max_udp_flows as usize,

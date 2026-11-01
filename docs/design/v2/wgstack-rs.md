@@ -413,7 +413,8 @@ agent の device の殻の段は、核と waker の表を 1 つの trait (`datap
 
 ### 操作の知らせ
 
-`wgft-netstack` の handle は、出力を生みうる操作の後に、同じスレッドの `tokio::sync::Notify` で駆動の task を起こします。
+`wgft-netstack` の handle は、出力を生みうる操作の後に、同じスレッドの知らせで駆動の task を起こします。
+agent のデータプレーンの知らせは錠を持たない `Cell` の印と waker で、`LocalNetstack` は `tokio::sync::Notify` です。
 対象の操作は `write`、`close_write`、`close`、`abort`、`read` (窓の更新を生むため)、`close_listener`、`send_to`、ping の送信です。
 `accept` は出力を生まないので起こしません。
 boost を accept の時に与える方針で受信のバッファが広がっても、窓の更新は最初の `read` が送ります。
@@ -1180,9 +1181,10 @@ L1 の miss は別の値に移した形だけが多く、PR 6 の形と PR 5 の
   `LocalNetstack` は核だけを持つ同じ形の実装で、試験とほかの駆動 (後の server) が使います
 - 作成の失敗:`Netstack::new` は、`Stack::new` の誤りと waker の表の確保の失敗を `NetstackError` で返し、`Budget` を取り戻せます。
   waker の表とポートの頁は `try_reserve_exact` で確保し、頁の確保の失敗は待ち受けと endpoint を開く操作の `NoMemory` の誤りにします。
-  [核との継ぎ目](agent-parity.md#核との継ぎ目)の「作成は失敗しない形」との合わせ方は核の段が決めます
+  核の段は、データプレーンの上の層の作成を失敗しうる形にし、失敗した作成が受けた予算を返す形で合わせました ([核との継ぎ目](agent-parity.md#核との継ぎ目))
 - 時刻:`Netstack` は作成の時の `Instant` と時計の関数を持ち、handle の操作の時刻はその時計から取ります。
   駆動はデータプレーンの時計と同じ関数を渡します。
+  agent はデータプレーンの時計 (`dataplane::clock::now`) を渡します。
   handle が駆動の起床を待たずに核を呼ぶためです
 - waker の表:接続の枠ごとに読みと書きの waker を 1 つずつ持ち、作成の時に枠の数だけ確保します。
   TCP の待ち受けの accept と UDP の endpoint の読みの waker は、256 個のポートの頁に分けて持ちます。

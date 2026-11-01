@@ -1,5 +1,5 @@
-//! ホストの IPv4 のアドレスとその帯を読む。トンネルのアドレスがホストのアドレスか、ホストに繋がった
-//! 帯に重ならないことを確かめるのに使う。
+//! ホストの IPv4 のアドレスとその帯と、interface の一覧を読む。宛先のユニキャストの判定
+//! (`targets::unicast`) と `agent doctor` が使う。
 
 use std::net::Ipv4Addr;
 
@@ -25,30 +25,6 @@ impl HostAddr {
         };
         u32::from(a) & mask == u32::from(self.addr) & mask
     }
-}
-
-/// `tunnel` がホストのアドレスか、ホストに繋がった帯に入るなら、その理由を返す。`skip` の名前の
-/// interface (このプロセスの TUN) は見ない。ループバックの interface は見ない (127.0.0.0/8 は別に拒む)。
-#[must_use]
-pub fn conflict(tunnel: Ipv4Addr, addrs: &[HostAddr], skip: &str) -> Option<String> {
-    addrs
-        .iter()
-        .filter(|h| h.interface != skip && !h.addr.is_loopback())
-        .find_map(|h| {
-            if h.addr == tunnel {
-                Some(format!(
-                    "address {tunnel} is already assigned on this host, on {}",
-                    h.interface
-                ))
-            } else if h.contains(tunnel) {
-                Some(format!(
-                    "address {tunnel} is inside {}/{}, a network this host is connected to on {}",
-                    h.addr, h.prefix_len, h.interface
-                ))
-            } else {
-                None
-            }
-        })
 }
 
 /// ホストの IPv4 のアドレスを読む (`getifaddrs`)。
@@ -375,32 +351,14 @@ mod tests {
     }
 
     #[test]
-    fn finds_assigned_addresses_and_connected_networks() {
-        let host = [
-            h("lo", [127, 0, 0, 1], 8),
-            h("eth0", [192, 168, 1, 5], 24),
-            h("wgftrs0", [10, 200, 0, 2], 32),
-        ];
-        assert!(
-            conflict(Ipv4Addr::new(192, 168, 1, 5), &host, "wgftrs0")
-                .unwrap()
-                .contains("already assigned")
-        );
-        assert!(
-            conflict(Ipv4Addr::new(192, 168, 1, 77), &host, "wgftrs0")
-                .unwrap()
-                .contains("connected to on eth0")
-        );
-        // 自分の TUN は見ない
-        assert_eq!(
-            conflict(Ipv4Addr::new(10, 200, 0, 2), &host, "wgftrs0"),
-            None
-        );
-        assert_eq!(
-            conflict(Ipv4Addr::new(10, 200, 0, 2), &host, "other"),
-            Some("address 10.200.0.2 is already assigned on this host, on wgftrs0".into())
-        );
-        assert_eq!(conflict(Ipv4Addr::new(10, 9, 9, 9), &host, "wgftrs0"), None);
+    fn a_band_contains_its_addresses() {
+        let eth = h("eth0", [192, 168, 1, 5], 24);
+        assert!(eth.contains(Ipv4Addr::new(192, 168, 1, 77)));
+        assert!(!eth.contains(Ipv4Addr::new(192, 168, 2, 5)));
+        let one = h("wg0", [10, 200, 0, 2], 32);
+        assert!(one.contains(Ipv4Addr::new(10, 200, 0, 2)));
+        assert!(!one.contains(Ipv4Addr::new(10, 200, 0, 3)));
+        assert!(h("any", [0, 0, 0, 0], 0).contains(Ipv4Addr::new(203, 0, 113, 1)));
     }
 
     #[cfg(any(unix, windows))]

@@ -14,7 +14,6 @@ pub mod enroll;
 pub mod error;
 pub mod flowpool;
 pub mod hostaddr;
-pub mod inbound;
 pub mod logging;
 pub mod platform;
 pub mod relay;

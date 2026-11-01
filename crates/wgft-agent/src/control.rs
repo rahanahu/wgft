@@ -16,8 +16,8 @@ use wgft_proto::GoTime;
 
 use crate::controlapi::{
     DOCTOR_LOCK_WAIT, DoctorAllowTargets, DoctorBudget, DoctorProcess, DoctorRefusal,
-    DoctorResponse, DoctorRule, DoctorRuntimeState, DoctorStream, DoctorTunnel, DoctorWatchdog,
-    clip_text,
+    DoctorResponse, DoctorRule, DoctorRuntimeState, DoctorSocketBuffers, DoctorStream,
+    DoctorTunnel, DoctorUdpAccounting, DoctorWatchdog, clip_text,
 };
 use crate::ctlserver::{DoctorRequest, RotateKeyRequest, RotateState};
 use crate::flowpool;
@@ -147,7 +147,11 @@ fn nanos(d: Duration) -> i64 {
 
 /// 単調な時計の時刻を、今の壁時計に写す。
 fn wall(at: Instant) -> SystemTime {
-    let now = Instant::now();
+    wall_at(at, Instant::now())
+}
+
+/// `now` と同じ時計の時刻 `at` を壁時計に直す。トンネルの時刻はデータプレーンの時計で測る。
+fn wall_at(at: Instant, now: Instant) -> SystemTime {
     if at <= now {
         SystemTime::now() - (now - at)
     } else {
@@ -173,7 +177,7 @@ fn stream(obs: &SharedObs) -> DoctorStream {
 
 /// 実行時の状態を 1 回に読む。トンネルの状態はハートビートと同じ値で、doctor のための 2 つ目の判定を
 /// 持たない。
-async fn runtime_state(a: &Agent) -> DoctorRuntimeState {
+pub(crate) async fn runtime_state(a: &Agent) -> DoctorRuntimeState {
     let ts = a.tunnel_status().await;
     let mut st = DoctorRuntimeState {
         generation: a.generation,
@@ -200,12 +204,41 @@ async fn runtime_state(a: &Agent) -> DoctorRuntimeState {
         let r = t.read().await;
         st.tunnel.rx_bytes = i64::try_from(r.rx_bytes).unwrap_or(i64::MAX);
         st.tunnel.tx_bytes = i64::try_from(r.tx_bytes).unwrap_or(i64::MAX);
-        st.tunnel.started_at = GoTime::from_system(wall(t.started_at()));
+        st.tunnel.started_at =
+            GoTime::from_system(wall_at(t.started_at(), crate::dataplane::clock::now()));
+        st.tunnel.socket_buffers = r.socket_buffers.as_ref().map(socket_buffers);
+        if let Ok(fault) = t.udp_fault().await {
+            st.tunnel.udp_accounting = Some(DoctorUdpAccounting {
+                stopped: fault.is_some(),
+                error: fault.map(|e| clip_text(&e)).unwrap_or_default(),
+            });
+        }
     }
     if let Some(relay) = &a.relay {
         relay_state(&mut st, relay);
     }
     st
+}
+
+/// 測ったソケットのバッファを応答の形に写す (Go の `doctorSocketBuffers`)。
+fn socket_buffers(b: &crate::dataplane::SocketBuffers) -> DoctorSocketBuffers {
+    if !b.supported {
+        return DoctorSocketBuffers::default();
+    }
+    let mut out = DoctorSocketBuffers {
+        supported: true,
+        port: b.port,
+        required: count(crate::dataplane::REQUIRED),
+        ..DoctorSocketBuffers::default()
+    };
+    if let Some(e) = &b.error {
+        out.error = clip_text(e);
+        return out;
+    }
+    out.sockets = 1;
+    out.recv = count(b.recv);
+    out.send = count(b.send);
+    out
 }
 
 /// 中継の値を載せる。ルールの状態とリスナーの集計は、リスナーの 1 回の読みから作る (Go の
@@ -474,16 +507,28 @@ mod tests {
     /// CLI の `relay.listeners` が Go と同じく読める。
     #[tokio::test]
     async fn doctor_carries_the_relay_s_rules_and_budgets() {
-        use crate::relay::{Manager, OpenPorts};
+        use crate::relay::Manager;
+        use crate::relay::testpeer::{AGENT_IP, Peer};
         use crate::targets::Targets;
         use wgft_proto::{AgentRule, Proto};
-        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = taken.local_addr().unwrap().port();
+        let peer = Peer::start().await;
+        // 核のポートを先に取り、中継の待ち受けを開けなくする
+        let port = 8080u16;
+        let addr = std::net::SocketAddrV4::new(AGENT_IP, port);
+        let (taken, held) = tokio::sync::oneshot::channel::<()>();
+        peer.agent()
+            .call(move |net| {
+                let l = wgft_netstack::TcpListener::bind(net, addr).unwrap();
+                tokio::task::spawn_local(async move {
+                    let _ = held.await;
+                    drop(l);
+                });
+            })
+            .await
+            .unwrap();
         let mut m = Manager::new(
-            std::net::Ipv4Addr::LOCALHOST,
-            std::net::Ipv4Addr::LOCALHOST,
-            None,
-            OpenPorts::default(),
+            AGENT_IP,
+            peer.agent().handle(),
             std::sync::Arc::new(Targets::new(None)),
             flowpool::Limits { udp: 64, tcp: 32 },
         );
@@ -524,13 +569,12 @@ mod tests {
     }
 
     /// 拒否の累計の起点は、中継と一緒に作り直すトンネルを立てた時刻である。
-    #[test]
-    fn refusals_since_is_the_tunnel_s_start() {
+    #[tokio::test]
+    async fn refusals_since_is_the_tunnel_s_start() {
+        let peer = crate::relay::testpeer::Peer::start().await;
         let m = Manager::new(
-            std::net::Ipv4Addr::LOCALHOST,
-            std::net::Ipv4Addr::LOCALHOST,
-            None,
-            crate::relay::OpenPorts::default(),
+            crate::relay::testpeer::AGENT_IP,
+            peer.agent().handle(),
             std::sync::Arc::new(crate::targets::Targets::new(None)),
             flowpool::Limits::default(),
         );
