@@ -75,6 +75,7 @@ impl Wheel {
     }
 
     /// 確保した領域の byte 数です。
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.dl.heap_bytes()
             + self.next.heap_bytes()
@@ -83,11 +84,13 @@ impl Wheel {
     }
 
     /// 輪に入っている節の数です。
+    #[cfg(test)]
     pub(crate) fn count(&self) -> usize {
         self.count
     }
 
     /// 処理を終えた tick です。
+    #[cfg(test)]
     pub(crate) fn tick(&self) -> u64 {
         self.tick
     }

@@ -6,8 +6,7 @@
 //! 下回らない。UDP は族を分けずに順に試す。Go の `net.Dialer` の `dialParallel` と `dialSerial` と同じ
 //! 規則である。
 //!
-//! 接続そのものは呼び手の関数に任せるので、この規則はソケットの種類 (TCP、接続した UDP) と、トンネルの
-//! 側の作り (TUN の試作、wgstack) に依らない。
+//! 接続そのものは呼び手の関数に任せるので、この規則はソケットの種類 (TCP、接続した UDP) に依らない。
 
 use std::future::Future;
 use std::io;
@@ -222,15 +221,7 @@ pub(crate) fn errno_text(e: &io::Error) -> String {
         K::PermissionDenied => return "permission denied".to_owned(),
         _ => {}
     }
-    let s = e.to_string();
-    let s = match s.rfind(" (os error ") {
-        Some(i) if s.ends_with(')') => &s[..i],
-        _ => &s,
-    };
-    let mut c = s.chars();
-    c.next().map_or_else(String::new, |f| {
-        f.to_lowercase().chain(c).collect::<String>()
-    })
+    crate::oserror::lower_first(&crate::oserror::os_text(e))
 }
 
 #[cfg(test)]

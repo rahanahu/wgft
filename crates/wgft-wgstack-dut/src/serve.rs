@@ -28,7 +28,7 @@ fn fail(out: &mut impl Write, log: &mut impl Write, msg: &str) -> u8 {
 }
 
 /// 1 つの要求を読みます。流れが frame の境目で終わったら `None` です。
-fn read_request(r: &mut impl Read) -> Result<Option<Msg>, String> {
+pub(crate) fn read_request(r: &mut impl Read) -> Result<Option<Msg>, String> {
     let (k, body) = match frame::read_frame(r) {
         Ok(f) => f,
         Err(FrameError::Eof) => return Ok(None),

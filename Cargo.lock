@@ -1727,7 +1727,10 @@ dependencies = [
  "libtest-mimic",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
  "wgft-alloc-count",
+ "wgft-netstack",
  "wgft-tcpharness",
  "wgft-wgstack",
 ]
@@ -1741,16 +1744,6 @@ dependencies = [
  "proptest",
  "sanstun",
  "zeroize",
-]
-
-[[package]]
-name = "wgft-wireguard-tun"
-version = "0.1.0"
-dependencies = [
- "clap",
- "libc",
- "tokio",
- "wgft-wireguard",
 ]
 
 [[package]]

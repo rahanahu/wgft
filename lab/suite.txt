@@ -181,6 +181,8 @@ parallel         yes  agent=go weight=245 agentkernel.sh userspace route session
 parallel         yes  agent=go weight=238 agentkernel.sh kernel notify pin reconnect
 parallel         yes  agent=go weight=222 agentkernel.sh kernel route session
 parallel         yes  agent=go weight=245 agentkernel.sh userspace resolve
+parallel         yes  weight=160 lifecycle.sh kernel 13
+parallel         yes  weight=160 lifecycle.sh userspace 13
 parallel         yes  agent=go weight=150 agentkernel.sh kernel failover
 parallel         yes  agent=go weight=150 agentkernel.sh userspace failover
 parallel         yes  agent=go weight=132 agentkernel.sh kernel drift 22 25 16 teardown

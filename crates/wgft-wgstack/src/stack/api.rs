@@ -34,7 +34,7 @@ impl ListenerId {
 }
 
 /// 接続と待ち受けの準備の変化の知らせです。知らせはきっかけで、状態の正本ではありません。呼び手は知らせを受けたら
-/// 操作を試し、`WouldBlock` なら次の知らせを待ちます。種類は後の段で足すので、知らない種類は無視します。
+/// 操作を試し、`WouldBlock` なら次の知らせを待ちます。種類は増えることがあるので、知らない種類は無視します。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Event {

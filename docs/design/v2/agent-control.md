@@ -1,8 +1,8 @@
-# Rust の agent の制御プレーン (試作)
+# Rust の agent の制御プレーン
 
-この文書は、v2 の Rust の agent のうち制御プレーンの試作を定めます。
+この文書は、v2 の Rust の agent のうち制御プレーンを定めます。
 制御プレーンは、wire の版 1 の型、接続文字列と登録、認証情報 (`agent.json`)、stream、全体状態の適用、ハートビートを受け持ちます。
-試作の目的は、変更していない Go の v1 の server に Rust の agent を登録し、トンネルを立て、ルールの TCP の接続を 1 本中継できることをラボで確かめることです。
+相手は変更していない Go の v1 の server です。
 wire と `agent.json` の契約は [agent と server の境目の仕様](../spec/README.md) に従います。
 この文書は Rust の側の作りと、未確認の点を書きます。
 
@@ -12,7 +12,7 @@ wire と `agent.json` の契約は [agent と server の境目の仕様](../spec
 | --- | --- |
 | `crates/wgft-proto` | wire の版 1 の型。接続文字列の解釈、登録の要求と応答、stream のメッセージ、全体状態、close の符号、版の交渉、理由の整形 |
 | `crates/wgft-agent` | agent の制御プレーン。登録、認証情報、stream、全体状態の適用、ハートビート、トンネルの監視、TCP の中継。データプレーンのスレッド (module `dataplane`) も持ちます |
-| `crates/wgft` | コマンド。今は `wgft agent run` と `wgft version` だけを持ちます |
+| `crates/wgft` | コマンド。agent のホストのコマンド (`wgft agent run`、`pubkey`、`rotate-key`、`doctor`、`teardown`) と `wgft version` を持ちます ([Rust のビルドが持つコマンド](agent-parity.md#rust-のビルドが持つコマンド)) |
 
 `wgft-proto` は I/O を持たず、serde と serde_json と time だけに依ります。
 agent と、後で作る Rust の server の両方が使います。
@@ -116,7 +116,7 @@ Rust の標準の `File::try_lock` は Unix で `flock`、Windows で `LockFileE
 ロックを取った後に、その名前が今も開いたファイルを指すかを inode で確かめ、別のプロセスが消して作り直していれば 4 回まで取り直します。
 ロックを取った後に、前の保存が残した `.wgft-credentials-` の一時ファイルを消します。
 
-`mode` が `kernel` の記録を持つファイルは、試作が扱わないので起動の拒否 (`mode-gate`) にします。
+`mode` が `userspace` でない記録を持つファイルは、このビルドがユーザー空間モードだけを扱うので起動の拒否 (`mode-gate`) にします。
 
 ## stream
 
@@ -172,7 +172,7 @@ server のトンネルのアドレスは、全体状態の `wg.address` の帯�
 0.0.0.0/8、127.0.0.0/8、224.0.0.0/4、240.0.0.0/4 のアドレスも拒みます。
 トンネルのアドレスはプロセスの中の wgstack だけが持ち、ホストの interface に付けません。
 このため、ホストのアドレスや LAN の帯と重なっても取り合いは起きず、v1 のユーザー空間モードと同じく確かめません。
-TUN の試作は重なるアドレスを拒んでいましたが、その確かめは乗っ取られた server にホストのアドレスの有無を教える面も持っていたので、TUN と一緒に外しました。
+重なるアドレスを拒む確かめは、乗っ取られた server にホストのアドレスの有無を教える面も持つので置きません。
 WireGuard のピアは server の 1 つで、AllowedIPs は server のアドレスの /32 です。
 keepalive の秒が 1 から 65535 の外なら 25 秒を使います。
 
@@ -228,12 +228,12 @@ device の印は handshake のときにしか進まないので、今の値を�
 
 ### トンネルの入口
 
-TUN の試作が持っていた入口の検査 (`inbound` の module) は消しました。
-packet は wgstack の核の中で終わり、ホストの TCP/IP にも LAN にも渡らないためです。
-規則は [トンネルの入口の検査](../spec/tunnel.md#トンネルの入口の検査) で、核が受け持ちます。
+入口の検査は wgstack の核が受け持ち、agent は別の検査の module を持ちません。
+packet は核の中で終わり、ホストの TCP/IP にも LAN にも渡らないためです。
+規則は [トンネルの入口の検査](../spec/tunnel.md#トンネルの入口の検査) です。
 待ち受けの無いポートへの SYN には RST を、UDP には Port Unreachable を返し、echo request に応答し、断片は組み立てます。
 捨てた数と 1 分に 1 回までのログも核が持ち、データプレーンが Go の wgstack と同じ文面でログに出します。
-試作との対応は [wgstack の Rust 版の入口の検査と試作の守りの移り先](wgstack-rs.md#入口の検査と試作の守りの移り先)にあります。
+TUN を使う形の守りとの対応は [wgstack の Rust 版の入口の検査](wgstack-rs.md#入口の検査)にあります。
 
 ### 乗っ取られた server が届く範囲
 
@@ -278,15 +278,15 @@ agent では次の範囲に届き、それより広がりません。
 netstack は Rust の wgstack の 1 つだけなので、`wgstack` 以外の値は使わない旨を 1 行出します。
 `WGFT_WG_INTERFACE` は v1 と同じくユーザー空間モードでは使いません。
 
-試作に無い機能は、値があれば黙って無視せずに、種別 `prerequisite` の拒否 (終了コード 3) で止めます。
-無視すると、許可一覧のような守りを利用者の意図より緩めるためです。
+このビルドに無い機能は、値があれば黙って無視せずに、種別 `prerequisite` の拒否 (終了コード 3) で止めます。
+無視すると、守りを利用者の意図より緩めることがあるためです。
+今これに当たるのは `WGFT_MODE=kernel` のカーネルモードです。
 
-- `WGFT_MODE=kernel`:カーネルモード
-- `WGFT_AGENT_ALLOW_TARGETS`:宛先の許可一覧。値は読んで検査しますが、判定が無いので拒みます
+宛先の許可一覧とフロー数の上限は効かせます ([宛先と予算](agent-parity.md#宛先と予算))。
+送信の向きのバッチは、値を受けて、まだ効かせていない旨を 1 行出します。
 
-同時フロー数の上限と送信の向きのバッチは、値を受けて、まだ効かせていない旨を 1 行出します。
-
-`agent doctor`、`agent pubkey`、`agent rotate-key`、`agent teardown`、制御ソケット (`agent.json.sock`)、server と rule と status のコマンドもありません。
+制御ソケット (`agent.json.sock`) と agent のホストのコマンドは [制御ソケットと agent doctor](agent-parity.md#制御ソケットと-agent-doctor) にあります。
+server と rule と status のコマンドはありません。
 ログの 1 行の形は Go の `log` と同じ `2006/01/02 15:04:05 msg` です。
 
 ## Go の v1 との照合
@@ -342,13 +342,12 @@ serde_json はどれも書き換えず、JSON の値は同じです。
 
 ## ラボでの確認
 
-ラボでの確認は、ラボの一式を Rust の agent で流す形に移りました ([Rust の agent の置き換えの設計のラボの切り替え](agent-parity.md#ラボの切り替え))。
+ラボでは、ラボの一式を Rust の agent で流して確かめます ([Rust の agent の置き換えの設計のラボの切り替え](agent-parity.md#ラボの切り替え))。
 手順は [lab/README.md](../../../lab/README.md#rust-の-agent-で流す) にあります。
-試作の台本 `lab/rust-agent.sh` は、Go の agent と Rust の agent の間の `agent.json` の引き継ぎだけを確かめる `lab/agent-handover.sh` になりました。
-試作の台本が確かめていた登録、stream、トンネル、keepalive の ping、中継、入口の検査は、一式の `rust` の組が確かめます。
+登録、stream、トンネル、keepalive の ping、中継、入口の検査は、一式の `rust` の組が確かめます。
+Go の agent と Rust の agent の間の `agent.json` の引き継ぎは `lab/agent-handover.sh` が確かめます。
 
 ## 未確認の点
 
-- 中継の接続を RST で切ること、実効宛先の変更ですぐに開き直すことは、試験の server の device と台本の TCP の相手をループバックで組む単体の試験と、ラボの一式で確かめます
-- 長い時間の動作、鍵の更新 (120 秒ごとの再ハンドシェイク) を跨ぐ転送、server の再起動からの戻りを確かめていません
+- ラボの一式の確認より長く動かし続けたときの動作は確かめていません
 - Windows と macOS では build と単体の試験だけを CI で流し、動かしていません

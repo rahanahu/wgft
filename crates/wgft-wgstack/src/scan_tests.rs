@@ -64,7 +64,7 @@ const FORBIDDEN: &[(&str, &str)] = &[
 ];
 
 /// `fixed_vec.rs` だけが使える語です。
-const FIXED_VEC_ONLY: &[&str] = &[".push(", "Box<", "Box::"];
+const FIXED_VEC_ONLY: &[&str] = &[".push(", ".extend(", "Box<", "Box::"];
 
 /// 一覧の項目のうち、clippy の設定に無ければならないものです。
 const CLIPPY_REQUIRED: &[&str] = &[
