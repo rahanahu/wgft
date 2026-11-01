@@ -1,0 +1,22 @@
+# Every statement shape: binding verbs, named atoms, ->, if/else/end, stop and templates.
+scenario statements
+refs: parser fixture
+
+listen l 8001
+connect p l 8001 syn=opts_standard() window=8 ack_delay=20ms
+await p 500ms match=(acks(s, p.snd_nxt) && s.len == 0) -> a
+send p segment(p, FIN|ACK, p.snd_nxt - 1)
+set p.rcv_nxt = a.seq + a.seq_len
+if a.ok
+  check fin.acked a.ok   # a comment after the condition
+    what: the {{braced}} expectation with "quotes"
+    got: {seg_desc(a)}, error {err_kind(none)}
+else
+  require gone !a.ok
+    what: nothing
+    got: {yes_no(a.ok, "x", "y")}
+  stop
+end
+measure synack.ws p.synack.ws
+log the peer's ISS is {p.iss}
+alive established p p.conn

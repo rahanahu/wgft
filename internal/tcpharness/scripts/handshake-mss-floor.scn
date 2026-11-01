@@ -1,0 +1,40 @@
+# The MSS floor from both sides. A SYN with MSS 536 is the positive control every engine
+# answers, so a probe that is dropped for another reason, such as a bad checksum, cannot pass for
+# the floor. A SYN with MSS 535 is answered by Linux and dropped by wgft's agent on purpose.
+scenario handshake-mss-floor
+refs: RFC 9293 3.7.1; wgft's TUN-ingress floor of 536, packet-validation.md
+
+listen l 8003
+# An MSS option of 0 is read as no option: 536, RFC 9293 3.7.1; the floor does not apply.
+peer m0 8003
+send m0 syn(m0, with(opts_none(), mss=0))
+await m0 1s match=is_synack(s) -> sa0
+let ok0 = sa0.ok && sa0.ack == m0.iss + 1
+check mss0.synack ok0
+  what: a SYN with an MSS option of 0 is answered within 1 s
+  got: {synack_desc(m0, sa0, ok0)}
+if ok0
+  send m0 raw(m0, RST, m0.iss + 1)
+end
+
+peer m536 8003
+send m536 syn(m536, with(opts_none(), mss=536))
+await m536 1s match=is_synack(s) -> sa536
+let ok536 = sa536.ok && sa536.ack == m536.iss + 1
+check mss536.synack ok536
+  what: a SYN with MSS 536 is answered within 1 s
+  got: {synack_desc(m536, sa536, ok536)}
+if ok536
+  send m536 raw(m536, RST, m536.iss + 1)
+end
+
+peer m535 8003
+send m535 syn(m535, with(opts_none(), mss=535))
+await m535 1s match=is_synack(s) -> sa535
+let ok535 = sa535.ok && sa535.ack == m535.iss + 1
+check mss535.synack ok535
+  what: a SYN with MSS 535 is answered within 1 s
+  got: {synack_desc(m535, sa535, ok535)}
+if ok535
+  send m535 raw(m535, RST, m535.iss + 1)
+end

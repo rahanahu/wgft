@@ -1,0 +1,27 @@
+# A SYN without options draws a SYN-ACK without them, and the DUT then assumes the default MSS.
+scenario handshake-bare
+refs: RFC 9293 3.7.1 MUST-15 default send MSS 536, RFC 7323 2.2 and 3.2, RFC 2018 2
+
+listen l 8002
+connect p l 8002 syn=opts_none()
+let sa = p.synack
+check synack.no-wscale sa.ws < 0
+  what: no window scale when the SYN had none
+  got: {yes_no(sa.ws < 0, "none", "window scale")}
+check synack.no-timestamps sa.ts == none
+  what: no timestamps when the SYN had none
+  got: {yes_no(sa.ts == none, "none", "timestamps")}
+check synack.no-sack-permitted !sa.sack_permitted
+  what: no SACK-permitted when the SYN had none
+  got: {yes_no(!sa.sack_permitted, "none", "SACK-permitted")}
+check synack.mss sa.mss != none
+  what: the SYN-ACK still carries an MSS option
+  got: {yes_no(sa.mss != none, "MSS option", "no MSS option")}
+# Without an MSS option the DUT must assume 536, RFC 9293 MUST-15.
+let data = pattern(4000, 0x11)
+write p.conn data
+recv p 4000 3s -> r
+check default-mss len(r.data) == len(data) && r.max_len <= 536
+  what: all 4000 bytes in segments of at most 536 bytes
+  got: {len(r.data)} bytes, largest segment {r.max_len}
+measure max-segment r.max_len

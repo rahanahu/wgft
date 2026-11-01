@@ -1,0 +1,5 @@
+scenario x
+refs: parser fixture
+
+peer p 1
+await p 1s match=is_data(s) 2s

@@ -1,0 +1,56 @@
+# Close a listener that holds an established connection nobody accepted and a handshake that has
+# not finished. wgstack.md resets both at the close. The port then refuses SYNs with a RST and can
+# be listened on again at once.
+scenario listener-close
+refs: RFC 9293 3.10.4 and 3.10.7.1; packetimpact tcp_noaccept_close_rst, tcp_listen_backlog
+
+listen l 8015
+handshake queued 8015 syn=opts_standard()
+send_data queued "q"
+await queued 1s match=acks(s, queued.snd_nxt) -> a
+require queued.established a.ok
+  what: the unaccepted connection acknowledges data
+  got: {seg_desc(a)}
+
+peer half 8015
+let o = with(opts_standard(), ts=ts(ts_val(half), seq(0)))
+send half syn(half, o)
+await half 1s match=is_synack(s) -> sa
+require half-open.synack sa.ok
+  what: the second SYN is answered
+  got: {seg_desc(sa)}
+set half.ws = o.ws
+adopt half o sa
+
+# Both flows are watched together: await would drop the other flow's segments.
+close l
+collect 500ms -> segs
+let qr = first(segs, s.dst == queued.local && is_rst(s))
+let hr = first(segs, s.dst == half.local && is_rst(s))
+check queued.rst qr.ok && qr.seq == queued.rcv_nxt
+  what: the unaccepted connection is reset at SND.NXT at the close
+  got: {yes_no(!qr.ok, "no RST at the close", yes_no(qr.ok && qr.seq == queued.rcv_nxt, "RST at SND.NXT", "RST at another number"))}
+# wgstack.md: the listener's Close resets its half-open rows at once.
+check half-open.rst-at-close hr.ok
+  what: the half-open connection is reset at the close
+  got: {yes_no(hr.ok, "RST at the close", "no RST at the close")}
+if !hr.ok
+  # Whatever the engine did with the row, the closed port answers the final ACK.
+  send_ack half
+  await half 1s match=is_rst(s) -> r
+  measure half-open.final-ack-reply seg_desc(r)
+end
+
+peer closed 8015
+send closed syn(closed, opts_standard())
+await closed 1s -> r
+check closed-port.rst r.ok && has(r, RST|ACK) && r.ack == closed.iss + 1
+  what: a SYN to the closed port draws RST|ACK
+  got: {seg_desc(r)}
+
+listen l2 8015 -> err
+require relisten err == none
+  what: the port can be listened on again at once
+  got: error {err_string(err)}
+connect p l2 8015 syn=opts_standard()
+alive relisten p p.conn

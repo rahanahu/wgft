@@ -1,0 +1,9 @@
+# ! binds looser than a comparison, so !a == b is !(a == b); && binds tighter than ||.
+scenario precedence
+refs: parser fixture
+linux: net/ipv4/tcp_sack = 1
+
+let a = 1
+let b = !a == 2
+let c = a == 1 || a == 2 && !b
+let d = -a * 2 - 3 % 2

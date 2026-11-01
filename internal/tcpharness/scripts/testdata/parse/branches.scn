@@ -1,0 +1,29 @@
+# Bindings through if: a name bound in both branches is bound after; a branch that stops counts
+# as binding everything; an empty else is the same as none in the AST; ifs nest.
+scenario branches
+refs: parser fixture
+
+let x = true
+if x
+  let y = 1
+else
+  let y = 2
+end
+let z1 = y
+if x
+  stop
+else
+  let w = 3
+end
+let z2 = w
+if x
+else
+end
+if x
+  if !x
+    let v = 1
+  else
+    stop
+  end
+  let z3 = v
+end

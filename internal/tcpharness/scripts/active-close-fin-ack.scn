@@ -1,0 +1,26 @@
+# The application closes first and the testbench answers with one segment that both
+# acknowledges the DUT's FIN and carries its own FIN, as a peer whose application closes at once
+# does. RFC 9293 3.10.7.4 FIN-WAIT-1: the DUT enters TIME-WAIT and acknowledges the FIN; the ACK
+# may be delayed, so it is bounded by RFC 1122's 500 ms.
+scenario active-close-fin-ack
+refs: RFC 9293 3.6 and 3.10.7.4 FIN-WAIT-1, RFC 1122 4.2.3.2
+
+listen l 8016
+connect p l 8016 syn=opts_standard()
+close p.conn
+await p 1s match=is_fin(s) -> f
+require fin f.ok && f.seq == p.rcv_nxt
+  what: Close sends a FIN
+  got: {seg_desc(f)}
+set p.rcv_nxt = f.seq + 1
+send_fin p
+await p 500ms match=acks(s, p.snd_nxt) -> a
+check fin-ack.acked a.ok
+  what: a FIN that also acknowledges the DUT's FIN is acknowledged within 500 ms
+  got: {seg_desc(a)}
+send p segment(p, FIN|ACK, p.snd_nxt - 1)
+await p prompt match=acks(s, p.snd_nxt) -> a
+check time-wait.reacks-fin a.ok
+  what: a retransmitted FIN in TIME-WAIT is acknowledged again at once
+  got: {seg_desc(a)}
+delivered delivered p.conn

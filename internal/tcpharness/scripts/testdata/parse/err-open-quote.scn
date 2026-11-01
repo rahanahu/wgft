@@ -1,0 +1,6 @@
+scenario x
+refs: parser fixture
+
+check a true
+  what: a " left open
+  got: x
