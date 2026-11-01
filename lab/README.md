@@ -205,6 +205,24 @@ lab/lab exec vm bash /wgft/lab/wg-interop.sh kernel quick
 鍵の更新はプロトコルの `REKEY_AFTER_TIME` の 120 秒を待つので、相手ごとに約 2 分かかります。
 `quick` はこの確認を省きます。
 
+## v2 の Rust の agent の試作
+
+`lab/rust-agent.sh` は、v2 の Rust の agent の試作を、変更していない Go の v1 の server に対して動かします。
+server のカーネルモードでは Linux のカーネルの WireGuard と、ユーザー空間モードでは wireguard-go と組みます。
+確認の中身と試作の範囲は[Rust の agent の制御プレーン](../docs/design/v2/agent-control.md#ラボでの確認)にあります。
+
+```sh
+WGFT_LAB_RUST=1 lab/lab build
+lab/lab exec vm bash /wgft/lab/rust-agent.sh kernel
+lab/lab exec vm bash /wgft/lab/rust-agent.sh userspace
+```
+
+`WGFT_LAB_RUST=1` を付けた `lab/lab build` は、Rust の `wgft` も cargo-zigbuild で musl の静的バイナリにし、`bin/rust/wgft-rs` に置いて VM に入れます。
+`lab-eph.sh` で流す場合も、同じ値を環境に付けます。
+[suite.txt](suite.txt) には載せていないので、`labhost run all` には入りません。
+Rust の build が要るのはこの確認と `lab/wg-interop.sh` だけで、一式の build を重くしないためです。
+Rust の agent は TUN を作るので、home の namespace で root として動きます。
+
 ## 対応する VPS の環境
 
 カーネルと nftables の対応範囲は[セットアップの前提](../docs/manual/setup.md)に従います。

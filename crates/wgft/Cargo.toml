@@ -1,6 +1,6 @@
 [package]
 name = "wgft"
-description = "wgft command line, placeholder during the v2 Rust migration"
+description = "wgft command line during the v2 Rust migration"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,9 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+clap = { workspace = true, features = ["env"] }
+wgft-agent.workspace = true
+wgft-proto.workspace = true
 
 [lints]
 workspace = true
