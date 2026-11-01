@@ -25,7 +25,8 @@ tokio-tungstenite = { workspace = true, features = ["handshake"] }
 unicode-general-category.workspace = true
 wgft-proto.workspace = true
 wgft-wireguard.workspace = true
-wgft-wireguard-tun.workspace = true
+wgft-netstack.workspace = true
+wgft-wgstack.workspace = true
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 
 [lints]

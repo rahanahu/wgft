@@ -259,9 +259,10 @@ pub fn startup_lines(c: &Config, s: &Settings) -> Vec<LogLine> {
             "WGFT_AGENT_BATCH_MIB: not applied yet, since this build has no send batching; the setting is kept so the same agent.env works later".to_owned(),
         ));
     }
-    if c.source("WGFT_AGENT_NETSTACK") != Source::Default {
+    // netstack は Rust の wgstack の 1 つだけである。wgstack 以外の値は使わない旨を書く
+    if c.source("WGFT_AGENT_NETSTACK") != Source::Default && s.netstack != "wgstack" {
         out.push(LogLine::Stamped(format!(
-            "WGFT_AGENT_NETSTACK={}: unused, since this build has no choice of network stack; the setting is kept so the same agent.env works",
+            "WGFT_AGENT_NETSTACK={}: unused, since this build has one network stack, wgstack, and runs on it; the setting is kept so the same agent.env works",
             s.netstack
         )));
     }
@@ -393,7 +394,7 @@ mod tests {
         assert!(st.contains("WGFT_AGENT_BATCH_MIB: not applied yet"), "{st}");
         assert!(!st.contains("WGFT_MAX_UDP_FLOWS"), "{st}");
         assert!(
-            st.contains("WGFT_AGENT_NETSTACK=gvisor: unused, since this build has no choice of network stack;"),
+            st.contains("WGFT_AGENT_NETSTACK=gvisor: unused, since this build has one network stack, wgstack,"),
             "{st}"
         );
         // 空の値でも、出所が既定でなければ書く
@@ -402,6 +403,13 @@ mod tests {
             stamped(&startup_lines(&c, &s))
                 .iter()
                 .any(|l| l.starts_with("WGFT_AGENT_NETSTACK=: unused"))
+        );
+        // wgstack はそのまま使うので書かない
+        let (c, s) = settings(&[("WGFT_AGENT_NETSTACK", "wgstack")], &[]);
+        assert!(
+            !stamped(&startup_lines(&c, &s))
+                .join("\n")
+                .contains("NETSTACK")
         );
         let (c, s) = settings(&[], &[]);
         assert!(

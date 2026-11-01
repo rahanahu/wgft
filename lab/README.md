@@ -184,7 +184,7 @@ shard の割り当ては `labhost run -shard K/N all` が決めます。
 結果の回収は 1 回 300 秒で打ち切ります。
 終了コードは、組ごとの結果を合わせたものです。
 組の結果は、どれかの shard の失敗、VM の中の後片付けの漏れ、中断、統合の不整合で失敗になります。
-`rust` の組は「wgstack の上の agent」の段まで報告だけなので、`go` の組も流したときは、`rust` の組の失敗をその旨の行で示すだけで終了コードに入れません。
+`rust` の組は「UDP の中継」の段まで報告だけなので、`go` の組も流したときは、`rust` の組の失敗をその旨の行で示すだけで終了コードに入れません。
 その段が入った後は、`rust` の組の失敗も終了コードに入れます (`lab/lab` の `SUITE_RUST_GATES`)。
 `rust` の組だけを流したときは、その結果が終了コードです。
 VM の削除の失敗は、終了コードに入れません。
@@ -274,9 +274,9 @@ lab/lab exec vm bash /wgft/lab/agent-handover.sh kernel
 lab/lab exec vm bash /wgft/lab/agent-handover.sh userspace
 ```
 
-今の Rust の agent は TUN の試作で、root が要ります。
-このため `rust` の組では、利用者 wgftlab で agent を動かす確認、試作に無い設定を渡す確認、UDP のルールを使う確認、2 つの agent を同じ namespace で動かして TUN の `wgft0` の名前が重なる確認などが失敗します。
-「wgstack の上の agent」の段までは、`rust` の組の結果を報告だけに使います ([テストの規範](../docs/development/testing.md#マージの前に流すテスト))。
+今の Rust の agent は Rust の wgstack の上で動き、root も TUN も要りません。
+UDP の中継はまだ無いので、`rust` の組では UDP のルールを使う確認と、`lifecycle.sh` の check 5 と 5b のメモリの上界の行の確認が落ちます。
+「UDP の中継」の段が入るまでの扱いは [テストの規範](../docs/development/testing.md#マージの前に流すテスト) にあります。
 
 ## 対応する VPS の環境
 

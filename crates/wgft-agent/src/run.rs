@@ -16,10 +16,10 @@ use crate::ctlserver;
 use crate::enroll::{register, token_hash};
 use crate::error::{AgentError, Refusal};
 use crate::flowpool::Limits;
-use crate::relay::{Manager, OpenPorts, ProbeRound};
+use crate::relay::{Manager, ProbeRound};
 use crate::stream::{self, SharedObs};
 use crate::targets::Targets;
-use crate::tunnel::{self, Tunnel};
+use crate::tunnel::{self, Generations, Tunnel};
 
 pub(crate) use crate::controlapi::REASON_HANDSHAKE_PENDING;
 use crate::controlapi::{
@@ -46,8 +46,6 @@ pub struct Options {
     pub name: String,
     /// 起動ログに出す版。
     pub version: String,
-    /// トンネルの TUN の名前。試作は `WGFT_WG_INTERFACE` から取る。
-    pub tun_name: String,
     /// 宛先の許可一覧 (`WGFT_AGENT_ALLOW_TARGETS`)。`None` は制限しない。
     pub allow_targets: Option<AllowList>,
     /// フロー数の上限 (`WGFT_MAX_UDP_FLOWS` と `WGFT_MAX_TCP_FLOWS`)。
@@ -69,7 +67,6 @@ impl std::fmt::Debug for Options {
             )
             .field("name", &self.name)
             .field("version", &self.version)
-            .field("tun_name", &self.tun_name)
             .field("allow_targets", &self.allow_targets)
             .field("limits", &self.limits)
             .finish()
@@ -94,6 +91,8 @@ pub(crate) struct Agent {
     pub(crate) private_key: Zeroizing<String>,
     pub(crate) tunnel: Option<Tunnel>,
     pub(crate) relay: Option<Manager>,
+    /// データプレーンの世代。核の予算とハンドシェイクの時刻の高い水位を、トンネルの作り直しの間も持つ。
+    pub(crate) dataplane: Generations,
     /// 宛先の規則。トンネルの世代をまたいで分け合う。
     targets: Arc<Targets>,
     wg: Option<WgConfig>,
@@ -106,8 +105,6 @@ pub(crate) struct Agent {
     pub(crate) rebuild_after: Duration,
     seen_handshake: Option<Instant>,
     seen_at: Option<Instant>,
-    /// 入口の検査で捨てた数を前にログに出した値と時刻。
-    refused_logged: (u64, Option<Instant>),
     /// stream の外の経路 (トンネルの立て直し) が状態を変えたことを、接続中の stream に伝え、
     /// ハートビートを 1 回送らせる。
     pub(crate) state_changed: Arc<Notify>,
@@ -152,21 +149,12 @@ impl Agent {
             }
             self.close().await;
             let cfg = tunnel::Config::from_wg(&st.wg).map_err(|e| format!("wireguard: {e}"))?;
-            let open = OpenPorts::default();
-            let server = cfg.server_address;
-            // ホストに既にあるアドレスと、ホストに繋がった帯のアドレスはトンネルに使わない。LAN の帯に
-            // 重なると、LAN の機器と ARP で取り合う。拒んでも止まらず、作成の失敗と同じく試し直す
-            let host = crate::hostaddr::read()
-                .map_err(|e| format!("wireguard: read this host's addresses: {e}"))?;
-            if let Some(why) = crate::hostaddr::conflict(cfg.address, &host, &self.opts.tun_name) {
-                return Err(self.schedule_retry(st, &why));
-            }
             let clock = self.opts.clock_path();
             match Tunnel::start(
                 &self.private_key,
-                &self.opts.tun_name,
                 cfg,
-                open.clone(),
+                &mut self.dataplane,
+                wgft_wgstack::Limits::with_max_flows(self.opts.limits.tcp),
                 Some(&clock),
                 Arc::clone(&self.tunnel_dead),
             )
@@ -175,9 +163,7 @@ impl Agent {
                 Ok(t) => {
                     self.relay = Some(Manager::new(
                         t.address(),
-                        server,
-                        Some(self.opts.tun_name.clone()),
-                        open,
+                        t.dataplane().clone(),
                         Arc::clone(&self.targets),
                         self.opts.limits,
                     ));
@@ -241,7 +227,7 @@ impl Agent {
             r.close().await;
         }
         if let Some(t) = self.tunnel.take() {
-            t.close().await;
+            t.close(&mut self.dataplane).await;
         }
         self.wg = None;
     }
@@ -256,9 +242,9 @@ impl Agent {
             .last_handshake
             .and_then(|h| SystemTime::now().duration_since(h).ok())
             .is_some_and(|d| d < FRESH_FOR);
-        let mono = r
-            .handshake_observed_at
-            .is_some_and(|o| o.elapsed() < FRESH_FOR);
+        let mono = r.handshake_observed_at.is_some_and(|o| {
+            crate::dataplane::clock::now().saturating_duration_since(o) < FRESH_FOR
+        });
         wall && mono
     }
 
@@ -327,7 +313,10 @@ impl Agent {
                 Err(e) => logf!("tunnel: rebuilding for generation {}: {e}", st.generation),
             }
         }
-        self.relay.as_mut().map(Manager::retry_round)
+        match self.relay.as_mut() {
+            Some(r) => Some(r.retry_round().await),
+            None => None,
+        }
     }
 }
 
@@ -336,15 +325,14 @@ impl Agent {
     /// 無い時間が閾値を超えるか、device を動かす外殻が止まっていれば、同じ全体状態でトンネルを作り直す。
     /// 時間は、最後に見たハンドシェイクを観測した時刻とトンネルを立てた時刻の遅い方から単調な時計で
     /// 測る。閾値は 300 秒で、作り直すたびに 2 倍にし、900 秒で止める。新しいハンドシェイクを見たら
-    /// 300 秒に戻す。あわせて、時刻の印の高い水位を残し、入口の検査が捨てた数をログに出す。
+    /// 300 秒に戻す。あわせて、時刻の印の高い水位を残す。時刻はすべてデータプレーンの時計で測る。
     async fn watch_tunnel(&mut self, stopped: bool) {
         let Some(t) = &self.tunnel else { return };
         t.persist_clock().await;
-        let counts = t.filter_counts();
         let finished = stopped || t.is_finished();
         let started = t.started_at();
         let hs = t.read().await.handshake_observed_at;
-        let now = Instant::now();
+        let now = crate::dataplane::clock::now();
         if hs.is_some() && hs != self.seen_handshake {
             self.handshake_seen.send_modify(|n| *n += 1);
             self.seen_handshake = hs;
@@ -362,7 +350,6 @@ impl Agent {
         } else {
             None
         };
-        self.log_refused(counts);
         let Some(reason) = reason else { return };
         let Some(st) = self.creds.last_state.clone() else {
             return;
@@ -373,24 +360,6 @@ impl Agent {
         match self.apply(&st).await {
             Ok(()) => self.state_changed.notify_one(),
             Err(e) => logf!("tunnel: rebuilding: {e}"),
-        }
-    }
-
-    /// 入口の検査が捨てた数が増えていれば、1 分に 1 回までログに出す。server の正しい作りは捨てられる
-    /// packet を送らないので、増え続けるのは server が乗っ取られている兆候でありうる。
-    fn log_refused(&mut self, c: crate::inbound::CountsSnapshot) {
-        let (last, at) = self.refused_logged;
-        if c.refused() > last && at.is_none_or(|a| a.elapsed() >= Duration::from_mins(1)) {
-            logf!(
-                "tunnel: the inbound filter refused {} packets from the server so far: {} not for this agent, {} fragments, {} to ports without a rule ({} answered with a reset), {} other",
-                c.refused(),
-                c.not_for_agent,
-                c.fragments,
-                c.closed_port,
-                c.resets,
-                c.other
-            );
-            self.refused_logged = (c.refused(), Some(Instant::now()));
         }
     }
 }
@@ -427,6 +396,7 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
         private_key,
         tunnel: None,
         relay: None,
+        dataplane: Generations::new(std::time::Duration::ZERO),
         targets,
         wg: None,
         generation: 0,
@@ -436,7 +406,6 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
         rebuild_after: REBUILD_AFTER_MIN,
         seen_handshake: None,
         seen_at: None,
-        refused_logged: (0, None),
         state_changed: Arc::new(Notify::new()),
         tunnel_dead: Arc::new(Notify::new()),
         handshake_seen: watch::Sender::new(0),
@@ -772,13 +741,96 @@ mod tests {
             rebuild_after: REBUILD_AFTER_MIN,
             seen_handshake: None,
             seen_at: None,
-            refused_logged: (0, None),
+            dataplane: Generations::new(Duration::ZERO),
             state_changed: Arc::new(Notify::new()),
             tunnel_dead: Arc::new(Notify::new()),
             handshake_seen: watch::Sender::new(0),
             stream_obs: SharedObs::default(),
             reconnect: watch::Sender::new(0),
         }
+    }
+
+    /// agent が全体状態を適用すると、TUN も root も使わずにトンネルと中継が立ち、server の側からの
+    /// 接続が LAN の宛先へ届く。wg の変更で作り直しても核の予算は次の世代に渡り、閉じると予算が残る。
+    #[tokio::test]
+    async fn the_agent_relays_over_the_wgstack_and_rebuilds_with_the_budget() {
+        use crate::relay::testpeer::{AGENT_IP, Peer};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use wgft_proto::{AgentRule, Proto};
+        let (peer, agent_key) = Peer::server().await;
+        let lan = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = lan.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = lan.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 256];
+                    while let Ok(n) = s.read(&mut buf).await {
+                        if n == 0 || s.write_all(&buf[..n]).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = agent();
+        a.opts.data_dir = dir.path().to_path_buf();
+        a.private_key = agent_key.to_base64();
+        let mut st = State {
+            generation: 1,
+            wg: WgConfig {
+                server_pubkey: peer.server_public_key().to_base64(),
+                endpoint: peer.endpoint().to_string(),
+                address: format!("{AGENT_IP}/24"),
+                mtu: 1420,
+                keepalive: 25,
+                udp_timeout: 30,
+                udp_timeout_stream: 120,
+            },
+            rules: vec![AgentRule {
+                id: "r_a".into(),
+                proto: Proto::Tcp,
+                listen_port: "80".parse().unwrap(),
+                target: target.to_string(),
+                enabled: true,
+            }],
+            ..State::default()
+        };
+        a.apply(&st).await.unwrap();
+        let mut c = peer.connect(80).await.unwrap();
+        c.send(b"through the tunnel");
+        assert_eq!(c.read_exact(18).await.unwrap(), b"through the tunnel");
+        let hb = a.heartbeat().await;
+        assert_eq!(hb.tunnel.state, STATUS_OK, "{:?}", hb.tunnel);
+        assert_eq!(hb.rules[0].state, STATUS_OK);
+        let r = a.tunnel.as_ref().unwrap().read().await;
+        assert!(r.rx_bytes > 0 && r.tx_bytes > 0, "{r:?}");
+        assert!(r.socket_buffers.is_some());
+        // agent doctor の値:ソケットのバッファと UDP の会計を載せる
+        let doc = crate::control::runtime_state(&a).await;
+        let bufs = doc.tunnel.socket_buffers.as_ref().unwrap();
+        assert_eq!(bufs.supported, cfg!(target_os = "linux"), "{bufs:?}");
+        let acct = doc.tunnel.udp_accounting.as_ref().unwrap();
+        assert!(!acct.stopped && acct.error.is_empty(), "{acct:?}");
+        assert_ne!(doc.tunnel.started_at, GoTime::ZERO);
+        // wg の変更はトンネルを作り直す。古い接続は RST で切られ、新しいトンネルでまた繋がる
+        st.generation = 2;
+        st.wg.keepalive = 20;
+        a.apply(&st).await.unwrap();
+        assert_eq!(
+            c.outcome(Duration::from_secs(5)).await,
+            crate::relay::testpeer::Outcome::Reset
+        );
+        let mut c = peer.connect(80).await.unwrap();
+        c.send(b"again");
+        assert_eq!(c.read_exact(5).await.unwrap(), b"again");
+        a.close().await;
+        assert!(
+            a.dataplane.has_budget(),
+            "the core's budget waits for the next tunnel"
+        );
+        assert!(dir.path().join("agent.json.clock").exists());
     }
 
     #[tokio::test]
@@ -834,11 +886,10 @@ mod tests {
             target,
             enabled: true,
         };
+        let peer = crate::relay::testpeer::Peer::start().await;
         let mut m = Manager::new(
-            std::net::Ipv4Addr::LOCALHOST,
-            std::net::Ipv4Addr::LOCALHOST,
-            None,
-            OpenPorts::default(),
+            crate::relay::testpeer::AGENT_IP,
+            peer.agent().handle(),
             Arc::clone(&targets),
             Limits::default(),
         );

@@ -618,7 +618,7 @@ cmd_suite() {
     done
   done
   wait
-  # 終了コード:組ごとの失敗 (crc) を合わせる。rust の組は「wgstack の上の agent」の段まで報告だけなので
+  # 終了コード:組ごとの失敗 (crc) を合わせる。rust の組は「UDP の中継」の段まで報告だけなので
   # (docs/development/testing.md の「マージの前に流すテスト」)、go の組も流したときは rust の組の失敗を出すだけにし、
   # 終了コードに入れない。その段が入ったら SUITE_RUST_GATES を 1 にする。rust の組だけを流したときは、その結果が終了コードになる
   local SUITE_RUST_GATES=0
@@ -658,7 +658,7 @@ cmd_suite() {
   done
   echo
   if ((rust_failed)); then
-    echo "lab: the rust configuration failed; it is report-only until the agent runs on the Rust wgstack, so the exit code leaves it out"
+    echo "lab: the rust configuration failed; it is report-only until the agent relays UDP, so the exit code leaves it out"
   fi
   echo "lab: suite wall time from the start to the merge: $((SECONDS - SUITE_T0)) s; VM deletion follows. Logs: $out"
   return $rc

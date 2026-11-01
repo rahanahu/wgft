@@ -1662,9 +1662,10 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite",
  "unicode-general-category",
+ "wgft-netstack",
  "wgft-proto",
+ "wgft-wgstack",
  "wgft-wireguard",
- "wgft-wireguard-tun",
  "windows-sys 0.61.2",
  "zeroize",
 ]
