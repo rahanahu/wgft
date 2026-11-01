@@ -1077,7 +1077,7 @@ Rust の agent は netstack を 1 つしか持たないので、`--netstack` の
   `--agent-impl rust` だけで流したときは、`go` の組が無い旨を出します。
   `-go-summary` のファイルが読めないか、`summary.json` でないか、`go` の組のものでなければ、警告にして取った結果を出さず、`rust` の組の統合はそのまま書いて示します
 - `lab/lab suite` の終了コードは組ごとの結果を合わせます。
-  `rust` の組は「UDP の中継」の段まで報告だけなので、`go` の組も流したときは `rust` の組の失敗を示すだけにし、終了コードに入れません。
+  `rust` の組は「UDP の中継」の段まで報告だけで、`go` の組も流したときは `rust` の組の失敗を示すだけにし、終了コードに入れませんでした。
   その段で `lab/lab` の `SUITE_RUST_GATES` を 1 にし、`rust` の組の失敗も終了コードに入れます。
   初めの計画は「wgstack の上の agent」の段で 1 にすることでしたが、UDP の中継の前は UDP のルールを使う確認が必ず落ちるので、1 つ後の段に移しました
   `rust` の組だけを流したときは、その結果が終了コードです
@@ -1098,8 +1098,7 @@ Rust の agent は試作のあいだ root で動きます。
 
 ラボの切り替えが入った後、agent の crate を変える PR は、ラボの一式の `rust` の組を積みの先頭で 1 回流します。
 「wgstack の上の agent」の段より前は、Rust の agent が TUN の試作の形だったので、`rust` の組の結果は報告だけに使い、マージの関門にしませんでした。
-「wgstack の上の agent」の段から「UDP の中継」の段までは、UDP のルールを使う確認と `lifecycle.sh` の check 5 と 5b が `rust` の組で落ちます。
-その間は、`rust` の組の結果を前の積みの結果と比べ、新しく落ちた確認が無いことを手で確かめます ([テストの規範](../../development/testing.md#マージの前に流すテスト))。
+「wgstack の上の agent」の段から「UDP の中継」の段までは、UDP のルールを使う確認と `lifecycle.sh` の check 5 と 5b が `rust` の組で落ちたので、`rust` の組の結果を前の積みの結果と比べ、新しく落ちた確認が無いことを手で確かめました。
 「UDP の中継」の段から後は、`rust` の組の結果をマージの関門にします。
 ラボの切り替えの PR は、この扱いを[テストの規範](../../development/testing.md)の契機の表に `rust-agent` として書きました。
 対象は、`crates/**` のうち TUN の殻の `crates/wgft-wireguard-tun/**` を除くものと、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` です。
