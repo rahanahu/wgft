@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::LazyLock;
 
 use clap::{Args, Parser, Subcommand};
 use wgft_agent::{AgentError, Options, Refusal};
@@ -110,21 +111,24 @@ impl std::fmt::Debug for RunArgs {
     }
 }
 
+/// 既定のパスは起動の時に 1 回だけ決める。`--help` の表示にも同じ値を出す。
 fn default_data_dir() -> &'static str {
-    if cfg!(windows) {
-        "C:\\ProgramData\\wgft"
-    } else {
-        "/var/lib/wgft"
-    }
+    static V: LazyLock<String> = LazyLock::new(|| {
+        wgft_agent::platform::paths::default_data_dir()
+            .to_string_lossy()
+            .into_owned()
+    });
+    &V
 }
 
 /// v1 の既定の dotenv。試作は読まないので、あれば止める。
 fn default_config_path() -> &'static str {
-    if cfg!(windows) {
-        "C:\\ProgramData\\wgft\\agent.env"
-    } else {
-        "/etc/wgft/agent.env"
-    }
+    static V: LazyLock<String> = LazyLock::new(|| {
+        wgft_agent::platform::paths::default_config_path()
+            .to_string_lossy()
+            .into_owned()
+    });
+    &V
 }
 
 /// 値だけから判定できる誤りを、認証情報とトンネルに触れる前にすべて拒む。
@@ -204,6 +208,11 @@ fn agent_options(a: &RunArgs) -> Result<Options, Refusal> {
 
 fn run_agent(a: &RunArgs) -> Result<(), AgentError> {
     let opts = agent_options(a)?;
+    // Go の実行環境が v1 で行っていたとおり、soft の open file の上限を hard の値まで上げる。
+    // agent run だけで行い、他のコマンドは何も出さない
+    if let Err(e) = wgft_agent::platform::fdlimit::raise_nofile() {
+        wgft_agent::logf!("cannot raise the open file limit, continuing with the current one: {e}");
+    }
     if !a.agent_netstack.is_empty() {
         wgft_agent::logf!(
             "WGFT_AGENT_NETSTACK={}: unused; this Rust agent prototype carries the tunnel on a Linux TUN device and the kernel network stack",

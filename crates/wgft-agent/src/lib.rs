@@ -9,6 +9,7 @@ pub mod error;
 pub mod hostaddr;
 pub mod inbound;
 pub mod logging;
+pub mod platform;
 pub mod relay;
 mod run;
 mod stream;
