@@ -87,14 +87,12 @@ pub(super) fn start(net: &Net, s: Spec) -> Result<Running, String> {
     let sock = UdpSocket::bind(net, s.addr).map_err(|e| format!("bind udp {}: {e}", s.addr))?;
     s.budget.accept();
     let (stop, stopped) = oneshot::channel();
-    let target = join_host_port(&s.host, s.tport);
     let listener = Listener {
         key: s.key,
         sender: sock.sender(),
         sock,
         host: s.host,
         tport: s.tport,
-        target,
         budget: s.budget,
         shared: s.shared,
         targets: s.targets,
@@ -126,10 +124,9 @@ struct Listener {
     key: Key,
     sock: UdpSocket<Net>,
     sender: UdpSender<Net>,
-    host: String,
+    /// 宛先のホスト。待ち受けの値を分け合い、待ち受けごとに写さない。
+    host: Arc<str>,
     tport: u16,
-    /// ログに出す宛先 (`host:port`)。
-    target: String,
     budget: Arc<flowpool::Listener>,
     shared: Arc<Shared>,
     targets: Arc<Targets>,
@@ -210,7 +207,7 @@ impl Listener {
                     "{}: write {} bytes to {}: {}; closing session",
                     self.key,
                     data.len(),
-                    self.target,
+                    join_host_port(&self.host, self.tport),
                     write_error(&lan, &e)
                 );
             }
@@ -244,7 +241,11 @@ impl Listener {
             Ok(s) => Rc::new(s),
             Err(e) => {
                 if self.dial_log.allow() {
-                    logf!("{}: dial {}: {e}", self.key, self.target);
+                    logf!(
+                        "{}: dial {}: {e}",
+                        self.key,
+                        join_host_port(&self.host, self.tport)
+                    );
                 }
                 return None;
             }

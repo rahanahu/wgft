@@ -19,8 +19,8 @@ pub use register::{REGISTER_RESPONSE_LIMIT, RegisterRequest, RegisterResponse};
 pub use state::{AgentRule, PortRange, Proto, State, WgConfig};
 pub use stream::{
     CLOSE_POLICY_VIOLATION, CloseCode, DecodeError, Heartbeat, Message, MessageType,
-    REASON_MAX_BYTES, RECONNECT_BACKOFF_MAX, RuleStatus, STATUS_ERROR, STATUS_OK,
-    STREAM_READ_LIMIT, TunnelStatus,
+    REASON_MAX_BYTES, RECONNECT_BACKOFF_MAX, RuleStatus, STATE_HELD_FACTOR, STATUS_ERROR,
+    STATUS_OK, STREAM_READ_LIMIT, TunnelStatus,
 };
 pub use version::{
     ProtocolRange, SUPPORTED_CAPABILITIES, SUPPORTED_PROTOCOL, select_protocol_version,

@@ -339,7 +339,7 @@ impl<T> Slab<T> {
 /// 0 個になった時点で退役し、以後 A に戻らない。
 #[derive(Debug)]
 struct Registration {
-    rule: String,
+    rule: Arc<str>,
     /// 受け付けている待ち受けの数。
     members: usize,
     retired: bool,
@@ -368,7 +368,8 @@ struct Cell {
     reason = "the flags mirror the Go pool's listener states one to one"
 )]
 struct ListenerState {
-    rule: String,
+    /// ルール ID。同じルールの待ち受けは中継の側と同じ 1 つの値を分け合い、範囲のルールでも写さない。
+    rule: Arc<str>,
     accepting: bool,
     open: bool,
     /// 登録に加わっているか (open かつ accepting)。
@@ -390,7 +391,7 @@ struct Inner {
     /// u。
     in_use: usize,
     /// A。ルール ID から今の登録への表。
-    regs: BTreeMap<String, RegId>,
+    regs: BTreeMap<Arc<str>, RegId>,
     /// 退役した登録のうち、まだ数えるフローを持つもの。
     retired: BTreeSet<RegId>,
     /// m。N が変わるたびに求め直す。
@@ -399,7 +400,7 @@ struct Inner {
     floor_short: usize,
     unfilled_regs: usize,
     floor_short_regs: usize,
-    refusals: BTreeMap<String, RefusalCounts>,
+    refusals: BTreeMap<Arc<str>, RefusalCounts>,
     not_accepting: u64,
     reg: Slab<Registration>,
     cell: Slab<Cell>,
@@ -486,7 +487,11 @@ impl Pool {
     /// ルール ID から理由ごとの拒否の数への表の複製。
     #[must_use]
     pub fn refusals(&self) -> BTreeMap<String, RefusalCounts> {
-        self.lock().refusals.clone()
+        self.lock()
+            .refusals
+            .iter()
+            .map(|(k, v)| (k.to_string(), *v))
+            .collect()
     }
 
     /// この pool の待ち受けそれぞれが保持しているフローの数を、1 回の排他で読む。範囲のルールは待ち受けが
@@ -517,7 +522,7 @@ impl Pool {
                 Reason::ALL
                     .iter()
                     .filter(|r| counts[r.index()] > 0)
-                    .map(|r| (rule.clone(), *r, counts[r.index()]))
+                    .map(|r| (rule.to_string(), *r, counts[r.index()]))
             })
             .collect();
         // Go の `doctorBudget` と同じく、ルール ID と理由の語の順に並べる
@@ -534,21 +539,21 @@ impl Pool {
 
     /// 待ち受け 1 つ分の枠を登録する。登録した時点で新しいフローを受け付けている。
     #[must_use]
-    pub fn listener(&self, rule: &str) -> Listener {
-        self.make_listener(rule, true)
+    pub fn listener(&self, rule: impl Into<Arc<str>>) -> Listener {
+        self.make_listener(rule.into(), true)
     }
 
     /// まだ新しいフローを受け付けない待ち受けの枠を登録する。bind の後に [`Listener::accept`] を呼ぶ。
     /// A は開けた待ち受けを持つルールの集合なので、bind の最中と失敗した待ち受けのルールを N に数えない。
     #[must_use]
-    pub fn pending_listener(&self, rule: &str) -> Listener {
-        self.make_listener(rule, false)
+    pub fn pending_listener(&self, rule: impl Into<Arc<str>>) -> Listener {
+        self.make_listener(rule.into(), false)
     }
 
-    fn make_listener(&self, rule: &str, accepting: bool) -> Listener {
+    fn make_listener(&self, rule: Arc<str>, accepting: bool) -> Listener {
         let mut g = self.lock();
         let id = LisId(g.lis.insert(ListenerState {
-            rule: rule.to_owned(),
+            rule,
             accepting,
             open: true,
             counted: false,
@@ -584,8 +589,8 @@ impl Pool {
         };
         for (rule, r) in &g.regs {
             let r = g.reg.get(r.0);
-            lg.reg_flows.insert(rule.clone(), r.count);
-            lg.reg_carried.insert(rule.clone(), r.carried);
+            lg.reg_flows.insert(rule.to_string(), r.count);
+            lg.reg_carried.insert(rule.to_string(), r.carried);
         }
         for r in &g.retired {
             let r = g.reg.get(r.0);
@@ -672,12 +677,13 @@ impl Inner {
     }
 
     fn refuse(&mut self, reason: Reason, l: LisId, flows: usize) -> Refusal {
-        let rule = self.lis(l).rule.clone();
-        self.refusals.entry(rule.clone()).or_default()[reason.index()] += 1;
+        let rule = Arc::clone(&self.lis(l).rule);
+        let rule_id = rule.to_string();
+        self.refusals.entry(rule).or_default()[reason.index()] += 1;
         let own = self.lis(l).reg.map_or(0, |g| self.reg(g).count);
         Refusal {
             reason: Some(reason),
-            rule_id: rule,
+            rule_id,
             in_use: self.in_use,
             total: self.total,
             rule_flows: flows,
@@ -870,12 +876,12 @@ impl Inner {
         if lis.counted || !lis.open || !lis.accepting {
             return;
         }
-        let rule = lis.rule.clone();
+        let rule = Arc::clone(&lis.rule);
         let g = if let Some(g) = self.regs.get(&rule) {
             *g
         } else {
             let g = RegId(self.reg.insert(Registration {
-                rule: rule.clone(),
+                rule: Arc::clone(&rule),
                 members: 0,
                 retired: false,
                 count: 0,
@@ -922,7 +928,7 @@ impl Inner {
             return;
         }
         r.retired = true;
-        let (rule, count) = (r.rule.clone(), r.count);
+        let (rule, count) = (Arc::clone(&r.rule), r.count);
         self.regs.remove(&rule);
         self.refresh();
         if count > 0 {
@@ -969,13 +975,14 @@ impl Listener {
 
     /// 所属ルールを付け替える (分割と統合)。既存のフローは受け付けたときの登録に数えたままで、この
     /// 待ち受けが運ぶ数 c_g だけが付け替え先の登録へ移る。
-    pub fn set_rule(&self, rule: &str) {
+    pub fn set_rule(&self, rule: impl Into<Arc<str>>) {
+        let rule = rule.into();
         let mut g = self.pool.lock();
         if g.lis(self.id).rule == rule {
             return;
         }
         g.detach(self.id);
-        rule.clone_into(&mut g.lis_mut(self.id).rule);
+        g.lis_mut(self.id).rule = rule;
         g.attach(self.id);
     }
 

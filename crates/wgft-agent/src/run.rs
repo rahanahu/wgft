@@ -101,6 +101,8 @@ pub(crate) struct Agent {
     retry: Option<State>,
     pub(crate) retry_at: Option<Instant>,
     retry_failures: usize,
+    /// 最後にメモリの上界の行に書いた TCP と UDP のリスナーの数。
+    bound_listeners: (usize, usize),
     /// トンネルの作り直しの閾値と、最後に見た最終ハンドシェイク (単調な時計) と、それを見た時刻。
     pub(crate) rebuild_after: Duration,
     seen_handshake: Option<Instant>,
@@ -141,8 +143,10 @@ impl Agent {
     }
 
     /// 全体状態を適用する。wg の設定が変わればトンネルを立て直し、ルールは変わったものだけを開閉する。
-    /// トンネルが立った後は、ルールの一部が失敗しても世代を進めて保存する。
-    pub(crate) async fn apply(&mut self, st: &State) -> Result<(), String> {
+    /// トンネルが立った後は、ルールの一部が失敗しても世代を進めて保存する。全体状態は値で受け、適用が
+    /// 済めば `last_state` に、トンネルを立てられなければ立て直しの控えに、写さずに移す。全体状態は 1 通で
+    /// 入力の十数倍まで持ちうるので、同時に持つ写しの数を増やさないためである (メモリの上界の全体状態の項)。
+    pub(crate) async fn apply(&mut self, st: State) -> Result<(), String> {
         if self.tunnel.is_none() || self.wg.as_ref() != Some(&st.wg) {
             if self.tunnel.is_some() {
                 logf!("wg config changed; rebuilding tunnel");
@@ -180,14 +184,20 @@ impl Agent {
         let relay = self.relay.as_mut().ok_or("no relay")?;
         let actions = relay.apply(&st.rules).await;
         let listening = relay.listening();
-        self.generation = st.generation;
-        self.creds.last_state = Some(st.clone());
+        let counts = relay.listener_counts();
+        let generation = st.generation;
+        self.generation = generation;
         self.record_tunnel_address(&st.wg.address);
+        self.creds.last_state = Some(st);
         let saved = self.save();
-        logf!(
-            "applied generation {}: {actions} actions, {listening} listeners",
-            st.generation
-        );
+        logf!("applied generation {generation}: {actions} actions, {listening} listeners");
+        if counts != self.bound_listeners {
+            self.bound_listeners = counts;
+            let (tcp, udp) = counts;
+            let bound =
+                crate::memory::MemoryBound::for_limits(self.opts.limits).with_listeners(tcp, udp);
+            logf!("{}", bound.listeners_line(tcp, udp));
+        }
         saved.map_err(|e| format!("save credentials file: {e}"))
     }
 
@@ -214,9 +224,9 @@ impl Agent {
     }
 
     /// トンネルを立てられなかった全体状態を控え、立て直しの時刻を決めて、誤りの文言を返す。
-    fn schedule_retry(&mut self, st: &State, why: &str) -> String {
+    fn schedule_retry(&mut self, st: State, why: &str) -> String {
         let wait = REBUILD_BACKOFF[self.retry_failures.min(REBUILD_BACKOFF.len() - 1)];
-        self.retry = Some(st.clone());
+        self.retry = Some(st);
         self.retry_at = Some(Instant::now() + wait);
         self.retry_failures += 1;
         format!("wireguard: {why}; retrying in {}s", wait.as_secs())
@@ -303,15 +313,16 @@ impl Agent {
     /// 試し接続の 1 周を返し、呼び手は排他を放してから走らせる ([`tick_round`])。
     async fn tick(&mut self) -> Option<ProbeRound> {
         self.watch_tunnel(false).await;
-        if let Some(st) = self.retry.clone()
-            && self.retry_at.is_none_or(|at| Instant::now() >= at)
+        if self.retry_at.is_none_or(|at| Instant::now() >= at)
+            && let Some(st) = self.retry.take()
         {
-            match self.apply(&st).await {
+            let generation = st.generation;
+            match self.apply(st).await {
                 Ok(()) => {
-                    logf!("tunnel: rebuilt for generation {}", st.generation);
+                    logf!("tunnel: rebuilt for generation {generation}");
                     self.state_changed.notify_one();
                 }
-                Err(e) => logf!("tunnel: rebuilding for generation {}: {e}", st.generation),
+                Err(e) => logf!("tunnel: rebuilding for generation {generation}: {e}"),
             }
         }
         match self.relay.as_mut() {
@@ -358,7 +369,7 @@ impl Agent {
         logf!("tunnel: {reason}; rebuilding it");
         self.rebuild_after = (self.rebuild_after * 2).min(REBUILD_AFTER_MAX);
         self.close().await;
-        match self.apply(&st).await {
+        match self.apply(st).await {
             Ok(()) => self.state_changed.notify_one(),
             Err(e) => logf!("tunnel: rebuilding: {e}"),
         }
@@ -412,6 +423,7 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
         retry: None,
         retry_at: None,
         retry_failures: 0,
+        bound_listeners: (0, 0),
         rebuild_after: REBUILD_AFTER_MIN,
         seen_handshake: None,
         seen_at: None,
@@ -425,10 +437,10 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
         let mut a = agent.lock().await;
         // server が止まっていても、server の側にピアが残っていれば転送が戻るよう、先に立てる
         if let Some(st) = a.creds.last_state.clone() {
-            if let Err(e) = a.apply(&st).await {
+            let generation = st.generation;
+            if let Err(e) = a.apply(st).await {
                 logf!(
-                    "apply saved generation {}: {e}; waiting for full state from stream",
-                    st.generation
+                    "apply saved generation {generation}: {e}; waiting for full state from stream"
                 );
             }
         } else {
@@ -889,6 +901,7 @@ mod tests {
             retry: None,
             retry_at: None,
             retry_failures: 0,
+            bound_listeners: (0, 0),
             rebuild_after: REBUILD_AFTER_MIN,
             seen_handshake: None,
             seen_at: None,
@@ -948,7 +961,7 @@ mod tests {
             }],
             ..State::default()
         };
-        a.apply(&st).await.unwrap();
+        a.apply(st.clone()).await.unwrap();
         let mut c = peer.connect(80).await.unwrap();
         c.send(b"through the tunnel");
         assert_eq!(c.read_exact(18).await.unwrap(), b"through the tunnel");
@@ -968,7 +981,7 @@ mod tests {
         // wg の変更はトンネルを作り直す。古い接続は RST で切られ、新しいトンネルでまた繋がる
         st.generation = 2;
         st.wg.keepalive = 20;
-        a.apply(&st).await.unwrap();
+        a.apply(st.clone()).await.unwrap();
         assert_eq!(
             c.outcome(Duration::from_secs(5)).await,
             crate::relay::testpeer::Outcome::Reset
@@ -1216,7 +1229,7 @@ mod tests {
             }],
             ..State::default()
         };
-        a.apply(&st).await.unwrap();
+        a.apply(st.clone()).await.unwrap();
         assert!(a.tunnel.is_some());
         (Arc::new(Mutex::new(a)), gate, peer, dir)
     }

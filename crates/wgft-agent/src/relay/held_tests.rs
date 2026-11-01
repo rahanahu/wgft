@@ -39,7 +39,7 @@ use super::testpeer::{self, Outcome, Peer};
 use super::tests::{rule, targets, wait_for};
 use super::{BULK_BUF, BULK_KEEP, BULK_WAIT, Kind, Manager};
 use crate::flowpool::Limits;
-use crate::memory::{MemoryBound, TCP_RELAY_CONN, UDP_SESSION};
+use crate::memory::{LISTENER_TCP, LISTENER_UDP, MemoryBound, TCP_RELAY_CONN, UDP_SESSION};
 
 /// 測りの誤差として認める量。実行環境と台本の通信路が測りの間に一時に持つもの (ログの行、チャネルの
 /// block、タイマー) のためで、流れの数に比例しない。
@@ -313,4 +313,102 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
         left <= kept + SLACK,
         "closing every flow left {left} bytes above setup, above the {kept} kept for reuse"
     );
+}
+
+/// 待ち受けの項の試験で開く待ち受けの数。
+const N: u16 = 256;
+
+/// `rules` を適用して `N` の待ち受けを開いたときの、核の自分で数える分を除いた保持の育ち。測った後に閉じる。
+async fn listener_growth(rules: Vec<wgft_proto::AgentRule>, m: &mut Manager, peer: &Peer) -> usize {
+    let before = settled().await;
+    let core0 = core_bytes(peer).await;
+    m.apply(&rules).await;
+    assert_eq!(m.listening(), usize::from(N));
+    let after = settled().await;
+    let core = core_bytes(peer).await.saturating_sub(core0);
+    let growth = after.saturating_sub(before).saturating_sub(core);
+    m.close().await;
+    growth
+}
+
+/// 待ち受け 1 つの保持が、メモリの上界の待ち受けの項に収まる。範囲のルールの待ち受けはルール ID と宛先の
+/// ホストを分け合うので、長い ID とホストでも待ち受けごとの保持は変わらない。試し接続の失敗の文は
+/// 待ち受けごとに持つが、長さの上限で切る。
+#[tokio::test]
+async fn listeners_hold_what_their_term_counts() {
+    if !counted_alone() {
+        eprintln!(
+            "skipped: the allocation count is per process, so this test measures only under cargo-nextest, which runs each test in its own process"
+        );
+        return;
+    }
+    let peer = Peer::start().await;
+    let mut m = Manager::new(
+        testpeer::AGENT_IP,
+        peer.agent().handle(),
+        targets("", vec![]),
+        Limits { udp: 128, tcp: 24 },
+        UDP_IDLE,
+    );
+    // 宛先は閉じたループバックのポートで、試し接続はすぐに失敗し、待ち受けごとに失敗の文を持つ
+    let closed = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let id = "r".repeat(4000);
+    let host = format!("{}.invalid", "h".repeat(4000));
+    let last = 20000 + N - 1;
+    let tcp = listener_growth(
+        vec![rule(
+            &id,
+            Proto::Tcp,
+            &format!("20000-{last}"),
+            &format!("127.0.0.1:{closed}"),
+            true,
+        )],
+        &mut m,
+        &peer,
+    )
+    .await;
+    let tcp_named = listener_growth(
+        vec![rule(
+            &id,
+            Proto::Tcp,
+            &format!("20000-{last}"),
+            &format!("{host}:1"),
+            true,
+        )],
+        &mut m,
+        &peer,
+    )
+    .await;
+    let udp = listener_growth(
+        vec![rule(
+            &id,
+            Proto::Udp,
+            &format!("20000-{last}"),
+            &format!("{host}:1"),
+            true,
+        )],
+        &mut m,
+        &peer,
+    )
+    .await;
+    let n = usize::from(N);
+    eprintln!(
+        "listeners: {n} TCP grew {tcp} bytes ({} each), with a long target host {tcp_named} ({} each); {n} UDP grew {udp} ({} each); the terms are {LISTENER_TCP} and {LISTENER_UDP}",
+        tcp / n,
+        tcp_named / n,
+        udp / n
+    );
+    for (what, growth, term) in [
+        ("TCP", tcp, LISTENER_TCP),
+        ("TCP with a long host", tcp_named, LISTENER_TCP),
+        ("UDP", udp, LISTENER_UDP),
+    ] {
+        assert!(
+            growth <= n * term + SLACK,
+            "{n} {what} listeners grew the heap by {growth} bytes, above {n} x {term}"
+        );
+    }
 }

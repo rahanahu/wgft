@@ -18,3 +18,4 @@ workspace = true
 
 [dev-dependencies]
 base64.workspace = true
+wgft-alloc-count.workspace = true

@@ -433,8 +433,9 @@ async fn stream_once(agent: &Shared, obs: &SharedObs, mut reconnect: watch::Rece
                             continue;
                         }
                         first = false;
-                        if let Err(e) = a.apply(&st).await {
-                            logf!("stream: applying generation {}: {e}", st.generation);
+                        let generation = st.generation;
+                        if let Err(e) = a.apply(st).await {
+                            logf!("stream: applying generation {generation}: {e}");
                         }
                         let hb = a.heartbeat().await;
                         drop(a);

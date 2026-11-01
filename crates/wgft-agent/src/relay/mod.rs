@@ -113,7 +113,7 @@ pub struct ProbeRound {
 #[derive(Debug)]
 struct ProbeEntry {
     key: Key,
-    target: (String, u16),
+    target: (Arc<str>, u16),
     /// 試したときのリスナー。結果を書くときに、同じリスナーかを確かめる。
     shared: Arc<Shared>,
 }
@@ -251,9 +251,11 @@ struct Running {
 
 #[derive(Debug)]
 struct Listener {
-    rule_id: String,
+    /// ルール ID と宛先のホスト。同じルールの待ち受けは 1 つの値を分け合い、範囲のルールでもポートごとに
+    /// 写さない。
+    rule_id: Arc<str>,
     key: Key,
-    target: (String, u16),
+    target: (Arc<str>, u16),
     /// 待ち受けを開けていれば、その受け付けの task。
     task: Option<Running>,
     /// 待ち受けを開けなかった理由。bind の失敗か、IP リテラルの宛先の拒否。[`Manager::retry`] が
@@ -292,8 +294,8 @@ impl Drop for Listener {
 /// リスナー 1 つの状態 (Go の `relay.Status`)。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ListenerStat {
-    /// 属するルールの ID。
-    pub rule_id: String,
+    /// 属するルールの ID。同じルールのリスナーと 1 つの値を分け合う。
+    pub rule_id: Arc<str>,
     /// 待ち受けのプロトコルとポート。名前は [`ListenerStat::key`]。
     pub key: Key,
     /// 待ち受けを開けているか。偽なら `err` は開けなかった理由 (bind の失敗か、IP リテラルの宛先の
@@ -339,6 +341,9 @@ fn go_port_order(a: u16, b: u16) -> std::cmp::Ordering {
     let (mut x, mut y) = ([0u8; 5], [0u8; 5]);
     decimal(a, &mut x).cmp(decimal(b, &mut y))
 }
+
+/// 適用で開くリスナーのルール ID と宛先。範囲のルールのリスナーは同じ値を分け合う。
+type Wanted = (Arc<str>, (Arc<str>, u16));
 
 /// 中継の全体。トンネルと一緒に作り、一緒に閉じる。リスナーはプロトコルとポートで区別するので、数は
 /// TCP と UDP のポートの数を超えない。v1 もルールの範囲の幅に上限を置かない。フロー数の予算もトンネルごとに作るので、
@@ -416,7 +421,7 @@ impl Manager {
     /// [`Manager::retry`] が開き直す。開いたリスナーの宛先へ試し接続し、その結果を待ってから戻るので、
     /// 最初の状態は適用の直後のハートビートに載る。戻り値は操作の数。
     pub async fn apply(&mut self, rules: &[AgentRule]) -> usize {
-        let mut want: BTreeMap<Key, (String, (String, u16))> = BTreeMap::new();
+        let mut want: BTreeMap<Key, Wanted> = BTreeMap::new();
         self.unsupported.clear();
         for r in rules.iter().filter(|r| r.enabled) {
             let kind = match &r.proto {
@@ -428,13 +433,8 @@ impl Manager {
                     continue;
                 }
             };
-            let targets: Option<Vec<_>> = r
-                .listen_port
-                .ports()
-                .map(|p| r.effective_target(p).map(|t| (p, t)))
-                .collect();
             // 使えない宛先のルールはリスナーを 1 つも開かない
-            let Some(targets) = targets else {
+            let Some((host, ports)) = r.effective_ports() else {
                 self.unsupported.insert(
                     r.id.clone(),
                     format!(
@@ -444,8 +444,12 @@ impl Manager {
                 );
                 continue;
             };
-            for (port, t) in targets {
-                want.insert(Key { kind, port }, (r.id.clone(), t));
+            let (id, host): (Arc<str>, Arc<str>) = (r.id.as_str().into(), host.into());
+            for (port, tport) in ports {
+                want.insert(
+                    Key { kind, port },
+                    (Arc::clone(&id), (Arc::clone(&host), tport)),
+                );
             }
         }
         let mut actions = 0;
@@ -464,7 +468,7 @@ impl Manager {
         let mut opened = Vec::new();
         for (k, (id, target)) in want {
             if let Some(l) = self.listeners.get_mut(&k) {
-                l.budget.set_rule(&id);
+                l.budget.set_rule(Arc::clone(&id));
                 l.rule_id = id;
                 continue;
             }
@@ -472,7 +476,7 @@ impl Manager {
                 Kind::Tcp => &self.tcp,
                 Kind::Udp => &self.udp,
             };
-            let budget = Arc::new(pool.pending_listener(&id));
+            let budget = Arc::new(pool.pending_listener(Arc::clone(&id)));
             let l = Listener {
                 rule_id: id,
                 key: k,
@@ -631,6 +635,17 @@ impl Manager {
         }
     }
 
+    /// TCP と UDP のリスナーの数。開けなかったリスナーも数える。メモリの上界の待ち受けの項に使う。
+    #[must_use]
+    pub fn listener_counts(&self) -> (usize, usize) {
+        let tcp = self
+            .listeners
+            .keys()
+            .filter(|k| k.kind == Kind::Tcp)
+            .count();
+        (tcp, self.listeners.len() - tcp)
+    }
+
     /// 待ち受けているリスナーの数。
     #[must_use]
     pub fn listening(&self) -> usize {
@@ -672,7 +687,7 @@ impl Manager {
         ls.into_iter()
             .zip(flows)
             .map(|(l, flows)| ListenerStat {
-                rule_id: l.rule_id.clone(),
+                rule_id: Arc::clone(&l.rule_id),
                 key: l.key,
                 listening: l.task.is_some(),
                 err: l.err(),
@@ -697,20 +712,20 @@ impl Manager {
     /// 誤りから取る。
     #[must_use]
     pub fn status_of(&self, stats: &[ListenerStat]) -> Vec<RuleStatus> {
-        let mut by: BTreeMap<String, RuleStatus> = BTreeMap::new();
+        let mut by: BTreeMap<&str, RuleStatus> = BTreeMap::new();
         for l in stats {
             // 範囲のルールはリスナーが多いので、ルールの ID を写すのは初めて見たときだけにする
-            if !by.contains_key(&l.rule_id) {
+            if !by.contains_key(&*l.rule_id) {
                 by.insert(
-                    l.rule_id.clone(),
+                    &l.rule_id,
                     RuleStatus {
-                        id: l.rule_id.clone(),
+                        id: l.rule_id.to_string(),
                         state: STATUS_OK.into(),
                         reason: String::new(),
                     },
                 );
             }
-            let Some(r) = by.get_mut(&l.rule_id) else {
+            let Some(r) = by.get_mut(&*l.rule_id) else {
                 continue;
             };
             if let Some(e) = &l.err
@@ -722,7 +737,7 @@ impl Manager {
         }
         for (id, reason) in &self.unsupported {
             by.insert(
-                id.clone(),
+                id,
                 RuleStatus {
                     id: id.clone(),
                     state: STATUS_ERROR.into(),
@@ -751,7 +766,7 @@ async fn close_all(mut ls: Vec<(Key, Listener)>) {
 struct Spec {
     key: Key,
     addr: SocketAddrV4,
-    host: String,
+    host: Arc<str>,
     tport: u16,
     budget: Arc<flowpool::Listener>,
     shared: Arc<Shared>,
@@ -808,7 +823,8 @@ struct Flow {
     /// 核の boost の hook が引く LAN の側のソケットの表。
     lan: Rc<LanSockets<LanConn>>,
     port: u16,
-    host: String,
+    /// 宛先のホスト。待ち受けの値を分け合い、接続ごとに写さない。
+    host: Arc<str>,
     tport: u16,
     shared: Arc<Shared>,
     targets: Arc<Targets>,

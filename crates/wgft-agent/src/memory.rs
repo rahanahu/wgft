@@ -16,6 +16,7 @@ use wgft_wgstack::{Bound, Limits as CoreLimits, MAX_MTU};
 use crate::flowpool;
 use crate::relay::{BULK_BUF, BULK_KEEP, LanConn, REPLY_SLOTS, UDP_BUF};
 use crate::targets::resolve::{ENDPOINT_PERMITS, TARGET_PERMITS};
+use wgft_proto::{STATE_HELD_FACTOR, STREAM_READ_LIMIT};
 
 /// The fixed base: the executable's pages, the tokio runtimes and their threads, the control
 /// socket's threads, the stream and TLS state. It is the RSS measured in the lab right after start
@@ -44,11 +45,38 @@ pub const UDP_REPLY_FUTURE: usize = 1 << 10;
 /// cells. A test checks the real size stays below it.
 pub const UDP_SESSION_ENTRY: usize = 512;
 
+/// One TCP listener: its entry in the relay's table, its state shared with its relays, its budget
+/// entry, its accept task and its netstack registration, and the failure text of its last probe,
+/// which is clipped at the reason's length cap. The rule ID and the target host are shared by every
+/// listener of a rule. A test measures 1.5 KiB with a clipped failure text; the rest covers the
+/// listener's row of a status read and its entry in the plan of an apply, which live only while they
+/// run. The core's port table is part of the core's term.
+pub const LISTENER_TCP: usize = 2 << 10;
+
+/// One UDP listener: its receive buffer of the largest datagram (Go's relay has the same per
+/// listener), its task, its session table and the shared parts of a TCP listener. A test measures
+/// the buffer plus 2.8 KiB.
+pub const LISTENER_UDP: usize = UDP_BUF + (4 << 10);
+
 /// One TCP relay's term without its bulk buffers: its task and its socket's registration.
 pub const TCP_RELAY_CONN: usize = TCP_RELAY_FUTURE + TASK_OVERHEAD + IO_OVERHEAD;
 
 /// One UDP session's term: its table entry, its socket's registration and its reply task.
 pub const UDP_SESSION: usize = UDP_SESSION_ENTRY + UDP_REPLY_FUTURE + TASK_OVERHEAD + IO_OVERHEAD;
+
+/// How many decoded full states the agent holds at once at most: the applied one (`last_state`),
+/// the one kept for a rebuild retry, the copy of `last_state` a tunnel rebuild or a key rotation
+/// applies, and the next one the stream decoded while it waits for the agent's lock.
+pub const STATE_COPIES: usize = 4;
+
+/// The stream's buffers around one message: the WebSocket's read buffer, which keeps the capacity
+/// of the largest frame, and the text of the message being applied.
+pub const STREAM_BUFFERS: usize = 2 * STREAM_READ_LIMIT;
+
+/// The full states' term: the decoded copies at the largest message, each at most
+/// [`STATE_HELD_FACTOR`] times the message's length, and the stream's buffers. `agent.json` is
+/// written straight to its file and needs no buffer of its length.
+pub const STATE: usize = STATE_COPIES * STATE_HELD_FACTOR * STREAM_READ_LIMIT + STREAM_BUFFERS;
 
 /// One resolver thread: Rust's default thread stack and the work area of `getaddrinfo`.
 pub const RESOLVER_THREAD: usize = (2 << 20) + (64 << 10);
@@ -93,6 +121,12 @@ pub struct MemoryBound {
     pub udp: usize,
     /// The resolver threads.
     pub resolver: usize,
+    /// The full states from the server ([`STATE`]).
+    pub state: usize,
+    /// The open listeners, [`LISTENER_TCP`] and [`LISTENER_UDP`] each. The server's full state
+    /// decides their number and the agent caps it only by the ports, so the start line counts none;
+    /// [`MemoryBound::with_listeners`] adds them after an apply.
+    pub listeners: usize,
     /// The sum.
     pub total: usize,
 }
@@ -127,7 +161,7 @@ impl MemoryBound {
         let udp = REPLY_SLOTS * UDP_BUF + limits.udp.saturating_mul(UDP_SESSION);
         let resolver = (TARGET_PERMITS + ENDPOINT_PERMITS) * RESOLVER_THREAD;
         let parts = [
-            BASE, core, tables, driver, device, tcp, tcp_bulk, udp, resolver,
+            BASE, core, tables, driver, device, tcp, tcp_bulk, udp, resolver, STATE,
         ];
         Self {
             base: BASE,
@@ -140,8 +174,24 @@ impl MemoryBound {
             tcp_bulk,
             udp,
             resolver,
+            state: STATE,
+            listeners: 0,
             total: parts.into_iter().fold(0, usize::saturating_add),
         }
+    }
+
+    /// The bound with `tcp` TCP and `udp` UDP listeners open.
+    #[must_use]
+    pub fn with_listeners(mut self, tcp: usize, udp: usize) -> Self {
+        let listeners = tcp
+            .saturating_mul(LISTENER_TCP)
+            .saturating_add(udp.saturating_mul(LISTENER_UDP));
+        self.total = self
+            .total
+            .saturating_sub(self.listeners)
+            .saturating_add(listeners);
+        self.listeners = listeners;
+        self
     }
 
     /// The bound in MiB, rounded up.
@@ -158,7 +208,7 @@ impl MemoryBound {
     pub fn terms_line(&self) -> String {
         let m = |b: usize| b.div_ceil(1 << 20);
         format!(
-            "memory bound terms: base {} MiB, core fixed {} MiB, core flows {} MiB, tables {} MiB, driver {} MiB, device {} MiB, tcp relay {} MiB, tcp bulk {} MiB, udp relay {} MiB, resolver {} MiB",
+            "memory bound terms: base {} MiB, core fixed {} MiB, core flows {} MiB, tables {} MiB, driver {} MiB, device {} MiB, tcp relay {} MiB, tcp bulk {} MiB, udp relay {} MiB, resolver {} MiB, state {} MiB; per listener, not in the line: tcp {} KiB, udp {} KiB",
             m(self.base),
             m(self.core_fixed),
             m(self.core.saturating_sub(self.core_fixed)),
@@ -168,7 +218,10 @@ impl MemoryBound {
             m(self.tcp),
             m(self.tcp_bulk),
             m(self.udp),
-            m(self.resolver)
+            m(self.resolver),
+            m(self.state),
+            LISTENER_TCP.div_ceil(1 << 10),
+            LISTENER_UDP.div_ceil(1 << 10)
         )
     }
 
@@ -177,6 +230,15 @@ impl MemoryBound {
     pub fn line(&self) -> String {
         format!(
             "memory bound: {} MiB, derived from the flow caps; it counts what the process holds, not the kernel socket buffers",
+            self.mib()
+        )
+    }
+
+    /// The line an apply writes when the number of listeners changed.
+    #[must_use]
+    pub fn listeners_line(&self, tcp: usize, udp: usize) -> String {
+        format!(
+            "memory bound with {tcp} TCP and {udp} UDP listeners: {} MiB",
             self.mib()
         )
     }
@@ -211,7 +273,14 @@ mod tests {
                 + small.tcp_bulk
                 + small.udp
                 + small.resolver
+                + small.state
         );
+        let open = small.with_listeners(3, 2);
+        assert_eq!(
+            open.total,
+            small.total + 3 * LISTENER_TCP + 2 * LISTENER_UDP
+        );
+        assert_eq!(open.with_listeners(0, 0), small);
     }
 
     #[test]

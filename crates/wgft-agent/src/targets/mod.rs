@@ -44,14 +44,27 @@ pub struct TargetError {
 impl TargetError {
     fn failed(text: String) -> Self {
         TargetError {
-            text,
+            text: clip(text),
             denied: false,
         }
     }
 
     fn denied(text: String) -> Self {
-        TargetError { text, denied: true }
+        TargetError {
+            text: clip(text),
+            denied: true,
+        }
     }
+}
+
+/// 誤りの文を、ハートビートの理由の長さの上限で切る。文は宛先のホストを含み、待ち受けごとに持つので、
+/// 長いホストの範囲のルールで待ち受けの数だけ写さないためである。理由とログに出す文は、この長さより
+/// 後ろを出さないので変わらない。
+fn clip(text: String) -> String {
+    if text.len() <= wgft_proto::REASON_MAX_BYTES {
+        return text;
+    }
+    wgft_proto::textsafe::clip_text(&text, wgft_proto::REASON_MAX_BYTES)
 }
 
 impl fmt::Display for TargetError {
@@ -240,7 +253,7 @@ impl Targets {
     /// future は走らせる分だけを作るので、待ち受けの数によらず保持は 32 件分である。
     pub async fn probe_all(
         self: Arc<Self>,
-        list: Vec<(String, u16)>,
+        list: Vec<(Arc<str>, u16)>,
     ) -> Vec<Result<(), TargetError>> {
         // 値を持ち込む閉包にする。借用を持つ閉包では、future の Send の判定が寿命について一般化できない
         futures_util::stream::iter(list)
@@ -446,9 +459,10 @@ mod tests {
             }),
         ));
         let t = Arc::new(Targets::with(None, unicast_lan(), resolver));
-        let list: Vec<(String, u16)> = ups
+        let host: Arc<str> = "nas.lan".into();
+        let list: Vec<(Arc<str>, u16)> = ups
             .iter()
-            .map(|l| ("nas.lan".to_owned(), l.local_addr().unwrap().port()))
+            .map(|l| (Arc::clone(&host), l.local_addr().unwrap().port()))
             .collect();
         let got = t.probe_all(list).await;
         assert_eq!(lookups.load(Ordering::SeqCst), 1);

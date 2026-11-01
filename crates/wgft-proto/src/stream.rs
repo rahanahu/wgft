@@ -80,10 +80,12 @@ impl Message {
     /// # Errors
     ///
     /// JSON として読めないか、上の形に当たれば誤りを返す。
+    ///
+    /// キーの検査は値を組み立てずに 1 回読み、型の値はその後に読む。検査の側は値を捨て、エスケープの無い
+    /// キーは入力を借りて調べるので、確保はエスケープを含むキー 1 つ分の作業域だけである。汎用の値の木を
+    /// 経由すると、小さな値を並べた 1 通が入力の数十倍の一時の確保になるためである。
     pub fn decode(text: &str) -> Result<Message, DecodeError> {
-        let v: serde_json::Value =
-            serde_json::from_str(text).map_err(|e| DecodeError(e.to_string()))?;
-        check_keys(&v)?;
+        serde_json::from_str::<KeyCheck>(text).map_err(|e| DecodeError(e.to_string()))?;
         serde_json::from_str(text).map_err(|e| DecodeError(e.to_string()))
     }
 
@@ -107,30 +109,101 @@ impl Message {
 /// エージェントが stream を繋ぎ直す待ちの上限。
 pub const RECONNECT_BACKOFF_MAX: Duration = Duration::from_mins(5);
 
-/// オブジェクトのキーが、Go の writer が書く小文字の ASCII の形かどうかを確かめる。
-fn check_keys(v: &serde_json::Value) -> Result<(), DecodeError> {
-    match v {
-        serde_json::Value::Object(m) => {
-            for (k, child) in m {
-                if !k
-                    .bytes()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
-                {
-                    return Err(DecodeError(format!(
-                        "key {k:?} is not a lower-case key a Go writer emits"
-                    )));
-                }
-                check_keys(child)?;
-            }
-            Ok(())
+/// オブジェクトのキーが、Go の writer が書く小文字の ASCII の形かどうかを確かめる。値は読み捨てる。
+/// 入れ子の深さは serde_json の再帰の上限 (128) が抑える。
+struct KeyCheck;
+
+impl<'de> Deserialize<'de> for KeyCheck {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(KeyCheckVisitor)
+    }
+}
+
+struct KeyCheckVisitor;
+
+impl<'de> serde::de::Visitor<'de> for KeyCheckVisitor {
+    type Value = KeyCheck;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<KeyCheck, E> {
+        Ok(KeyCheck)
+    }
+
+    fn visit_i64<E>(self, _: i64) -> Result<KeyCheck, E> {
+        Ok(KeyCheck)
+    }
+
+    fn visit_u64<E>(self, _: u64) -> Result<KeyCheck, E> {
+        Ok(KeyCheck)
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<KeyCheck, E> {
+        Ok(KeyCheck)
+    }
+
+    fn visit_str<E>(self, _: &str) -> Result<KeyCheck, E> {
+        Ok(KeyCheck)
+    }
+
+    fn visit_unit<E>(self) -> Result<KeyCheck, E> {
+        Ok(KeyCheck)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<KeyCheck, A::Error> {
+        while seq.next_element::<KeyCheck>()?.is_some() {}
+        Ok(KeyCheck)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<KeyCheck, A::Error> {
+        while map.next_key::<LowerKey>()?.is_some() {
+            map.next_value::<KeyCheck>()?;
         }
-        serde_json::Value::Array(a) => a.iter().try_for_each(check_keys),
-        _ => Ok(()),
+        Ok(KeyCheck)
+    }
+}
+
+/// Go の writer が書く形のキー。読むだけで持たない。
+struct LowerKey;
+
+impl<'de> Deserialize<'de> for LowerKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_str(LowerKeyVisitor)
+    }
+}
+
+struct LowerKeyVisitor;
+
+impl serde::de::Visitor<'_> for LowerKeyVisitor {
+    type Value = LowerKey;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an object key")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, k: &str) -> Result<LowerKey, E> {
+        if k.bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+        {
+            Ok(LowerKey)
+        } else {
+            Err(E::custom(format_args!(
+                "key {k:?} is not a lower-case key a Go writer emits"
+            )))
+        }
     }
 }
 
 /// stream の 1 通の大きさの上限 (byte)。agent が読む全体状態はこの 1 通に収まる。
 pub const STREAM_READ_LIMIT: usize = 4 << 20;
+
+/// 読んだ 1 通が持つ確保の、入力の長さに対する倍率の上限。読む間の確保の最大値もこの内に収まる。
+/// 最も密な形は空の文字列を並べた capability の列で、3 byte ごとに `String` の 24 byte を持ち、列の容量は
+/// 長さの 2 倍まで育つので 16 倍である。ルールの列は 3 倍未満に収まる。試験 `tests/decode_held.rs` が
+/// 確かめ、agent のメモリの上界の全体状態の項がこの値を使う。
+pub const STATE_HELD_FACTOR: usize = 16;
 
 /// ハートビート。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

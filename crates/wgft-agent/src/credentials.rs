@@ -405,12 +405,17 @@ impl Credentials {
     /// 書けない値があれば誤りを返す。
     pub fn to_go_json(&self) -> Result<Vec<u8>, serde_json::Error> {
         let mut out = Vec::new();
+        self.write_go_json(&mut out)?;
+        Ok(out)
+    }
+
+    /// [`Credentials::to_go_json`] と同じ byte 列を `w` に書く。
+    fn write_go_json(&self, w: impl Write) -> Result<(), serde_json::Error> {
         let fmt = GoIndent {
             inner: serde_json::ser::PrettyFormatter::with_indent(b"  "),
         };
-        let mut ser = serde_json::Serializer::with_formatter(&mut out, fmt);
-        self.serialize(&mut ser)?;
-        Ok(out)
+        let mut ser = serde_json::Serializer::with_formatter(w, fmt);
+        self.serialize(&mut ser)
     }
 
     /// 一時ファイルに書いて rename する。Unix では作った瞬間から 0600。既にあるファイルの持ち主と
@@ -419,11 +424,10 @@ impl Credentials {
     /// # Errors
     ///
     /// 書けなければ誤りを返す。既にある `path` が通常のファイルでなければ何も書かずに拒む。
+    ///
+    /// 中身は一時ファイルへ直に書き、全体を 1 つのバッファに組まない。全体状態を持つファイルは 1 通の
+    /// 全体状態の数倍の長さになり、保存のたびにその長さの一時の確保を作らないためである。
     pub fn save(&self, path: &Path) -> Result<(), CredentialsError> {
-        let b = self.to_go_json().map_err(|e| other(path, e))?;
-        if b.len() as u64 > MAX_FILE_SIZE {
-            return Err(other(path, "would be larger than wgft ever writes"));
-        }
         let old = match fs::symlink_metadata(path) {
             Ok(m) if !m.file_type().is_file() => {
                 return Err(other(
@@ -435,13 +439,23 @@ impl Credentials {
             Err(_) => None,
         };
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let (tmp_path, mut tmp) = create_temp(dir)
+        let (tmp_path, tmp) = create_temp(dir)
             .map_err(|e| other(path, format!("create temp credentials file: {e}")))?;
-        let result = tmp
-            .write_all(&b)
-            .and_then(|()| tmp.sync_all())
-            .and_then(|()| keep_owner(&tmp, old.as_ref()))
+        let mut w = Capped {
+            inner: std::io::BufWriter::new(tmp),
+            left: MAX_FILE_SIZE,
+        };
+        let result = self
+            .write_go_json(&mut w)
+            .map_err(std::io::Error::from)
             .and_then(|()| {
+                w.inner
+                    .into_inner()
+                    .map_err(std::io::IntoInnerError::into_error)
+            })
+            .and_then(|tmp| tmp.sync_all().map(|()| tmp))
+            .and_then(|tmp| keep_owner(&tmp, old.as_ref()).map(|()| tmp))
+            .and_then(|tmp| {
                 drop(tmp);
                 fs::rename(&tmp_path, path)
             });
@@ -503,6 +517,30 @@ fn keep_owner(tmp: &File, old: Option<&fs::Metadata>) -> std::io::Result<()> {
 )]
 fn keep_owner(_tmp: &File, _old: Option<&fs::Metadata>) -> std::io::Result<()> {
     Ok(())
+}
+
+/// 書いた長さが `left` を超えたら誤りにする書き手。
+struct Capped<W> {
+    inner: W,
+    left: u64,
+}
+
+impl<W: Write> Write for Capped<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = u64::try_from(buf.len()).unwrap_or(u64::MAX);
+        if n > self.left {
+            return Err(std::io::Error::other(
+                "would be larger than wgft ever writes",
+            ));
+        }
+        self.left -= n;
+        self.inner.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 fn create_temp(dir: &Path) -> std::io::Result<(PathBuf, File)> {
