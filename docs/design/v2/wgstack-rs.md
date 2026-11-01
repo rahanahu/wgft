@@ -6,6 +6,7 @@ agent のユーザー空間モードは、トンネルの中の TCP、UDP、ICMP
 このため Rust の agent は root の権限も TUN も要りません。
 段を踏んで実装しています。
 PR 6 の範囲 (受動の open、閉じる手順と TIME_WAIT、アプリケーションの操作と知らせ、データの送受信、RTO、窓の probe、SACK による回復と D-SACK、RACK-TLP、不要な再送の取り消し、CUBIC と NewReno、boost の取得と回収、UDP の endpoint と予算、echo と ping、ICMP の誤りと PMTU、断片の入口) まで実装しました。
+核の上の非同期の handle の層 (`wgft-netstack`) は PR 7 で実装しました。
 構造、境目、メモリ、作業の順をここで決め、値と細部は[実装の時に決めること](#実装の時に決めること)に残します。
 
 ## この文書の読み方
@@ -414,6 +415,10 @@ agent の device の殻の段は、核と waker の表を 1 つの trait (`datap
 
 `wgft-netstack` の handle は、出力を生みうる操作の後に、同じスレッドの `tokio::sync::Notify` で駆動の task を起こします。
 対象の操作は `write`、`close_write`、`close`、`abort`、`read` (窓の更新を生むため)、`close_listener`、`send_to`、ping の送信です。
+`accept` は出力を生まないので起こしません。
+boost を accept の時に与える方針で受信のバッファが広がっても、窓の更新は最初の `read` が送ります。
+PR 7 の作業で、窓を満たした接続を accept しても segment が出ないことを使い捨ての試験で確かめました。
+`WouldBlock` を返した操作は核の状態を変えないので、起こしません。
 駆動の task は起きたら 1 回の起床の処理を行います。
 
 ### スレッドを 1 つにする理由と危険
@@ -1144,6 +1149,100 @@ Go の試験を変える PR は、規則どおり wgstack の関門を流しま�
 `send_segment/1024` の criterion の中央の推定は、同じ build でも 631 ns と 677 ns の間で回ごとに変わり、3 つの差はこの揺れの内でした。
 L1 の miss は別の値に移した形だけが多く、PR 6 の形と PR 5 の頭の差は回ごとの揺れの内でした。
 別の値に移した形で増えた理由は調べていません。
+
+### PR 7 で決めたこと
+
+実装の担当が決めた点です。
+理由と共に挙げ、所有者か監督が変えるときはこの節を直します。
+
+- 核に届く道:handle は `Access` の trait (`with`、`wake_driver`、`is_poisoned`) を通して核を借用します。
+  agent のデータプレーンは device の層と核を 1 つの `RefCell` に置くので、handle の層が別の `RefCell` を持つと持ち主が 2 つになるためです。
+  核と waker の表は `Netstack` の 1 つの値にし、駆動の口 (`handle_packet`、`handle_timeout`、`poll_transmit`、`poll_timeout`、`poll_wakers`、`poll_log`、`close`) は `dataplane::Upper` と同じ形で時刻を `Instant` で受けます。
+  核の段 (#680 の「wgstack の上の agent」) は、`Local` に `Access` を、`Netstack` に `Upper` を実装して繋ぎます。
+  `LocalNetstack` は核だけを持つ同じ形の実装で、試験とほかの駆動 (後の server) が使います
+- 作成の失敗:`Netstack::new` は、`Stack::new` の誤りと waker の表の確保の失敗を `NetstackError` で返し、`Budget` を取り戻せます。
+  waker の表とポートの頁は `try_reserve_exact` で確保し、頁の確保の失敗は待ち受けと endpoint を開く操作の `NoMemory` の誤りにします。
+  [核との継ぎ目](agent-parity.md#核との継ぎ目)の「作成は失敗しない形」との合わせ方は核の段が決めます
+- 時刻:`Netstack` は作成の時の `Instant` と時計の関数を持ち、handle の操作の時刻はその時計から取ります。
+  駆動はデータプレーンの時計と同じ関数を渡します。
+  handle が駆動の起床を待たずに核を呼ぶためです
+- waker の表:接続の枠ごとに読みと書きの waker を 1 つずつ持ち、作成の時に枠の数だけ確保します。
+  TCP の待ち受けの accept と UDP の endpoint の読みの waker は、256 個のポートの頁に分けて持ちます。
+  頁はその範囲のポートで初めて開く時に確保し、核を閉じるまで持ちます。
+  65,536 個のポートの分を作成の時に確保すると、待ち受けの少ない agent でも約 2 MiB を持つためです。
+  ping は核の表と同じ数です。
+  上界は 64 bit の target で、接続の枠の数 × 32 byte、ポートの頁をすべて開いた 2 MiB、頁の表の 4 KiB、ping と UDP の送りの待ちの分の和で、K の既定で約 2.1 MiB です。
+  `Netstack::waker_bound` が計算し、試験がすべての頁を開いた表の大きさと一致することを確かめます。
+  waker の表と、駆動が借用の外で起こすために waker を移す list は、核の `Bound` の外です。
+  核の段が agent のメモリの上界の行に足します。
+  表は知らない種類の知らせを試験と debug の build で止めます。
+  dial の側が `Connected` と `ConnectFailed` を足す時に、表が黙って捨てないためです
+- 待つ task の数:接続の読みと書き、待ち受け、UDP の受け取り、ping は、向きごとに 1 つの task だけが待ちます。
+  handle の操作が `&mut self` を取るので、同じ向きを 2 つの task で待てません。
+  UDP の送りだけは、UDP の中継のセッションの task が同じ endpoint から送るので、複製できる `UdpSender` で複数の task が待ちます。
+  送りの待ち手は核の全体で 1 つの `tokio::sync::Notify` を分け合います。
+  核は送信の予約が 1 つ返ると待つ endpoint すべてに `UdpWritable` を出すので、全体で 1 つにしても起こす相手は変わりません。
+  待ち手の節は待つ future の中にあるので、表は伸びません。
+  `poll_wakers` はこの `Notify` を起こす waker を 1 つ出すので、待ち手を起こすのも借用を返した後です。
+  `Notify` は中に錠を持ち、`UdpWritable` は送信の予算が尽きた時だけ出ます。
+  1 回の知らせで起きる送り手は、UDP の中継の応答のバッファの枠の数 (64) までです
+- 駆動を起こす道:handle は操作ごとに `wake_driver` を呼びます。
+  `LocalNetstack` と agent の `Local` はどちらも `tokio::sync::Notify` の `notify_one` で起こし、駆動の task が待っている時は `Notify` の錠を取ります。
+  packet ごとではなく操作ごとの費用です。
+  核の段は、これを 1 つのスレッドの `Cell` に置いた waker に替えてもよいとします
+- 取り消し:どの future も核の操作を 1 回の poll の中で終えます。
+  進んだら `Ready` を返し、`WouldBlock` なら waker を登録して `Pending` を返します。
+  核の `WouldBlock` は状態を変えないので、future をどこで落としても核は一貫します。
+  落とした future の waker は表に残り、次の知らせで一度起きるか、handle を閉じる時に捨てられます
+- 閉じ方:`TcpStream` を `close` で閉じずに落とすと `abort` (RST) します。
+  中継の終わり方の表でポートの消滅と停止は RST で、task の取り消しと panic もこの経路を通るためです。
+  ただし送信の向きを閉じた後 (`close_write` か tokio の `shutdown`) に、巻き戻しの途中でなく落とした時は、`close` と同じく閉じます。
+  書いて `shutdown` して落とす tokio の書き方で、書いたデータを RST で失わないためです。
+  未読の受信のデータがあれば、Linux と同じく RST で終えます。
+  ルールの削除と停止の中継は、明示の `abort` を使います。
+  `close` は `Closing` を返します。
+  核は届け終えたことを知らせないので、中継は Go の `AwaitDelivered` と同じく、間隔を伸ばしながら `Closing::delivered` を問い直します。
+  `Closing::abort` は TIME_WAIT の表に移った行にも RST を送ります。
+  閉じた後の枠は別の接続に使われているかもしれないので、`Closing::abort` は枠の waker を捨てません。
+  捨てると新しい接続の知らせを失います。
+  `TcpListener`、`UdpSocket`、`Ping` は落とすと閉じます。
+  `UdpSocket` を閉じると、その endpoint から送ろうと待つ `UdpSender` が起き、閉じた誤りを受けます。
+  毒の印の後、handle は操作に誤りを返し、落とす時も核に触りません。
+  毒の印の時に handle で待っている task は起きないので、駆動の持ち主がそれらの task を落とします。
+  agent のデータプレーンは世代の終わりに local の task をすべて落とします
+- 誤り:核の `Error` を種類の合う `io::ErrorKind` の `io::Error` にし、核の誤りを中に置きます。
+  呼び手は `get_ref` と `downcast_ref` で核の誤りを取り出せます
+- tokio の `AsyncRead` と `AsyncWrite`:`TcpStream` に実装しました。
+  中継が LAN 側のソケットとの間で tokio の写しの道具を使えるようにするためです。
+  `poll_flush` は何もせず、`poll_shutdown` は `close_write` です
+- ログの文面:`poll_log` は Go の wgstack と同じ文面の行を返します。
+  文面の正本は handle の層の 1 か所だけです。
+  核の `LogLine` の `Display` は消しました。
+  核はログを書かず、駆動の層が英語の 1 行にする決まり ([誤りと捨てた数](#誤りと捨てた数)) に合わせ、UDP の内訳と会計の故障の中身を読める層に置くためです。
+  MSS の下限の行は、Go が書く最後の相手のアドレス (the latest from) を書きません。
+  `LogLine` がアドレスを運ばないためです。
+  UDP の捨てた数の行の内訳は `stats` から取ります
+- LAN 側のソケットの表:`LanSockets<T>` は接続の枠の数の行を作成の時に確保し、行は接続の handle とソケットの組です。
+  中継は accept の後、最初の読み書きの前に `register` で組を登録し、返る登録の値を LAN 側のソケットを閉じる前に落とします。
+  hook は handle の世代も照らすので、枠を使い直した接続に古い組は届きません。
+  同じ接続を 2 回登録すると後の組に替わり、先の登録の値を落としても後の組は外れません。
+  表は核の `RefCell` の外の `Rc` で、hook と中継が分け合います。
+  hook は核の借用の中で呼ばれるためです。
+  boost を accept の時に与える方針では、boost の知らせが accept の中で登録より先に来ます。
+  hook は変化だけを伝えるので ([PR 5 で決めたこと](#pr-5-で決めたこと))、この方針では最初の知らせが LAN 側に届きません。
+  この方針は試験と測定だけが選ぶので、知らせを溜めて登録の時に渡す仕組みは作りません。
+  製品の既定の需要による boost は読み書きの後に来るので、登録が先です
+- 核に足した口:`PingId::index`、`Stack::hook`、定数の `MAX_PINGS`、`MIN_MSS`、`UDP_RX_BYTES`、`UDP_ENDPOINT_SHARE` です。
+  waker の表とログの文面が核の値を写さずに使うためです
+- dial の側の余地:`TcpStream` は `ConnId` から作り、waker の表は接続の枠の番号で引くので、受動と能動の接続で同じ形です。
+  dial の側は、`connect` の future と、`Connected` と `ConnectFailed` の知らせで書きの waker を起こす行を足します
+- 試験:試験の中の代わりの駆動が、1 回の起床と同じ順で、止めた tokio の時計の上の核を動かします。
+  核は能動の open を持たないので、TCP の相手は試験の中の台本の相手です。
+  UDP と ping は 2 つの核を向かい合わせます。
+  future を落とした後の一貫、空きを待つ書き込みが知らせで起きること、操作の知らせで駆動が時計を待たずに起きること、閉じた接続の枠を使い直した接続の知らせ、`shutdown` の後に落とした接続が書いたデータを届けること、毒の印、packet ごとにヒープが伸びないこと (確保の数え) を確かめます。
+  試験の本体は自分の task として動かします。
+  `run_until` の中で直に poll すると、ほかの task が起きるたびに本体も poll され、失った知らせが隠れるためです。
+  知らせを失った試験は、止めた時計の上の期限で止まらずに失敗します
 
 ### 後の段
 

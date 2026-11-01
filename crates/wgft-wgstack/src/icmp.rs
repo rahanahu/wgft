@@ -37,6 +37,14 @@ pub struct PingId {
     pub(crate) generation: u64,
 }
 
+impl PingId {
+    /// ping の endpoint の表の番号です。[`MAX_PINGS`](crate::MAX_PINGS) より小さく、呼び手が endpoint ごとの表を
+    /// 核の外に持つ時の位置に使えます。
+    pub fn index(&self) -> usize {
+        usize::from(self.slot)
+    }
+}
+
 /// ping の endpoint の行です。
 #[derive(Clone, Copy, Debug, Default)]
 struct PingEp {
