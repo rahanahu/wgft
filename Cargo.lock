@@ -1723,6 +1723,7 @@ dependencies = [
  "libtest-mimic",
  "serde",
  "serde_json",
+ "wgft-alloc-count",
  "wgft-tcpharness",
  "wgft-wgstack",
 ]

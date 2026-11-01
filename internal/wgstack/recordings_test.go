@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -22,6 +23,11 @@ import (
 
 // recordSetEnv は作る記録の集まり。git (既定) は git に入れる集まり、full は手元の cache に作る大きな集まり。
 const recordSetEnv = "WGFT_WGSTACK_RECORD_SET"
+
+// recordFuzzEnv は、大きな集まりに足す Go の fuzz の corpus の directory。FuzzCore と FuzzAdversarialSender の
+// directory (`go test fuzz v1` の形式) を下に持つ、go の fuzz の cache の package の directory の写しを渡す。
+// 長く流した fuzz が見つけた入力も記録と照らすため。git の集まりは使わない。
+const recordFuzzEnv = "WGFT_WGSTACK_RECORD_FUZZ_DIR"
 
 // recordCheckPlatform は、記録を作れる組 (linux/amd64、GOAMD64=v1、commit の指定) でなければ試験を止める。
 // CUBIC の浮動小数点の値は compiler が積和の命令を使うかで最後の桁が変わりうるので、作る環境を 1 つに決める。
@@ -105,6 +111,57 @@ func fuzzCorePrograms(t *testing.T, generated int) map[string][]byte {
 	return progs
 }
 
+// fuzzCacheInputs は dir の FuzzCore と FuzzAdversarialSender の corpus を読む。FuzzCore の列は cache-<名前> の
+// 名前で、FuzzAdversarialSender の種は値で返す。dir が空なら何も返さない。読めないファイルは試験を落とす。
+func fuzzCacheInputs(t *testing.T, dir string) (map[string][]byte, []uint64) {
+	t.Helper()
+	core := map[string][]byte{}
+	var adv []uint64
+	if dir == "" {
+		return core, nil
+	}
+	read := func(target string, f func(name, body string)) {
+		entries, err := os.ReadDir(filepath.Join(dir, target))
+		if os.IsNotExist(err) {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			b, err := os.ReadFile(filepath.Join(dir, target, e.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			f(e.Name(), string(b))
+		}
+	}
+	read("FuzzCore", func(name, body string) {
+		p, err := parseFuzzBytes(body)
+		if err != nil {
+			t.Fatalf("FuzzCore/%s: %v", name, err)
+		}
+		core["cache-"+name] = p
+	})
+	read("FuzzAdversarialSender", func(name, body string) {
+		lines := strings.Split(strings.TrimSpace(strings.ReplaceAll(body, "\r\n", "\n")), "\n")
+		v, ok := "", len(lines) == 2 && lines[0] == "go test fuzz v1"
+		if ok {
+			v, ok = strings.CutPrefix(lines[1], "uint64(")
+		}
+		if !ok || !strings.HasSuffix(v, ")") {
+			t.Fatalf("FuzzAdversarialSender/%s is not a go test fuzz v1 file with one uint64", name)
+		}
+		n, err := strconv.ParseUint(strings.TrimSuffix(v, ")"), 0, 64)
+		if err != nil {
+			t.Fatalf("FuzzAdversarialSender/%s: %v", name, err)
+		}
+		adv = append(adv, n)
+	})
+	slices.Sort(adv)
+	return core, slices.Compact(adv)
+}
+
 // parseFuzzBytes は `go test fuzz v1` の形式の 1 つの []byte の値を読む。CRLF の checkout の行末も読む。
 func parseFuzzBytes(s string) ([]byte, error) {
 	lines := strings.Split(strings.TrimSpace(strings.ReplaceAll(s, "\r\n", "\n")), "\n")
@@ -125,6 +182,7 @@ func parseFuzzBytes(s string) ([]byte, error) {
 // recordSet は作る記録の集まりの大きさ。
 type recordSet struct {
 	fuzzGenerated     int
+	fuzzDir           string // FuzzCore と FuzzAdversarialSender の corpus を足す directory。空なら足さない
 	rxSeeds, txSeeds  []uint64
 	advSeeds          []uint64
 	rx4b, tx4b, adv4b []uint64
@@ -151,8 +209,9 @@ func recordSetFor(t *testing.T) recordSet {
 			}
 			return s
 		}
-		return recordSet{fuzzGenerated: 200, rxSeeds: seq(100), txSeeds: seq(80), advSeeds: seq(200),
-			rx4b: seq(40), tx4b: seq(40), adv4b: seq(40)}
+		// 敵対的な送り手はホストの関門 (adversarial-seeds) と同じ種 1 から 3000
+		return recordSet{fuzzGenerated: 200, fuzzDir: os.Getenv(recordFuzzEnv), rxSeeds: seq(100), txSeeds: seq(80),
+			advSeeds: seq(3000), rx4b: seq(40), tx4b: seq(40), adv4b: seq(40)}
 	default:
 		t.Fatalf("%s=%q; want git or full", recordSetEnv, v)
 	}
@@ -173,8 +232,15 @@ func TestWriteRecordings(t *testing.T) {
 		}
 		return n
 	}
+	extraCore, extraAdv := fuzzCacheInputs(t, set.fuzzDir)
+	for _, seed := range extraAdv {
+		if !slices.Contains(set.advSeeds, seed) {
+			set.advSeeds = append(set.advSeeds, seed)
+		}
+	}
 	for _, for4b := range []bool{false, true} {
 		progs := fuzzCorePrograms(t, set.fuzzGenerated)
+		maps.Copy(progs, extraCore)
 		names := slices.Sorted(func(yield func(string) bool) {
 			for k := range progs {
 				if !yield(k) {
