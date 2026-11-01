@@ -114,29 +114,34 @@ fn fix_matches_the_allocated_tables() {
             addr: Ipv4Addr::new(10, 9, 0, 1),
             mtu: 1420,
             limits,
+            ..Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420)
         };
         let s = Stack::new(config, Budget::new().unwrap(), &[7; 64], NoHook).unwrap();
         let p = fix_parts(&limits, config.mtu, size_of::<Stack<NoHook>>());
-        assert_eq!(p.conn_slots, b(s.conns.heap_bytes()));
-        assert_eq!(p.conn_index, b(s.conn_idx.heap_bytes()));
-        assert_eq!(p.syn, b(s.syn.heap_bytes()));
-        assert_eq!(p.tw, b(s.tw.heap_bytes()));
-        assert_eq!(p.listeners, b(s.listeners.heap_bytes()));
-        assert_eq!(p.wheel, b(s.wheel.heap_bytes() + s.fired.heap_bytes()));
+        let sh = &s.s;
+        assert_eq!(
+            p.conn_slots,
+            b(s.conns.heap_bytes() + sh.conn_free.heap_bytes() + sh.qlinks.heap_bytes())
+        );
+        assert_eq!(p.conn_index, b(sh.conn_idx.heap_bytes()));
+        assert_eq!(p.syn, b(sh.syn.heap_bytes()));
+        assert_eq!(p.tw, b(sh.tw.heap_bytes()));
+        assert_eq!(p.listeners, b(sh.listeners.heap_bytes()));
+        assert_eq!(p.wheel, b(sh.wheel.heap_bytes() + sh.fired.heap_bytes()));
         assert_eq!(
             p.output,
-            b(s.out_conns.heap_bytes() + s.out_rows.heap_bytes() + s.ctl.heap_bytes())
+            b(sh.out.conns.heap_bytes() + sh.out.rows.heap_bytes() + sh.out.ctl.heap_bytes())
         );
-        assert_eq!(p.events, b(s.events.heap_bytes()));
+        assert_eq!(p.events, b(sh.events.heap_bytes()));
         assert_eq!(
             p.chunk_pool,
-            b(s.chunks.heap_bytes() + POOL_KEEP * CHUNK_SIZE)
+            b(sh.chunks.heap_bytes() + POOL_KEEP * CHUNK_SIZE)
         );
         assert_eq!(p.stack, b(size_of::<Stack<NoHook>>()));
         let bound = s.bound();
         assert_eq!(bound, Bound::for_limits(&limits, 1420));
         // boost の項は Budget が確保した配列と管理を覆います。
-        assert!(b(s.budget.heap_bytes()) <= bound.boost);
+        assert!(b(sh.budget.heap_bytes()) <= bound.boost);
         assert_eq!(
             bound.total,
             bound.fix + bound.floor_conn + bound.boost + bound.frag
@@ -153,11 +158,11 @@ fn bound_does_not_depend_on_use() {
     let config = Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420);
     let mut s = Stack::new(config, Budget::new().unwrap(), &[1; 64], NoHook).unwrap();
     let before = s.bound();
-    let slot = s.conns.alloc().unwrap().unwrap();
+    let slot = s.conns.alloc(&mut s.s.conn_free).unwrap().unwrap();
     s.conns
-        .slot_mut(slot)
+        .bufs_mut(slot)
         .snd
-        .write(0, &[1; 1000], &mut s.chunks)
+        .write(0, &[1; 1000], &mut s.s.chunks)
         .unwrap();
     assert_eq!(s.bound(), before);
     assert!(before.floor_conn > 0 && before.transient > 0);
@@ -184,14 +189,15 @@ fn a_full_stack_meets_each_term() {
         addr: Ipv4Addr::new(10, 9, 0, 1),
         mtu: 1420,
         limits,
+        ..Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420)
     };
     let mut s = Stack::new(config, Budget::new().unwrap(), &[3; 64], NoHook).unwrap();
     let data = vec![7u8; BOOST_SIZE as usize];
     for _ in 0..limits.conns() {
-        let i = s.conns.alloc().unwrap().unwrap();
+        let i = s.conns.alloc(&mut s.s.conn_free).unwrap().unwrap();
         let id = s.conns.id(i);
-        let boosted = s.budget.acquire(id);
-        let c = s.conns.slot_mut(i);
+        let boosted = s.s.budget.acquire(id);
+        let (t, _, c) = s.conns.parts_mut(i);
         if let Some((b, recs, iv)) = boosted {
             c.boost = Some(b);
             c.snd = crate::buf::ring::Ring::new(BOOST_SIZE);
@@ -200,12 +206,14 @@ fn a_full_stack_meets_each_term() {
             c.spare_iv = c.rcv.set_intervals(iv).unwrap();
         }
         let (snd_cap, rcv_cap) = (c.snd.cap(), c.rcv.r.cap());
+        (t.snd_cap, t.rcv_cap) = (snd_cap, rcv_cap);
+        t.tail_off = snd_cap;
         c.snd
-            .write(0, &data[..snd_cap as usize], &mut s.chunks)
+            .write(0, &data[..snd_cap as usize], &mut s.s.chunks)
             .unwrap();
         assert_eq!(
             c.rcv
-                .insert(0, &data[..rcv_cap as usize], rcv_cap, &mut s.chunks)
+                .insert(0, &data[..rcv_cap as usize], rcv_cap, &mut s.s.chunks)
                 .accepted,
             rcv_cap as usize
         );

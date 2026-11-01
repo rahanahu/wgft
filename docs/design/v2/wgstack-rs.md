@@ -4,7 +4,8 @@
 wgstack は wgft 自身の TCP/IP の stack です。
 agent のユーザー空間モードは、トンネルの中の TCP、UDP、ICMP をこの stack で終えます。
 このため Rust の agent は root の権限も TUN も要りません。
-未実装です。
+段を踏んで実装しています。
+PR 4a と 4b の範囲 (受動の open、閉じる手順と TIME_WAIT、アプリケーションの操作と知らせ、データの送受信、RTO、NewReno、窓の probe) まで実装しました。
 構造、境目、メモリ、作業の順をここで決め、値と細部は[実装の時に決めること](#実装の時に決めること)に残します。
 
 ## この文書の読み方
@@ -56,14 +57,14 @@ bit の一致を求める間は、写し方も Go と同じ順と同じ算術に
 
 | Go のファイル | Rust の module | 中身 |
 | --- | --- | --- |
-| `stack.go`、`const.go`、`stats.go` | `stack`、`config`、`stats` | 核、作成、上界の計算、数え |
+| `stack.go`、`const.go`、`stats.go` | `stack`、`stack::shared`、`config` | 核、作成、上界の計算、数え |
 | `device.go` | `stack` と `config` | 作成の値の検査と核の作成。`tun.Device` の面とタイマーの goroutine は移しません |
-| `conn.go` | `stack::tcp_app` | 接続のアプリケーションの操作 (読み書き、`CloseWrite`、`Close`、`Abort`、`Delivered`、古い handle)。期限と通知の channel は移しません |
-| `tcb.go`、`tcpin.go`、`tcpout.go`、`timers.go`、`fault.go` | `tcp::conn`、`tcp::input`、`tcp::output`、`tcp::timers` | 接続の枠、受け入れの判定、segment を作る処理、タイマー、会計の不整合 |
+| `conn.go`、`listener.go` の操作 | `stack::api` | 接続のアプリケーションの操作 (読み書き、`CloseWrite`、`Close`、`Abort`、`Delivered`、古い handle)。期限と通知の channel は移しません |
+| `tcb.go`、`tcpin.go`、`tcpout.go`、`timers.go`、`fault.go` | `tcp::conn`、`tcp::ctx`、`tcp::input`、`tcp::output`、`tcp::timers` | 接続の枠と確立と閉じる手順、受け入れの判定、segment を作る処理、タイマー、会計の不整合 |
 | `syn.go`、`listener.go` | `tcp::syn`、`tcp::listen` | 握手の途中の表、待ち受け、accept の待ち行列 |
 | `timewait.go` | `tcp::timewait` | TIME_WAIT と FIN_WAIT_2 の行の表 |
 | `ring.go`、`recv.go`、`records.go` | `buf::chunk`、`buf::recv`、`buf::records` | chunk の置き場、送受信の輪、区間の treap、送信の記録 |
-| `ack.go`、`ackpolicy.go`、`rcvwin.go` | `tcp::rtt`、`tcp::ack_policy`、`tcp::rcv_window` | RTT と RTO、受け手の ACK、受信の窓の自動調整 |
+| `ack.go`、`ackpolicy.go`、`rcvwin.go` | `tcp::ack`、`tcp::ack_policy`、`tcp::rcv_window` | RTT と RTO、受け手の ACK、受信の窓の自動調整 |
 | `scoreboard.go`、`rack.go`、`undo.go` | `tcp::sack`、`tcp::rack`、`tcp::undo` | SACK の scoreboard と回復、RACK-TLP、不要な再送の取り消し |
 | `cc.go`、`hystart.go`、`cwndval.go`、`lazyegress.go` | `tcp::cc` | NewReno、CUBIC、HyStart++、窓の使用の判定、遅れた送り出し |
 | `boost.go` | `budget` | boost の枠、回収、取り消し |
@@ -207,9 +208,13 @@ IPv4 でない packet は device の層が捨てます。
 
 - TCP の待ち受け:`listen_tcp(now, SocketAddrV4) -> Result<ListenerId>`、`accept(now, ListenerId) -> Result<(ConnId, SocketAddrV4)>`、`close_listener(now, ListenerId)`。
   待ち受けを閉じると、Go と同じく accept の待ち行列の接続と握手の途中の行に RST を送ります
-- TCP の接続:`read(now, ConnId, &mut [u8])`、`write(now, ConnId, &[u8])`、`close_write`、`close`、`abort`、`delivered`、`local_addr`、`peer_addr`。
+- TCP の接続:`read(now, ConnId, &mut [u8])`、`write(now, ConnId, &[u8])`、`close_write`、`close_conn`、`abort`、`delivered`、`local_addr`、`peer_addr`。
   読み取りは、相手の FIN の後に `Eof` を、RST と会計の不整合の後に誤りを返します。
-  `close_for_delivery` は Go と同じく `close` と同じ動作です
+  `close_for_delivery` は Go と同じく `close_conn` と同じ動作です。
+  PR 4a で、接続を閉じる操作の名前を `close` から `close_conn` に変えました。
+  核を消費する `close(self, now)` と同じ名前を持てないためです。
+  `read` は、`dst` が空でないときの 0 を EOF とします (std の `Read` と同じ約束です)。
+  古い handle の `local_addr` と `peer_addr` は `None` を返します
 - 写さずに読み書きする口:提案として、受信の輪の生きている範囲を 2 つの slice で見せる `read_slices` と `consume`、送信の輪の空きに直接書く `write_slices` と `commit` を足します。
   中継が LAN 側のソケットとの間で中身を 1 度だけ写すためです。
   採るかは CPU を測ってから決めます
@@ -261,6 +266,26 @@ handle は `Copy` の小さな値で、核への参照を持ちません。
 UDP と ping の対象は、その表を作る段が足します。
 呼び手は知らせを受けたら操作を試し、`WouldBlock` なら次の知らせを待ちます。
 
+PR 4a で次のように決めました。
+
+- `Readable` と `Writable` は、Go が読み取りと書き込みの通知の channel に知らせる所で付けます。
+  `close_conn` は両方を、`close_write` は `Writable` を付けます。
+  accept した接続の枠を返す時 (`abort`、閉じた後の RST、TIME_WAIT の表の行に移す時など) も、Go が通知の channel を
+  閉じて待つ呼び手を起こすのと同じく両方を付けます。
+  `Closed` は、接続が CLOSED になる所 (相手の RST、再送か窓の probe の打ち切り、会計の不整合、TIME_WAIT の期限) で
+  `Readable` と `Writable` と一緒に付けます
+- 枠を返した後に取り出した接続の知らせは、枠を最後に使った接続の handle (世代を 1 つ戻した値) で出します。
+  枠を返すのはアプリケーションが閉じた後か、まだ accept していない接続だけなので、呼び手の handle は知らせと
+  一致します。
+  枠を確立に使い直すときに、その枠の印を消します
+- `Acceptable` は accept の待ち行列に入れた時と、accept の後にまだ接続が残る時に付けます。
+  待ち受けを開く時と閉じる時に、そのポートの印を消します
+- accept の時には知らせを付けません。
+  accept の前に届いたデータの `Readable` は、呼び手がまだ知らない handle で `Acceptable` より後に出ることがあります。
+  呼び手は accept した接続を、待つ前に一度 `read` と `write` で試します
+- 自分の FIN の確認で LAST_ACK から CLOSED に移り、アプリケーションが閉じていて枠を返す接続の `Writable` と
+  `Closed` は、枠を返した後に取り出すので、上の規則どおり枠を最後に使った接続の handle で出ます
+
 boost の変化は知らせに入れず、hook だけで伝えます ([boost の hook](#boost-の-hook))。
 
 ### 時刻と乱数
@@ -271,6 +296,9 @@ boost の変化は知らせに入れず、hook だけで伝えます ([boost の
   Go の核の時刻 (起点からの int64 の ns) と同じ値を持てるので、記録の時刻をそのまま渡せます。
   `Time` と `Duration` の足し算と、`Time` どうしの引き算は飽和します。核の中で panic を起こさないためです。
   駆動の層は、作成の時の `Instant` からの経過を ns にして渡します。
+  PR 4a で、核は受けた時刻を `i64::MAX / 4` ns (約 73 年) で止めることにしました。
+  核は時刻に期限の長さ (最も長いのは PAWS の 24 日) を足すので、止めないと上限の近くの時刻で足し算が溢れます。
+  止めた後の時刻ではタイマーが進まなくなりますが、73 年を超える時刻を渡す呼び手は製品にありません
   時刻が前の値より戻ったときは、前の値を使います
 - 停止の間の時計:駆動の層は、device の層に渡すものと同じ時刻を核に渡します。
   時計はデータプレーンの時計で、Linux と macOS では一時停止の間に止まり、Windows ではスリープの間も進みます ([agent の置き換えの時計](agent-parity.md#時計))
@@ -419,6 +447,35 @@ CPU の目標は置き換えの条件に入れないので ([置き換えの判�
 device の層のハンドシェイクの時刻の高い水位 (`Device::unix_high_water`) も、同じ受け渡しで次の世代に渡します。
 
 ## メモリ
+
+### 接続の枠の配置
+
+決定 (所有者、2026-11-01):データプレーンのコードは CPU のキャッシュに合わせて配置します。
+segment ごとの経路が触る欄をまとめ、まれにしか触らない欄から分けます。
+tick ごとにたどるものは配列と番号で持ち、pointer をたどりません。
+輪は連続した領域に置き、ほかのスレッドが読む数を segment ごとの欄の行に置きません。
+配置は意味を変えないので、Go の wgstack の記録との bit の一致の条件はそのまま守ります。
+
+PR 4a で次の形にしました。
+
+- 接続の枠は、同じ番号で引く 3 つの配列に分けます。
+  `Tcb` は segment ごとの経路が触る欄 (番号、窓、タイマーの期限、輻輳の窓、送信の記録の scoreboard、印) で、
+  `repr(C, align(64))` で受信の入口が最初に触る欄を前に並べ、枠どうしがキャッシュの行を分け合わないようにします。
+  `ConnCold` は不要な再送の取り消しと boost の需要のような、まれにしか触らない欄です。
+  `ConnBufs` は送受信の輪と記録の輪の管理で、`repr(C)` で小さな管理の欄を前に、輪の chunk への pointer の配列
+  (1 つの輪で 2 KiB) を後ろに置きます
+- 前の段の `ConnSlot` は、2 つの輪の pointer の配列 (合わせて約 4 KiB) を接続の欄と同じ値に持っていました。
+  segment ごとの欄はその間に散らばっていました。
+  配列を `ConnBufs` に移したので、`Tcb` の行は配列に押し広げられません
+- accept の待ち行列の節は、別の接続の処理が書き換えるので、接続の枠から出して番号で引く配列 (`QLink`) にし、
+  核の共有の状態に置きます。
+  接続の処理が自分の枠と共有の状態を同時に `&mut` で借りられるようにするためでもあります
+- タイマーの輪、出力の list、知らせの list は前の段から番号の表です
+- 数えと 1 分に 1 回の門は核の共有の状態にあり、`Tcb` の行にありません。
+  核は 1 つのスレッドの値で、ほかのスレッドは読みません
+- 上界の `conn_slots` の項は 3 つの配列と空きの list と待ち行列の節の型の大きさで数え、表を生成し直しました
+
+測る道具と、分ける前と後の測った値は、ベンチの crate を足す積んだ PR がこの節に書きます。
 
 ### 上界の式の写し方
 
@@ -817,6 +874,44 @@ Go の試験を変える PR は、規則どおり wgstack の関門を流しま�
 試験の担当は Rust の wgstack の実装のコードを読まず、公開の API の文書だけを読みます。
 実装の担当は試験の担当の台本と runner を直しません。
 台本が誤っていると考えたら、理由を書いて試験の担当に返します。
+
+### PR 4a と 4b で決めたこと
+
+実装の担当が決めた点です。
+理由と共に挙げ、所有者か監督が変えるときはこの節を直します。
+
+- PR の分け方:受動の open と閉じる手順 (4a) と、データの経路 (4b) を 1 つの PR にしました。
+  Go のコードでは、FIN の状態の遷移を ACK の処理が進め、窓の probe を入力の後の処理が張るように、2 つが同じ関数を
+  通ります。
+  分けると 4a に使い捨ての代わりの規則 (再送の無い送信、固定の窓) が要るためです。
+  ベンチの crate は積んだ別の PR にしました
+- SACK の交渉:PR 5 までは SACK を交渉しません。
+  SYN-ACK に SACK-permitted を載せず、`sack_ok` は偽です。
+  SACK の印付けと回復の無い核が SACK を交渉すると、Go と違う経路 (高速の再送の無い回復) を通るためです。
+  SACK を示す記録は PR 5 から照らすので、照らす範囲は変わりません
+- HyStart++:Go の HyStart++ は輻輳の制御の種類によらず最初の slow start で働きます。
+  NewReno の記録と同じ出力を返すため、PR 5 でなく PR 4b に入れました
+- 輻輳の制御と boost の与え方:`Config` に `congestion` と `boost` を足しました。
+  PR 5 までは既定を NewReno と boost を求めない方針にし、CUBIC と boost を求める方針は設定の誤り
+  (`ConfigError::Unsupported`) にします。
+  PR 5 が既定を Go と同じ CUBIC と需要による boost に戻します
+- 時刻の算術:TCP の規則の中の時刻は Go と同じ符号つきの 64 bit の ns で持ち、0 を「無し」にします。
+  Go は `now - curRTO()` のように負になりうる値を 0 と区別して使うので、飽和する `Time` の算術では同じ出力に
+  なりません
+- 古い handle の abort:Go は古い接続の値が持つ 4 つ組で TIME_WAIT の行を引きます。
+  Rust の `ConnId` は 4 つ組を持たないので、TIME_WAIT の表に元の接続の枠ごとの行の list を持ち、元の枠と世代で引きます。
+  手間は、その枠から移して表に残る行の数です。
+  中継は規則を変えた時と閉じる時に、届けている途中の多くの接続を abort するので、表の全体をたどる形は採りませんでした。
+  上界の `tw` の項は、行ごとの節と枠ごとの先頭を数えます
+- 接続の枠の確保の失敗:握手の最後の ACK で floor の記録の輪と区間の表を確保できなければ、accept の待ち行列が
+  満杯の時と同じく ACK を捨てて行を残し、`accept_overflow` を数えます
+- 断片、UDP、ICMP:PR 6 までは捨てて理由ごとに数えます (`fragments_dropped`、`udp_dropped`、`icmp_dropped`)
+- chunk の確保の失敗:受信のバッファが chunk を確保できなければ、segment を状態を変えずに捨てて
+  `recv_no_memory` を数えます。
+  書き込みは `Error::NoMemory` を返します
+- 白箱の試験:Go の `tcp_test.go`、`ackpolicy_test.go`、`orphan_test.go`、`reuse_refused_test.go`、
+  `hystart_test.go` などのうち、この段の範囲の試験を移しました。
+  SACK、D-SACK、boost、受信の窓の boost の段を使う試験 (`rcvwin_test.go` の多く) は、その段が移します
 
 ### 後の段
 

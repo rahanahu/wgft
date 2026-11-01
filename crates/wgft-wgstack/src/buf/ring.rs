@@ -18,6 +18,7 @@ const MASK: u64 = CHUNK_SIZE as u64 - 1;
 
 /// byte の輪です。
 #[derive(Debug)]
+#[repr(C)]
 pub(crate) struct Ring {
     cap: u64,
     chunks: [Option<Chunk>; SLOTS],

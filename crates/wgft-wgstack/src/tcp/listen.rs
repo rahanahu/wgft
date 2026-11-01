@@ -4,9 +4,10 @@
 //! 持ち、閉じた後の handle を誤りにします。UDP の endpoint の表も同じ [`PortTable`] を使い、行の型は UDP の段
 //! (PR 6) が足します。
 //!
-//! accept の待ち行列は Device 全体で Q 本、待ち受け 1 つで Q の半分までで、待ち行列の節は接続の枠に持ちます。
+//! accept の待ち行列は Device 全体で Q 本、待ち受け 1 つで Q の半分までです。待ち行列の節は接続の番号で引く
+//! 別の配列 ([`QLink`]) に持ちます。
 
-use super::conn::ConnSlots;
+use super::conn::QLink;
 use crate::fixed_vec::{AllocError, FixedVec};
 use crate::output::NIL;
 
@@ -71,6 +72,11 @@ impl<R: Default + Copy> PortTable<R> {
         (r.open && r.generation == generation).then_some(&mut r.row)
     }
 
+    /// ポート `port` の行の今の世代です。閉じた行は最後に開いた時の世代です。
+    pub(crate) fn generation(&self, port: u16) -> u32 {
+        self.rows[usize::from(port)].generation
+    }
+
     /// 開いているポート `port` の行です。
     pub(crate) fn by_port(&self, port: u16) -> Option<&R> {
         let r = &self.rows[usize::from(port)];
@@ -127,65 +133,70 @@ impl Default for Listener {
     }
 }
 
-/// 確立した接続 `slot` を、ポート `port` の待ち受けの待ち行列の末尾に入れます。`qlen` は呼び手が先に予約します。
-pub(crate) fn enqueue(l: &mut Listener, port: u16, conns: &mut ConnSlots, slot: u32) {
+/// 確立した接続 `slot` を待ち受け `l` (ポート `port`) の待ち行列の末尾に入れます。待ち行列の長さは呼び手が
+/// 予約済みです。
+pub(crate) fn enqueue(l: &mut Listener, port: u16, links: &mut [QLink], slot: u32) {
     let tail = l.qtail;
-    let c = conns.slot_mut(slot);
-    c.listener = port;
-    c.queued = true;
-    (c.qprev, c.qnext) = (tail, NIL);
+    links[slot as usize] = QLink {
+        queued: true,
+        listener: port,
+        prev: tail,
+        next: NIL,
+    };
     if tail == NIL {
         l.qhead = slot;
     } else {
-        conns.slot_mut(tail).qnext = slot;
+        links[tail as usize].next = slot;
     }
     l.qtail = slot;
 }
 
-/// 接続 `slot` を待ち行列から外し、予約を返します。外したかを返します。
-pub(crate) fn dequeue(l: &mut Listener, conns: &mut ConnSlots, slot: u32) -> bool {
-    let c = conns.slot(slot);
+/// 接続 `slot` を待ち行列から外し、待ち受けの長さを 1 つ減らします。外したかを返します。呼び手は核の全体の
+/// 数も減らします。
+pub(crate) fn dequeue(l: &mut Listener, links: &mut [QLink], slot: u32) -> bool {
+    let c = links[slot as usize];
     if !c.queued {
         return false;
     }
-    let (p, x) = (c.qprev, c.qnext);
-    if p == NIL {
-        l.qhead = x;
+    if c.prev == NIL {
+        l.qhead = c.next;
     } else {
-        conns.slot_mut(p).qnext = x;
+        links[c.prev as usize].next = c.next;
     }
-    if x == NIL {
-        l.qtail = p;
+    if c.next == NIL {
+        l.qtail = c.prev;
     } else {
-        conns.slot_mut(x).qprev = p;
+        links[c.next as usize].prev = c.prev;
     }
-    let c = conns.slot_mut(slot);
-    (c.qprev, c.qnext) = (NIL, NIL);
-    c.queued = false;
+    links[slot as usize] = QLink::default();
     l.qlen -= 1;
     true
 }
 
-/// 待ち行列の長さ (移している途中の行を除く) と、節の向きと印を確かめます。
+/// 待ち受け `l` の待ち行列の節が使っている枠を正しく結び、数が長さ以下であることを確かめ、待ち行列の接続の
+/// 数を返します。
 pub(crate) fn check_queue(
     l: &Listener,
     port: u16,
-    conns: &ConnSlots,
+    links: &[QLink],
+    in_use: impl Fn(u32) -> bool,
 ) -> Result<usize, &'static str> {
     let mut n = 0;
     let mut prev = NIL;
     let mut i = l.qhead;
     while i != NIL {
-        let c = conns.slot(i);
-        if !c.queued || !c.in_use || c.listener != port || c.qprev != prev {
+        let c = links
+            .get(i as usize)
+            .ok_or("an accept queue node is out of range")?;
+        if !c.queued || !in_use(i) || c.listener != port || c.prev != prev {
             return Err("an accept queue node is linked wrongly");
         }
         n += 1;
-        if n > conns.len() {
+        if n > links.len() {
             return Err("an accept queue loops");
         }
         prev = i;
-        i = c.qnext;
+        i = c.next;
     }
     if prev != l.qtail || n > usize::from(l.qlen) {
         return Err("an accept queue disagrees with its length");
@@ -220,19 +231,23 @@ mod tests {
 
     #[test]
     fn accept_queue_keeps_order() {
-        let mut conns = ConnSlots::new(4).unwrap();
+        let mut links = [QLink::default(); 4];
         let mut l = Listener::default();
-        for _ in 0..3 {
-            let s = conns.alloc().unwrap().unwrap();
+        for s in 0..3 {
             l.qlen += 1;
-            enqueue(&mut l, 80, &mut conns, s);
+            enqueue(&mut l, 80, &mut links, s);
         }
-        assert_eq!(check_queue(&l, 80, &conns), Ok(3));
-        assert!(dequeue(&mut l, &mut conns, 1));
-        assert!(!dequeue(&mut l, &mut conns, 1));
-        assert_eq!(check_queue(&l, 80, &conns), Ok(2));
+        let used = |i: u32| i < 3;
+        assert_eq!(check_queue(&l, 80, &links, used), Ok(3));
+        assert!(dequeue(&mut l, &mut links, 1));
+        assert!(!dequeue(&mut l, &mut links, 1));
+        assert_eq!(check_queue(&l, 80, &links, used), Ok(2));
         assert_eq!((l.qhead, l.qtail, l.qlen), (0, 2, 2));
-        assert!(dequeue(&mut l, &mut conns, 0) && dequeue(&mut l, &mut conns, 2));
+        assert_eq!(
+            check_queue(&l, 81, &links, used),
+            Err("an accept queue node is linked wrongly")
+        );
+        assert!(dequeue(&mut l, &mut links, 0) && dequeue(&mut l, &mut links, 2));
         assert_eq!((l.qhead, l.qtail, l.qlen), (NIL, NIL, 0));
     }
 

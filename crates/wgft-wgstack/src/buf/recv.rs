@@ -59,9 +59,11 @@ pub(crate) struct InsertResult {
 }
 
 /// 受信のバッファです。
+/// `repr(C)` で管理の欄を前に、輪 (chunk の pointer の配列を持つ) を後ろに置きます。受信の経路が触る管理の欄を
+/// 少ないキャッシュの行に収めるためです。
 #[derive(Debug)]
+#[repr(C)]
 pub(crate) struct RecvBuf {
-    pub(crate) r: Ring,
     /// 最も古い未読の byte です。
     pub(crate) read_off: u64,
     /// 次に順序どおりに受ける byte (RCV.NXT) です。
@@ -80,6 +82,7 @@ pub(crate) struct RecvBuf {
     /// 最近触れた区間の始まり (offset の下位 32 bit) で、新しい順です。
     recent: [u32; SACK_RECENT],
     nrecent: usize,
+    pub(crate) r: Ring,
 }
 
 /// 種から優先度を作る混ぜ合わせです。
@@ -116,6 +119,21 @@ impl RecvBuf {
             recent: [0; SACK_RECENT],
             nrecent: 0,
         }
+    }
+
+    /// 確立の時に、容量 `cap` の空の輪と、空の区間の表と、接続ごとの優先度の種 `seed` で始め直します。区間の表の
+    /// 配列はそのまま使います。
+    pub(crate) fn restart(&mut self, cap: u64, seed: u64) {
+        debug_assert!(
+            self.r.held_chunks() == 0,
+            "a restarted buffer holds no chunks"
+        );
+        self.r = Ring::new(cap);
+        self.read_off = 0;
+        self.nxt_off = 0;
+        self.clear_intervals();
+        self.seed = seed;
+        self.ctr = 0;
     }
 
     fn full(&self, x: u32) -> u64 {

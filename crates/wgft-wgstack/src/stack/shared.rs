@@ -1,0 +1,496 @@
+//! 接続の枠の外の、核の共有の状態 (Go の `stack` の欄のうち接続の枠を除くもの)。
+//!
+//! 接続の処理は、自分の枠の欄とこの値を同時に `&mut` で借ります。接続の枠の配列はこの値に入れないので、
+//! 借用が重なりません。数えと 1 分に 1 回の門の状態もここにあり、segment ごとに触る接続の欄とは別の行に
+//! あります。
+
+use crate::budget::Budget;
+use crate::buf::RECV_FLOOR;
+use crate::buf::chunk::ChunkPool;
+use crate::config::Config;
+use crate::event::{Bits, EventList};
+use crate::fixed_vec::FixedVec;
+use crate::frag;
+use crate::index::Index;
+use crate::output::{CtlRing, Dlist};
+use crate::rng::ChaCha8;
+use crate::seq;
+use crate::siphash::SipKey;
+use crate::tcp::conn::QLink;
+use crate::tcp::listen::{Listener, PortTable};
+use crate::tcp::syn::SynTable;
+use crate::tcp::timewait::TwTable;
+use crate::tcp::{IP_TCP_HEADERS, TS_OPTION_LEN};
+use crate::wheel::Wheel;
+use crate::wire::{self, FLAG_ACK, FLAG_RST, Segment, TcpHeader, Tuple};
+use core::fmt;
+
+/// 出力の組です。接続の枠の segment、握手の途中の行と TIME_WAIT の行の segment、UDP の datagram、制御の輪の
+/// 順で、Go と同じ番号です。
+pub(crate) const CLASS_CONN: usize = 0;
+pub(crate) const CLASS_ROW: usize = 1;
+pub(crate) const CLASS_UDP: usize = 2;
+pub(crate) const CLASS_CTL: usize = 3;
+pub(crate) const NUM_CLASSES: usize = 4;
+
+/// 接続の知らせの印です。
+pub(crate) const EV_READ: Bits = 1;
+pub(crate) const EV_WRITE: Bits = 2;
+pub(crate) const EV_CLOSED: Bits = 4;
+/// 待ち受けの知らせの印です。
+pub(crate) const EV_ACCEPT: Bits = 1;
+
+/// 出力の組の状態です (Go の `output`)。
+#[derive(Debug)]
+pub(crate) struct Output {
+    /// 送るもののある接続の枠です。
+    pub(crate) conns: Dlist,
+    /// 送るもののある行です。握手の途中の行は 0 から、TIME_WAIT の行は握手の途中の表の大きさから数えます。
+    pub(crate) rows: Dlist,
+    pub(crate) ctl: CtlRing,
+    pub(crate) cur: usize,
+    pub(crate) deficit: [i64; NUM_CLASSES],
+}
+
+impl Output {
+    fn class_empty(&self, c: usize) -> bool {
+        match c {
+            CLASS_CONN => self.conns.is_empty(),
+            CLASS_ROW => self.rows.is_empty(),
+            CLASS_CTL => self.ctl.len() == 0,
+            // UDP の送信の FIFO は PR 6 が足します。
+            _ => true,
+        }
+    }
+
+    /// deficit round robin で次の組を選びます。どの組も空なら `None` です。
+    pub(crate) fn pick(&mut self, quantum: i64) -> Option<usize> {
+        for _ in 0..NUM_CLASSES {
+            let c = self.cur;
+            if self.class_empty(c) {
+                self.deficit[c] = 0;
+                self.cur = (c + 1) % NUM_CLASSES;
+                continue;
+            }
+            if self.deficit[c] <= 0 {
+                self.deficit[c] += quantum;
+            }
+            return Some(c);
+        }
+        None
+    }
+
+    /// 組 `cls` が `n` byte の packet を作った後の deficit を進めます。
+    pub(crate) fn spent(&mut self, cls: usize, n: usize) {
+        self.deficit[cls] -= i64::try_from(n).unwrap_or(i64::MAX);
+        if self.deficit[cls] <= 0 || self.class_empty(cls) {
+            self.cur = (cls + 1) % NUM_CLASSES;
+        }
+    }
+}
+
+/// 種類ごとの拒否と事象の数です (Go の `Stats` の数の欄)。保持の量は [`crate::Held`] が持ちます。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Stats {
+    pub mss_floor_drops: u64,
+    pub syn_table_full: u64,
+    pub accept_overflow: u64,
+    pub tw_evicted: u64,
+    pub ctl_dropped: u64,
+    pub ooo_dropped: u64,
+    pub recv_trimmed: u64,
+    pub recv_no_memory: u64,
+    pub challenge_limited: u64,
+    pub fragments_dropped: u64,
+    pub udp_dropped: u64,
+    pub icmp_dropped: u64,
+    pub malformed: u64,
+    pub bad_checksum: u64,
+    pub not_local: u64,
+    pub retransmit_aborts: u64,
+    pub probe_aborts: u64,
+    /// 再送のタイマーの期限で送り直した回数です。窓の probe は数えません。
+    pub rtos: u64,
+    /// 累積の確認が進む前に続いた RTO です。
+    pub rtos_backed_off: u64,
+    /// 回復の外で、重複した ACK を 1 つか 2 つ受けた後の RTO です。
+    pub rtos_short_of_dup_thresh: u64,
+    pub fast_recoveries: u64,
+    pub partial_acks: u64,
+    /// 原因ごとの再送の segment です。添字は高速の再送、部分の確認、RTO、PMTU、TLP です。
+    pub retrans: [u64; 5],
+    pub dup_acks_in: u64,
+    pub acks_delayed: u64,
+    pub acks_immediate: u64,
+    pub accounting_faults: u64,
+    /// HyStart++ が Conservative Slow Start に入った回数です。
+    pub hystart_css: u64,
+    /// HyStart++ が CSS の後に slow start を終えた回数です。
+    pub hystart_exits: u64,
+    /// 再送が不要だったと分かり輻輳の窓を戻した回数です。
+    pub spurious_undos: u64,
+}
+
+/// 1 分に 1 回までの門を通るログの種類です。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LogKind {
+    /// MSS の下限より小さな MSS を示す SYN を捨てました。
+    MssFloor,
+    /// 握手の途中の表が満杯で SYN を捨てました。
+    SynFull,
+    /// accept の待ち行列か接続の表が満杯で、握手の最後の ACK を捨てました。
+    AcceptOverflow,
+    /// TIME_WAIT の表が満杯で最も古い行を外しました。
+    TwEvicted,
+    /// 制御の輪が満杯で制御の packet を捨てました。
+    CtlDropped,
+    /// 順序外の区間の数の上限で segment を捨てました。
+    OooDropped,
+    /// 会計の不整合で接続を閉じました。
+    AccountingFault,
+}
+
+const LOG_KINDS: [LogKind; 7] = [
+    LogKind::MssFloor,
+    LogKind::SynFull,
+    LogKind::AcceptOverflow,
+    LogKind::TwEvicted,
+    LogKind::CtlDropped,
+    LogKind::OooDropped,
+    LogKind::AccountingFault,
+];
+
+/// 門を通った 1 行の材料です。`count` は核を作ってからの数です。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LogLine {
+    pub kind: LogKind,
+    pub count: u64,
+}
+
+impl fmt::Display for LogLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let n = self.count;
+        match self.kind {
+            LogKind::MssFloor => write!(
+                f,
+                "wgstack: dropped TCP handshakes that advertise an MSS below 536; {n} dropped since the tunnel was built; peers that advertise a smaller MSS cannot connect through this tunnel"
+            ),
+            LogKind::SynFull => write!(
+                f,
+                "wgstack: dropped SYNs because the half-open table was full; {n} since the tunnel was built"
+            ),
+            LogKind::AcceptOverflow => write!(
+                f,
+                "wgstack: dropped final handshake ACKs because the accept queue or the connection table was full; {n} since the tunnel was built"
+            ),
+            LogKind::TwEvicted => write!(
+                f,
+                "wgstack: evicted the oldest TIME_WAIT rows because the table was full; {n} since the tunnel was built"
+            ),
+            LogKind::CtlDropped => write!(
+                f,
+                "wgstack: dropped control packets because the control output ring was full; {n} since the tunnel was built"
+            ),
+            LogKind::OooDropped => write!(
+                f,
+                "wgstack: dropped out-of-order segments that would need more than the fixed number of receive intervals; {n} since the tunnel was built"
+            ),
+            LogKind::AccountingFault => write!(
+                f,
+                "wgstack: closed a connection after an internal accounting error; {n} since the tunnel was built"
+            ),
+        }
+    }
+}
+
+/// 1 分に 1 回までの門です (Go の `gate`)。核の時刻で判定します。
+#[derive(Clone, Copy, Debug, Default)]
+struct Gate {
+    next: i64,
+    used: bool,
+    /// 門を通った時の数で、`poll_log` が取り出すまで持ちます。
+    pending: Option<u64>,
+}
+
+/// 種類ごとの門です。
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Gates {
+    gates: [Gate; LOG_KINDS.len()],
+}
+
+impl Gates {
+    fn allow(&mut self, kind: LogKind, now: i64, count: u64) {
+        let Some(i) = LOG_KINDS.iter().position(|&k| k == kind) else {
+            return;
+        };
+        let g = &mut self.gates[i];
+        if g.used && now < g.next {
+            return;
+        }
+        g.used = true;
+        g.next = now.saturating_add(60_000_000_000);
+        g.pending = Some(count);
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<LogLine> {
+        for (g, &kind) in self.gates.iter_mut().zip(LOG_KINDS.iter()) {
+            if let Some(count) = g.pending.take() {
+                return Some(LogLine { kind, count });
+            }
+        }
+        None
+    }
+}
+
+/// 接続の枠の外の核の状態です。
+#[derive(Debug)]
+pub(crate) struct Shared {
+    pub(crate) config: Config,
+    /// 受け付ける宛先のアドレスです。
+    pub(crate) addr: u32,
+    /// 最後に受けた時刻 (ns) です。
+    pub(crate) now: i64,
+    pub(crate) isn_key: SipKey,
+    pub(crate) ts_key: SipKey,
+    pub(crate) ip_id: u32,
+    pub(crate) rng: ChaCha8,
+    /// 空きの接続の枠です。
+    pub(crate) conn_free: FixedVec<u32>,
+    /// accept の待ち行列の節です。接続の枠の番号で引きます。
+    pub(crate) qlinks: FixedVec<QLink>,
+    pub(crate) conn_idx: Index,
+    pub(crate) syn: SynTable,
+    pub(crate) tw: TwTable,
+    pub(crate) listeners: PortTable<Listener>,
+    /// accept の待ち行列の全体の数です。
+    pub(crate) queued: usize,
+    pub(crate) out: Output,
+    pub(crate) events: EventList,
+    pub(crate) wheel: Wheel,
+    pub(crate) fired: FixedVec<u32>,
+    pub(crate) chunks: ChunkPool,
+    pub(crate) frag: frag::Table,
+    pub(crate) budget: Budget,
+    /// challenge ACK の token bucket です。
+    pub(crate) ch_sec: i64,
+    pub(crate) ch_count: i64,
+    pub(crate) stats: Stats,
+    pub(crate) gates: Gates,
+}
+
+impl Shared {
+    /// 拒否を数え、1 分に 1 回までログの材料にします (Go の `refused`)。
+    pub(crate) fn refused(&mut self, kind: LogKind, now: i64) {
+        let st = &mut self.stats;
+        let c = match kind {
+            LogKind::MssFloor => &mut st.mss_floor_drops,
+            LogKind::SynFull => &mut st.syn_table_full,
+            LogKind::AcceptOverflow => &mut st.accept_overflow,
+            LogKind::TwEvicted => &mut st.tw_evicted,
+            LogKind::CtlDropped => &mut st.ctl_dropped,
+            LogKind::OooDropped => &mut st.ooo_dropped,
+            LogKind::AccountingFault => &mut st.accounting_faults,
+        };
+        *c += 1;
+        let n = *c;
+        self.gates.allow(kind, now, n);
+    }
+
+    /// MSS の下限で SYN を捨てたことを数えます。
+    pub(crate) fn drop_mss(&mut self, now: i64) {
+        self.refused(LogKind::MssFloor, now);
+    }
+
+    /// 次の IP の ID です。
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Go keeps the low 16 bits of the counter"
+    )]
+    pub(crate) fn next_id(&mut self) -> u16 {
+        self.ip_id = self.ip_id.wrapping_add(1);
+        self.ip_id as u16
+    }
+
+    /// `[0, n)` の乱数です (Go の `randomU64N`)。
+    pub(crate) fn random_below(&mut self, n: u64) -> u64 {
+        self.rng.below(n)
+    }
+
+    /// RFC 6528 の鍵付きの hash で ISN を作ります。M は 4 µs ごとに進む時計です。`reuse` は TIME_WAIT の 4 つ組を
+    /// 新しい SYN が使い直すときの前の接続の SND.NXT で、ISN をその 65537 先より前に置きません。
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "Go keeps the low 32 bits of the clock and the hash"
+    )]
+    pub(crate) fn isn(&self, t: Tuple, now: i64, reuse: Option<u32>) -> u32 {
+        let mut iss = ((now / 4000) as u32).wrapping_add(self.isn_key.hash_tuple(t) as u32);
+        if let Some(snd_nxt) = reuse {
+            let floor = snd_nxt.wrapping_add(65537);
+            if seq::lt(iss, floor) {
+                iss = floor;
+            }
+        }
+        iss
+    }
+
+    /// timestamp の値に足す offset です。アドレスの組の鍵付きの hash から作ります。
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Go keeps the low 32 bits of the hash"
+    )]
+    pub(crate) fn ts_offset(&self, t: Tuple) -> u32 {
+        self.ts_key
+            .sum(u64::from(t.laddr) | u64::from(t.raddr) << 32, 0) as u32
+    }
+
+    /// 核の全体の challenge ACK の token bucket から 1 つ取れたかを返します。1 秒ごとに limit/2 から 3*limit/2
+    /// の間の乱数の数を補います。
+    pub(crate) fn challenge_allowed(&mut self, now: i64) -> bool {
+        const LIMIT: u64 = 1000;
+        let sec = now / 1_000_000_000;
+        if sec != self.ch_sec || self.ch_count < 0 {
+            self.ch_sec = sec;
+            self.ch_count = i64::try_from(LIMIT / 2 + self.random_below(LIMIT)).unwrap_or(0);
+        }
+        let ok = self.ch_count > 0;
+        if ok {
+            self.ch_count -= 1;
+        } else {
+            self.stats.challenge_limited += 1;
+        }
+        ok
+    }
+
+    /// 自分が示す MSS です。MTU から IPv4 と TCP の header を引いた値です。
+    pub(crate) fn our_mss(&self) -> u32 {
+        u32::try_from(self.config.mtu).unwrap_or(0) - IP_TCP_HEADERS
+    }
+
+    /// SYN-ACK で広告する窓です。65535 と受信の floor の小さい方を、中身の大きさの倍数に切り下げます。
+    pub(crate) fn initial_window(&self, ts: bool) -> u32 {
+        let mut mss = self.our_mss();
+        if ts {
+            mss -= TS_OPTION_LEN;
+        }
+        let w = u32::try_from(RECV_FLOOR.min(65535)).unwrap_or(65535);
+        w / mss * mss
+    }
+
+    pub(crate) fn queue_conn(&mut self, id: u32) {
+        self.out.conns.push_back(id);
+    }
+
+    pub(crate) fn unqueue_conn(&mut self, id: u32) {
+        self.out.conns.remove(id);
+    }
+
+    pub(crate) fn queue_row(&mut self, id: u32) {
+        self.out.rows.push_back(id);
+    }
+
+    pub(crate) fn unqueue_row(&mut self, id: u32) {
+        self.out.rows.remove(id);
+    }
+
+    /// 接続 `id` に知らせの印を付けます。
+    pub(crate) fn signal(&mut self, id: u32, bit: Bits) {
+        self.events.raise(id, bit);
+    }
+
+    /// 待ち受けのポート `port` に accept できる知らせを付けます。
+    pub(crate) fn signal_listener(&mut self, port: u16) {
+        let t = self.listener_target(port);
+        self.events.raise(t, EV_ACCEPT);
+    }
+
+    /// 待ち受けのポート `port` の知らせの対象の番号です。接続の枠の後ろに並べます。接続の枠の数は accept の
+    /// 待ち行列の節の配列の長さと同じです。
+    pub(crate) fn listener_target(&self, port: u16) -> u32 {
+        u32::try_from(self.qlinks.len()).unwrap_or(0) + u32::from(port)
+    }
+
+    /// option の無い segment を制御の輪に積みます。輪が満杯なら捨てて数えます。
+    pub(crate) fn send_ctl(&mut self, h: TcpHeader) {
+        let id = self.next_id();
+        let Some(b) = self.out.ctl.slot() else {
+            let now = self.now;
+            self.refused(LogKind::CtlDropped, now);
+            return;
+        };
+        wire::write_tcp(b, id, &h, None, 0);
+        let n = wire::finish_tcp(b);
+        self.out.ctl.commit(n);
+    }
+
+    /// どの接続にも行にも当たらない segment に RST を返します (RFC 9293 3.10.7.1)。RST には返しません。
+    pub(crate) fn reply_rst(&mut self, seg: &Segment<'_>) {
+        if seg.has(FLAG_RST) {
+            return;
+        }
+        let mut h = TcpHeader {
+            tup: seg.tup,
+            flags: FLAG_RST,
+            ..TcpHeader::default()
+        };
+        if seg.has(FLAG_ACK) {
+            h.seq = seg.ack;
+        } else {
+            h.ack = seg.seq.wrapping_add(seg.seq_len());
+            h.flags |= FLAG_ACK;
+        }
+        self.send_ctl(h);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![expect(clippy::disallowed_methods, reason = "tests format the log lines")]
+
+    use super::*;
+
+    #[test]
+    fn gates_pass_once_a_minute_and_keep_the_count() {
+        let mut g = Gates::default();
+        g.allow(LogKind::SynFull, 5, 1);
+        g.allow(LogKind::SynFull, 6, 2);
+        assert_eq!(
+            g.pop(),
+            Some(LogLine {
+                kind: LogKind::SynFull,
+                count: 1
+            })
+        );
+        assert_eq!(g.pop(), None);
+        g.allow(LogKind::SynFull, 60_000_000_005, 3);
+        assert_eq!(g.pop().map(|l| l.count), Some(3));
+        for kind in LOG_KINDS {
+            let text = LogLine { kind, count: 2 }.to_string();
+            assert!(
+                text.starts_with("wgstack: ") && text.contains(" 2 "),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn output_rotates_by_deficit() {
+        let mut o = Output {
+            conns: Dlist::new(2).unwrap(),
+            rows: Dlist::new(2).unwrap(),
+            ctl: CtlRing::new(2, 64).unwrap(),
+            cur: 0,
+            deficit: [0; NUM_CLASSES],
+        };
+        assert_eq!(o.pick(100), None);
+        o.conns.push_back(0);
+        o.rows.push_back(1);
+        assert_eq!(o.pick(100), Some(CLASS_CONN));
+        o.spent(CLASS_CONN, 60);
+        assert_eq!(o.pick(100), Some(CLASS_CONN), "the deficit allows more");
+        o.spent(CLASS_CONN, 60);
+        assert_eq!(o.pick(100), Some(CLASS_ROW));
+    }
+}
