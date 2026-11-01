@@ -61,7 +61,7 @@ pub struct Settings {
     pub wg_interface: String,
     /// ユーザー空間モードの netstack の指定。`gvisor`、`wgstack`、または空。
     pub netstack: String,
-    /// 送信の向きのバッチの予算 (MiB)。空は `None`。
+    /// トンネルの受信と送信のバッチの予算 (MiB)。空は `None`。
     pub batch_mib: Option<i64>,
     /// 宛先の許可一覧。`None` は制限しない。
     pub allow_targets: Option<AllowList>,
@@ -81,10 +81,10 @@ impl Settings {
         }
     }
 
-    /// The tunnel batching, derived from the flow caps.
+    /// The tunnel batching from `WGFT_AGENT_BATCH_MIB` and the flow caps.
     #[must_use]
     pub fn batching(&self) -> crate::batching::Batching {
-        crate::batching::Batching::derived(self.flow_caps())
+        crate::batching::Batching::new(self.batch_mib, self.flow_caps())
     }
 }
 
@@ -192,9 +192,14 @@ pub fn flow_cap(c: &Config, env: &str) -> Result<u32, Refusal> {
         })
 }
 
-/// 0 以上の 10 進の整数。`int64` を超える正の値は誤りにせず、最大に丸める。
-/// 解釈は Go の `strconv.ParseInt(v, 10, 64)` で、符号を外した後の走査の順も同じである。
-fn batch_mib(v: &str) -> Result<Option<i64>, Refusal> {
+/// `WGFT_AGENT_BATCH_MIB` の値。0 以上の 10 進の整数。`int64` を超える正の値は誤りにせず、最大に丸める。
+/// 解釈は Go の `strconv.ParseInt(v, 10, 64)` で、符号を外した後の走査の順も同じである。誤りの文面は v1 と
+/// 同じにする (仕様 cli-config.md の WGFT_AGENT_BATCH_MIB)。
+///
+/// # Errors
+///
+/// 値が 0 以上の整数でなければ設定の誤りを返す。
+pub fn batch_mib(v: &str) -> Result<Option<i64>, Refusal> {
     if v.is_empty() {
         return Ok(None);
     }
@@ -264,7 +269,7 @@ pub fn check_supported(s: &Settings) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// 入口を通った後に標準エラーへ書く行。有効な設定、まだ効かせていない設定の知らせ、使わない設定の知らせ、
+/// 入口を通った後に標準エラーへ書く行。有効な設定、メモリの上界、トンネルのバッチ、使わない設定の知らせ、
 /// 宛先の許可一覧の行の順である。
 #[must_use]
 pub fn startup_lines(c: &Config, s: &Settings) -> Vec<LogLine> {
@@ -274,12 +279,8 @@ pub fn startup_lines(c: &Config, s: &Settings) -> Vec<LogLine> {
     let bound = crate::memory::MemoryBound::for_limits(s.flow_caps(), s.batching());
     out.push(LogLine::Stamped(bound.line()));
     out.push(LogLine::Stamped(bound.terms_line()));
-    // 送信の向きのバッチは、値から導く量が wgstack の送信の経路で決まるまで効かせない
-    if !c.get("WGFT_AGENT_BATCH_MIB").is_empty() {
-        out.push(LogLine::Stamped(
-            "WGFT_AGENT_BATCH_MIB: not applied yet, since this build has no send batching; the setting is kept so the same agent.env works later".to_owned(),
-        ));
-    }
+    // バッチの予算が何をするかを、Go の `send batch budget:` の行の代わりに書く
+    out.push(LogLine::Stamped(s.batching().line()));
     // netstack は Rust の wgstack の 1 つだけである。wgstack 以外の値は使わない旨を書く
     if c.source("WGFT_AGENT_NETSTACK") != Source::Default && s.netstack != "wgstack" {
         out.push(LogLine::Stamped(format!(
@@ -384,11 +385,13 @@ mod tests {
             crate::batching::Batching::derived(crate::flowpool::Limits::default()),
         );
         let (line, terms) = (bound.line(), bound.terms_line());
+        let batch = crate::batching::Batching::default().line();
         assert_eq!(
             st,
             vec![
                 line.as_str(),
                 terms.as_str(),
+                batch.as_str(),
                 "no target allowlist: WGFT_AGENT_ALLOW_TARGETS is not set; the server can direct this agent to any address it can reach"
             ]
         );
@@ -406,18 +409,20 @@ mod tests {
             crate::batching::Batching::derived(crate::flowpool::Limits::default()),
         );
         let (line, terms) = (bound.line(), bound.terms_line());
+        let batch = crate::batching::Batching::default().line();
         assert_eq!(
             stamped(&startup_lines(&c, &s)),
             vec![
                 line.as_str(),
                 terms.as_str(),
+                batch.as_str(),
                 "target allowlist WGFT_AGENT_ALLOW_TARGETS=10.0.0.0/8,192.168.1.10/32:80; the server can direct this agent only to these addresses"
             ]
         );
     }
 
     #[test]
-    fn a_set_batch_and_netstack_get_their_notice_and_flow_caps_none() {
+    fn a_set_batch_applies_and_netstack_gets_its_notice_and_flow_caps_none() {
         let (c, s) = settings(
             &[
                 ("WGFT_AGENT_NETSTACK", "gvisor"),
@@ -426,7 +431,14 @@ mod tests {
             &[("WGFT_AGENT_BATCH_MIB", "4")],
         );
         let st = stamped(&startup_lines(&c, &s)).join("\n");
-        assert!(st.contains("WGFT_AGENT_BATCH_MIB: not applied yet"), "{st}");
+        assert!(!st.contains("not applied yet"), "{st}");
+        // 値は効き、上界の batch の項と同じ置き場を書く
+        assert_eq!(s.batch_mib, Some(4));
+        assert!(s.batching().slots() < crate::batching::MAX_SLOTS);
+        assert!(st.contains(&s.batching().line()), "{st}");
+        if cfg!(target_os = "linux") {
+            assert!(st.contains("; from WGFT_AGENT_BATCH_MIB"), "{st}");
+        }
         assert!(!st.contains("WGFT_MAX_UDP_FLOWS"), "{st}");
         assert!(
             st.contains("WGFT_AGENT_NETSTACK=gvisor: unused, since this build has one network stack, wgstack,"),

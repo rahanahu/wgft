@@ -276,6 +276,8 @@ pub struct Input {
     pub(crate) platform: String,
     pub(crate) max_udp_flows: u32,
     pub(crate) max_tcp_flows: u32,
+    /// `WGFT_AGENT_BATCH_MIB`。空は `None`。
+    pub(crate) batch_mib: Option<i64>,
     pub(crate) user: String,
     pub(crate) config_path: PathBuf,
     /// 設定ファイルがあるのに権限で読めなかった誤り。
@@ -328,6 +330,7 @@ impl Input {
             platform: os::platform(),
             max_udp_flows: 8192,
             max_tcp_flows: 2048,
+            batch_mib: None,
             user: os::running_user_text(),
             config_path: PathBuf::new(),
             config_unreadable: None,
