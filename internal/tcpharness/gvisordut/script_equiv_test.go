@@ -26,10 +26,15 @@ func TestScriptsMatchGoFunctions(t *testing.T) {
 			s := scripts[legacy.Name]
 			for seed := uint64(1); seed <= 2; seed++ {
 				var d string
-				for range 3 {
-					_, want := tcpharness.RecordTrace(t, Engine(Known), legacy, seed)
-					_, got := tcpharness.RecordTrace(t, Engine(Known), s, seed)
-					if d = tcpharness.DiffLines(tcpharness.CheckLines(want), tcpharness.CheckLines(got)); d == "" {
+				for k := range uint64(3) {
+					goSeed := seed + k*attemptSeedStride
+					wantOut, want := tcpharness.RecordTrace(t, Engine(Known), legacy, goSeed)
+					_, got := tcpharness.RecordTrace(t, Engine(Known), s, goSeed+pairSeedOffset)
+					d = tcpharness.DiffLines(tcpharness.CheckLines(want), tcpharness.CheckLines(got))
+					if d == "" && !tcpharness.Passed(wantOut) {
+						d = "the Go function's run did not pass, so the pair shows nothing"
+					}
+					if d == "" {
 						break
 					}
 					t.Logf("seed %d: %s; running the pair again", seed, d)
@@ -41,3 +46,10 @@ func TestScriptsMatchGoFunctions(t *testing.T) {
 		})
 	}
 }
+
+// pairSeedOffset gives the script's run of a pair its own seed. Each run here gets a fresh gVisor
+// stack, so the offset is 0; the Linux pair shares one namespace and needs another seed.
+const pairSeedOffset = 0
+
+// attemptSeedStride moves both seeds of a pair on each new attempt; 0 here, as pairSeedOffset.
+const attemptSeedStride = 0

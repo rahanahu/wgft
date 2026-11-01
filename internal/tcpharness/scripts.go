@@ -36,11 +36,13 @@ func loadScript(file string) (*Script, error) {
 }
 
 // CheckLines keeps the lines of a trace that a real-time DUT gives the same way on every run:
-// each check's outcome, key, expectation and observation, and the names of the measured values
-// without the values. Segment lines carry the engine's own random numbers and are left out.
+// each check's outcome, key, expectation and observation, failed ones included, and the names of
+// the measured values without the values. Segment lines carry the engine's own random numbers and
+// are left out.
 func CheckLines(lines []string) []string {
 	var out []string
 	for _, l := range lines {
+		l = strings.TrimPrefix(l, "recorded: ")
 		for _, p := range []string{"PASS  ", "FAIL  ", "KNOWN DIFFERENCE  ", "CHANGED DIFFERENCE  ", "UNEXPECTED PASS  "} {
 			if strings.HasPrefix(l, p) {
 				out = append(out, l)
@@ -71,4 +73,18 @@ func DiffLines(want, got []string) string {
 		}
 	}
 	return ""
+}
+
+// Passed reports whether every check of a recorded run passed or met its expected difference. A
+// side-by-side pair is evidence only when the Go function's run passed: two runs that fail the
+// same way, such as on a DUT left in a bad state, match without showing anything.
+func Passed(outcome map[string][]string) bool {
+	for _, os := range outcome {
+		for _, o := range os {
+			if o != OutcomePass && o != OutcomeKnown {
+				return false
+			}
+		}
+	}
+	return true
 }
