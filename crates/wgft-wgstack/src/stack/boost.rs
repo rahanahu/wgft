@@ -79,7 +79,7 @@ impl<H: Hook> Stack<H> {
     /// 8 節)。相手は累積の確認まで送ったデータを持つので、取り消したデータは再送で届きます。戻した後も広告した右端は
     /// 縮めず、floor の外に届いたデータは受信のバッファに入れずに捨てます (`input_data` の上限)。輪の確保に失敗した
     /// ら、取り消しの後でも boost の段のままにします。
-    fn demote(&mut self, h: ConnId, now: i64) -> bool {
+    pub(super) fn demote(&mut self, h: ConnId, now: i64) -> bool {
         let Some(i) = self.conns.resolve(h) else {
             return false;
         };

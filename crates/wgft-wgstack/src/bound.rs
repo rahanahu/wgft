@@ -44,12 +44,42 @@ pub struct Bound {
     pub udp_tx: u64,
     /// N_ping × c_ping:ping の endpoint の行と応答の置き場です。
     pub ping: u64,
-    /// 項の和です。
+    /// 項の和です。段を変える間の一時の保持は、段を変える接続が持つ boost の枠の予約の内にあるので、別の項を
+    /// 持ちません ([`STAGE_CHANGE_FITS`])。
     pub total: u64,
-    /// 段を変える間の一時の保持で、式に含めない項です。1 本の接続の操作の中で起きるので、同時に起きる数は boost の
-    /// 枠の数以下で、B × (f_s + f_r) で抑えます。
-    pub transient: u64,
 }
+
+/// 段を変える間の一時の保持が、その接続の boost の予約の内にあることです (wgstack-rs.md の「上界の式の写し方」)。
+///
+/// 段を変えるのは枠を持つ接続だけで、枠は段を移す前に受け取り、移した後に返します (`try_boost`、`grow_recv`、
+/// `demote`)。核は 1 つのスレッドで動くので、1 回の移しは 1 本の接続の 1 回の呼び出しの中で終わり、その間にほかの
+/// 接続が枠や chunk を取ることはありません。枠を持つ接続の予約は、両方の向きの boost の段で 2B 個の chunk です
+/// (B は boost の段の chunk の数、F は floor の段の chunk の数)。
+///
+/// 移す間に接続が持つ chunk は、呼び出しごとに次の数以下です。送信の輪は確認した分の chunk を返すので、生きている
+/// 範囲 (floor 以下) に掛かる chunk だけを持ち、境目がそろわなければ F + 1 個です。新しい floor の輪は位置を
+/// floor で割った余りに置くので F 個以下です。
+///
+/// - `enter_boost`:送信の古い floor の輪 F、新しい boost の輪 F + 1、floor の受信の輪 F で、3F + 1 です
+/// - `grow_recv`:boost の送信の輪 B、受信の古い floor の輪 F、新しい boost の輪 F + 1 で、B + 2F + 1 です
+/// - `demote`:受信の取り消しは区間の表だけを変え、古い boost の受信の輪は chunk を B 個まで持ったままです。
+///   受信の古い輪 B と新しい floor の輪 F、送信の古い boost の輪 F + 1 と新しい floor の輪 F で、B + 3F + 1 です
+///
+/// 最も大きい `demote` の和が 2B 以下であることを確かめます。
+pub(crate) const STAGE_CHANGE_FITS: bool = {
+    let c = CHUNK_SIZE as u64;
+    let floor = (if SEND_FLOOR > RECV_FLOOR {
+        SEND_FLOOR
+    } else {
+        RECV_FLOOR
+    }) / c;
+    let boost = BOOST_SIZE / c;
+    let enter_boost = 3 * floor + 1;
+    let grow_recv = boost + 2 * floor + 1;
+    let demote = boost + 3 * floor + 1;
+    enter_boost <= demote && grow_recv <= demote && demote <= 2 * boost
+};
+const _: () = assert!(STAGE_CHANGE_FITS);
 
 /// 項の内訳です。生成する表が使います。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -157,7 +187,6 @@ impl Bound {
             udp_tx,
             ping,
             total: fix + floor_conn + boost + frag + udp_rx + udp_tx + ping,
-            transient: b(BOOST_SLOTS) * (SEND_FLOOR + RECV_FLOOR),
         }
     }
 }
