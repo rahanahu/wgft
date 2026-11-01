@@ -484,16 +484,11 @@ async fn apply_saved(agent: &Shared, mut shutdown: Pin<&mut impl Future<Output =
         () = &mut shutdown => {}
     }
     logf!("shutting down");
-    let close = async {
+    within_shutdown_limit(async {
         let mut a = timed("take the agent lock", agent.lock()).await;
         timed("close the relays and the tunnel", a.close()).await;
-    };
-    if tokio::time::timeout(SHUTDOWN_LIMIT, close).await.is_err() {
-        logf!(
-            "shutting down took longer than {}s; exiting without waiting for the rest",
-            SHUTDOWN_LIMIT.as_secs()
-        );
-    }
+    })
+    .await;
     true
 }
 
@@ -579,7 +574,7 @@ pub(crate) async fn main_loop(
         }
     };
     logf!("shutting down");
-    let done = tokio::time::timeout(SHUTDOWN_LIMIT, async {
+    within_shutdown_limit(async {
         // stream の task を落とし、終わるのを待つ。適用の途中なら、その排他もここで返る
         if !stream_done {
             stream_task.abort();
@@ -595,13 +590,18 @@ pub(crate) async fn main_loop(
         timed("close the relays and the tunnel", a.close()).await;
     })
     .await;
-    if done.is_err() {
+    result
+}
+
+/// 止める手順 `steps` を [`SHUTDOWN_LIMIT`] で打ち切って走らせる。打ち切ったら、残りを待たずに終わる旨を
+/// ログに出す。
+async fn within_shutdown_limit(steps: impl Future<Output = ()>) {
+    if tokio::time::timeout(SHUTDOWN_LIMIT, steps).await.is_err() {
         logf!(
             "shutting down took longer than {}s; exiting without waiting for the rest",
             SHUTDOWN_LIMIT.as_secs()
         );
     }
-    result
 }
 
 /// 止める手順の 1 段を走らせ、[`SLOW_STEP`] より長ければログに出す。
