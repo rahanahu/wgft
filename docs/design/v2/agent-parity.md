@@ -179,7 +179,9 @@ UDP の中継は、[wgstack の Rust 版の設計 (#681)](https://github.com/rah
 ### 向き
 
 - トンネルから宛先へ:待ち受けのタスクが受け取り、セッションのソケットへ書きます。
-  書き込みの失敗でセッションを閉じ、そのことを待ち受けごとに 1 分に 1 回までログに出します
+  書き込みの失敗でセッションを閉じ、そのことを待ち受けごとに 1 分に 1 回までログに出します。
+  Linux と macOS は接続した UDP のソケットに残った ICMP の拒否を次の書き込みの誤りとして返すので、この道で閉じることがあります。
+  CI の Windows では拒否の後の書き込みは失敗せず、拒否は受信の側に届きました
 - 宛先からトンネルへ:セッションごとのタスクが、バッファを持たずに読みの準備と誤りを待ちます。
   待ち方は tokio のソケットの `ready(Interest::READABLE | Interest::ERROR)` です。
   読める準備が来たら、応答のバッファの枠を 1 つ借ります。
@@ -1168,7 +1170,7 @@ B14 (`rust-windows` と `rust-macos`) で、次をすべて build し、単体�
 | 制御ソケット | AF_UNIX で `doctor` と `rotate-key` を往復すること、103 byte を超えるパスの扱い、止め方 | 同じ |
 | dotenv の権限 | 権限の拒否の文に DACL を評価しない旨が付くこと | Unix の文面と警告 |
 | WireGuard のソケット | `SIO_UDP_CONNRESET` を切ったソケットで、ICMP の Port Unreachable の後も受信が止まらないこと | 該当しない |
-| UDP の中継 | ループバックの宛先で、到着の待ち、Port Unreachable でのセッションの閉鎖、枠の上限 | 同じ試験と、送信バッファを 65535 byte に上げること |
+| UDP の中継 | ループバックの宛先で、到着の待ち、Port Unreachable でのセッションの閉鎖、枠の上限。書き込みの失敗で閉じる試験は、書き込みが拒否で失敗しないので外す | 同じ試験と、送信バッファを 65535 byte に上げること |
 | 名前の解決 | 期限と同時の数の上限 | 同じ |
 | wgstack と中継の結合 | wgstack の核を試験の殻で動かす中継の試験 | 同じ |
 | `agent doctor` | `host.privileges` が `permission_not_determined` になること、`tunnel.socket_buffers` が `not_tested` になること | `tunnel.socket_buffers` が `not_tested` になること |
@@ -1293,8 +1295,12 @@ wgstack の口が前提と違えば、wgstack の上の agent と UDP の中継�
 - 核の接続ごとの送受信の floor を満たす量を流す場面 (読まない相手) で、核の保持が核の項に収まること
 - 固定の基礎の 40 MiB は Linux の musl の静的なビルドの RSS から決めました。
   Windows と macOS のビルドの起動の後の RSS は測っていません
-- macOS の kqueue と Windows の AFD の poll で、接続した UDP のソケットへの ICMP の拒否が読みか誤りの準備として届くこと
-- Windows の接続した UDP のソケットが、宛先の Port Unreachable の後に `WSAECONNRESET` を返すこと
+- macOS の kqueue と Windows の AFD の poll で、接続した UDP のソケットへの ICMP の拒否が応答の task に届いてセッションを閉じることは、CI のループバックの宛先で確かめただけです。
+  実機の LAN の宛先では確かめていません
+- Windows で拒否が受信の側だけに届き、書き込みは失敗しないこと。
+  CI の Windows ではそうなりましたが、Winsock の文書は UDP の書き込みも前の datagram への Port Unreachable で `WSAECONNRESET` を返しうるとしています。
+  書き込みが失敗した場合も、セッションを閉じる同じ道を通ります。
+  受信の側が返す誤りが `WSAECONNRESET` であることも確かめていません
 - `GetAdaptersAddresses` が返す adapter の名前 (FriendlyName) が、TUN の名前と一致すること
 - musl と glibc の `getaddrinfo` の順と Go の resolver の順の違い。wgft が並べ直すので結果には効かない見込みです
 - 設定の層の Windows と macOS の挙動:既定のパス、dotenv を権限で読めないときの文面、環境変数の名前の大文字と小文字の区別は、実機で確かめていません
