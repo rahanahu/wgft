@@ -231,13 +231,58 @@ device の層はこの timer をピアごとに持ちます。
   期限は keepalive の間隔の後に置き直します。
 - 送信:セッションの無いピアへの packet は、待たせてハンドシェイクを始めます。
 
+### ハンドシェイクの開始の間隔と打ち切りの後の休止
+
+論文 (6.1 節) は、ハンドシェイクの開始を `REKEY_TIMEOUT` (5 秒) に 1 回より多く送らないと定めます。
+wireguard-go と Linux の WireGuard は、前の開始か応答の送信から 5 秒が経つまで新しい開始を送りません。
+sanstun は進行中のハンドシェイクを 1 つに保つだけで、この間隔を持ちません。
+agent のデータプレーンは使えるセッションが無い間、起きるたびに `start_handshake` を呼びます。
+このため、90 秒の再試行の打ち切りでトンネルを取り替えた同じ起床で次の開始を送り、開始の間隔が 2 秒前後に縮んでいました。
+
+device の層は、自分が始める開始 (`start_handshake`、セッションの無いピアへの packet、keepalive の期限) に次の規則を当てます。
+
+- 間隔:ピアへ最後に開始か応答を送ってから `REKEY_TIMEOUT` が経つまで始めません。
+  sanstun の timer が送る再送と鍵の更新は、sanstun が進行中の開始から間隔を取るので、そのまま送ります。
+- 休止:接続の期限切れ (使ったトンネルの再試行の打ち切りか鍵の期限切れ) の後は、keepalive の間隔だけ `start_handshake` と keepalive の期限による開始を控えます。
+  論文の規則 (打ち切りの後は新しいデータまで始めない) に合わせます。
+  データの packet は休止の中でも開始を促し、間隔の規則だけを受けます。
+  wireguard-go と同じです。
+  keepalive を持たないピアには休止を置きません。
+- 控えた要求:規則で控えた要求は覚えておき、許される時刻に `handle_timeout` が行います。
+  `poll_timeout` はその時刻を含みます。
+  その時までにセッションができていれば (相手が始めたハンドシェイクなど) 捨てます。
+
+server が始めたハンドシェイクに答えた直後は、server の確認が届くまで agent のセッションは使えません。
+前はこの間に agent が自分の開始を重ねていましたが、応答も間隔に数えるので、確認が先に届きます。
+試験 `initiations_are_paced_and_pause_after_the_peer_gives_up`、`data_starts_a_handshake_during_the_pause_but_not_within_the_rekey_timeout`、`answering_the_server_holds_back_an_own_initiation` が確かめています。
+
+### passive keepalive
+
+論文 (6.5 節)、wireguard-go、Linux の WireGuard は、返事をしていない最初のデータの受信から `KEEPALIVE_TIMEOUT` (10 秒) の間なにも送らなければ keepalive を 1 つ送ります。
+後から届いたデータでこの期限は延びません。
+sanstun 0.1.0 は、データを受けるたびに期限を受信の時刻から 10 秒後へ延ばします。
+10 秒より短い間隔で片向きのデータ (server から agent への UDP など) が届き続けると、sanstun は keepalive を送りません。
+相手は返事の無いデータの 15 秒後に新しいハンドシェイクを始めるので、Linux の server は 15 から 25 秒ごとにハンドシェイクを繰り返します。
+これは規則からの帰結で、ラボでは観測していません。
+sanstun は keepalive を送る口を公開せず、空の平文の暗号化を拒みます。
+
+device の層は、返事をしていない最初と最後のデータの受信の時刻をピアごとに持ちます (`sanstun_compat::PassiveKeepalive`)。
+sanstun の送信の記録が進む呼び出し (データの暗号化、開始、応答、keepalive) で消します。
+最初の受信から `KEEPALIVE_TIMEOUT` が経っても sanstun が送っていなければ、その 1 回の timer の呼び出しの間だけ、公開の `set_keepalive_timeout` で値を最後の受信からの経過に縮めます。
+sanstun の passive keepalive の期限が今になり、sanstun が keepalive を送ります。
+呼び出しの後で元の値に戻します。
+縮めた値が sanstun 0.1.0 の中で効く箇所と、どれも余計な送信を生まない理由は `PassiveKeepalive::force` の文書に書きました。
+この方法は sanstun 0.1.0 の timer の作りに依ります。
+sanstun を上げるときは、試験 `one_way_data_gets_a_passive_keepalive_within_the_keepalive_timeout` がこの規則を確かめ直します。
+この試験は、片向きのデータの間に agent が 11 秒より長く黙らないことと、server が新しいハンドシェイクを始めないことを確かめます。
+
 server が始めたセッションでは、agent は応答の側です。
 応答の側のセッションは 180 秒で使えなくなり、sanstun は応答の側から新しいハンドシェイクを始めません。
 Linux の WireGuard の server は、送るデータが無ければハンドシェイクを始めません。
 上の期限の規則が、この場合に agent の側からハンドシェイクを始めます。
 試験 `an_idle_responder_keeps_contacting_the_server` は、600 秒の間に agent の送信が 40 秒より長く途切れないことを確かめています。
 
-応答しない server に対しては、5 秒ごとの再送が 90 秒続き、keepalive の間隔の後に同じ再送が始まります。
+応答しない server に対しては、5 秒ごとの再送が 90 秒続き、keepalive の間隔の休止の後に同じ再送が始まります (下の「ハンドシェイクの開始の間隔と打ち切りの後の休止」)。
 
 sanstun は、ハンドシェイクを一度もしていないトンネルも作成から 540 秒で期限切れにします。
 期限の切れたトンネルはハンドシェイクを受けないので、device の層は同じように取り替えます。

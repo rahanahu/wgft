@@ -123,6 +123,14 @@ struct Peer {
     /// 間隔だけ先へ延ばす (wireguard-go の persistent keepalive の timer と同じ規則)。期限が来たときは、
     /// 使えるセッションが無いので、ハンドシェイクを始める。persistent keepalive を持たないピアには置かない。
     keepalive_at: Option<Instant>,
+    /// 最後にハンドシェイクの開始か応答を送った時刻。device が始める開始は、ここから `REKEY_TIMEOUT` を
+    /// 空ける (論文の 6.1 節、wireguard-go の `lastSentHandshake`)。
+    handshake_sent_at: Option<Instant>,
+    /// 接続の期限切れ (再試行の打ち切り) の後、データを持たない開始 ([`Device::start_handshake`] と
+    /// keepalive の期限) を控える終わりの時刻。
+    paused_until: Option<Instant>,
+    /// 間隔か休止で控えた開始の要求。時刻が来たら `handle_timeout` が行う。`bool` はデータの送信の要求か。
+    deferred: Option<(Instant, bool)>,
     rx_bytes: u64,
     tx_bytes: u64,
 }
@@ -134,6 +142,8 @@ pub struct Device {
     by_key: HashMap<PublicKey, PeerId>,
     routes: AllowedIps<PeerId>,
     mtu: usize,
+    /// `REKEY_TIMEOUT`。device が始めるハンドシェイクの開始の間隔の下限。
+    rekey_timeout: Duration,
     limits: Limits,
     transmits: BoundedQueue<Transmit>,
     packets: BoundedQueue<Vec<u8>>,
@@ -238,6 +248,9 @@ impl Device {
                 keepalive,
                 staged: BoundedQueue::new(l.staged_packets, staged_bytes),
                 keepalive_at: (keepalive.is_some() && p.endpoint.is_some()).then_some(now),
+                handshake_sent_at: None,
+                paused_until: None,
+                deferred: None,
                 rx_bytes: 0,
                 tx_bytes: 0,
             });
@@ -248,6 +261,7 @@ impl Device {
             by_key,
             routes,
             mtu,
+            rekey_timeout: config.timers.effective_rekey_timeout(),
             limits: l,
             transmits: BoundedQueue::new(l.transmit_packets, l.transmit_bytes),
             packets: BoundedQueue::new(l.deliver_packets, l.deliver_bytes),
@@ -306,6 +320,7 @@ impl Device {
                     self.counted_from(peer, rx);
                     self.send_to(peer, from, response);
                 }
+                self.peers[peer].handshake_sent_at = Some(now);
                 self.push_event(Event::HandshakeAccepted {
                     peer: self.peers[peer].key,
                 });
@@ -409,9 +424,7 @@ impl Device {
         // セッションが無いか、先に待っている packet がある。順を保って待たせ、ハンドシェイクを始める
         let evicted = self.peers[peer].staged.push_evicting(packet);
         self.drops.add(DropReason::StagedOverflow, evicted as u64);
-        if let Some(initiation) = self.proto.initiate(peer, now) {
-            self.send_to_peer(peer, initiation);
-        }
+        self.initiate(peer, now, true);
         self.flush_staged(peer, now);
     }
 
@@ -426,6 +439,37 @@ impl Device {
                 Err(reason) => self.drops.add(reason, 1),
             }
         }
+    }
+
+    /// ハンドシェイクを始める。前の開始か応答から `REKEY_TIMEOUT` が経っていないか、データを持たない
+    /// 要求 (`data` が偽) が期限切れの後の休止の中なら、始めずに要求を控え、許される時刻に
+    /// `handle_timeout` で行う。開始を送る待ち行列に入れたら `true`。
+    fn initiate(&mut self, peer: PeerId, now: Instant, data: bool) -> bool {
+        let p = &mut self.peers[peer];
+        if p.endpoint.is_none() {
+            return false;
+        }
+        let mut allowed = p.handshake_sent_at.map(|t| t + self.rekey_timeout);
+        if !data {
+            allowed = allowed.max(p.paused_until);
+        }
+        if let Some(at) = allowed
+            && now < at
+        {
+            // データの要求を先に控えていれば、それより遅くしない
+            p.deferred = Some(match p.deferred {
+                Some((earlier, true)) => (earlier.min(at), true),
+                _ => (at, data),
+            });
+            return false;
+        }
+        p.deferred = None;
+        let Some(initiation) = self.proto.initiate(peer, now) else {
+            return false;
+        };
+        self.peers[peer].handshake_sent_at = Some(now);
+        self.send_to_peer(peer, initiation);
+        true
     }
 
     /// Advances the timers to `now`: handshake retries, rekeying, keepalives and expiry.
@@ -443,10 +487,15 @@ impl Device {
                 && at <= now
             {
                 p.keepalive_at = Some(now + interval);
-                if p.endpoint.is_some()
-                    && let Some(initiation) = self.proto.initiate(peer, now)
-                {
-                    self.send_to_peer(peer, initiation);
+                self.initiate(peer, now, false);
+            }
+            // 控えた要求。その間にセッションができていれば (相手が始めたハンドシェイクなど) 捨てる
+            if let Some((at, data)) = self.peers[peer].deferred
+                && at <= now
+            {
+                self.peers[peer].deferred = None;
+                if !self.proto.has_session(peer, now) {
+                    self.initiate(peer, now, data);
                 }
             }
         }
@@ -455,9 +504,11 @@ impl Device {
     fn drain_proto_events(&mut self, peer: PeerId, now: Instant) {
         while let Some(event) = self.proto.poll_event(peer, now) {
             match event {
-                ProtoEvent::SendInitiation(d) | ProtoEvent::SendKeepalive(d) => {
+                ProtoEvent::SendInitiation(d) => {
+                    self.peers[peer].handshake_sent_at = Some(now);
                     self.send_to_peer(peer, d);
                 }
+                ProtoEvent::SendKeepalive(d) => self.send_to_peer(peer, d),
                 ProtoEvent::Established { took } => self.push_event(Event::SessionEstablished {
                     peer: self.peers[peer].key,
                     took,
@@ -473,6 +524,12 @@ impl Device {
                     }
                     if let (Some(interval), Some(_)) = (p.keepalive, p.endpoint) {
                         p.keepalive_at = Some(now + interval);
+                    }
+                    // 再試行を打ち切った後は、データを持たない開始を keepalive の間隔だけ控える
+                    // (論文の 6.1 節: 打ち切りの後は新しいデータまで始めない)。期限は keepalive の
+                    // 期限と同じなので、その時に 1 つだけ始める。控えた要求も休止の後へ送る
+                    if used && let Some(interval) = p.keepalive {
+                        p.paused_until = Some(now + interval);
                     }
                     let key = p.key;
                     self.drops.add(DropReason::NoSession, lost as u64);
@@ -547,7 +604,14 @@ impl Device {
     #[must_use]
     pub fn poll_timeout(&self) -> Option<Instant> {
         (0..self.peers.len())
-            .flat_map(|peer| [self.proto.poll_timeout(peer), self.peers[peer].keepalive_at])
+            .flat_map(|peer| {
+                let p = &self.peers[peer];
+                [
+                    self.proto.poll_timeout(peer),
+                    p.keepalive_at,
+                    p.deferred.map(|(at, _)| at),
+                ]
+            })
             .flatten()
             .min()
     }
@@ -586,22 +650,22 @@ impl Device {
         self.proto.has_session(id, now.max(self.now))
     }
 
-    /// Starts a handshake with the peer, as sending a packet without a session would, and queues
-    /// the initiation for [`Device::poll_transmit`]. Returns `false` and does nothing when a
-    /// handshake is already in progress, the peer has no endpoint or the key is unknown.
+    /// Asks for a handshake with the peer, for a caller that wants a session before it has a
+    /// packet to send, and queues the initiation for [`Device::poll_transmit`]. Returns `true` when
+    /// an initiation was queued.
+    ///
+    /// It keeps the protocol's pacing: no initiation within `REKEY_TIMEOUT` of the last initiation
+    /// or response to the peer, and none for one keepalive interval after the peer expired because
+    /// it did not answer. A request that the pacing holds back returns `false` and is carried out
+    /// by [`Device::handle_timeout`] when it is allowed, unless a session exists by then;
+    /// [`Device::poll_timeout`] includes that time. It also returns `false` and does nothing when
+    /// a handshake is already in progress, the peer has no endpoint or the key is unknown.
     pub fn start_handshake(&mut self, now: Instant, peer: &PublicKey) -> bool {
         let now = self.clock(now);
         let Some(&id) = self.by_key.get(peer) else {
             return false;
         };
-        if self.peers[id].endpoint.is_none() {
-            return false;
-        }
-        let Some(initiation) = self.proto.initiate(id, now) else {
-            return false;
-        };
-        self.send_to_peer(id, initiation);
-        true
+        self.initiate(id, now, false)
     }
 
     /// The state of a peer, or `None` for an unknown key.

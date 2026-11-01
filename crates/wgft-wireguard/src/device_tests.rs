@@ -1073,3 +1073,102 @@ fn start_handshake_sends_one_initiation_and_establishes_a_session() {
     assert!(!m.a.start_handshake(m.now(), &a_key));
     assert_eq!(m.b.held().transmit_packets, 0);
 }
+
+#[test]
+fn initiations_are_paced_and_pause_after_the_peer_gives_up() {
+    // agent のデータプレーンのように、セッションが無い間は起きるたびに start_handshake を呼ぶ。
+    // B は落ちているので、A が送るものはすべてハンドシェイクの開始である
+    let mut n = Net::new();
+    n.b_up = false;
+    let b = n.b_pub();
+    let mut expired_at = None;
+    while n.t < Duration::from_secs(200) {
+        n.t += Duration::from_millis(100);
+        n.tick();
+        let now = n.now();
+        if !n.a.has_session(&b, now) {
+            n.a.start_handshake(now, &b);
+        }
+        n.pump();
+        if expired_at.is_none()
+            && n.a_events
+                .iter()
+                .any(|e| matches!(e, Event::PeerExpired { .. }))
+        {
+            expired_at = Some(n.t);
+        }
+    }
+    let sent = &n.a_sent_at;
+    let tx = n.a.peer_status(&b, n.now()).unwrap().tx_bytes;
+    assert_eq!(tx, 148 * sent.len() as u64, "only initiations");
+    assert!(
+        sent.windows(2)
+            .all(|w| w[1].saturating_sub(w[0]) >= Duration::from_secs(5)),
+        "initiations closer than REKEY_TIMEOUT: {sent:?}"
+    );
+    // 90 秒の再試行を打ち切った後は、keepalive の間隔だけ始めない
+    let expired_at = expired_at.expect("the peer expired");
+    let next = sent.iter().find(|&&t| t > expired_at).unwrap();
+    assert!(
+        next.saturating_sub(expired_at) >= KEEPALIVE.saturating_sub(Duration::from_millis(100)),
+        "the first initiation after giving up came {:?} later",
+        next.saturating_sub(expired_at)
+    );
+}
+
+#[test]
+fn data_starts_a_handshake_during_the_pause_but_not_within_the_rekey_timeout() {
+    let mut n = Net::new();
+    n.b_up = false;
+    n.run(Duration::from_secs(91), Duration::from_millis(100));
+    assert_eq!(
+        Net::count(&n.a_events, |e| matches!(e, Event::PeerExpired { .. })),
+        1
+    );
+    let last = *n.a_sent_at.last().unwrap();
+    // 休止の中でもデータは開始を促す。ただし前の開始から 5 秒は空ける
+    n.a_sent_at.clear();
+    n.b_up = true;
+    n.a_sends(b"data");
+    n.run(Duration::from_secs(6), Duration::from_millis(100));
+    let first = n.a_sent_at[0];
+    assert!(
+        first >= last + Duration::from_secs(5)
+            && first <= (last + Duration::from_millis(5100)).max(Duration::from_secs(91)),
+        "last {last:?}, first {first:?}"
+    );
+    assert_eq!(n.b_got, vec![ipv4_packet(AGENT_IP, SERVER_IP, b"data")]);
+}
+
+#[test]
+fn answering_the_server_holds_back_an_own_initiation() {
+    // server が始めたハンドシェイクに答えた直後は、agent が自分の開始を重ねない
+    let mut n = Net::with(
+        |a| a.peers[0].endpoint = None,
+        |b| b.peers[0].endpoint = Some(addr("198.51.100.2:40000")),
+    );
+    let now = n.now();
+    let b = n.b_pub();
+    n.b.handle_packet(now, &ipv4_packet(SERVER_IP, AGENT_IP, b"hello"));
+    let init = n.b.poll_transmit().unwrap();
+    n.a.handle_datagram(now, n.b_addr, &init.payload);
+    let response = n.a.poll_transmit().unwrap();
+    n.a.set_endpoint(now, &b, n.b_addr);
+    // B の確認がまだ届かず、A のセッションは使えない。前は A がここで自分の開始を送った
+    assert!(!n.a.has_session(&b, now));
+    assert!(!n.a.start_handshake(now, &b));
+    assert!(n.a.poll_transmit().is_none());
+    n.b.handle_datagram(now, n.a_addr, &response.payload);
+    n.pump();
+    assert!(n.a.has_session(&b, now));
+    n.run(Duration::from_secs(6), Duration::from_millis(100));
+    // B が受け付けたハンドシェイクは A の応答の 1 つだけ
+    assert_eq!(
+        Net::count(&n.b_events, |e| matches!(
+            e,
+            Event::HandshakeAccepted { .. }
+        )),
+        1
+    );
+    assert_eq!(n.a_got, vec![ipv4_packet(SERVER_IP, AGENT_IP, b"hello")]);
+}
