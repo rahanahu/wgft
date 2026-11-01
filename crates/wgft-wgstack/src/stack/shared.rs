@@ -103,7 +103,7 @@ pub struct Stats {
     pub mss_floor_drops: u64,
     /// 握手の途中の表が満杯で捨てた SYN です。cookie で応えた SYN は数えません。
     pub syn_table_full: u64,
-    /// 握手の途中の表が満杯で cookie を使う所だったが、accept の待ち行列か接続の枠も満杯で捨てた SYN です。
+    /// SYN cookie を使う間に、accept の待ち行列か接続の枠が満杯で捨てた SYN です。
     pub syn_accept_full: u64,
     /// 握手の途中の表が満杯で、行を作らずに cookie で応えた SYN です。
     pub syn_cookies_sent: u64,
@@ -193,7 +193,7 @@ pub enum LogKind {
     SynFull,
     /// 握手の途中の表が満杯で、SYN に cookie で応えました。`count` は応えた数です。
     SynCookies,
-    /// 握手の途中の表と accept の待ち行列の両方が満杯で SYN を捨てました。
+    /// SYN cookie を使う間に、accept の待ち行列か接続の枠が満杯で SYN を捨てました。
     SynAcceptFull,
     /// accept の待ち行列か接続の表が満杯で、握手の最後の ACK を捨てました。
     AcceptOverflow,

@@ -335,14 +335,21 @@ impl Shared {
     pub(crate) fn defer_cookie(&mut self, r: &SynRow, now: i64) -> bool {
         // 待ち受けの分は見ません。cookie を使うのはその分が満杯の時なので、分を守るとほぼすべてが RST になります。
         // 行を作れるのは握手を終えた相手だけで、経路の外から表を埋められません。
-        if !self.syn.has_free() || self.listeners.by_port(r.listener).is_none() {
+        // 1 つの待ち受けが表のすべての行を持ちうるので、待ち受けの数の上限も確かめます。
+        if !self.syn.has_free()
+            || self
+                .listeners
+                .by_port(r.listener)
+                .is_none_or(|l| l.syn_count == u16::MAX)
+        {
             return false;
         }
         debug_assert!(r.cookie, "only a recovered cookie becomes a deferred row");
-        // 相手は最初の SYN-ACK に ACK を返し済みなので、行の SYN-ACK を RTT の標本にしません (`rtx`)。
+        // `cookie` が TSecr からの RTT の標本を止め、`sent_at` は cookie の SYN-ACK の時刻を持ちません。`rtx` は
+        // 偽で始め、最初の再送の前に接続を作れた時は、輻輳の窓を 1 MSS に下げません。再送した後は普通の行と同じ
+        // く真になります。
         let row = SynRow {
             deadline: time(now + SYNACK_RTO),
-            rtx: true,
             pending: RowSend::None,
             ..*r
         };

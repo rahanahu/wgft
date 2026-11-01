@@ -697,6 +697,72 @@ fn data_that_fails_the_cookie_is_dropped_without_rst() {
 }
 
 #[test]
+fn a_delayed_cookie_ack_past_a_full_queue_replaces_the_later_row() {
+    let (mut n, l) = flooded();
+    let syn = TSeg {
+        sport: 45000,
+        dport: 80,
+        seq: 500,
+        flags: FLAG_SYN,
+        wnd: 65535,
+        mss: 1380,
+        ..TSeg::default()
+    };
+    n.inject(&syn);
+    let cookie = n.drain().remove(0);
+    // 洪水の行を RST で外し、accept の待ち行列を待ち受けの分まで普通の握手で埋めます。
+    for i in 0..200u32 {
+        n.inject(&TSeg {
+            src: Some(spoofed(i)),
+            sport: 1024 + (i % 50000) as u16,
+            dport: 80,
+            seq: i.wrapping_mul(2_654_435_761).wrapping_add(1),
+            flags: FLAG_RST,
+            ..TSeg::default()
+        });
+    }
+    n.drain();
+    let half = small_limits().accept_queue / 2;
+    for i in 0..half {
+        n.handshake(46000 + i as u16, 80, false, false);
+    }
+    assert_eq!(n.s.held().accept_queued, half);
+    // 相手は SYN を送り直し、行ができます。行の ISN は cookie と違います。
+    n.inject(&syn);
+    let row_syn_ack = n.drain().remove(0);
+    assert_ne!(row_syn_ack.seq, cookie.seq);
+    assert_eq!(n.s.held().syn_rows, 1);
+    // 遅れて届いた cookie の SYN-ACK への ACK は、待ち行列が満杯なので、同じ 4 つ組の行を cookie の値の行に
+    // 替えます。行は 1 つのままです。
+    n.inject(&TSeg {
+        seq: 501,
+        ack: cookie.seq.wrapping_add(1),
+        flags: FLAG_ACK,
+        ..syn.clone()
+    });
+    assert!(n.drain().is_empty());
+    assert_eq!(n.s.held().syn_rows, 1);
+    assert_eq!(n.s.stats().syn_cookies_deferred, 1);
+    n.s.check_invariants().unwrap();
+    // 行の SYN-ACK の再送は cookie の ISN を持ちます。
+    n.advance(Duration::from_secs(1));
+    let outs = n.drain();
+    let sa: Vec<_> = outs.iter().filter(|o| o.rport == 45000).collect();
+    assert_eq!(sa.len(), 1, "{}", show(&outs));
+    assert_eq!(sa[0].seq, cookie.seq);
+    let _ = n.accept(l);
+    n.inject(&TSeg {
+        seq: 501,
+        ack: cookie.seq.wrapping_add(1),
+        flags: FLAG_ACK,
+        ..syn.clone()
+    });
+    assert_eq!(n.s.held().syn_rows, 0);
+    assert_eq!(n.s.stats().syn_cookies_accepted, 1);
+    n.s.check_invariants().unwrap();
+}
+
+#[test]
 fn a_delayed_cookie_ack_wins_over_a_later_row() {
     let (mut n, l) = flooded();
     let syn = TSeg {

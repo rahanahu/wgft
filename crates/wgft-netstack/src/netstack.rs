@@ -194,7 +194,7 @@ impl<H: Hook> Netstack<H> {
                 "answered SYNs with SYN cookies because the half-open table was full; a SYN flood may be under way",
             ),
             LogKind::SynAcceptFull => refused(
-                "dropped SYNs because the half-open table and the accept queue were both full",
+                "dropped SYNs because the accept queue or the connection table was full while SYN cookies were in use",
             ),
             LogKind::AcceptOverflow => refused(
                 "dropped final handshake ACKs because the accept queue or the connection table was full",
