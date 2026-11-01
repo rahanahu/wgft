@@ -7,12 +7,22 @@
 //!   `internal/tcpharness/scripts/testdata/` の fixture と byte の単位で一致します
 //! - [`rng`]:台本の乱数。Go の `math/rand/v2` の PCG と `Uint32`、`IntN` の写しと、harness が台本の種から
 //!   相手のポート、ISN、timestamp の起点を取る順序
-//! - [`gojson`]:Go の `encoding/json` と同じ bytes を書く JSON の書き手
+//! - [`gojson`]:Go の `encoding/json` と同じ bytes を書く JSON の書き手と、小さな読み手
+//! - [`frame`]:3 節の DUT の口の frame の符号。Go の `internal/dutproto` と同じ bytes を作ります
+//! - [`packet`] と [`ip`]:試験台の IPv4、TCP、UDP、ICMP の組み立てと読み取り
+//! - [`dut`]:手で進める時計の DUT の trait [`dut::ClockedDut`]、transcript を書く包み [`dut::Recorded`]、
+//!   別のプロセスを叩く [`dut::ProcessDut`]
+//! - [`chacha8`]:HELLO の 64 byte の種
 //!
 //! この crate は標準ライブラリだけに依ります。
 
 #![forbid(unsafe_code)]
 
+pub mod chacha8;
+pub mod dut;
+pub mod frame;
 pub mod gojson;
+pub mod ip;
+pub mod packet;
 pub mod rng;
 pub mod script;
