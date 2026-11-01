@@ -44,6 +44,12 @@ pub(crate) enum OpenError {
 }
 
 impl<R: Default + Copy> PortTable<R> {
+    /// 試験と fuzz の build だけにある欄 `opened` の byte です。[`crate::stack::HARNESS_BYTES`] との一致を試験が確かめます。
+    #[cfg(test)]
+    pub(crate) fn harness_bytes(&self) -> usize {
+        size_of_val(&self.opened)
+    }
+
     pub(crate) fn new() -> Result<Self, AllocError> {
         Ok(Self {
             rows: FixedVec::try_filled(PORTS, |_| PortRow::default())?,

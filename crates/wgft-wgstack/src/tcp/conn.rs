@@ -423,6 +423,12 @@ pub(crate) const fn slot_bytes() -> usize {
 }
 
 impl ConnSlots {
+    /// 試験と fuzz の build だけにある欄 `touched` の byte です。[`crate::stack::HARNESS_BYTES`] との一致を試験が確かめます。
+    #[cfg(test)]
+    pub(crate) fn harness_bytes(&self) -> usize {
+        size_of_val(&self.touched)
+    }
+
     pub(crate) fn new(n: usize) -> Result<Self, AllocError> {
         Ok(Self {
             hot: FixedVec::try_filled(n, |_| Tcb::default())?,

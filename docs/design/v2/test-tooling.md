@@ -1175,7 +1175,7 @@ adapter が口の誤りとする要求 (知らない handle など) も飛ばし
 製品の作り直しと同じく、閉じた核の `Budget` は借りが 0 です。
 `Budget` を作る費用 (開発のホストで 1 ms ほど) は、小さな表の核を作って閉じる費用 (0.2 ms ほど) より大きいためです。
 `Net` を使う target と `replay` は、閉じた核のポートの数の行を持つ表 (待ち受けの表、UDP の endpoint の表、知らせの list) も作成の時の値に戻し、次の入力の核に使います ([wgstack の Rust 版の核の使い回し](wgstack-rs.md#核の使い回し))。
-核を作る手間の大部分がこれらの表を埋める手間だからです。
+核を作る手間の大部分はこれらの表を作成の時の値で埋める手間なので、使い回すと入力ごとの準備が軽くなります。
 同じ `set_options` で、表を使い回すかと、外から見える出力の hash を取るかも選べます。
 
 seed は `fuzz/corpus/<対象>/` に置き、見つけた落ちる入力は `fuzz/regressions/<対象>/` に置きます。
@@ -1202,16 +1202,16 @@ cargo-fuzz の crate は `[workspace]` を自分で持ち、ワークスペー�
 
 ### 被覆の地図
 
-fuzz の target が届かない所は、cargo-fuzz が育てた corpus の被覆で調べます。
+fuzz の target が届かない所は、cargo-fuzz で増やした corpus の被覆で調べます。
 
-1. 各 target を git の種の写しから固定の `-runs` で流し、corpus を育てます (下の build と flag)
-2. 育てた corpus を stable の試験で流し、被覆を取ります。
+1. 各 target を git の種の写しから固定の `-runs` で流し、corpus を増やします (下の build と flag)
+2. 増やした corpus を stable の試験で流し、被覆を取ります。
    `WGFT_WGSTACK_CORPUS_DIRS=core=<dir>,adversarial_sender=<dir>,raw_adversary=<dir>,replay=<dir> cargo llvm-cov nextest --no-report -p wgft-wgstack-dut --test fuzz_corpus`
 3. `cargo llvm-cov report --text --output-path <file>` で行ごとの回数を書き出し、`crates/wgft-wgstack/src` の 0 回の行を関数ごとに並べます
 
 被覆は stable の build で取るので、fuzz の build と inline の違いで行の数え方が少し違います。
 `fuzz_corpus` は入力を新しい核と使い回した核で 2 回流し、2 つの確かめを並べるので、確かめのコードも被覆に入ります。
-届かない所は、入力の形が状況を表せないもの (操作を足します) と、表せるが corpus が育っていないものに分けます。
+届かない所は、入力の形が状況を表せないもの (操作を足します) と、表せるが corpus がまだ増えていないものに分けます。
 
 ### 実行の速さ
 
@@ -1298,7 +1298,7 @@ k 段に 1 回だけ確かめる形は採っていません。
 - 理由:100,000 回では、10 の形は長さの制御を切った形より cov と ft が多く、時間は約 2 割短くなりました。
   上限は 1024 byte に届き、短い入力と全長の入力が混ざります。
   既定の値は上限が最も長い種の長さ (544 byte) のまま伸びず、全長の入力を試しませんでした。
-  同じ時間で比べると、既定の値は cov が同じほどで ft が少なくなりました
+  同じ時間で比べると、既定の値は cov がほぼ同じで ft が少なくなりました
 - 短い実行:25,000 回では、10 の形は切った形より ft が約 3% 少なく、cov は種の間の揺れの内でした。
   関門の `core` の回数 (2,500 回) では上限がほとんど伸びず、種の長さまでの入力しか試さないので、関門には使いません
 
@@ -1451,7 +1451,7 @@ Rust の側は核の crate の中の試験の補助を使うので、書き手�
 - qbench の Unix ソケットの 1 段:`TestQBenchRelayStage` が測りました。細い stream の遅れの p50 に約 0.1 ms が加わり、CPU は約 0.1 ns/byte です ([wgstack の Rust 版の設計の qbench での測定](wgstack-rs.md#qbench-での測定))
 - 実時間の Rust の DUT:`--clock real` の外側の層は、製品と同じ `wgft-netstack` の handle と、agent のデータプレーンと同じ順の駆動の写しです。駆動は agent の `dataplane::driver` を共有せず、`wgstack-dut` の中に同じ順で書きました。agent の駆動は WireGuard の device の層と UDP のソケットを持つためです
 - fuzz の速さ:6 節の表のとおり測り、関門の回数を決めました。
-  `core` の各段の確かめは書き換えた接続の枠だけを確かめ直し、残りの多くは毎段すべてを確かめる共有の表です。
+  `core` の各段の確かめは書き換えた接続の枠だけを確かめ直し、残る手間の多くは毎段すべてを確かめる共有の表です。
   共有の表にも書き換えの印を足すかは未決です。
   `replay` も adapter を通して書き換えた枠だけの確かめと表の使い回しを使います
 - 関門の時間:7 節の時間は、道具の照合の `dutserve` を相手にした分のほかは推定です

@@ -294,3 +294,17 @@ fn demote_holds_within_the_connection_s_reservation() {
     let closed = s.close(Time::from_nanos(IDLE_RECLAIM.unsigned_abs() + 2));
     assert!(closed.held.is_zero(), "{:?}", closed.held);
 }
+
+/// 試験と fuzz の build だけにある欄の byte の和 `HARNESS_BYTES` が、欄の型の大きさの和と一致します。
+/// 欄の型の大きさが変わった場合と、`HARNESS_BYTES` を誤って直した場合を検出します。
+/// 試験だけの欄を足すときは、その欄の `harness_bytes` もこの和に足します (足し忘れた新しい欄は検出できません)。
+#[test]
+fn harness_bytes_match_the_harness_only_fields() {
+    let s = Stack::new(small(), Budget::new().unwrap(), &[7; 64], NoHook).unwrap();
+    let sum = s.conns.harness_bytes()
+        + s.s.events.harness_bytes()
+        + s.s.budget.harness_bytes()
+        + s.s.listeners.harness_bytes()
+        + s.s.udp.eps.harness_bytes();
+    assert_eq!(sum, HARNESS_BYTES);
+}

@@ -26,6 +26,12 @@ pub(crate) struct EventList {
 }
 
 impl EventList {
+    /// 試験と fuzz の build だけにある欄 `marked` の byte です。[`crate::stack::HARNESS_BYTES`] との一致を試験が確かめます。
+    #[cfg(test)]
+    pub(crate) fn harness_bytes(&self) -> usize {
+        size_of_val(&self.marked)
+    }
+
     /// `targets` 個の対象の印と節を確保します。
     pub(crate) fn new(targets: usize) -> Result<Self, AllocError> {
         Ok(Self {
