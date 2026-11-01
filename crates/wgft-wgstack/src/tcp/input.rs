@@ -231,6 +231,8 @@ impl Conn<'_> {
             self.rcv_grow(res.accepted, res.ooo);
             self.rcv_rtt_stamp(seg, n, now);
             self.rcv_rtt_window(now);
+            self.rcv_lat_sample(seg, now);
+            self.rcv_lat_drain(now);
         }
         if seg.has(FLAG_FIN) && !res.trimmed && !res.dropped {
             let fin_off = off + n as u64;

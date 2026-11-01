@@ -79,6 +79,8 @@ mod golden_tests;
 #[cfg(test)]
 mod icmp_tests;
 #[cfg(test)]
+mod lat_tests;
+#[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
 mod listen_tests;

@@ -217,6 +217,7 @@ impl Conn<'_> {
             flags: flags | FLAG_ACK,
             wnd: self.window_field(),
         };
+        self.rcv_lat_mark(now);
         let id = self.s.next_id();
         let n = n as usize;
         let p = wire::write_tcp(b, id, &h, Some(o), n);
