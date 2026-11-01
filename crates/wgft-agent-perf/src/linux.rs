@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
 use socket2::{Domain, Protocol, Socket, Type};
+use wgft_udp_batch::{MAX_SLOTS, RxBatch, TxBatch, sys};
 use wgft_wireguard::{
     DEFAULT_KEEPALIVE, DEFAULT_MTU, Device, DeviceConfig, Ipv4Prefix, Limits, Outgoing, PeerConfig,
     PrivateKey, ProtocolTimers, PublicKey, Roaming, Transmit,
@@ -56,12 +57,16 @@ struct Args {
     /// CPU for the second thread.
     #[arg(long)]
     cpu_peer: Option<usize>,
+    /// Use one `sendto` or `recvfrom` per datagram, as before the batching, instead of the data
+    /// plane's batch store with `sendmmsg`, `recvmmsg`, UDP GSO and GRO.
+    #[arg(long)]
+    one_by_one: bool,
 }
 
 /// System calls the data path made, counted by the tool itself.
 #[derive(Debug, Default, Clone, Copy)]
 struct Syscalls {
-    /// `sendto` and `recvfrom`, the final `WouldBlock` read included.
+    /// `sendto`, `recvfrom`, `sendmmsg` and `recvmmsg`, the final `WouldBlock` read included.
     data: u64,
     /// The readiness check once per burst, standing in for the data plane's `epoll_wait`.
     wake: u64,
@@ -117,8 +122,8 @@ fn run(args: &Args) -> Result<String, String> {
             agent.mtu()
         ));
     }
-    let agent = Link::new(agent_socket, agent);
-    let server = Link::new(server_socket, server);
+    let agent = Link::new(agent_socket, agent, !args.one_by_one);
+    let server = Link::new(server_socket, server, !args.one_by_one);
     let packet = inner_packet(args.size);
     let bursts = args.packets.div_ceil(args.burst as u64);
     let plan = Plan {
@@ -133,12 +138,13 @@ fn run(args: &Args) -> Result<String, String> {
     };
     let packets = bursts * args.burst as u64;
     Ok(format!(
-        "RESULT mode={} size={} packets={packets} bytes={} cpu_ns={} user_ns={} sys_ns={} data_syscalls={} wake_syscalls={}",
+        "RESULT mode={} size={} batch={} packets={packets} bytes={} cpu_ns={} user_ns={} sys_ns={} data_syscalls={} wake_syscalls={}",
         match args.mode {
             Mode::Send => "send",
             Mode::Recv => "recv",
         },
         args.size,
+        if args.one_by_one { "off" } else { "on" },
         packets * args.size as u64,
         measured.cpu.total.as_nanos(),
         measured.cpu.user.as_nanos(),
@@ -337,12 +343,32 @@ struct Link {
     /// The device layer encrypts into this buffer; `direct` names the datagram it holds.
     sealed: Vec<u8>,
     direct: Option<Outgoing>,
+    /// The data plane's batch store, when batching: the packets of a burst are sealed into its send
+    /// slots and sent with `sendmmsg`, UDP GSO joining runs of one length, and datagrams are read
+    /// with `recvmmsg` and UDP GRO.
+    batch: Option<Batch>,
+}
+
+struct Batch {
+    rx: RxBatch,
+    tx: TxBatch,
+    gso: bool,
 }
 
 impl Link {
-    fn new(socket: UdpSocket, device: Device) -> Self {
+    fn new(socket: UdpSocket, device: Device, batching: bool) -> Self {
         let buf = vec![0; device.max_transmit_len() + 64];
         let sealed = vec![0; device.max_transmit_len()];
+        let batch = batching.then(|| {
+            let fd = socket.as_raw_fd();
+            // データプレーンと同じく、GRO を有効にし、GSO の有無を調べる
+            let _ = sys::enable_gro(fd);
+            Batch {
+                rx: RxBatch::new(MAX_SLOTS, true, device.max_transmit_len()),
+                tx: TxBatch::new(MAX_SLOTS, true, device.mtu(), device.max_transmit_len()),
+                gso: sys::has_gso(fd),
+            }
+        });
         Self {
             socket,
             device,
@@ -351,11 +377,24 @@ impl Link {
             plain: vec![0; usize::from(u16::MAX)],
             sealed,
             direct: None,
+            batch,
         }
     }
 
-    /// The adapter to the device layer's encrypt side: one inner packet in.
+    /// The adapter to the device layer's encrypt side: one inner packet in. When batching, the
+    /// packet goes through a send slot as the data plane's core writes it, into the next sealed
+    /// slot.
     fn encrypt(&mut self, now: Instant, packet: &[u8]) {
+        if let Some(b) = &mut self.batch {
+            let i = b.tx.n_sealed;
+            b.tx.packet_slot(i)[..packet.len()].copy_from_slice(packet);
+            b.tx.set_len(i, packet.len());
+            let (p, out) = b.tx.seal_slot(i);
+            if let Some(o) = self.device.handle_packet(now, p, out) {
+                b.tx.push_sealed(o.to, o.len);
+            }
+            return;
+        }
         self.direct = self.device.handle_packet(now, packet, &mut self.sealed);
     }
 
@@ -370,10 +409,29 @@ impl Link {
         }
     }
 
-    /// Sends every datagram the device layer has, one `sendto` each.
+    /// Sends every datagram the device layer has, one `sendto` each, then the sealed batch with
+    /// `sendmmsg`, or the one sealed datagram with `sendto`.
     fn send_pending(&mut self, calls: &mut Syscalls) -> std::io::Result<()> {
         while let Some(Transmit { to, payload }) = self.device.poll_transmit() {
             send_datagram(&self.socket, to, &payload, calls)?;
+        }
+        if let Some(b) = &mut self.batch {
+            if b.tx.n_sealed == 0 {
+                return Ok(());
+            }
+            b.tx.lay_out(0, b.gso);
+            while b.tx.is_pending() {
+                calls.data += 1;
+                match b.tx.send(self.socket.as_raw_fd()) {
+                    Ok(n) => b.tx.next += n.max(1),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        wait(&self.socket, libc::POLLOUT, 100)?;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            b.tx.clear();
+            return Ok(());
         }
         if let Some(out) = self.direct.take() {
             send_datagram(&self.socket, out.to, &self.sealed[..out.len], calls)?;
@@ -381,9 +439,20 @@ impl Link {
         Ok(())
     }
 
-    /// Reads until the socket is empty, one `recvfrom` each and one for the `WouldBlock`.
-    /// Returns the datagrams read.
+    /// Whether to send after this packet: always without batching, and when the send slots are
+    /// full with it.
+    fn send_each(&self) -> bool {
+        self.batch
+            .as_ref()
+            .is_none_or(|b| b.tx.n_sealed == b.tx.slots())
+    }
+
+    /// Reads until the socket is empty, one `recvfrom` or `recvmmsg` each and one for the
+    /// `WouldBlock`. Returns the datagrams read, a GRO buffer's segments each.
     fn receive_all(&mut self, now: Instant, calls: &mut Syscalls) -> std::io::Result<u64> {
+        if self.batch.is_some() {
+            return self.receive_batches(now, calls);
+        }
         let mut read = 0;
         loop {
             calls.data += 1;
@@ -395,6 +464,37 @@ impl Link {
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(read),
                 Err(e) => return Err(e),
             }
+        }
+    }
+
+    /// [`Link::receive_all`] with `recvmmsg` into the batch store, decrypting into its plaintext
+    /// area as the data plane does.
+    fn receive_batches(&mut self, now: Instant, calls: &mut Syscalls) -> std::io::Result<u64> {
+        let fd = self.socket.as_raw_fd();
+        let Some(b) = &mut self.batch else {
+            return Ok(0);
+        };
+        let mut read = 0;
+        loop {
+            calls.data += 1;
+            let n = match b.rx.recv(fd, MAX_SLOTS) {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(read),
+                Err(e) => return Err(e),
+            };
+            let device = &mut self.device;
+            let mut delivered = 0;
+            b.rx.decrypt_each(n, |from, datagram, out| {
+                read += 1;
+                match device.handle_datagram(now, from, datagram, out) {
+                    Some(got) => {
+                        delivered += 1;
+                        got
+                    }
+                    None => 0,
+                }
+            });
+            self.delivered += delivered;
         }
     }
 
@@ -467,8 +567,11 @@ fn measure_send(mut agent: Link, server: Link, plan: &Plan) -> Result<Measured, 
             calls.wake += 1;
             for _ in 0..plan.burst {
                 agent.encrypt(now, &plan.packet);
-                agent.send_pending(&mut calls).map_err(|e| e.to_string())?;
+                if agent.send_each() {
+                    agent.send_pending(&mut calls).map_err(|e| e.to_string())?;
+                }
             }
+            agent.send_pending(&mut calls).map_err(|e| e.to_string())?;
             cpu = cpu.plus(Cpu::now().since(start));
             target += plan.burst as u64;
             while seen < target {
@@ -608,8 +711,11 @@ fn sender_thread(
         let now = Instant::now();
         for _ in 0..n {
             agent.encrypt(now, packet);
-            agent.send_pending(&mut calls).map_err(|e| e.to_string())?;
+            if agent.send_each() {
+                agent.send_pending(&mut calls).map_err(|e| e.to_string())?;
+            }
         }
+        agent.send_pending(&mut calls).map_err(|e| e.to_string())?;
         if sent.send(()).is_err() {
             break;
         }

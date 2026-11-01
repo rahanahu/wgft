@@ -35,16 +35,17 @@
 //!
 //! (The code is in `linux.rs`.)
 //!
-//! Extending it for stage 2 of the batching work. Everything the data plane would replace sits in
-//! three places: `Link::send_pending` (one `sendto` per datagram), `Link::receive_all` (one
-//! `recvfrom` per datagram plus the final `WouldBlock`) and the `encrypt` and `decrypt` adapters
-//! that call the device layer. When the data plane gets `sendmmsg` or `recvmmsg`, replace the
-//! loops in the first two with the batch call over a whole burst and count one data call per batch
-//! (`Syscalls::data`); for UDP GSO and GRO, pass the segment size and read the coalesced
-//! datagram, and count its segments as packets. The report then shows the drop in system calls per
-//! packet directly, and the cache and instruction counts show the layout effect. Keep the
-//! workload (sizes, burst, packet pattern) unchanged so that a base build and a head build stay
-//! comparable; change the adapters, not the workload, when the device layer's API changes.
+//! Batching. By default each end uses the data plane's batch store and system calls from
+//! `wgft-udp-batch`, the code the agent runs: a burst's packets are copied into the store's packet
+//! slots as the core writes them, sealed by the device layer into its send slots, laid out into
+//! messages that join runs of one length with UDP GSO, and sent with `sendmmsg`; datagrams are
+//! read with `recvmmsg` with UDP GRO on and decrypted, segment by segment, into the store's
+//! plaintext area. `data_syscalls` counts one per batch call. `--one-by-one` keeps the earlier
+//! path, one `sendto` or `recvfrom` per datagram, for a comparison inside one build; a base build
+//! from before the batching runs that path by itself. The workload (sizes, burst, packet pattern)
+//! stays the same, so a base build and a head build stay comparable. In `recv` mode the second
+//! thread sends with the same path, so with batching the measured end reads GRO buffers that
+//! loopback hands over whole.
 
 #[cfg(target_os = "linux")]
 mod linux;

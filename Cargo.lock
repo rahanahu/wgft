@@ -1679,6 +1679,7 @@ dependencies = [
  "clap",
  "libc",
  "socket2",
+ "wgft-udp-batch",
  "wgft-wireguard",
 ]
 
