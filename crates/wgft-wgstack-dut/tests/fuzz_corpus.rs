@@ -10,6 +10,9 @@
 //! (最初の種、既定は 1) で足せます (Go の `TestAdversarialSender` と同じ名前です)。既定は 0 で、corpus の
 //! 種 1 から 8 だけを流します。1 つの種は debug の build で 3 秒ほどかかるので、多くの種はホストの関門が
 //! release の build で流します (`scripts/wgstack-gate.sh` の `wgstack-rs-adversarial`)。
+//!
+//! 生の packet の敵 (`raw_adversary`) は corpus を持たず、決まった種から作った入力を流します。種の数は
+//! `WGFT_WGSTACK_RAW_SEEDS` (既定は 8) で変えられます。
 
 use std::path::{Path, PathBuf};
 use std::{env, fs};
@@ -29,6 +32,10 @@ const TARGETS: [(&str, Body); 3] = [
 
 /// 既定で足す敵対的な送り手の種の数です。
 const AUDIT_SEEDS: u64 = 0;
+
+/// 既定で流す生の packet の敵の種の数と、1 つの種の入力の byte 数です。
+const RAW_SEEDS: u64 = 8;
+const RAW_LEN: usize = 16_000;
 
 fn fuzz_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../wgft-wgstack/fuzz")
@@ -86,6 +93,16 @@ fn main() {
             format!("adversarial_sender/seed/{seed}"),
             move || {
                 fuzz::adversarial_sender_seed(seed);
+                Ok(())
+            },
+        ));
+    }
+    let seeds = env_u64("WGFT_WGSTACK_RAW_SEEDS", RAW_SEEDS);
+    for seed in 1..=seeds {
+        trials.push(Trial::test(
+            format!("raw_adversary/seed/{seed}"),
+            move || {
+                fuzz::raw_adversary_seed(seed, RAW_LEN);
                 Ok(())
             },
         ));

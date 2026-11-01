@@ -1,23 +1,25 @@
-//! Rust の agent の制御プレーンの試作。
+//! wgft の agent。
 //!
-//! 接続文字列と登録、認証情報 (`agent.json`)、stream、全体状態の適用、ハートビート、TCP の中継を
-//! 持つ。WireGuard の device の層は、試作の TUN の経路では `tunnel` が、TUN を使わない経路では
-//! `dataplane` が扱う。作りは `docs/design/v2/agent-control.md` に書く。
+//! 接続文字列と登録、認証情報 (`agent.json`)、stream、全体状態の適用、ハートビート、TCP と UDP の中継、
+//! 制御ソケットを持つ。WireGuard の device の層と Rust の wgstack の核は、`tunnel` が世代ごとに立てる
+//! `dataplane` のスレッドが動かす。TUN は使わない。作りは `docs/design/v2/agent-control.md` と
+//! `docs/design/v2/agent-parity.md` に書く。
 
 pub mod config;
 mod control;
 pub mod controlapi;
 pub mod credentials;
 mod ctlserver;
-pub mod dataplane;
+mod dataplane;
 pub mod enroll;
-pub mod error;
+mod error;
 pub mod flowpool;
 pub mod hostaddr;
 pub mod logging;
 pub mod memory;
+pub mod oserror;
 pub mod platform;
-pub mod relay;
+mod relay;
 mod run;
 mod stream;
 pub mod targets;

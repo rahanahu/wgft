@@ -14,6 +14,7 @@ pub(crate) const FLAG_SYN: u8 = 0x02;
 pub(crate) const FLAG_RST: u8 = 0x04;
 pub(crate) const FLAG_PSH: u8 = 0x08;
 pub(crate) const FLAG_ACK: u8 = 0x10;
+#[cfg(test)]
 pub(crate) const FLAG_URG: u8 = 0x20;
 
 pub(crate) const IP_HEADER_LEN: usize = 20;
@@ -129,6 +130,7 @@ pub(crate) struct Ipv4<'a> {
 
 impl<'a> Ipv4<'a> {
     /// option を含む header です。
+    #[cfg(test)]
     pub(crate) fn header(&self) -> &'a [u8] {
         &self.packet[..self.hlen]
     }
