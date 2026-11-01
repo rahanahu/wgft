@@ -50,9 +50,8 @@ name: CI
 #               above except the scenario scripts and their fixtures, which the Go and the
 #               Rust parsers both read, so a Go-only or document-only change leaves these
 #               jobs skipped and a Rust-only change leaves the Go jobs to build-test's own
-#               rule. rust-deny
-#               additionally runs on the weekly schedule, because new RustSec advisories
-#               affect code nobody touched.
+#               rule. rust-deny additionally runs on the weekly schedule, because new
+#               RustSec advisories affect code nobody touched.
 #
 # A change to .github/workflows/** (the `workflows` filter below) additionally forces every
 # gated job to run, on top of what `build` and `go_code` already cover: a ci.yml change can
@@ -403,10 +402,11 @@ jobs:
       - name: doctests
         run: cargo test --workspace --doc --locked
       # The test tooling crates never reach the product binary's dependency tree
-      # (docs/design/v2/wgstack-rs.md, the dependency and isolation checks).
+      # (docs/design/v2/wgstack-rs.md, the dependency and isolation checks). Every target and
+      # every feature, so a target-specific or optional dependency cannot hide one.
       - name: product tree
         run: |
-          tree=$(cargo tree -p wgft -e normal,build --prefix none --locked)
+          tree=$(cargo tree -p wgft -e normal,build --target all --all-features --prefix none --locked)
           if printf '%s\n' "$tree" | grep -E '^wgft-(tcpharness|wgstack-dut) '; then
             echo "the wgft binary depends on a test tooling crate" >&2
             exit 1
