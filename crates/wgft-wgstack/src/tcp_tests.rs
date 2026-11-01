@@ -1,8 +1,6 @@
-//! TCP の白箱の試験 (Go の `tcp_test.go`、`lifecycle_test.go`、`orphan_test.go`、`regress_test.go` などのうち
-//! この段の範囲のもの)。
+//! TCP の白箱の試験 (Go の `tcp_test.go`、`lifecycle_test.go`、`orphan_test.go`、`regress_test.go` など)。
 //!
-//! Go の試験は SACK を交渉する接続も使いますが、この段の核は SACK を交渉しないので、SACK の印付けと回復を見る
-//! 試験は SACK の段 (PR 5) が移します。
+//! SACK の印付けと回復、RACK-TLP、不要な再送の取り消し、CUBIC、boost の試験は `sack_tests.rs` にあります。
 
 #![expect(
     clippy::disallowed_macros,
@@ -66,7 +64,7 @@ fn handshake_options() {
     assert_eq!(sa.mss, Some((TEST_MTU - 40) as u16));
     assert_eq!(sa.wscale, Some(crate::tcp::RCV_WINDOW_SHIFT));
     assert_eq!(sa.ts.map(|t| t.1), Some(5000), "TSecr");
-    assert!(!sa.sack_ok, "this stage does not negotiate SACK");
+    assert!(sa.sack_ok, "SACK-permitted");
     assert_eq!(sa.wnd, 64296);
 }
 

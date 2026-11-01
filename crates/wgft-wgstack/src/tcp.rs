@@ -6,6 +6,7 @@
 
 pub(crate) mod ack;
 pub(crate) mod ack_policy;
+pub(crate) mod boost;
 pub(crate) mod cc;
 pub(crate) mod conn;
 pub(crate) mod ctx;

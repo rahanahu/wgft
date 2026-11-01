@@ -15,7 +15,7 @@ use crate::buf::{BOOST_SIZE, RECV_FLOOR};
 use crate::wire::Segment;
 
 /// 歩みの上限を広げる順序どおりの segment の中身の最小 (Linux の tcp_event_data_recv の 128) です。
-const RCV_GROW_MIN: usize = 128;
+pub(crate) const RCV_GROW_MIN: usize = 128;
 
 impl Conn<'_> {
     /// 窓の上限です。floor から予約までの間で、測定が求めた値です。
@@ -24,14 +24,14 @@ impl Conn<'_> {
     }
 
     /// 窓の上限から保持するデータを引いた空きです。順序外のデータも空きを減らします。
-    fn rcv_free(&self) -> u64 {
+    pub(crate) fn rcv_free(&self) -> u64 {
         let held = self.b.rcv.unread() + self.b.rcv.ooo_bytes();
         self.rcv_clamp().saturating_sub(held)
     }
 
     /// 今広告してよい右端 (受信の offset) です。空きと歩みの上限の小さい方を RCV.NXT に足し、窓の欄で表せる量に
     /// 収めます。
-    fn rcv_target(&self) -> u64 {
+    pub(crate) fn rcv_target(&self) -> u64 {
         let nxt = self.b.rcv.nxt_off;
         nxt + self
             .rcv_free()

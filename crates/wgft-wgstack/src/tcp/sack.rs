@@ -10,22 +10,50 @@
 //! - `high_sack`:SACK 済みの記録の最も右の端
 //!
 //! pipe は SND.MAX - SND.UNA - sacked - (境目より手前の SACK 済みでない byte) + rtx_bytes です。
-//! SACK の印付けと SACK による回復 (RFC 6675、PRR) は SACK の段 (PR 5) が足します。
+//! ACK 1 つの手間は、SACK の block の数 x log(記録の数) と、印付けの均した手間と、定数の更新の和を超えません。
 
-use super::ctx::Conn;
+use super::conn::{RecList, Tcb};
+use super::ctx::{Conn, u32_of};
 use super::rack::Which;
-use crate::buf::records::{REC_IN_Q, REC_IN_T, REC_LOST, REC_RTX, REC_SACKED};
+use super::{MS, RTX_FAST};
+use crate::buf::records::{REC_IN_Q, REC_IN_T, REC_LOST, REC_RTX, REC_SACKED, Record, RecordRing};
 use crate::seq;
+use crate::wire::Segment;
+
+// scoreboard の手間の数え (Go の `scoreSteps`) です。試験の build だけが数え、Go の試験と同じく ACK 1 つの手間の
+// 上界を確かめます。型の大きさを製品と同じに保つため、欄ではなく thread の値に置きます。
+#[cfg(test)]
+std::thread_local! {
+    static STEPS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// scoreboard の手間を 1 つ数えます。製品の build では何もしません。
+#[inline]
+pub(crate) fn step() {
+    #[cfg(test)]
+    STEPS.set(STEPS.get() + 1);
+}
+
+/// この thread で数えた scoreboard の手間です。
+#[cfg(test)]
+pub(crate) fn steps() -> u64 {
+    STEPS.get()
+}
 
 /// RFC 6675 の DupThresh です。
 pub(crate) const DUP_THRESH: i64 = 3;
 
+/// SACK の取り消しを疑ってから RTO の処理に移るまでの最短の時間です (Linux の tcp_check_sack_reneging と同じく
+/// max(SRTT/2, 10 ms))。
+const RENEGE_DELAY_MIN: i64 = 10 * MS;
+
 /// 再送する記録の選び方です。`Queue` は RACK の損失の待ち行列、`Pos` は番号の順の手がかり (損失の境目より
-/// 手前と規則 3) です。TLP の probe は SACK の段が足します。
+/// 手前と規則 3)、`Tlp` は TLP の probe です。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Src {
     Pos,
     Queue,
+    Tlp,
 }
 
 /// 再送に選んだ記録です。
@@ -106,6 +134,23 @@ impl Conn<'_> {
         p
     }
 
+    /// 開始の番号が `seq` 以上の最初の記録の位置です。記録は番号の順に隙間なく並びます。
+    pub(crate) fn first_rec_from(&mut self, seq: u32) -> usize {
+        let una = self.t.snd_una;
+        let key = seq.wrapping_sub(una);
+        let (mut lo, mut hi) = (0, self.b.recs.len());
+        while lo < hi {
+            let mid = usize::midpoint(lo, hi);
+            step();
+            if self.b.recs.at(mid).seq.wrapping_sub(una) < key {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
     /// SACK 済みの記録 `i` から続く SACK 済みの記録を飛ばし、SACK 済みでない最初の記録の位置 (無ければ記録の
     /// 数) を返します。たどった記録の `skip` を返す位置に書き直します (経路の圧縮)。
     #[expect(
@@ -119,6 +164,7 @@ impl Conn<'_> {
             if !self.is_sacked(j) {
                 break;
             }
+            step();
             j += idx(self.b.recs.at(j).skip).max(1);
         }
         let j = j.min(n);
@@ -130,9 +176,127 @@ impl Conn<'_> {
             let r = self.b.recs.at(k);
             let next = k + idx(r.skip).max(1);
             r.skip = idx32(j - k);
+            step();
             k = next;
         }
         j
+    }
+
+    /// segment の SACK の block で記録に印を付け、損失の境目を進めます。新しく SACK 済みになった byte を返します。
+    /// block の 1 つでも範囲の外にあれば、segment の block をすべて捨てます。
+    pub(crate) fn mark_sack(&mut self, seg: &Segment<'_>, now: i64) -> u32 {
+        let blocks = seg.opt.sack_blocks();
+        let Some(&b0) = blocks.first() else {
+            return 0;
+        };
+        let t = &*self.t;
+        let low = t.snd_una.wrapping_sub(t.max_snd_wnd);
+        if blocks.iter().any(|b| {
+            !seq::lt(b.left, b.right) || seq::lt(b.left, low) || seq::gt(b.right, t.snd_max)
+        }) {
+            return 0;
+        }
+        if !t.sack_ok {
+            return 0;
+        }
+        // 先頭の block が確認済みの範囲か 2 つ目の block の内側なら D-SACK です (RFC 2883 4 節)。
+        if !seq::gt(b0.right, t.snd_una)
+            || blocks
+                .get(1)
+                .is_some_and(|b1| seq::le(b1.left, b0.left) && seq::le(b0.right, b1.right))
+        {
+            let (dup, tlp) = self.dsack_seen(b0);
+            if dup > 0 {
+                if !tlp {
+                    self.rack_dsack();
+                }
+                self.note_undo_dsack(b0, dup, tlp);
+            }
+        }
+        if self.b.recs.len() == 0 {
+            return 0;
+        }
+        let before = self.t.sacked;
+        for b in blocks {
+            let una = self.t.snd_una;
+            if !seq::gt(b.right, una) {
+                continue; // D-SACK か、確認済みの範囲
+            }
+            let left = if seq::lt(b.left, una) { una } else { b.left };
+            let key = b.right.wrapping_sub(una);
+            let mut i = self.first_rec_from(left);
+            while i < self.b.recs.len() {
+                let r = *self.b.recs.at(i);
+                step();
+                if r.seq.wrapping_add(u32::from(r.length)).wrapping_sub(una) > key {
+                    break;
+                }
+                if self.is_sacked(i) {
+                    i = self.next_unsacked(i);
+                    continue;
+                }
+                self.set_sacked(i, now);
+                i += 1;
+            }
+        }
+        self.advance_loss();
+        self.t.sacked.wrapping_sub(before)
+    }
+
+    /// 位置 `i` の記録に SACK 済みの印を付け、欄を更新します。
+    #[expect(
+        clippy::many_single_char_names,
+        reason = "the names follow the Go code"
+    )]
+    fn set_sacked(&mut self, i: usize, now: i64) {
+        self.rack_delivered(i, now);
+        self.unlink_rec(i);
+        let l = u32::from(self.b.recs.at(i).length);
+        if self.rack_lost(i) {
+            if i >= idx(self.t.loss_idx) {
+                self.t.rack_lost_beyond = self.t.rack_lost_beyond.wrapping_sub(l);
+            }
+            self.b.recs.at(i).flags &= !REC_LOST; // SACK の取り消しの後に損失の印が残らないように消します
+        }
+        let g = self.t.sack_gen;
+        let r = self.b.recs.at(i);
+        r.flags |= REC_SACKED;
+        r.sack_gen = g;
+        r.skip = 1;
+        let end = r.seq.wrapping_add(l);
+        let t = &mut *self.t;
+        t.sacked_recs += 1;
+        if t.sacked == 0 || seq::gt(end, t.high_sack) {
+            t.high_sack = end;
+        }
+        t.sacked = t.sacked.wrapping_add(l);
+        if i >= idx(t.loss_idx) {
+            t.beyond_bytes = t.beyond_bytes.wrapping_add(l);
+            t.beyond_cnt += 1;
+        }
+        self.clear_rtx(i);
+    }
+
+    /// 境目の記録より先の SACK 済みの量が RFC 6675 の閾値 (DupThresh 個の記録か (DupThresh - 1) x SMSS byte を
+    /// 超える量) に届く間、境目を先へ進めます。境目は後ろへ戻りません。
+    pub(crate) fn advance_loss(&mut self) {
+        if self.t.reorder_seen {
+            return; // 並べ替えを見た後は RACK だけで損失を決めます (Linux の tcp_time_to_recover)
+        }
+        let limit = u32_of((DUP_THRESH - 1) * i64::from(self.seg_mss()));
+        while idx(self.t.loss_idx) < self.b.recs.len() {
+            let i = idx(self.t.loss_idx);
+            let (mut cnt, mut by) = (self.t.beyond_cnt, self.t.beyond_bytes);
+            let s = self.is_sacked(i);
+            if s {
+                cnt -= 1;
+                by = by.wrapping_sub(u32::from(self.b.recs.at(i).length));
+            }
+            if i64::from(cnt) < DUP_THRESH && by <= limit {
+                return;
+            }
+            self.pass_loss(i, s);
+        }
     }
 
     /// 境目を記録 `i` (境目の記録) の先へ進めます。`sacked` は記録が SACK 済みかです。
@@ -153,6 +317,7 @@ impl Conn<'_> {
             }
         }
         self.t.loss_idx += 1;
+        step();
     }
 
     /// SACK 済みでない記録をすべて損失にし、再送の世代を進め、再送の手がかりを SND.UNA に戻します。RTO で
@@ -176,10 +341,25 @@ impl Conn<'_> {
         self.t.resend_cause = cause;
     }
 
+    /// SACK の取り消しで、すべての記録の SACK 済みの印を世代の番号で消します。
+    pub(crate) fn clear_sack(&mut self) {
+        let t = &mut *self.t;
+        t.sack_gen = t.sack_gen.wrapping_add(1);
+        if t.sack_gen == 0 {
+            self.b.recs.clear_flags(REC_SACKED);
+        }
+        let t = &mut *self.t;
+        (t.sacked, t.beyond_bytes, t.beyond_cnt, t.sacked_recs) = (0, 0, 0, 0);
+        self.s.stats.sack_reneging += 1;
+    }
+
     /// 累積の確認で外す先頭の記録の分を欄から引き、位置の欄を 1 つ前へずらします。呼び手はこの後に記録を輪から
-    /// 外し、`rec_base` を 1 つ進めます。RACK の状態の更新は SACK の段 (PR 5) が足します。
-    pub(crate) fn drop_head(&mut self) {
+    /// 外し、`rec_base` を 1 つ進めます。
+    pub(crate) fn drop_head(&mut self, now: i64) {
         let l = u32::from(self.b.recs.at(0).length);
+        if !self.is_sacked(0) {
+            self.rack_delivered(0, now);
+        }
         if self.t.lost_q.n > 0 && self.t.lost_q.head == self.t.rec_base {
             (self.t.q_off, self.t.q_mid) = (0, false);
         }
@@ -262,6 +442,7 @@ impl Conn<'_> {
         match p.src {
             Src::Queue => self.t.q_off,
             Src::Pos => self.t.rxt_off,
+            Src::Tlp => 0,
         }
     }
 
@@ -288,6 +469,7 @@ impl Conn<'_> {
             if x >= limit || x >= self.b.recs.len() {
                 return None;
             }
+            step();
             if self.is_sacked(x) {
                 self.t.rxt_idx = idx32(self.next_unsacked(x));
                 (self.t.rxt_off, self.t.rxt_mid) = (0, false);
@@ -317,5 +499,350 @@ impl Conn<'_> {
         let n = left.min(super::ctx::u32_of(pay_cap.max(0)));
         let fin = self.t.fin_sent && n == left && seq::gt(end, de);
         (n, fin)
+    }
+
+    /// SACK による回復に入ります (RFC 6675 5 節、RFC 6937。RecoverFS は RFC 9937)。先頭の記録は損失とみなします。
+    /// `delivered` は回復に入る ACK が累積の確認と SACK で新しく届けたと知らせた byte です。
+    fn enter_recovery(&mut self, delivered: u32) {
+        self.enter_fast_recovery();
+        let t = &*self.t;
+        let k = &mut *self.k;
+        (k.prr_delivered, k.prr_out) = (0, 0);
+        // RFC 9937 6.1 の RecoverFS:回復の間に届くかもしれない byte。回復の前に SACK 済みの byte は回復の間に
+        // 届いたと数えないので引き、この ACK が届けた byte は足します。
+        k.recover_fs = t
+            .snd_max
+            .wrapping_sub(t.snd_una)
+            .wrapping_sub(t.sacked)
+            .wrapping_add(delivered);
+        self.reset_rxt();
+        self.t.resend_cause = RTX_FAST;
+        let t = &*self.t;
+        if t.loss_idx == 0 && t.rack_lost_beyond == 0 && t.lost_q.n == 0 && self.b.recs.len() > 0 {
+            let s = self.is_sacked(0);
+            self.pass_loss(0, s);
+            self.advance_loss();
+        }
+    }
+
+    /// 回復の中の ACK ごとに、PRR (RFC 6937 の PRR-SSRB) で輻輳の窓を決めます。`delivered` はこの ACK が累積の
+    /// 確認と SACK で新しく届けたと知らせた byte です。
+    fn prr_update(&mut self, delivered: u32) {
+        let mss = i64::from(self.seg_mss());
+        self.k.prr_delivered = self.k.prr_delivered.wrapping_add(delivered);
+        let pipe = i64::from(self.pipe());
+        let t = &mut *self.t;
+        let k = &*self.k;
+        let ss = i64::from(t.ssthresh);
+        let (pd, po) = (i64::from(k.prr_delivered), i64::from(k.prr_out));
+        let mut sndcnt = if pipe > ss {
+            let fs = i64::from(k.recover_fs).max(1);
+            (pd * ss + fs - 1) / fs - po
+        } else {
+            let limit = (pd - po).max(i64::from(delivered)) + mss;
+            (ss - pipe).min(limit)
+        };
+        sndcnt = sndcnt.max(0);
+        if k.prr_out == 0 && sndcnt < mss {
+            sndcnt = mss; // 回復に入った時の最初の再送 (Linux の tcp_cwnd_reduction)
+        }
+        t.cwnd = u32_of((pipe + sndcnt).min(1 << 30));
+    }
+
+    /// SACK を交渉した接続で、ACK の処理の後に回復に入るかを決め、回復の中なら窓を決めます。
+    pub(crate) fn sack_after_ack(&mut self, delivered: u32) {
+        let t = &*self.t;
+        let lost = t.loss_idx > 0 || t.rack_lost_beyond > 0 || t.lost_q.n > 0;
+        let dup_entry = t.dup_acks >= DUP_THRESH && !t.reorder_seen;
+        if !t.in_recovery
+            && t.snd_una != t.snd_max
+            && seq::ge(t.snd_una, t.recover)
+            && (dup_entry || lost)
+        {
+            self.enter_recovery(delivered);
+        }
+        if self.t.in_recovery {
+            self.prr_update(delivered);
+        }
+    }
+
+    /// 累積の確認の後も先頭の記録が SACK 済みのとき (相手が SACK 済みのデータを捨てた疑い)、再送のタイマーを
+    /// max(SRTT/2, 10 ms) に早めます。期限までに直す ACK が来なければ、RTO の処理が印を消します。
+    pub(crate) fn renege_timer(&mut self, now: i64) {
+        if self.t.persist || self.b.recs.len() == 0 || !self.is_sacked(0) {
+            return;
+        }
+        let at = now + (self.t.srtt / 2).max(RENEGE_DELAY_MIN);
+        if self.t.rto_at == 0 || at < self.t.rto_at {
+            self.set_rto(at);
+        }
+    }
+}
+
+/// 記録 `r` が今の世代の印 `f` を持つかです。
+fn gen_flag(t: &Tcb, r: &Record, f: u8) -> bool {
+    r.flags & f != 0 && r.rtx_gen == t.rtx_gen
+}
+
+/// 接続の scoreboard の欄を記録から数え直し、増減で保つ値と比べます (`check_invariants`)。記録が SND.UNA から
+/// SND.MAX まで隙間なく並ぶこと、SACK 済みの byte と数、境目から先の byte と数、送り残しの再送の byte、境目から先の
+/// RACK の損失の byte、位置の欄の範囲、SACK 済みの記録の飛ばし先、2 つの list の節と印と数と順、SACK 済みでない
+/// 記録がどこかの list にあるか境目の手前で送り直しを待つことを確かめます。手間は記録の数に比例します。
+#[expect(
+    clippy::many_single_char_names,
+    reason = "the names follow the Go code"
+)]
+pub(crate) fn check_scoreboard(t: &Tcb, recs: &RecordRing) -> Result<(), &'static str> {
+    let n = recs.len();
+    if usize::try_from(t.loss_idx).map_or(true, |i| i > n)
+        || usize::try_from(t.rxt_idx).map_or(true, |i| i > n)
+    {
+        return Err("a scoreboard position is out of range");
+    }
+    let loss = idx(t.loss_idx);
+    let sacked = |r: &Record| r.flags & REC_SACKED != 0 && r.sack_gen == t.sack_gen;
+    let (mut by, mut beyond_by, mut rtx, mut lost_beyond) = (0u32, 0u32, 0u32, 0u32);
+    let mut high = None;
+    let (mut cnt, mut beyond_cnt) = (0i32, 0i32);
+    let mut s = t.snd_una;
+    for i in 0..n {
+        let r = recs.get(i);
+        if r.seq != s {
+            return Err("the send records do not cover SND.UNA to SND.MAX");
+        }
+        let l = u32::from(r.length);
+        s = s.wrapping_add(l);
+        let in_t = gen_flag(t, r, REC_IN_T);
+        let in_q = gen_flag(t, r, REC_IN_Q);
+        if gen_flag(t, r, REC_RTX) {
+            rtx = rtx.wrapping_add(l);
+        }
+        if sacked(r) {
+            cnt += 1;
+            by = by.wrapping_add(l);
+            high = Some(s);
+            if i >= loss {
+                beyond_cnt += 1;
+                beyond_by = beyond_by.wrapping_add(l);
+            }
+            if in_t || in_q {
+                return Err("a SACKed record is in a record list");
+            }
+            continue;
+        }
+        if gen_flag(t, r, REC_LOST) && i >= loss {
+            lost_beyond = lost_beyond.wrapping_add(l);
+        }
+        if in_t && in_q {
+            return Err("a send record is in both record lists");
+        }
+        if i < loss && in_t && !gen_flag(t, r, REC_RTX) {
+            return Err("a record before the loss frontier waits on the transmit list");
+        }
+        let waits = i < loss && !gen_flag(t, r, REC_RTX);
+        if !in_t && !in_q && !waits {
+            return Err("an unSACKed send record is in no list");
+        }
+    }
+    // 飛ばし先は SACK 済みでない次の記録を越えません。後ろからたどり、手間を記録の数に比例させます。
+    let mut next_unsacked = n;
+    for i in (0..n).rev() {
+        let r = recs.get(i);
+        if !sacked(r) {
+            next_unsacked = i;
+            continue;
+        }
+        let skip = usize::try_from(r.skip).unwrap_or(0);
+        if skip == 0 || (next_unsacked < n && i + skip > next_unsacked) {
+            return Err("a SACK skip passes an unSACKed record");
+        }
+    }
+    if n > 0 && s != t.snd_max {
+        return Err("the send records do not cover SND.UNA to SND.MAX");
+    }
+    if (by, cnt, beyond_by, beyond_cnt, rtx, lost_beyond)
+        != (
+            t.sacked,
+            t.sacked_recs,
+            t.beyond_bytes,
+            t.beyond_cnt,
+            t.rtx_bytes,
+            t.rack_lost_beyond,
+        )
+    {
+        return Err("the SACK scoreboard sums disagree with the send records");
+    }
+    if t.sacked > 0 && high != Some(t.high_sack) {
+        return Err("the highest SACKed byte disagrees with the send records");
+    }
+    check_list(t, recs, t.t_list, REC_IN_T, true)?;
+    check_list(t, recs, t.lost_q, REC_IN_Q, false)
+}
+
+/// list `l` を先頭からたどり、節と印と数が合うこと、`time_order` なら送った時刻の順であることを確かめます。
+#[expect(
+    clippy::many_single_char_names,
+    reason = "the names follow the Go code"
+)]
+fn check_list(
+    t: &Tcb,
+    recs: &RecordRing,
+    l: RecList,
+    flag: u8,
+    time_order: bool,
+) -> Result<(), &'static str> {
+    const BROKEN: &str = "a send record list is broken";
+    let n = recs.len();
+    let len = usize::try_from(l.n).map_err(|_| BROKEN)?;
+    let mut a = l.head;
+    let mut last = None;
+    for k in 0..len {
+        let i = a.wrapping_sub(t.rec_base) as usize;
+        if i >= n {
+            return Err(BROKEN);
+        }
+        let r = recs.get(i);
+        if !gen_flag(t, r, flag) {
+            return Err(BROKEN);
+        }
+        if time_order && last.is_some_and(|x| r.sent_at < x) {
+            return Err("the transmit list is out of time order");
+        }
+        last = Some(r.sent_at);
+        if k + 1 == len {
+            if a != l.tail || r.next != 0 {
+                return Err(BROKEN);
+            }
+        } else if r.next == 0 {
+            return Err(BROKEN);
+        }
+        a = a.wrapping_add_signed(r.next);
+    }
+    if (0..n).filter(|&i| gen_flag(t, recs.get(i), flag)).count() != len {
+        return Err(BROKEN);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! `check_scoreboard` の検出の 1 つずつに、壊した状態を渡します。
+
+    #![expect(
+        clippy::disallowed_methods,
+        clippy::cast_possible_truncation,
+        reason = "test setup"
+    )]
+
+    use super::*;
+    use crate::testnet_tests::{TestNet, small_limits};
+    use crate::wire::SackBlock;
+
+    /// SACK を交渉し、記録をいくつか送り、最後の記録だけを SACK した接続です。
+    fn sacked_net() -> (TestNet, u32) {
+        let (mut n, i, s) = sent_net();
+        n.inject(&s);
+        (n, i)
+    }
+
+    /// SACK を交渉して記録をいくつか送った接続と、最後の記録を SACK する相手の segment です。RACK は ACK の
+    /// 時刻で先の記録を損失の待ち行列に移すので、SACK の前の記録は送った時刻の順の list にあります。
+    fn sent_net() -> (TestNet, u32, crate::testnet_tests::TSeg) {
+        let mut n = TestNet::new(small_limits());
+        let (c, mut p) = n.accepted_sack(true, true);
+        let data = [0u8; 10 * 1000];
+        let mut off = 0;
+        while off < data.len() {
+            off += n.s.write(n.now, c, &data[off..]).unwrap();
+        }
+        let outs = n.drain();
+        assert!(outs.len() >= 6);
+        let mut s = p.seg(crate::wire::FLAG_ACK, &[]);
+        s.sack = [SackBlock {
+            left: outs[outs.len() - 1].seq,
+            right: outs[outs.len() - 1]
+                .seq
+                .wrapping_add(outs[outs.len() - 1].payload.len() as u32),
+        }]
+        .to_vec();
+        (n, c.slot, s)
+    }
+
+    fn check(n: &mut TestNet, i: u32) -> Result<(), &'static str> {
+        let c = n.s.conn(i);
+        check_scoreboard(c.t, &c.b.recs)
+    }
+
+    #[test]
+    fn each_broken_scoreboard_is_caught() {
+        type Break = fn(&mut Conn<'_>);
+        let cases: [(Break, &str); 11] = [
+            (
+                |c| c.t.loss_idx = 1000,
+                "a scoreboard position is out of range",
+            ),
+            (
+                |c| c.b.recs.at(1).seq ^= 1,
+                "the send records do not cover SND.UNA to SND.MAX",
+            ),
+            (
+                |c| c.t.snd_max ^= 1,
+                "the send records do not cover SND.UNA to SND.MAX",
+            ),
+            (
+                |c| c.t.sacked += 1,
+                "the SACK scoreboard sums disagree with the send records",
+            ),
+            (
+                |c| {
+                    let last = c.b.recs.len() - 1;
+                    c.b.recs.at(last).skip = 0;
+                },
+                "a SACK skip passes an unSACKed record",
+            ),
+            (
+                |c| {
+                    let last = c.b.recs.len() - 1;
+                    c.b.recs.at(last).flags |= REC_IN_T;
+                },
+                "a SACKed record is in a record list",
+            ),
+            (
+                |c| c.b.recs.at(0).flags |= REC_IN_Q | REC_IN_T,
+                "a send record is in both record lists",
+            ),
+            (
+                |c| c.b.recs.at(0).flags &= !REC_IN_Q,
+                "an unSACKed send record is in no list",
+            ),
+            (|c| c.t.t_list.n += 1, "a send record list is broken"),
+            (
+                |c| c.t.high_sack = c.t.high_sack.wrapping_sub(1),
+                "the highest SACKed byte disagrees with the send records",
+            ),
+            (
+                |c| {
+                    c.t.loss_idx = 1;
+                    let r = c.b.recs.at(0);
+                    r.flags = (r.flags & !REC_IN_Q) | REC_IN_T;
+                },
+                "a record before the loss frontier waits on the transmit list",
+            ),
+        ];
+        for (brk, want) in cases {
+            let (mut n, i) = sacked_net();
+            check(&mut n, i).unwrap();
+            brk(&mut n.s.conn(i));
+            assert_eq!(check(&mut n, i), Err(want));
+        }
+        // 送った時刻の順を崩します。
+        let (mut n, i, _) = sent_net();
+        let c = n.s.conn(i);
+        let head = c.rec_idx(c.t.t_list.head);
+        c.b.recs.at(head).sent_at = crate::time::Time::from_nanos(u64::MAX);
+        assert_eq!(
+            check(&mut n, i),
+            Err("the transmit list is out of time order")
+        );
     }
 }

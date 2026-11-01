@@ -17,7 +17,7 @@
 
 use crate::budget::Budget;
 use crate::config::{Config, Limits};
-use crate::stack::{Event, ListenerId, NoHook, Stack};
+use crate::stack::{Event, Hook, ListenerId, Stack};
 use crate::tcp::conn::ConnId;
 use crate::time::Time;
 use crate::wire::{
@@ -45,9 +45,44 @@ pub(crate) fn small_limits() -> Limits {
     }
 }
 
+/// 試験の hook です。boost の変化を順に記録し、`may_return` には `allow_return` を返します (Go の試験の
+/// `OnBoost` に当たります)。
+#[derive(Debug)]
+pub(crate) struct TestHook {
+    pub(crate) allow_return: bool,
+    /// `(接続, 得たか)` の列です。`may_return` の問い合わせは `asked` に記録します。
+    pub(crate) changes: Vec<(ConnId, bool)>,
+    pub(crate) asked: Vec<ConnId>,
+}
+
+impl Default for TestHook {
+    fn default() -> Self {
+        Self {
+            allow_return: true,
+            changes: Vec::new(),
+            asked: Vec::new(),
+        }
+    }
+}
+
+impl Hook for TestHook {
+    fn boost_granted(&mut self, conn: ConnId) {
+        self.changes.push((conn, true));
+    }
+
+    fn may_return(&mut self, conn: ConnId) -> bool {
+        self.asked.push(conn);
+        self.allow_return
+    }
+
+    fn boost_returned(&mut self, conn: ConnId) {
+        self.changes.push((conn, false));
+    }
+}
+
 /// 手で進める時計の核と、トンネルの側の相手です。
 pub(crate) struct TestNet {
-    pub(crate) s: Stack<NoHook>,
+    pub(crate) s: Stack<TestHook>,
     pub(crate) now: Time,
     buf: Vec<u8>,
 }
@@ -125,6 +160,7 @@ pub(crate) struct Out {
     pub(crate) wscale: Option<u8>,
     pub(crate) sack_ok: bool,
     pub(crate) ts: Option<(u32, u32)>,
+    pub(crate) sack: Vec<SackBlock>,
     pub(crate) payload: Vec<u8>,
     pub(crate) id: u16,
 }
@@ -179,7 +215,17 @@ impl TestNet {
             limits,
             ..Config::new(DUT, TEST_MTU)
         };
-        let s = Stack::new(config, Budget::new().unwrap(), &seed, NoHook).unwrap();
+        Self::with_config(config, seed)
+    }
+
+    /// 設定 `config` の核です (Go の試験の `TestCongestion` と `TestBoost` を選ぶ時に使います)。
+    pub(crate) fn with_config(config: Config, seed: [u8; 64]) -> Self {
+        Self::with_budget(config, seed, Budget::new().unwrap())
+    }
+
+    /// 渡した `Budget` を使う核です。
+    pub(crate) fn with_budget(config: Config, seed: [u8; 64], budget: Budget) -> Self {
+        let s = Stack::new(config, budget, &seed, TestHook::default()).unwrap();
         Self {
             s,
             now: Time::ZERO,
@@ -236,8 +282,13 @@ impl TestNet {
     /// 80 番で待ち受け、相手の 40000 番から窓の scale を付けて接続を開き、accept で受け取った接続と相手の側の
     /// 接続を返します。握手の出力は読み捨てます。
     pub(crate) fn accepted(&mut self, ts: bool) -> (ConnId, PeerConn) {
+        self.accepted_sack(ts, false)
+    }
+
+    /// `accepted` と同じで、`sack` が真なら相手が SACK-permitted を示します (Go の `accepted(ts, sack)`)。
+    pub(crate) fn accepted_sack(&mut self, ts: bool, sack: bool) -> (ConnId, PeerConn) {
         let l = self.listen(80);
-        let p = self.handshake(40000, 80, ts, true);
+        let p = self.handshake_sack(40000, 80, ts, sack, true);
         let c = self.accept(l);
         self.drain();
         (c, p)
@@ -245,6 +296,18 @@ impl TestNet {
 
     /// 相手から接続を開き、核の SYN-ACK に最後の ACK を返します。
     pub(crate) fn handshake(&mut self, sport: u16, dport: u16, ts: bool, ws: bool) -> PeerConn {
+        self.handshake_sack(sport, dport, ts, false, ws)
+    }
+
+    /// `handshake` と同じで、`sack` が真なら相手が SACK-permitted を示します。
+    pub(crate) fn handshake_sack(
+        &mut self,
+        sport: u16,
+        dport: u16,
+        ts: bool,
+        sack: bool,
+        ws: bool,
+    ) -> PeerConn {
         let mut p = PeerConn {
             sport,
             dport,
@@ -265,6 +328,7 @@ impl TestNet {
             wnd: 65535,
             mss: 1380,
             ws: ws.then_some(7),
+            sack_ok: sack,
             ts: ts.then_some((p.ts_val, 0)),
             ..TSeg::default()
         });
@@ -337,6 +401,7 @@ pub(crate) fn parse_out(pkt: &[u8]) -> Out {
         wscale: seg.opt.wscale,
         sack_ok: seg.opt.sack_ok,
         ts: seg.opt.ts,
+        sack: seg.opt.sack_blocks().to_vec(),
         payload: seg.payload.to_vec(),
         id: u16::from_be_bytes([pkt[4], pkt[5]]),
     }

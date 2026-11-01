@@ -5,6 +5,7 @@
 //! アプリケーションの操作は [`api`] にあり、接続の枠の外の共有の状態は [`shared`] にあります。
 
 pub(crate) mod api;
+mod boost;
 pub(crate) mod shared;
 
 use crate::bound::{Bound, Held};
@@ -329,6 +330,7 @@ impl<H: Hook> Stack<H> {
             if used {
                 reserved += b.snd.cap() + b.rcv.r.cap();
                 check_conn(t, b)?;
+                crate::tcp::sack::check_scoreboard(t, &b.recs)?;
             }
             for (k, &d) in t.tdl.iter().enumerate() {
                 let node = i * NUM_TIMERS32 + u32::try_from(k).unwrap_or(0);
@@ -634,6 +636,9 @@ fn check_conn(t: &Tcb, b: &ConnBufs) -> Result<(), InvariantError> {
     }
     if t.snd_cap != b.snd.cap() || t.rcv_cap != b.rcv.r.cap() {
         return Err("a connection's reservation disagrees with its rings".into());
+    }
+    if b.boost.is_none() && t.rcv_cap != crate::buf::RECV_FLOOR {
+        return Err("a connection without boost has a boost reservation".into());
     }
     Ok(())
 }

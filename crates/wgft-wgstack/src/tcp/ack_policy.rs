@@ -2,6 +2,8 @@
 
 use super::conn::TMR_DELACK;
 use super::ctx::Conn;
+use crate::seq;
+use crate::wire::SackBlock;
 
 /// 相手の segment の大きさの推定の初期値の上限 (Linux の TCP_MSS_DEFAULT) です。
 const MIN_RCV_MSS_EST: u32 = 536;
@@ -40,12 +42,27 @@ impl Conn<'_> {
         self.t.quick_acks = self.t.quick_acks.max(q);
     }
 
-    /// 既に届いていた `[seq, seq+n)` を受けたとき、quickack に入って対話の印を外します (Linux の
-    /// tcp_enter_quickack_mode)。範囲を D-SACK の block として次の ACK に載せる規則 (RFC 2883) は SACK の段 (PR 5)
-    /// が足します。
-    pub(crate) fn note_duplicate(&mut self, _seq: u32, n: u32) {
+    /// 既に届いていた `[seq, seq+n)` を受けたとき、その範囲を D-SACK の block として次の ACK の先頭に載せ
+    /// (RFC 2883)、quickack に入って対話の印を外します (Linux の tcp_dsack_set、tcp_dsack_extend、
+    /// tcp_enter_quickack_mode)。ACK を送る前に次の重複が届けば、接するか重なるときだけ block を広げます。
+    pub(crate) fn note_duplicate(&mut self, seq: u32, n: u32) {
         if n == 0 {
             return;
+        }
+        let t = &mut *self.t;
+        if t.sack_ok {
+            let b = SackBlock {
+                left: seq,
+                right: seq.wrapping_add(n),
+            };
+            if !t.dsack_pending {
+                (t.dsack, t.dsack_pending) = (b, true);
+            } else if seq::le(b.left, t.dsack.right) && seq::le(t.dsack.left, b.right) {
+                t.dsack = SackBlock {
+                    left: seq::min(b.left, t.dsack.left),
+                    right: seq::max(b.right, t.dsack.right),
+                };
+            }
         }
         self.raise_quickack();
         self.t.pingpong = false;

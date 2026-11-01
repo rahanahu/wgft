@@ -1,7 +1,7 @@
 //! 接続の枠のタイマーの期限 (Go の `timers.go` と `rack.go` のタイマーの部分)。
 //!
 //! 再送、窓の probe、遅延 ACK、閉じた後の期限を処理します。再送のタイマーの節は RTO、並べ替え、TLP の期限が
-//! 分け合い、最も早い期限を張ります。並べ替えと TLP の期限は SACK の段 (PR 5) が張ります。
+//! 分け合い、最も早い期限を張ります。
 
 use super::conn::{ConnError, State, TMR_CLOSE, TMR_DELACK, TMR_RETRANS};
 use super::ctx::Conn;
@@ -96,9 +96,18 @@ impl Conn<'_> {
         if !t.in_recovery && t.dup_acks > 0 && t.dup_acks < DUP_THRESH {
             st.rtos_short_of_dup_thresh += 1;
         }
-        // SACK の取り消しは SACK の段 (PR 5) が足します。
+        // SACK の取り消し:先頭の記録が SACK 済みのままか、同じ SND.UNA で 2 回目の RTO なら、相手が SACK 済みの
+        // データを捨てたとみなします (Linux の tcp_timeout_mark_lost)。
+        let mut reneged = false;
+        if self.t.sack_ok
+            && (self.t.backoff > 0 || (self.b.recs.len() > 0 && self.is_sacked(0)))
+            && self.t.sacked > 0
+        {
+            self.clear_sack();
+            reneged = true;
+        }
         let mss = self.seg_mss();
-        let frto = self.frto_eligible();
+        let frto = self.frto_eligible() && !reneged; // 取り消した SACK の記録は損失にして送り直します
         if self.t.backoff == 0 {
             // 最初の RTO が輻輳の事象として ssthresh を下げます。続く RTO は ssthresh を下げ直さず、F-RTO を終えます。
             if !self.t.in_recovery {
@@ -160,12 +169,6 @@ impl Conn<'_> {
         (t.tlp_probe, t.tlp_active, t.tlp_retrans) = (false, false, false);
     }
 
-    /// PTO の期限を決めます。新しいデータを送った後と、累積の確認が進んだ後に呼びます。TLP は SACK を交渉した
-    /// 接続だけで使い、SACK の段 (PR 5) が足します。
-    pub(crate) fn schedule_tlp(&mut self, _now: i64) {
-        self.t.tlp_at = 0;
-    }
-
     /// RTO の期限を `at` にします。0 なら RTO の期限を消します。
     pub(crate) fn set_rto(&mut self, at: i64) {
         self.t.rto_at = at;
@@ -198,12 +201,37 @@ impl Conn<'_> {
         }
     }
 
-    /// 再送のタイマーの節の期限です。期限の来た種類を 1 つ処理し、残る期限を張り直します。並べ替えと TLP の期限は
-    /// SACK の段 (PR 5) が足します。
+    /// 再送のタイマーの節の期限です。期限の来た種類を 1 つ処理し、残る期限を張り直します。並べ替えの期限は RTO の
+    /// 期限を動かしません。TLP の probe を送った時だけ、`build_tlp` が RTO を張り直します。
     fn on_retrans_timer(&mut self, now: i64) {
-        if self.t.rto_at != 0 && now >= self.t.rto_at {
+        let t = &*self.t;
+        let (rto_at, reo_at, tlp_at) = (t.rto_at, t.reo_at, t.tlp_at);
+        if tlp_at != 0 && rto_at != 0 && now >= rto_at && tlp_at <= rto_at && self.tlp_can_probe() {
+            // PTO を RTO の期限に揃えてあります。RTO ではなく probe を送り、送れたかによらず RTO を今から張り直します
+            // (RFC 8985 7.2、7.3)。前の probe の後に RTT を測っていなければ probe を送れないので、その期限の RTO を
+            // 起こします (次の場合)。
+            self.t.tlp_at = 0;
+            self.t.rto_at = now + self.cur_rto();
+            self.t.tlp_probe = true;
+        } else if rto_at != 0 && now >= rto_at {
             self.t.rto_at = 0;
             self.on_rto(now);
+        } else if reo_at != 0 && now >= reo_at {
+            self.t.reo_at = 0;
+            self.s.stats.reorder_timeouts += 1;
+            if self.rack_detect(now) {
+                self.sack_after_ack(0);
+            }
+        } else if tlp_at != 0 && now >= tlp_at {
+            // PTO の期限。新しいデータか最後の記録の再送を probe として 1 つ送ります (RFC 8985 7.3)。probe を送れ
+            // なければ、RTO は最後の手段として残すので、張ってある RTO の期限は動かさず、無いときだけ今から張ります。
+            // 動かすと、PTO を張り直す新しいデータが続く間 RTO が起きません。
+            self.t.tlp_at = 0;
+            if self.tlp_can_probe() {
+                self.t.tlp_probe = true;
+            } else if self.tlp_eligible() && self.t.rto_at == 0 {
+                self.t.rto_at = now + self.cur_rto();
+            }
         }
         self.rearm_retrans();
     }

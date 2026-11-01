@@ -76,3 +76,8 @@ undocumented_unsafe_blocks = "deny"
 allow_attributes = "deny"
 # 局所的な許可は #[expect(..., reason = "...")] で理由を書く。
 allow_attributes_without_reason = "deny"
+
+# The wgstack core's white-box tests run check_invariants after every step and replay long ACK floods. Optimising
+# the core in dev and test builds keeps them fast; overflow checks and debug assertions stay on.
+[profile.dev.package.wgft-wgstack]
+opt-level = 2
