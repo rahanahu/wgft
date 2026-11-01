@@ -3,7 +3,8 @@
 この文書は、Rust に移る wgstack を確かめる試験の道具の設計を定めます。
 対象は、適合の台本をデータにする言語、台本を流す 2 つの runner、Rust の DUT を別のプロセスとして叩く標準入出力の口、凍結した Go の wgstack の記録との照合、qbench、fuzz、関門です。
 1 節の台本の言語、2 節の Go の runner と Rust の runner と 2 つの runner の一致の確かめ、Rust の構文解析器と台本の乱数の写し、3 節の口の Go と Rust の符号と `dutserve` と `rustdut` と `ProcessDut` と `wgstack-dut`、4 節の記録とその Rust での照合は実装済みです。
-5 節から後の節は未実装です。
+6 節の fuzz と 7 節の関門は、実装の 4b の段 (8 節) の分まで実装済みです。
+5 節は未実装です。
 実装は 8 節の順に積んだ PR で行い、各 PR がこの文書の該当する節を実装に合わせて直します。
 
 Rust の wgstack そのもの (sans-IO の API、crate の分け方、bit の一致の条件、実装の PR の順) は、wgstack の Rust 版の設計 (`docs/design/v2/wgstack-rs.md`) が決めます。
@@ -46,9 +47,9 @@ Rust の wgstack の核は sans-IO で、台本と記録と fuzz は偽の時計
 | Go の DUT の server | `internal/wgstack` の試験のバイナリの `dutserve` の形 | Go | 凍結した Go の wgstack を 3 節の口で出す |
 | 別のプロセスの DUT | `internal/tcpharness/rustdut` | Go | 3 節の口の client。`tcpharness.ClockedDUT` を実装する。相手は Rust の `wgstack-dut` か、確かめのための `dutserve` |
 | Rust の道具の crate | `crates/wgft-tcpharness` | Rust | 口の符号、packet の組み立て、台本の構文解析器と runner |
-| Rust の DUT | `crates/wgft-wgstack-dut` | Rust | Rust の wgstack を `ClockedDut` に合わせる adapter、3 節の口の server のバイナリ `wgstack-dut`、記録の読み込みと照合、核に入った段の表 (`stages.json`) |
+| Rust の DUT | `crates/wgft-wgstack-dut` | Rust | Rust の wgstack を `ClockedDut` に合わせる adapter、3 節の口の server のバイナリ `wgstack-dut`、記録の読み込みと照合、核に入った段の表 (`stages.json`)、fuzz の target の本体 (`fuzz`)、敵対的な保持の試験 (`tests/holding.rs`) |
 | 記録 | `testdata/wgstack-rec/` | 言語に依らない | 凍結した Go の wgstack の入出力 |
-| wgstack の fuzz | `crates/wgft-wgstack/fuzz/` | Rust | cargo-fuzz の target |
+| wgstack の fuzz | `crates/wgft-wgstack/fuzz/` | Rust | cargo-fuzz の target。試験の担当の target は `wgft-wgstack-dut` の本体を呼ぶだけ |
 
 `crates/wgft-tcpharness` と `crates/wgft-wgstack-dut` は試験の道具で、製品のバイナリに入りません。
 どちらも `publish = false` で、リリースのワークフローはこれらを作りません。
@@ -1086,28 +1087,99 @@ Linux の TUN の上で Rust の engine を動かす確かめは、qbench でな
 
 | Go の対象 | 移る先 | seed |
 | --- | --- | --- |
-| `internal/wgstack` の `FuzzCore` | `crates/wgft-wgstack/fuzz/` の `core` (試験の担当) | Go の corpus の bytes をそのまま |
+| `internal/wgstack` の `FuzzCore` | `crates/wgft-wgstack/fuzz/` の `core` (試験の担当) | Go の `f.Add` の値と corpus の bytes をそのまま |
 | (無し) | 同じ所の `replay` (試験の担当) | 記録の要求の列 |
 | `internal/wgstack` の `FuzzParse` | 同じ所の `parse` (実装の担当) | Go の corpus の bytes をそのまま |
 | `FuzzAdversarialSender` | 同じ所の `adversarial_sender` (試験の担当) | u64 の種を 8 byte の little endian に |
 | `internal/tcpharness` の `FuzzParseScript` | `crates/wgft-tcpharness/fuzz/` の `parse_script` (試験の担当) | 台本と構文の fixture の directory |
 | `proto`、`credentials`、`enroll`、`allowtargets`、`policy`、`vpsd` の fuzz | それぞれを移す crate の `fuzz/` | 1 つの引数の対象は bytes をそのまま、複数の引数の対象は対象ごとに決めた並び |
 
+試験の担当の target の本体は `crates/wgft-wgstack-dut` の `fuzz` module に置き、`crates/wgft-wgstack/fuzz/` の target はその関数を呼ぶだけにします。
+stable の試験が同じ本体で seed と見つけた落ちる入力を流せるためと、試験の担当のコードを核の crate に置かないためです。
+本体は核の公開の API (`check_invariants`、`held`、`bound` を含みます) だけを使うので、核の `#[cfg(fuzzing)]` の口は要りません。
+
 `core` は `FuzzCore` の解釈器 (`op%8` で操作を選び、相手の模型 `peerConn` が packet を作る) を同じ byte の読み方で写します。
 同じ読み方なので Go の corpus はそのまま seed になります。
 相手の模型は DUT の出力に応じて packet を作るので、Rust の wgstack の出力が Go と同じ間は同じ経路をたどり、違えば別の経路をたどります。
 どちらでも seed としては働きます。
+Go と違う所が 1 つあります。
+Go は書ける量が 1000 byte を超える時だけ書き、読める時だけ読みます。
+核の公開の API は書ける量と読めるかを返さないので、`core` は書き込みと読み取りをそのまま呼び、`WouldBlock` と一部だけの書き込みを受け入れます。
+各段の後に `check_invariants` と、保持が表の大きさと上界の内にあることを確かめ、最後に核を閉じて会計が 0 に戻ることを確かめます。
 
-`replay` の入力は 3 節の要求の列で、壊れた末尾は捨てて読みます。
-`INJECT` の packet には checksum を直すかの印を持たせ、変異で checksum が壊れただけの入力が入口で落ちるのを避けます。
-不変条件 (予約が上界以下、表の数と予約の一致、`Close` の後に予約が 0) の確かめは、Rust の wgstack が試験のために出す口を使います。
+`adversarial_sender` は Go の `runAudit` を公開の API で写します。
+入力の先頭の 8 byte を little endian の種として読み、短ければ 0 で埋めます。
+Go の試験は各段で接続の送り手の内部の欄を確かめます。
+SND.UNA ≤ SND.NXT ≤ SND.MAX、cwnd が 0 でないこと、pipe ≤ 2 × flight + 1、scoreboard の数え直し (再送した byte、SACK 済み、その先の欄)、損失の列と再送の位置の範囲、list のつながり、損失の列と再送の途中の位置 (`qMid` と `qOff`、`rxtMid` と `rxtOff`) です。
+今の核の `check_invariants` はこれらを確かめないので、`adversarial_sender` はまだこれらを各段で確かめていません。
+このため、再送した byte の数えのずれのような送り手の会計の故障は段の中では見えず、相手が stream を受け取れなくなった時か、記録の照合で初めて落ちます。
+送り手の確かめは核の `check_invariants` に足す予定で (実装の担当)、入ったら各段で呼びます。
+それまで各段で確かめるのは、`check_invariants` (表、予約、上界) と、外から見える出力の確かめです。
+出力の確かめは、DUT の data が書いた byte の範囲の中にあって中身が stream と同じこと、FIN が stream の終わりにあること、接続が生きている間に RST を送らないことです。
+接続が生きているとは、handle が枠を持ち (`local_addr` が値を返す)、その接続の `Event::Closed` がまだ来ていないことです。
+嘘の SACK の block と ICMP が引く番号は、DUT の内部の値でなく、相手が知る値 (累積の確認と、見た DUT の segment の最も先の番号) から取ります。
+Go の boost の切り替え (試験が内部の関数を直接呼ぶ) は、hook が floor に戻ることを許すかの切り替えに替えます。
+核がまだ持たない輻輳の制御と boost の方針は、設定の誤りになることを見て持つ方に替えます。
+段が入ると、同じ target がその段の選択を使います。
+Go と同じ番号の種でも、相手の列は Go と同じになりません。
+書く量を乱数で決める回数が違うためです (Go は書ける量がある時だけ引きます)。
+ICMP の frag-needed の MTU は、相手が覚えた値から送るたびに 1 から 100 下げ、DUT が受け入れたかを見ないので下がり続けます。
+600 以下になると送るのを止めます。
+stream の長さは `2000 + (seed × 7919 mod 2^64) mod 200000` です。
+Go の元の式は積を符号つきの int にしてから剰余を取ったので、積が 2^63 以上の種 (でたらめな 64 bit の種のおよそ半分) では長さが負になり、`make` が panic しました。
+T4 で Go の `adversaryCfg` も同じ符号なしの剰余に直しました。
+積が 2^63 より小さい種 (Go の試験と記録が使う範囲) では、元の式と同じ値です。
 
-Go の corpus は `go test fuzz v1` の形式です。
-変換の道具 (`tools/fuzzseed`) が 1 行目を読み、値を取り出して cargo-fuzz の corpus の directory に書きます。
+`replay` の入力は、1 byte の印と 3 節の要求の frame の列です。
+壊れた frame とその後は捨てます。
+`INJECT` の n 番目の packet (要求をまたいで数えます) は、印の bit `n % 8` が立っていれば IPv4 の header と、断片でない TCP、UDP、ICMP の checksum を直してから渡します。
+変異で checksum が壊れただけの入力が入口で落ちるのを避け、壊れた checksum の packet も混ぜるためです。
+最初の要求が `HELLO` なら、その輻輳の制御、boost の方針、アドレス、MTU、種で核を作り、上限の組の代わりに `core` と同じ小さな表を使います。
+既定の表は作ることと不変条件の確かめが重く、1 回の実行が遅くなるためです。
+`RTO_AT` と `CONN_SOCKET` は飛ばし、`ADVANCE` は 1 時間、`POLL` は 4096 packet で切ります。
+adapter が口の誤りとする要求 (知らない handle など) も飛ばします。
+各要求の後に `check_invariants` を確かめ、最後に核を閉じて会計が 0 に戻ることを確かめます。
+
+3 つの target は、入力ごとの準備を軽くするため、boost の枠の集まり (`Budget`) をスレッドごとに 1 つ作り、核を閉じるたびに取り戻して次の入力に渡します。
+製品の作り直しと同じく、閉じた核の `Budget` は借りが 0 です。
+`Budget` を作る費用 (開発のホストで 1 ms ほど) は、小さな表の核を作って閉じる費用 (0.2 ms ほど) より大きいためです。
+
 seed は `fuzz/corpus/<対象>/` に置き、見つけた落ちる入力は `fuzz/regressions/<対象>/` に置きます。
-`regressions` は stable の `cargo nextest` が流す試験も読みます。
+`core` と `adversarial_sender` の seed は、変換の道具 (`tools/fuzzseed`) を作らず、Go の試験 `TestRustFuzzSeeds` (`internal/wgstack/rustfuzzseeds_test.go`) が書き出して照らします。
+`core` の seed は `FuzzCore` の記録の元と同じ列 (`fuzzCorePrograms`) で、`f.Add` の値、repo の corpus (`go test fuzz v1` の形式) から取り出した値、種から作った 200 から 600 byte の列です。
+最後の列は 500 段まで進む長い入力の種になります。
+`adversarial_sender` の seed は `FuzzAdversarialSender` の `f.Add` の種を 8 byte の little endian にした値です。
+`parse` の seed を `TestRustGolden` が書き出すのと同じ形にし、Go の corpus を変えて書き出しを忘れた変更が Go の試験で落ちるようにしました。
+値の取り出しは記録の試験の `parseFuzzBytes` で足ります。
+ほかの package の fuzz を移すときも、まずその package の試験が書き出す形にし、道具を作るかはその時に決めます。
+作り直すときは `go test ./internal/wgstack -run TestRustFuzzSeeds -update-rust-golden` を流します。
+`replay` の seed は、記録の要求の列から example の `replay_seeds` (`crates/wgft-wgstack-dut/examples/`) が書きます。
+git には `fuzzcore` の記録の分を、要求の frame を 4096 byte (libFuzzer の入力の長さの上限の既定) までに切って置きます。
+関門は、git のすべての記録から同じく作った seed を足して流します。
+
+stable の試験 `crates/wgft-wgstack-dut/tests/fuzz_corpus.rs` が、3 つの target の `corpus` と `regressions` のファイルを 1 つずつ流します。
 nightly の無い CI でも、見つけた入力の回帰を確かめるためです。
+Go の `TestAdversarialSender` と同じ種の範囲を、同じ試験に環境変数 `WGFT_WGSTACK_AUDIT_SEEDS` と `WGFT_WGSTACK_AUDIT_START` で足せます。
+既定では足さず、seed の種 1 から 8 だけを流します。
+1 つの種は debug の build で 3 秒ほど、release の build で 0.1 秒ほどかかるので、多くの種はホストの関門が release の build で流します (7 節)。
 cargo-fuzz の crate は `[workspace]` を自分で持ち、ワークスペースの member に入りません。
+
+### 実行の速さ
+
+2026-11-01 に開発のホストで、`wgft-heavy --timing` の 1 つの車線で測りました。
+build は `cargo fuzz run -s none --no-trace-compares` (AddressSanitizer と比較の追跡を外し、debug assertions は残します) です。
+git の seed の写しから固定の `-runs` を流し、壁時計の時間で割りました。
+
+| target | `-runs` | 1 秒あたりの実行 |
+| --- | --- | --- |
+| `core` | 20,000 | 約 620 |
+| `replay` | 20,000 | 約 650 |
+| `adversarial_sender` | 200 | 約 4 |
+
+`adversarial_sender` の 1 回は、stream を最後まで送り切る 1 つの種です。
+`core` と `replay` の 1 回の時間の多くは、各段の後の `check_invariants` です。
+小さな表の核でも 1 回に 50 から 60 µs ほどかかり、表の大きさでほとんど変わりませんでした (`core` の表と、どの表も 1 から 2 行にした表で、release の build、1 回の測り)。
+核を作って閉じるのは 0.2 ms ほどです。
 
 ## 7. 関門と CI
 
@@ -1118,7 +1190,7 @@ cargo-fuzz の crate は `[workspace]` を自分で持ち、ワークスペー�
 | Go の試験 | `go test ./...`。台本の構文の fixture、移した台本の表、`rustdut` の SKIP、記録の Go の照らし直しと上限 (1 秒ほど) | 今と同じ |
 | Rust の試験 (B13) | `cargo nextest`。構文の fixture、乱数の照合、台本を偽の時計で同じプロセスで、記録の照合、fuzz の回帰 | 1 分未満 (推定) |
 | 道具の照合 | Go の runner の `rustdut` で `dutserve` と `wgstack-dut` に全部の台本を種 1 から 5 で、Rust の runner との transcript の一致 | `dutserve` で Go の側が 12 秒ほど、Rust の側が 4 秒ほど (build を除く、1 回の測り)。`wgstack-dut` は未測定 |
-| fuzz の smoke | `parse`、`core`、`adversarial_sender`、`replay` を libFuzzer の `-runs` の回数で流す | 回数は Rust の実行の速さを測ってから、1 段 2 分以内に決める |
+| fuzz の smoke | `parse` を 2,000,000 回、`core` を 2,500 回、`replay` を 20,000 回、`adversarial_sender` を 200 回、libFuzzer の `-runs` で流す。`core` は長さの制御を切り、最大の長さを 1024 byte にします | 1 段 2 分以内を目指します。ほかの段と並べた関門では `replay` が 1 秒に 170 回ほどに落ちました。`core` は全長の入力で、1 つの車線で 1 秒に 34 回ほどでした (1 回の測り) |
 | ラボ | `linuxdut` の適合の実行は表を使うので、移した台本も今と同じく流れる | 今と同じ |
 
 道具の照合の段は、CI に新しい job (`harness-rust-go`) として足します。
@@ -1146,23 +1218,89 @@ T3c で、`rust` の契機に記録 (`testdata/wgstack-rec/**`) と期待した�
 T3c で `wgstack-rs` の段を足しました。
 この段は `wgft-wgstack-dut` の試験 (記録の照合、台本、adapter とバイナリ) を流し、台本の試験は種 1 から 5 でも流します。
 cargo の無いホストと `wgft-wgstack-dut` の無い木では SKIP にします。
-`wgstack-dut` に対する `rustdut` の適合の種 1 から 5 と fuzz の smoke は、まだ足していません。
+`wgstack-dut` に対する `rustdut` の適合の種 1 から 5 は、まだ足していません。
 `rustdut` が流す Go の台本は印で段を分けないので、`rustdut` の適合は核が UDP と ICMP を持つ段 (実装の 6) の後に足します。
 対象の crate やバイナリが無い木では、今の段と同じく SKIP にします。
 凍結した Go の wgstack の段は、Go の wgstack を消すまで残します。
 別の script にせず今の script に段を足すのは、1 つの表で全部の段の結果と時間を見られ、並列の数の上限を共有できるためです。
+
+T4 で次の段を足しました。
+
+- `wgstack-rs-adversarial`:Rust の敵対的な送り手を、Go の `adversarial-seeds` の段と同じ種の数 (3000) で release の build で流します
+- `wgstack-rs-replay-full-<i>of3`:手元の cache の大きな記録の集まりを 3 つに分けて Rust で照らします ([段階の関門](#段階の関門)の後半)
+- `fuzz-rs-<対象>`:6 節の 4 つの target を `-runs` の固定の回数で流します。
+  `core` は 1 段に 2 byte を読み 500 段まで進むので、libFuzzer の長さの制御 (入力を短く始めて少しずつ伸ばす) のままでは関門の回数で十数段の入力しか試しません。
+  `-len_control=0 -max_len=1024` で全長から試します。
+  新しい入力はログの directory の corpus に、落ちる入力はその横に書きます。
+  nightly の cargo と cargo-fuzz の無いホストでは SKIP にします
 
 台本の検出力は、今の `gvisordut` の故障を入れた試験と同じ考えで、Rust の wgstack に故障を 1 つずつ入れた build で確かめます。
 故障は cargo の feature でなく、`RUSTFLAGS="--cfg wgstack_fault=\"名前\""` で選びます。
 feature はワークスペースの中で統合され、別の crate の試験の build に故障が漏れうるためです。
 故障の名前の一覧は `Cargo.toml` の `[lints.rust]` の `unexpected_cfgs` の `check-cfg` に書き、知らない名前を build の警告 (`-D warnings` の下では誤り) にします。
 故障を入れた build は別の target directory に作り、台本の言語の台本と `rustdut` の Go の台本を流して、その故障を捉えるはずの確かめが落ちることを求めます。
-故障を核の crate に入れるか adapter の側で作るかは、核の公開の API で作れる故障の範囲を見て、T4 で決めます。
+T4 で、故障を 2 つに分けて置き場を決めました。
+
+- 出力の時機と中身の故障 (ACK を遅らせる、segment を落とす、欄を書き換える) は、核の外で作れます。
+  台本のこの検出力は `gvisordut` の故障を入れた試験が Go の runner で確かめ、Rust の runner は transcript が Go の runner と byte の単位で同じことを確かめるので (2 節)、Rust の側で作り直しません
+- 核の会計、表、タイマー、送信の輪の故障は、公開の API の外からは作れません。
+  核の crate の `wgstack_fault` の点として、実装の担当が次の一覧から書きます
+
+adapter の側に核の故障の写しを作らないのは、公開の API の外の状態を壊せず、作れるのは出力の書き換えだけになるためです。
+故障の一覧は次のとおりです。
+落ちるはずの確かめは、T4 の試験 (`crates/wgft-wgstack-dut/tests/` の `holding` と `fuzz_corpus`、関門の段) の名前で書きます。
+
+| 名前 | 故障 | 落ちるはずの確かめ |
+| --- | --- | --- |
+| `held_undercount` | 置き場に chunk を返す時に、会計の chunk の byte を 1 chunk 多く引く | `holding` の確保の数えと会計の一致、`check_invariants` |
+| `abort_keeps_chunks` | `abort` が受信の輪の chunk を置き場に返さない | `holding` の `ooo_flood` (中断した接続が chunk を返す) と、核を閉じた後に元の値へ戻る確かめ |
+| `syn_rows_no_listener_cap` | 待ち受けごとの握手の途中の行の上限を外す | `holding` の `syn_flood` |
+| `accept_queue_no_listener_cap` | 待ち受けごとの accept の待ち行列の上限を外す | `holding` の `accept_backlog` |
+| `tw_evict_uncounted` | TIME_WAIT の表の追い出しを数えない | `holding` の `time_wait_churn` |
+| `ctl_drop_uncounted` | 制御の輪が満杯で捨てた packet を数えない | `holding` の `unmatched_flood` |
+| `ctl_first` | 出力の組を選ぶ時に制御の組を常に先にする | `holding` の `unmatched_flood` (洪水の間も data が進む) |
+| `ooo_no_interval_cap` | 順序外の区間の数の上限で segment を捨てない | `holding` の `ooo_flood`、`check_invariants` |
+| `stall_forgets_resend` | 出力が引き取られない間に期限の来た再送の印を消す | `holding` の `output_stall` (詰まりの後に stream が届く) |
+| `send_stale_byte` | 再送の segment の中身を送信の輪の 1 byte 先から読む | `adversarial_sender` の中身の確かめ (`fuzz_corpus` と `wgstack-rs-adversarial`) |
+| `fin_before_data` | 送り残しがあっても `close_write` の FIN をすぐ送る | `adversarial_sender` の FIN の位置の確かめ |
+| `close_keeps_held` | `close` が最後の会計に TIME_WAIT の行を残す | 3 つの target と `holding` の、閉じた後の会計が 0 の確かめ |
+| `rtx_bytes_drift` | 送り手の scoreboard の再送した byte の数えを、印を付け直す時に増やしすぎる | 送り手の確かめが入った後の `check_invariants` と `adversarial_sender` の各段の確かめ。それまでは記録の照合 (git の集まりと `wgstack-rs-replay-full`) と `adversarial_sender` の最後の確かめだけが捉えます |
+
+故障を入れた build を流す手順 (故障ごとの別の target directory と、落ちるはずの試験の選び方) は、実装の担当が点を書いた後に試験の担当が足します。
+SACK、boost、UDP、断片の故障は、それぞれの段の入力と一緒に足します。
 
 ### 段階の関門
 
 段階の関門では、git に入れない大きな記録の集まりを照らし、fuzz を長く流します。
-回数と時間は、Rust の実行の速さを測ってから決めます。
+fuzz の長い実行の回数と時間は、6 節の速さをもとに段階の関門で決めます。
+
+T4 で、大きな記録の集まりの照合を PR の関門の段 `wgstack-rs-replay-full-<i>of3` にしました。
+窓の故障を入れたレビューの確かめで、この照合だけがその故障を捉えたので、段階の関門でなく PR の関門に置きます。
+照合は記録の名前の順の番号で 3 つに分け (`WGFT_WGSTACK_REPLAY_SHARD`)、関門の並列の中で並べて流し、1 つの段の時間を抑えます。
+時間をさらに抑えるため、PR の関門では、木が Rust の wgstack、試験の道具の crate、記録とその元を基の branch との分かれ目から変えた時だけ流します (基は `WGFT_GATE_BASE`、既定は `origin/feat/v2-rust`、無ければ `origin/main`)。
+`WGFT_GATE_REPLAY_FULL=1` で常に流せます。
+段階の関門は、大きな集まりのすべてを照らします。
+集まりは、記録の元の package と記録の手順の git の tree から決める key ごとに、`${XDG_CACHE_HOME:-~/.cache}/wgft/wgstack-rec-full/` に 1 つ作って残します。
+元に変更のある木では、ログの directory に作ります。
+作る段は directory の錠 (`flock`) を排他で取り、一時の directory に作ってから名前を変えて置き、ほかの key の集まりを消します。
+照合は同じ錠を共有で取るので、照らしている集まりが消されることはありません。
+大きな集まりは、Go の試験の種の範囲に加えて、ホストの関門の `adversarial-seeds` と同じ敵対的な送り手の種 1 から 3000 と、作る時の Go の fuzz の cache の `FuzzCore` と `FuzzAdversarialSender` の入力 (`WGFT_WGSTACK_RECORD_FUZZ_DIR` に渡す写し) を持ちます。
+長く流した fuzz が見つけた入力も Rust と照らすためです。
+cache の入力は集まりを作る時のもので、その後に増えた入力は、記録の元が変わって作り直すまで入りません。
+移行の間は Go の wgstack を凍結しているので、作り直しはまれです。
+2026-11-01 の開発のホストの 1 回の測りでは、集まりは 8712 の記録で 1.1 GB ほど、作るのに 4 分半ほど (2 回作って比べる今の手順) でした。
+敵対的な送り手の 3000 の種が 0.8 GB ほどを占めます。
+4b の段の印の記録の照合は、3 つに分けた段のそれぞれが release の build で 40 秒ほどでした。
+段が入ると照らす記録が増えるので、時間は段ごとに測り直します。
+
+Go と Rust の wgstack を同じ反応する相手の前に並べて出力を比べる差分の試験 (レビューで使い捨てに書いたもの) は、T4 に入れません。
+記録の照合が、同じ比べを記録した形で行うためです。
+反応する相手は DUT の出力に応じて次の packet を作るので、2 つの wgstack の出力が初めて違う所までは、Go の記録の要求の列と同じ入力が Rust に入ります。
+照合はその所で止まって違いを示すので、違いを見つける力は並べた差分と同じです。
+並べた差分を git に入れると、相手の模型を Go と Rust で同じに保つ費用がかかります。
+Rust の側は核の crate の中の試験の補助を使うので、書き手の分離 (wgstack の Rust 版の設計の「書き手の分離」) にも反します。
+大きな記録の集まりは、敵対的な送り手 (落とし、重複、並べ替え、嘘の確認)、損失のある送信と受信の stream、`FuzzCore` の種の記録を、Go の試験の種の範囲で持ちます。
+使い捨ての差分が、この集まりに無い相手の振る舞い (決まった番号の segment の落としと遅らせなど) で違いを見つけたときは、その相手を大きな集まりだけの記録の元として `TestWriteRecordings` に足します。
 
 ## 8. 段階の計画
 
@@ -1181,7 +1319,7 @@ feature はワークスペースの中で統合され、別の crate の試験�
 | T3b-1 | `test(wgstack-rs): add the DUT frames and ProcessDut in Rust` | 口の符号、packet の組み立て、`ClockedDut` と transcript の包み、`ProcessDut`、`HELLO` の種、Go の書式の値の書き出し | 約 3,300 行 (実績) | T2a、T3a |
 | T3b-2 | `test(wgstack-rs): run scenario scripts in Rust` | 偽の時計の runner、台本ごとの試験の入口、`dutserve` に対する transcript の一致、CI の `harness-rust-go` | 約 4,400 行 (実績) | T3b-1 |
 | T3c | `test(wgstack-rs): add wgstack-dut and replay the Go recordings` | adapter、`wgstack-dut`、記録の読み込みと照合、意図した違いの一覧、期待した差の一覧のファイル、関門の段 | 約 1,900 行 (実績、2 つの積んだ PR) | T2b、T3b、実装の 4 |
-| T4 | `test(wgstack-rs): fuzz targets and adversarial bounds` | `tools/fuzzseed`、`core`、`adversarial_sender`、`replay`、回帰の試験、敵対的な保持の試験、stream の一致の試験、故障を入れた build | 約 3,000 行。段ごとに分ける | 実装の 3 から。4 から 6 に合わせて足す |
+| T4 | `test(wgstack-rs): fuzz targets and adversarial bounds` | seed の書き出し (`TestRustFuzzSeeds`)、`core`、`adversarial_sender`、`replay`、回帰の試験、敵対的な保持の試験、大きな記録の集まりの照合の段、故障の一覧、stream の一致の試験、故障を入れた build | 約 3,000 行。段ごとに分ける。最初の PR は実装の 4b の段の分で、stream の一致の試験と故障を入れた build を除きます | 実装の 3 から。4 から 6 に合わせて足す |
 | 8 の試験の側 | `test(wgstack-rs): qbench through wgstack-dut` | `--clock real`、socketpair の `tun.Device`、`wgstack-rs` の engine、判定の切り替え | 約 1,000 行 | 実装の 5 と 7 |
 | 後の段 | 未定 | 台本の相手が SYN から SACK-permitted と timestamp を外す harness の選択と、それを使う台本の 4b の変種の記録 (4 節) | 未見積 | T1b、T2b、T3a |
 
@@ -1204,7 +1342,9 @@ Rust の wgstack を相手にするのは T3c からで、実装の 4 の API �
 - `wgft-tcpharness` の JSON:crate は標準ライブラリだけに依るため、Go の書いた例と一覧を読む小さな読み手 (`gojson::parse`) を持ちます。整数でない数は読みません
 - 実時間の Rust の DUT:`--clock real` の外側の層が製品の層と同じものになるかは、Rust の wgstack の外側の層の設計で決まります
 - qbench の Unix ソケットの 1 段:細い stream の遅れの p99 にどれだけ加わるかは未測定です
-- fuzz の速さ:cargo-fuzz の 1 秒あたりの実行回数は未測定で、関門の回数はその後に決めます
+- fuzz の速さ:6 節の表のとおり測り、関門の回数を決めました。
+  `core` と `replay` の 1 回の時間の多くは `check_invariants` です。
+  確かめを軽くできるか (使っていない範囲を飛ばすなど) は、実装の担当の判断で、未確認です
 - 関門の時間:7 節の時間は、道具の照合の `dutserve` を相手にした分のほかは推定です
 
 ## 10. wgstack の Rust 版の設計との対応
