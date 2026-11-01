@@ -203,7 +203,7 @@ impl WgstackDut {
         self.stack.held()
     }
 
-    fn config(h: &Hello, limits: Limits) -> Config {
+    pub(crate) fn config(h: &Hello, limits: Limits) -> Config {
         Config {
             addr: h.addr,
             mtu: usize::try_from(h.mtu).unwrap_or(usize::MAX),
@@ -340,7 +340,7 @@ fn udp_reason(stack: &Stack<DutHook>, e: Error) -> String {
 
 /// `Debug` の形の平らな構造体 (`Name { a: 1, b: [0, 0] }`) を `a=1 b=[0,0]` にします。`STATS`、`BOUND`、`HELD`
 /// の応答の文字列です。照合は応答の種類だけを比べるので、欄の名前は Rust の名前のままです。
-fn key_values(debug: &str) -> String {
+pub(crate) fn key_values(debug: &str) -> String {
     let inner = debug
         .split_once('{')
         .and_then(|(_, r)| r.rsplit_once('}'))

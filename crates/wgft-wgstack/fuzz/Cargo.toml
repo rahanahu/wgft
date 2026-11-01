@@ -47,3 +47,10 @@ path = "fuzz_targets/replay.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "raw_adversary"
+path = "fuzz_targets/raw_adversary.rs"
+test = false
+doc = false
+bench = false

@@ -199,9 +199,13 @@ impl Ring {
             .count()
     }
 
-    /// 容量の外の位置に chunk が無いことを確かめます。
+    /// 容量の外の位置に chunk が無いことを確かめます。途中で止まらない畳み込みにして、位置の比べを vector の
+    /// 命令にします。`any` は位置ごとに分岐するので、容量の外の位置の多い floor の輪で遅くなります。
     pub(crate) fn check(&self) -> Result<(), &'static str> {
-        if self.chunks[us(self.slots())..].iter().any(Option::is_some) {
+        if self.chunks[us(self.slots())..]
+            .iter()
+            .fold(false, |found, c| found | c.is_some())
+        {
             return Err("a ring holds a chunk outside its capacity");
         }
         Ok(())
@@ -271,6 +275,22 @@ mod tests {
 
     use super::super::{BOOST_SIZE, SEND_FLOOR};
     use super::*;
+
+    #[test]
+    fn check_finds_a_chunk_outside_the_capacity() {
+        let mut p = ChunkPool::new().unwrap();
+        let mut r = Ring::new(SEND_FLOOR);
+        let inside = us(r.slots());
+        r.chunks[inside - 1] = Some(p.get().unwrap());
+        assert_eq!(r.check(), Ok(()));
+        // 容量のすぐ外と最後の位置のどちらも見つけます。
+        for at in [inside, SLOTS - 1] {
+            r.chunks[at] = Some(p.get().unwrap());
+            assert_eq!(r.check(), Err("a ring holds a chunk outside its capacity"));
+            p.put(r.chunks[at].take().unwrap());
+        }
+        r.release(&mut p);
+    }
 
     #[test]
     fn resize_and_trim() {
