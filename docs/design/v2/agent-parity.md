@@ -265,7 +265,7 @@ TCP と UDP の中継の両方がこの pool を使うので、「宛先と予�
   wgstack の核の出力 (`poll_transmit`) を引くのは、device にセッションがあり、device の送る datagram のキューが空の間だけです。
   セッションが無い間に引くと、packet はハンドシェイクを待つ device のキューに溜まり、溢れて古いものから捨てられるためです。
   キューが空でない間に引くと、詰まりが核の外の device のキューに移り、核の出力の詰まりとして TCP の再送で回復する性質を失うためです
-- 起こし方:中継の task が核の操作 (書き込み、close、accept、`send_to`、`close_udp` など) をするたびに、データプレーンのスレッドの local の知らせ (`tokio::sync::Notify` の類) を鳴らし、駆動する task を起こします。
+- 起こし方:中継の task が出力を生みうる核の操作 (書き込み、読み取り、close、abort、`send_to` など。一覧は [wgstack-rs.md の操作の知らせ](wgstack-rs.md#操作の知らせ)) をするたびに、データプレーンのスレッドの local の知らせ (`tokio::sync::Notify` の類) を鳴らし、駆動する task を起こします。
   核の出力は操作の結果として増えるので、ソケットの準備やタイマーを待たずに引くためです
 - 上界:1 回の起床で作る packet の数の上限は #681 の値に従います
 - 時計:device と核に渡す時刻の時計は同じものにします ([時計](#時計))
@@ -295,6 +295,8 @@ agent は核の段まで TUN の殻で動きます。
   借用の前から巻き戻しの途中だった場合は、巻き戻しで落ちる handle の `Drop` の借用なので印を付けません
 - 命令:制御プレーンは容量 16 の channel で、状態の読み出し、endpoint の変更、データプレーンのスレッドで動かす閉包を送ります。
   閉包は local の task を立てられるので、待ち受けの開閉と ping の命令はこの形で足します
+- handle の層:`wgft-netstack` の handle は `Access` の trait を通して核を借用します。
+  核の段は `Local` に `Access` を、`Netstack` (核と waker の表) に `Upper` を実装します ([PR 7 で決めたこと](wgstack-rs.md#pr-7-で決めたこと))
 
 ### 送り出しと受信の値
 

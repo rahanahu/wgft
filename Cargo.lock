@@ -1677,6 +1677,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wgft-netstack"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "wgft-alloc-count",
+ "wgft-wgstack",
+]
+
+[[package]]
 name = "wgft-proto"
 version = "0.1.0"
 dependencies = [

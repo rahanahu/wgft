@@ -25,7 +25,6 @@ use crate::tcp::{IP_TCP_HEADERS, TS_OPTION_LEN};
 use crate::udp::Udp;
 use crate::wheel::Wheel;
 use crate::wire::{self, FLAG_ACK, FLAG_RST, Segment, TcpHeader, Tuple};
-use core::fmt;
 
 /// 出力の組です。接続の枠の segment、握手の途中の行と TIME_WAIT の行の segment、UDP の datagram、制御の輪の
 /// 順で、Go と同じ番号です。
@@ -206,58 +205,11 @@ const LOG_KINDS: [LogKind; 8] = [
     LogKind::UdpDropped,
 ];
 
-/// 門を通った 1 行の材料です。`count` は核を作ってからの数です。
+/// 門を通った 1 行の材料です。`count` は核を作ってからの数です。英語の文面は駆動の層 (`wgft-netstack`) が書きます。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LogLine {
     pub kind: LogKind,
     pub count: u64,
-}
-
-impl fmt::Display for LogLine {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let n = self.count;
-        match self.kind {
-            LogKind::MssFloor => write!(
-                f,
-                "wgstack: dropped TCP handshakes that advertise an MSS below 536; {n} dropped since the tunnel was built; peers that advertise a smaller MSS cannot connect through this tunnel"
-            ),
-            LogKind::SynFull => write!(
-                f,
-                "wgstack: dropped SYNs because the half-open table was full; {n} since the tunnel was built"
-            ),
-            LogKind::AcceptOverflow => write!(
-                f,
-                "wgstack: dropped final handshake ACKs because the accept queue or the connection table was full; {n} since the tunnel was built"
-            ),
-            LogKind::TwEvicted => write!(
-                f,
-                "wgstack: evicted the oldest TIME_WAIT rows because the table was full; {n} since the tunnel was built"
-            ),
-            LogKind::CtlDropped => write!(
-                f,
-                "wgstack: dropped control packets because the control output ring was full; {n} since the tunnel was built"
-            ),
-            LogKind::OooDropped => write!(
-                f,
-                "wgstack: dropped out-of-order segments that would need more than the fixed number of receive intervals; {n} since the tunnel was built"
-            ),
-            LogKind::AccountingFault => write!(
-                f,
-                "wgstack: closed a connection after an internal accounting error; {n} since the tunnel was built"
-            ),
-            LogKind::UdpDropped => write!(
-                f,
-                "wgstack: dropped UDP datagrams because receiving sockets are not read fast enough; {n} over the per-socket limit of {} bytes and {} datagrams or the tunnel budget of {} bytes and {} datagrams since the tunnel was built",
-                crate::udp::RX_BYTES / crate::udp::ENDPOINT_SHARE,
-                crate::udp::RX_DATAGRAMS / crate::udp::ENDPOINT_SHARE,
-                crate::udp::RX_BYTES,
-                crate::udp::RX_DATAGRAMS,
-            ),
-            LogKind::UdpFault => f.write_str(
-                "wgstack: UDP accounting found an internal inconsistency and stopped all UDP on this tunnel; restart the agent to recover",
-            ),
-        }
-    }
 }
 
 /// 1 分に 1 回までの門です (Go の `gate`)。核の時刻で判定します。
@@ -511,8 +463,6 @@ impl Shared {
 
 #[cfg(test)]
 mod tests {
-    #![expect(clippy::disallowed_methods, reason = "tests format the log lines")]
-
     use super::*;
 
     #[test]
@@ -530,13 +480,6 @@ mod tests {
         assert_eq!(g.pop(), None);
         g.allow(LogKind::SynFull, 60_000_000_005, 3);
         assert_eq!(g.pop().map(|l| l.count), Some(3));
-        for kind in LOG_KINDS {
-            let text = LogLine { kind, count: 2 }.to_string();
-            assert!(
-                text.starts_with("wgstack: ") && text.contains(" 2 "),
-                "{text}"
-            );
-        }
     }
 
     #[test]
