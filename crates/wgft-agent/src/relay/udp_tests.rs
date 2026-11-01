@@ -120,8 +120,9 @@ async fn a_datagram_larger_than_the_mtu_goes_both_ways() {
     let mut m = manager(&peer);
     m.apply(&udp("r_u", 2456, &target.to_string())).await;
     let mut a = peer.udp();
-    // トンネルの中の datagram は試験の相手が組み立てないので、MTU に収まる最大の大きさで確かめる
-    let big = vec![7u8; 1392];
+    // トンネルの中の datagram は試験の相手が組み立てないので、MTU に収まる最大の大きさで確かめる。
+    // device の MTU は設定の 1420 を 16 の倍数に切り下げた 1408 で、IPv4 と UDP のヘッダの 28 を引く
+    let big = vec![7u8; 1380];
     assert_eq!(round_trip(&mut a, 2456, &big).await.unwrap(), big);
 }
 
@@ -153,39 +154,73 @@ async fn an_idle_session_closes_between_the_timeout_and_a_quarter_more() {
     assert_eq!(sources.borrow().len(), 2);
 }
 
-/// 受けるだけで応答しない宛先。受けた送信元を返す。
-async fn sink() -> (SocketAddr, tokio::sync::watch::Receiver<Vec<SocketAddr>>) {
+/// 受けるだけで応答しない宛先。受けた送信元と、受けた datagram の数を返す。
+async fn sink() -> (
+    SocketAddr,
+    tokio::sync::watch::Receiver<(Vec<SocketAddr>, usize)>,
+) {
     let s = LanSocket::bind("127.0.0.1:0").await.unwrap();
     let a = s.local_addr().unwrap();
-    let (tx, rx) = tokio::sync::watch::channel(Vec::new());
+    let (tx, rx) = tokio::sync::watch::channel((Vec::new(), 0));
     tokio::spawn(async move {
         let mut buf = vec![0u8; 65535];
         while let Ok((_, from)) = s.recv_from(&mut buf).await {
-            tx.send_modify(|v| {
+            tx.send_modify(|(v, n)| {
                 if !v.contains(&from) {
                     v.push(from);
                 }
+                *n += 1;
             });
         }
     });
     (a, rx)
 }
 
+/// 片方の向きだけの datagram がセッションを保つ試験の間隔。datagram は前のものが届いてからこの間をおいて
+/// 送り、この間に届かなければ送り直す (ループバックとトンネルでも datagram は落ちうる)。点検の間隔の半分で、
+/// 届いた datagram の間は無通信の期限よりずっと短い。保つことを確かめる長さは期限の 3 倍である。
+fn keep_spacing(idle: Duration) -> Duration {
+    super::udp::sweep_interval(idle) / 2
+}
+
 #[tokio::test]
 async fn datagrams_toward_the_target_alone_keep_the_session() {
     let peer = start().await;
-    let (target, sources) = sink().await;
+    let (target, mut seen) = sink().await;
     let idle = Duration::from_millis(300);
+    let spacing = keep_spacing(idle);
     let mut m = manager_with(&peer, Limits::default(), idle);
     m.apply(&udp("r_u", 2456, &target.to_string())).await;
     let a = peer.udp();
     // 期限の 3 倍の間、トンネルの側からだけ送る。応答は無い
-    for _ in 0..9 {
-        a.send(2456, b"k");
-        tokio::time::sleep(idle / 3).await;
+    let began = Instant::now();
+    let mut last = began;
+    let mut longest = Duration::ZERO;
+    while began.elapsed() < 3 * idle {
+        let before = seen.borrow().1;
+        let give_up = Instant::now() + WAIT;
+        loop {
+            a.send(2456, b"k");
+            let arrived = seen.wait_for(|(_, n)| *n > before);
+            if tokio::time::timeout(spacing, arrived).await.is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < give_up,
+                "no datagram reached the target for {WAIT:?}; sessions {}",
+                stat(&m, 2456).sessions
+            );
+        }
+        longest = longest.max(last.elapsed());
+        last = Instant::now();
+        tokio::time::sleep(spacing).await;
     }
     assert_eq!(stat(&m, 2456).sessions, 1);
-    assert_eq!(sources.borrow().len(), 1, "the session was rebuilt");
+    assert_eq!(
+        seen.borrow().0.len(),
+        1,
+        "the session was rebuilt; the longest gap between datagrams at the target was {longest:?}, the idle timeout is {idle:?}"
+    );
 }
 
 #[tokio::test]
@@ -194,6 +229,7 @@ async fn datagrams_from_the_target_alone_keep_the_session() {
     let s = LanSocket::bind("127.0.0.1:0").await.unwrap();
     let target = s.local_addr().unwrap();
     let idle = Duration::from_millis(300);
+    let spacing = keep_spacing(idle);
     let mut m = manager_with(&peer, Limits::default(), idle);
     m.apply(&udp("r_u", 2456, &target.to_string())).await;
     let mut a = peer.udp();
@@ -203,15 +239,33 @@ async fn datagrams_from_the_target_alone_keep_the_session() {
         .await
         .unwrap()
         .unwrap();
-    // 期限の 3 倍の間、宛先からだけ送る。トンネルの側は送らない
-    for i in 0..9u8 {
-        s.send_to(&[i], session).await.unwrap();
-        let (_, d) = a
-            .recv(WAIT)
-            .await
-            .expect("every datagram from the target arrives");
-        assert_eq!(d, [i]);
-        tokio::time::sleep(idle / 3).await;
+    // 期限の 3 倍の間、宛先からだけ送る。トンネルの側は送らない。閉じたセッションへは宛先から作り直せない
+    // ので、最後まで届けばセッションは保たれている
+    let began = Instant::now();
+    let mut last = began;
+    let mut longest = Duration::ZERO;
+    let mut i = 0u8;
+    while began.elapsed() < 3 * idle {
+        let give_up = Instant::now() + WAIT;
+        loop {
+            s.send_to(&[i], session).await.unwrap();
+            if let Some((_, d)) = a.recv(spacing).await {
+                // 送り直した datagram の遅れた写しは前の番号で届く
+                assert!(d.len() == 1 && d[0] <= i, "{d:?}");
+                if d[0] == i {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < give_up,
+                "no datagram from the target came through for {WAIT:?}; sessions {}, the longest gap so far {longest:?}, the idle timeout {idle:?}",
+                stat(&m, 2456).sessions
+            );
+        }
+        longest = longest.max(last.elapsed());
+        last = Instant::now();
+        i += 1;
+        tokio::time::sleep(spacing).await;
     }
     assert_eq!(stat(&m, 2456).sessions, 1);
 }
