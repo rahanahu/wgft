@@ -1665,6 +1665,7 @@ dependencies = [
  "wgft-alloc-count",
  "wgft-netstack",
  "wgft-proto",
+ "wgft-udp-batch",
  "wgft-wgstack",
  "wgft-wireguard",
  "windows-sys 0.61.2",
@@ -1716,6 +1717,13 @@ name = "wgft-tcpharness"
 version = "0.1.0"
 dependencies = [
  "libtest-mimic",
+]
+
+[[package]]
+name = "wgft-udp-batch"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
