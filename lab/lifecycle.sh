@@ -194,7 +194,7 @@ agent_limit_text() {
 # from its first use; they carry no bulk data, so the TCP relays' bulk buffers and the core's
 # per-connection send and receive buffers stay empty and are left out. The arrays count only the
 # slots the floods reached: the agent's last "connection slots used so far" line gives their bytes,
-# rounded up; without that line the whole "core arrays" term counts.
+# rounded up to the line's step, which scales with the slot count; without that line the whole "core arrays" term counts.
 agent_flood_terms() {
   local line; line=$(grep -m1 'memory bound terms:' "$1" 2>/dev/null)
   local sum=0 term v
