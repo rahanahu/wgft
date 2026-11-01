@@ -155,7 +155,7 @@ pub struct RunArgs {
     /// forwarding mode userspace or kernel, env WGFT_MODE; unset means userspace, and kernel is Linux only
     #[arg(long, allow_hyphen_values = true, overrides_with = "mode")]
     pub mode: Option<String>,
-    /// kernel-mode WireGuard interface name, env WGFT_WG_INTERFACE; this build names its TUN device with it
+    /// kernel-mode WireGuard interface name, env WGFT_WG_INTERFACE; unused in userspace mode
     #[arg(
         long = "wg-interface",
         allow_hyphen_values = true,

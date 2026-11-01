@@ -199,8 +199,6 @@ struct Peer {
     snd: u32,
     rcv: u32,
     ts: u32,
-    iss: u32,
-    open: bool,
 }
 
 fn stress(seed: u64, steps: usize) {
@@ -239,8 +237,6 @@ fn stress(seed: u64, steps: usize) {
                     snd: iss.wrapping_add(1),
                     rcv: 0,
                     ts: p.ts.wrapping_add(1 + r.below(1000) as u32),
-                    iss,
-                    open: true,
                 };
                 let seq = if r.chance(30) {
                     p.snd.wrapping_add(r.below(1 << 20) as u32)

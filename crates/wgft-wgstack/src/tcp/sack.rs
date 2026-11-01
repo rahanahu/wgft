@@ -134,11 +134,6 @@ impl Conn<'_> {
         (self.t.rxt_idx, self.t.rxt_off, self.t.rxt_mid) = (0, 0, false);
     }
 
-    /// 失われた byte です ([`lost_bytes`])。
-    pub(crate) fn lost_bytes(&mut self) -> u32 {
-        lost_bytes(self.t, &self.b.recs)
-    }
-
     /// RFC 6675 の送り残しの量です ([`pipe`])。
     pub(crate) fn pipe(&mut self) -> u32 {
         pipe(self.t, &self.b.recs)

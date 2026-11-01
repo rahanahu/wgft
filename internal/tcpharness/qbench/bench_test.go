@@ -314,7 +314,11 @@ func TestQBench(t *testing.T) {
 
 // TestQBenchSmoke is a short unclean-link transfer that checks the rig itself.
 func TestQBenchSmoke(t *testing.T) {
-	for _, eng := range []string{"wgstack", "gvisor"} {
+	engs := []string{"wgstack", "gvisor"}
+	if os.Getenv(wgstackRSEnv) != "" {
+		engs = append(engs, "wgstack-rs")
+	}
+	for _, eng := range engs {
 		for _, send := range []bool{false, true} {
 			r := runOne(eng, Case{Name: "smoke", Loss: 0.01, DUTSend: send}, 42, 1<<20, 60*time.Second)
 			t.Logf("%s send=%v: %+v", eng, send, r)

@@ -16,12 +16,13 @@
 //! - 嘘の SACK の block の範囲と ICMP の引く番号は、Go は DUT の SND.UNA と SND.MAX から取ります。ここでは
 //!   相手が知る値 (累積の確認と、見た DUT の segment の最も先の番号) から取ります
 //! - Go の boost の切り替え (`tryBoost` と `demote` を試験が直接呼ぶ) は frame に無い内部の操作です。ここでは
-//!   hook が floor に戻ることを許すかを切り替えます。核が boost を持たない段では効きません
+//!   hook が floor に戻ることを許すかを切り替えます
 //! - Go は書ける量があるときだけ書く量を乱数で決めます。ここでは毎回決めて書き、`WouldBlock` を受け入れます。
 //!   乱数を引く回数が Go と違うので、同じ番号の種でも Go と同じ相手の列にはなりません
 //! - ICMP の frag-needed の MTU は、相手が覚えた値から送るたびに 1 から 100 下げます。DUT が受け入れたかを
 //!   見ないので、値は下がり続け、600 以下で送るのを止めます
-//! - 核がまだ持たない輻輳の制御と boost の方針 (設定の誤りになる選択) は、持つ方に替えます
+//! - 表の大きさは Go と同じ `small_limits` ですが、相手が触れない UDP の datagram の表だけを `fuzz_limits` と
+//!   同じ小ささにします。各段の不変条件の検査が datagram の表をすべてたどるためです
 //! - stream の長さは `2000 + (seed × 7919 mod 2^64) mod 200000` です。Go の元の式は積を符号つきの int に
 //!   してから剰余を取ったので、積が 2^63 以上の種では長さが負になり、`make` が panic しました。Go の
 //!   `adversaryCfg` も同じ符号なしの剰余に直したので、2 つは同じ長さを返します。積が 2^63 より小さい種
@@ -34,9 +35,9 @@ use std::time::Duration;
 
 use wgft_tcpharness::packet::{self, ACK, FIN, RST, SYN, SackBlock, Segment};
 use wgft_tcpharness::rng::Pcg;
-use wgft_wgstack::{BoostPolicy, Config, Congestion, ConnId, Error, Event, Hook};
+use wgft_wgstack::{BoostPolicy, Config, Congestion, ConnId, Error, Event, Hook, Limits};
 
-use super::net::{DUT, MTU, Net, PEER, small_limits};
+use super::net::{DUT, MTU, Net, PEER, fuzz_limits, small_limits};
 use super::peer::{PeerConn, SackPeer, seq_gt};
 
 /// 相手のポートです。
@@ -100,11 +101,6 @@ impl Hook for FlipHook {
     }
 }
 
-/// 核がこの選択を持つかです。持たない段の核は設定の誤りにします。誤りの種類の名前は段で変わるので見ません。
-fn supported(c: Config) -> bool {
-    c.validate().is_ok()
-}
-
 /// `adversarial_sender` の target の 1 回分です。入力の先頭の 8 byte を little endian の種として読みます
 /// (短ければ 0 で埋めます)。Go の corpus の `uint64` の値は同じ 8 byte になります。
 pub fn adversarial_sender(data: &[u8]) {
@@ -135,26 +131,19 @@ fn len32(n: usize) -> u32 {
 fn run(cfg: &AdversaryCfg) {
     let seed = cfg.seed;
     let mut rng = Pcg::new(seed, seed.wrapping_mul(7).wrapping_add(1));
-    let base_cfg = Net::<FlipHook>::config(small_limits());
-    let cubic = supported(Config {
-        congestion: Congestion::Cubic,
-        ..base_cfg
-    });
-    let on_demand = supported(Config {
-        boost: BoostPolicy::OnDemand,
-        ..base_cfg
+    // UDP の datagram の表だけを小さくします (module の説明)。TCP の出力は UDP の表の大きさに依りません。
+    let base_cfg = Net::<FlipHook>::config(Limits {
+        udp_rx_datagrams: fuzz_limits().udp_rx_datagrams,
+        udp_tx_datagrams: fuzz_limits().udp_tx_datagrams,
+        ..small_limits()
     });
     let config = Config {
-        congestion: if cfg.newreno || !cubic {
+        congestion: if cfg.newreno {
             Congestion::NewReno
         } else {
             Congestion::Cubic
         },
-        boost: if on_demand {
-            BoostPolicy::OnDemand
-        } else {
-            BoostPolicy::Never
-        },
+        boost: BoostPolicy::OnDemand,
         ..base_cfg
     };
     let may_return = Rc::new(Cell::new(true));

@@ -155,21 +155,9 @@ fn os_error_text(e: &std::io::Error) -> String {
     if cfg!(unix) {
         "permission denied".to_owned()
     } else {
-        strip_os_suffix(&e.to_string())
+        crate::oserror::os_text(e)
             .trim_end_matches(['.', ' '])
             .to_owned()
-    }
-}
-
-/// `std::io::Error` の文から `(os error N)` の接尾辞を除く。
-pub(super) fn strip_os_error(e: &std::io::Error) -> String {
-    strip_os_suffix(&e.to_string())
-}
-
-fn strip_os_suffix(s: &str) -> String {
-    match s.rfind(" (os error ") {
-        Some(i) if s.ends_with(')') => s[..i].to_owned(),
-        _ => s.to_owned(),
     }
 }
 
