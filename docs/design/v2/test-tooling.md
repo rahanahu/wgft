@@ -2,8 +2,8 @@
 
 この文書は、Rust に移る wgstack を確かめる試験の道具の設計を定めます。
 対象は、適合の台本をデータにする言語、台本を流す 2 つの runner、Rust の DUT を別のプロセスとして叩く標準入出力の口、凍結した Go の wgstack の記録との照合、qbench、fuzz、関門です。
-1 節の台本の言語、2 節の Go の runner、Rust の構文解析器と台本の乱数の写し、3 節の口の Go と Rust の符号と `dutserve` と `rustdut` と `ProcessDut`、4 節の記録は実装済みです。
-Rust の runner と 2 つの runner の一致の確かめ、Rust の wgstack を包む `wgstack-dut`、記録の Rust での照合と、5 節から後の節は未実装です。
+1 節の台本の言語、2 節の Go の runner と Rust の runner と 2 つの runner の一致の確かめ、Rust の構文解析器と台本の乱数の写し、3 節の口の Go と Rust の符号と `dutserve` と `rustdut` と `ProcessDut`、4 節の記録は実装済みです。
+Rust の wgstack を包む `wgstack-dut`、記録の Rust での照合と、5 節から後の節は未実装です。
 実装は 8 節の順に積んだ PR で行い、各 PR がこの文書の該当する節を実装に合わせて直します。
 
 Rust の wgstack そのもの (sans-IO の API、crate の分け方、bit の一致の条件、実装の PR の順) は、wgstack の Rust 版の設計 (`docs/design/v2/wgstack-rs.md`) が決めます。
@@ -473,6 +473,7 @@ adapter は `inject` を同じ時刻の `handle_packet` の列に、`advance` �
 待つ文は `poll` で packet を引き取り、無ければ時計を 1 ms 進めます。
 時計を次に起きる時刻まで飛ばす近道は取りません。
 同じプロセスの中の 1 回の呼び出しは軽く、30 秒の待ちも 3 万回の呼び出しで済むためです。
+別のプロセスの `dutserve` を相手にしても、1 往復は 5 µs ほどでした (9 節)。
 近道を取らなければ、2 つの runner は DUT への呼び出しの列まで一致し、次節の確かめが使えます。
 
 Rust の runner は、Go の runner が DUT を呼ぶ順と数をそのまま写します。
@@ -1059,7 +1060,7 @@ cargo-fuzz の crate は `[workspace]` を自分で持ち、ワークスペー�
 | --- | --- | --- |
 | Go の試験 | `go test ./...`。台本の構文の fixture、移した台本の表、`rustdut` の SKIP、記録の Go の照らし直しと上限 (1 秒ほど) | 今と同じ |
 | Rust の試験 (B13) | `cargo nextest`。構文の fixture、乱数の照合、台本を偽の時計で同じプロセスで、記録の照合、fuzz の回帰 | 1 分未満 (推定) |
-| 道具の照合 | Go の runner の `rustdut` で `dutserve` と `wgstack-dut` に全部の台本を種 1 から 5 で、Rust の runner との transcript の一致 | 数分 (推定) |
+| 道具の照合 | Go の runner の `rustdut` で `dutserve` と `wgstack-dut` に全部の台本を種 1 から 5 で、Rust の runner との transcript の一致 | `dutserve` で Go の側が 12 秒ほど、Rust の側が 4 秒ほど (build を除く、1 回の測り)。`wgstack-dut` は未測定 |
 | fuzz の smoke | `parse`、`core`、`adversarial_sender`、`replay` を libFuzzer の `-runs` の回数で流す | 回数は Rust の実行の速さを測ってから、1 段 2 分以内に決める |
 | ラボ | `linuxdut` の適合の実行は表を使うので、移した台本も今と同じく流れる | 今と同じ |
 
@@ -1069,10 +1070,14 @@ cargo と Go の両方が要り、`crates/**`、`internal/tcpharness/**`、`inte
 [テストの規範](../../development/testing.md)は Rust の job を `rust-*` の名前で数えてラボの一式を省くので、この job は `rust-` で始めない名前にします。
 job を足す PR は、同じ PR で testing.md の B 類の表と振り分けに `harness-rust-go` を足し、この job を変える PR がラボを省けないことを書きます。
 
-ホストの関門 (`scripts/wgstack-gate.sh`) には、T2a で `rustdut-dutserve` の段を足しました。
-この段は `dutserve` を作り、`rustdut` を通した適合と輻輳の制御、`wgstackdut` との一致、誤りの道の一致、transcript の繰り返しを種 1 から 5 で流します。
+T3b で、この job と、testing.md の B 類の表の B16、振り分けの `harness` の契機を足しました。
+job は `dutserve` を作り、Go の `TestWriteTranscripts` と `TestRustVectors`、Rust の `tests/scripts.rs` を流します (2 節の「2 つの runner の一致の確かめ」)。
+
+ホストの関門 (`scripts/wgstack-gate.sh`) には、T2a で `rustdut-dutserve` の段を、T3b で `harness-rust-go` の段を足しました。
+`rustdut-dutserve` の段は `dutserve` を作り、`rustdut` を通した適合と輻輳の制御、`wgstackdut` との一致、誤りの道の一致、transcript の繰り返しを種 1 から 5 で流します。
 適合と輻輳の制御は、`wgstackdut` の package の `TestRustdutConformance` と `TestRustdutCongestion` です。
 凍結した Go の wgstack の期待した差の一覧が、その package にあるためです。
+`harness-rust-go` の段は CI の同じ名前の job と同じ確かめを流し、cargo の無いホストと Rust の runner の無い木では SKIP にします。
 今後、Rust の段 (Rust の台本と記録の照合、`wgstack-dut` に対する `rustdut` の適合の種 1 から 5、fuzz の smoke) を足します。
 対象の crate やバイナリが無い木では、今の段と同じく SKIP にします。
 凍結した Go の wgstack の段は、Go の wgstack を消すまで残します。
@@ -1120,18 +1125,19 @@ Rust の wgstack を相手にするのは T3c からで、実装の 4 の API �
 
 ## 9. 未決の点
 
-- 口の往復の費用:1 往復を数 µs から数十 µs と見込んでいますが、測っていません。`rustdut` で 30 秒の待ちを持つ台本は、1 ms ごとに `POLL` と `ADVANCE` の 2 往復をします。遅すぎる場合は、`POLL` が空の時に時計を 1 ms 進めて次の packet を返す要求を足します
+- 口の往復の費用:Rust の runner が `ProcessDut` で `dutserve` を叩くと、1 往復は runner の処理を含めて 5 µs ほどでした。35 秒の待ちを持つ `udp-reassembly-timeout` は 1 回の実行が約 6 万 6 千往復で 0.3 秒ほどです。すべての台本を種 1 から 5 で 1 つずつ流すと 4 秒ほどでした (開発のホスト、Rust は debug の build、1 回の測り)。`POLL` が空の時に時計を進める要求は足しません。Go の `rustdut` の側は締め切りまで壁時計で待つ読みがあり、同じ確かめが 12 秒ほどでした
 - `dutserve` の `udpSendReady`:UDP の会計の不整合の条件は、`TestDutserveReadyMatchesBlocking` の列が通りません
 - `rustdut` の往復の費用:`dutserve` を相手に全部の台本を 1 つの種で流すと、適合と輻輳の制御の実行で 5 秒ほどでした (1 回の測り)。1 往復の時間は測っていません
 - 記録の大きさ:T2b で測り、5 MiB の上限を保ちました (4 節)。Rust の照らし直しが記録を読む時間は測っていません
 - 乱数の写し:Go の PCG と `IntN` の写しは、T3a で `rng.json` の値と一致しました。
   `IntN` の棄却の枝は、最初の値が棄却される状態と 2^63 に近い上限で Go の試験が書いた `rng-intn.json` の値と一致しました。
-  Go の `%q` と `%.0f` の丸めの写しは、T3b で Go の試験が書き出した値と照らします
+  Go の `strconv.Quote` と `strconv.FormatFloat` の写しは、T3b で Go の試験が書き出した値 (`vectors.json`) と一致しました
+- `quote` の ASCII でない文字:Rust の写しは Go の `unicode.IsPrint` の表を持たず、制御文字、空白、私用の領域などを `\u` で書き、ほかの文字をそのまま書きます。`vectors.json` の文字では Go と一致しますが、ほかの ASCII でない文字では違いうります。今の台本が `quote` に渡すのは DUT から読んだ ASCII のデータです
 - `wgft-tcpharness` の JSON:crate は標準ライブラリだけに依るため、Go の書いた例と一覧を読む小さな読み手 (`gojson::parse`) を持ちます。整数でない数は読みません
 - 実時間の Rust の DUT:`--clock real` の外側の層が製品の層と同じものになるかは、Rust の wgstack の外側の層の設計で決まります
 - qbench の Unix ソケットの 1 段:細い stream の遅れの p99 にどれだけ加わるかは未測定です
 - fuzz の速さ:cargo-fuzz の 1 秒あたりの実行回数は未測定で、関門の回数はその後に決めます
-- 関門の時間:7 節の時間はどれも推定です
+- 関門の時間:7 節の時間は、道具の照合の `dutserve` を相手にした分のほかは推定です
 
 ## 10. wgstack の Rust 版の設計との対応
 

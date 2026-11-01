@@ -45,6 +45,7 @@ v1.0 はリリース済みですが、その事実だけで新設項目の実装
 v2 への移行の間、次のものだけを変える PR は、ラボの一式の `go` の組を流しません。
 `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、文書、ラボが使わない CI 専用の検査スクリプト (`scripts/check-*`)、`.github/workflows/ci.yml` の Rust のジョブ (`rust-*`) と `changes` の `rust` の振り分けです。
 `go` の組はこれらをビルドも実行もしないためです。
+CI の `harness-rust-go` (B16) は名前が `rust-` で始まらず、Go の試験を流すので、この job と `changes` の `harness` の振り分けを変える PR は、ここで言う Rust だけの変更に当たりません。
 `lab/`、ラボが流すテスト、`deploy/`、ラボが使うスクリプトと、上記以外の Go のコードを変える PR は、これまでどおり流します。
 
 `go` の組は、ラボの台本が起動するユーザー空間モードのエージェントを Go の agent にした既定の一式です。
@@ -109,6 +110,7 @@ B 類の契機は、次のテストを選ぶために使います。
 | `deploy` | `deploy/*.service`、`deploy/*.conf`、`deploy/*.plist`、`deploy/server.env.example`、`cmd/wgft/config.go`、`cmd/wgft/server.go`、`cmd/wgft/agent.go` (設定の読み込みと終了コード) | B2、B9 | L7 |
 | `build` | `.goreleaser.yaml`、`scripts/build-release.sh`、`scripts/goreleaser-checksum.sh`、`scripts/third-party-licenses.sh`、`scripts/check-release-assets.sh`、`scripts/docker-smoke.sh`、`deploy/Dockerfile.*`、`deploy/*.compose.yaml`、`go.mod`、`go.sum`、`.github/workflows/**` | B5、B6、B10 | 無し |
 | `rust` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、`internal/tcpharness/scripts/**` | B13、B14、B15 | 無し |
+| `harness` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`internal/tcpharness/**`、`internal/dutproto/**`、`internal/wgstack/**` | B16 | 無し |
 | `rust-agent` | `crates/**` のうち `crates/wgft-wireguard-tun/**` 以外、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` | 無し | ラボの一式の `rust` の組を積みの先頭で 1 回。「wgstack の上の agent」の段までは報告だけで、その後はマージの関門 ([マージの前に流すテスト](#マージの前に流すテスト)) |
 | `dataplane-net` | `internal/dataplane/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` の転送の経路 | 無し (C1 と C5 は次の段階の完了時に流し直す) | L1 |
 | `phase` | 関係する実装の段階の完了 | C 類 | すべて |
@@ -130,7 +132,7 @@ CI (`.github/workflows/ci.yml`) は、ホストで完結する A1 から A8 と�
 開発の途中でラボの確認を流し直すときは、`lab/lifecycle.sh` に確認の番号を指定して、その確認だけを流せます (`lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b`)。
 `lab/exhaustion.sh` も確認の名前で同じように選べます (`lab/lab exec vm bash /wgft/lab/exhaustion.sh userspace postclose`)。
 
-CI は、`build-test` (A1 から A7)、B4 (`windows-test`)、B5 (`release-snapshot`)、B6 (`govulncheck`)、B8 (`macos-test`)、B13 (`rust-check`)、B14 (`rust-windows` と `rust-macos`)、B15 (`rust-deny`) を、変更の内容に応じてだけ流します。
+CI は、`build-test` (A1 から A7)、B4 (`windows-test`)、B5 (`release-snapshot`)、B6 (`govulncheck`)、B8 (`macos-test`)、B13 (`rust-check`)、B14 (`rust-windows` と `rust-macos`)、B15 (`rust-deny`)、B16 (`harness-rust-go`) を、変更の内容に応じてだけ流します。
 振り分けは `.github/workflows/ci.yml` の `changes` という 1 つのジョブが担い、`dorny/paths-filter` で変更されたパスを調べます。
 振り分けはワークフロー全体の `paths:` ではなく、ジョブごとの `if:` で行います。
 ワークフローの `paths:` で絞ると、当たらない PR ではジョブそのものが実行されず、GitHub の checks の一覧に現れません。
@@ -198,8 +200,12 @@ B15 は `cargo deny check` で、ライセンスの許可リスト、RustSec の
 advisory の検査が `cargo audit` を兼ねるため、`cargo audit` は別に流しません。
 移行の間は Rust の成果物を配布しないため、リリースのワークフローは変えません。
 
+B16 は、Go の runner と Rust の runner が同じ台本で DUT への同じ要求を送ることを確かめます ([v2 の試験の道具](../design/v2/test-tooling.md)の 2 節の「2 つの runner の一致の確かめ」)。
+Go の凍結した wgstack の `dutserve` を作り、Go の試験 `TestWriteTranscripts` と Rust の試験 `crates/wgft-tcpharness/tests/scripts.rs` が、すべての台本を種 1 から 5 で流して、要求と応答の列と確かめの結果を byte の単位で比べます。
+Go と cargo の両方が要るので、前節の表の `harness` の契機で、Rust の変更、試験の道具、DUT の口、凍結した Go の wgstack の変更に流します。
+
 パスによる判定ができない、または信用できないときは、契機を問わずすべてを流します。
-`changes` ジョブの `paths-filter` の実行が失敗したとき、比較対象の直前のコミットが無いとき (ブランチの最初の push、force push)、`workflow_dispatch` による手動実行のとき、`.github/workflows/**` 自身を変更したとき (振り分けの仕組み自身の変更を、その仕組みに判定させないため) は、`build-test`、B4、B5、B6、B8、B13、B14、B15 のすべてを流します。
+`changes` ジョブの `paths-filter` の実行が失敗したとき、比較対象の直前のコミットが無いとき (ブランチの最初の push、force push)、`workflow_dispatch` による手動実行のとき、`.github/workflows/**` 自身を変更したとき (振り分けの仕組み自身の変更を、その仕組みに判定させないため) は、`build-test`、B4、B5、B6、B8、B13、B14、B15、B16 のすべてを流します。
 B6 と B15 は、これに加えて週に 1 回の定期実行と `workflow_dispatch` でも流します。
 定期実行はコードを変えていない PR にも起きるため、この場合の失敗は外部の脆弱性の情報の変化によるものであり、コードの不具合とは限りません。
 定期実行が失敗すると、GitHub はリポジトリの所有者に既定でメールを送ります。
@@ -320,6 +326,7 @@ L15 は server の 30 秒ごとの再試行を待つ場合に、確認の待ち�
 | B13 | CI の `rust-check` (`cargo fmt --check`、`cargo clippy -D warnings`、`cargo nextest run`、`cargo test --doc`) | Rust のワークスペースの書式、lint、テストの退行 | CI (Linux) | `rust` | 契機に当たる PR の更新ごと | 自動 |
 | B14 | CI の `rust-windows` と `rust-macos` (`cargo clippy -D warnings` と `cargo nextest run`) | Windows と macOS でだけ通らない Rust のコード | CI (Windows と macOS の runner) | `rust` | 契機に当たる PR の更新ごと | 自動 |
 | B15 | CI の `rust-deny` (`cargo deny check`) | 許可リスト外のライセンス (MPL-2.0 と GPL 系を含む)、RustSec の advisory、crates.io 以外の依存元 | CI (Linux) | `rust`、週に 1 回の定期実行 | 契機に当たる PR の更新ごと。定期実行は週に 1 回 | 自動 |
+| B16 | CI の `harness-rust-go` (Go の runner と Rust の runner の transcript の一致) | 2 つの runner の台本の意味のずれ、Rust の口の符号と DUT の口の食い違い | CI (Linux) | `harness` | 契機に当たる PR の更新ごと | 自動 |
 
 B9 は、リリース候補ごとに Debian 12、Ubuntu 24.04、Fedora 44 の 3 つで実行します。
 環境変数 `WGFT_DIST_VM_SLOT` に実行ごとに違う値を指定すると、複数のディストリビューションを並行して流せます。

@@ -13,6 +13,7 @@
 //! - [`dut`]:手で進める時計の DUT の trait [`dut::ClockedDut`]、transcript を書く包み [`dut::Recorded`]、
 //!   別のプロセスを叩く [`dut::ProcessDut`]
 //! - [`chacha8`]:HELLO の 64 byte の種
+//! - [`runner`]:台本を偽の時計で流す runner。結果の行は Go の harness と同じ形です
 //!
 //! この crate は標準ライブラリだけに依ります。
 
@@ -25,4 +26,5 @@ pub mod gojson;
 pub mod ip;
 pub mod packet;
 pub mod rng;
+pub mod runner;
 pub mod script;
