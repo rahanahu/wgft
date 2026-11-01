@@ -205,6 +205,8 @@ impl Conn<'_> {
         now: i64,
     ) -> usize {
         let len = u64::from(n);
+        // 最小の測り直しの右端の止めと再開は、窓の欄を作る前に決めます
+        self.rcv_lat_tick(now);
         if n > 0 && (off < self.t.una_off || off + len > self.t.tail_off) {
             // 送信の輪の生きている範囲の外を読もうとしました:会計の不整合なので接続を閉じます。
             self.accounting_fault(now);
@@ -217,6 +219,7 @@ impl Conn<'_> {
             flags: flags | FLAG_ACK,
             wnd: self.window_field(),
         };
+        self.rcv_lat_mark(now);
         let id = self.s.next_id();
         let n = n as usize;
         let p = wire::write_tcp(b, id, &h, Some(o), n);
