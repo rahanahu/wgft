@@ -3,7 +3,7 @@
 この文書は、Rust の agent の[メモリの上界の行](agent-parity.md#メモリの上界の行)の値を、代表のフロー数の上限で示します。
 表は `crates/wgft-agent` の試験 `memory::tests::bound_table_is_up_to_date` が生成し、印の間だけを書き直します。
 手で直さず、`WGFT_UPDATE_GOLDEN=1 cargo nextest run -p wgft-agent bound_table` で作り直します。
-印を付けずに流すと、試験は表が計算と違うときに失敗します。
+`WGFT_UPDATE_GOLDEN=1` を付けずに流すと、試験は表が計算と違うときに失敗します。
 
 値は byte で、括弧の中は MiB です。
 K は `WGFT_MAX_TCP_FLOWS`、U は `WGFT_MAX_UDP_FLOWS` です。
