@@ -645,12 +645,26 @@ mod tests {
         }
     }
 
+    /// 今は空いていて、試験が手放した後に他が取りにくいポート。ポート 0 の bind が割り当てる一時の
+    /// ポートの範囲 (Linux の既定は 32768 から、macOS と Windows は 49152 から) の下から選ぶ。一時の
+    /// ポートを手放して使い直すと、並行に走る試験のポート 0 の bind が間で同じポートを取りうるためである。
+    /// 始まりの位置はプロセスごとに乱し、nextest の別のプロセスと重なりにくくする。
     fn free_port() -> u16 {
-        std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port()
+        use std::hash::{BuildHasher, RandomState};
+        use std::sync::atomic::{AtomicU16, Ordering};
+        const LOW: u16 = 20000;
+        const SPAN: u16 = 10000;
+        static NEXT: AtomicU16 = AtomicU16::new(0);
+        let seed = RandomState::new().hash_one(std::process::id());
+        for _ in 0..SPAN {
+            let i = NEXT.fetch_add(1, Ordering::Relaxed);
+            let offset = seed.wrapping_add(u64::from(i)) % u64::from(SPAN);
+            let port = LOW + u16::try_from(offset).unwrap_or(0);
+            if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                return port;
+            }
+        }
+        panic!("no free port below the ephemeral range");
     }
 
     /// 接続ごとに読んだものを返す echo の宛先。
@@ -883,8 +897,8 @@ mod tests {
 
     #[tokio::test]
     async fn reports_unsupported_unusable_and_failed_listeners() {
-        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = taken.local_addr().unwrap().port();
+        let port = free_port();
+        let taken = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
         let target = echo().await;
         let mut m = manager();
         m.apply(&[

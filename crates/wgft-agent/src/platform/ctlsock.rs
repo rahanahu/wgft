@@ -227,8 +227,24 @@ pub fn connect(path: &Path, timeout: Duration) -> io::Result<Stream> {
         other => io::Error::new(io::ErrorKind::InvalidInput, other.to_string()),
     })?;
     let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
-    socket.connect_timeout(&addr, timeout)?;
+    match socket.connect_timeout(&addr, timeout) {
+        Ok(()) => {}
+        // Windows: socket2 は接続を待つ WSAPoll が POLLHUP を返すと、SO_ERROR が空でも誤りにする。相手が
+        // 受けた直後に閉じると、接続は済んでいるのに WSAPoll は POLLWRNORM と一緒に POLLHUP を返す。止める
+        // ために accept を起こす接続がこれに当たる。接続は済んでいるので成功として扱い、読みが終わりを返す
+        #[cfg(windows)]
+        Err(e) if hang_up_after_connect(&socket, &e) => {}
+        Err(e) => return Err(e),
+    }
     Ok(Stream::new(socket, DEFAULT_DEADLINE))
+}
+
+/// socket2 の「no error set after POLLHUP」か。OS の誤りの番号を持たない `Other` で、相手のアドレスを読める
+/// (接続が済んでいる) ときだけ真である。SO_ERROR は socket2 が読んで空だったことをこの誤りが表すので、
+/// 読み直さない。拒まれた接続は SO_ERROR の誤りとして返り、ここに当たらない。
+#[cfg(windows)]
+fn hang_up_after_connect(socket: &Socket, e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::Other && e.raw_os_error().is_none() && socket.peer_addr().is_ok()
 }
 
 #[cfg(test)]
