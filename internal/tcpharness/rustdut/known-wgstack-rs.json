@@ -1,0 +1,22 @@
+{
+  "handshake-mss-floor/mss535.synack": {
+    "observed": "no SYN-ACK",
+    "reason": "wgstack.md, TCP の機能, MSS, and packet-validation.md, TCP の MSS の下限: the ingress drops SYNs with an MSS of 1 to 535"
+  },
+  "icmp-echo/oversized": {
+    "observed": "no reply",
+    "reason": "wgstack.md, Linux との一致を確かめていない選択, MTU を超える echo request: wgstack does not fragment what it sends, so it does not answer an echo whose reply exceeds the MTU; Linux and gVisor send it in fragments"
+  },
+  "limited-transmit/first-dupack.new-data": {
+    "observed": "0 new segments",
+    "reason": "wgstack-performance.md, RACK-TLP: wgstack always runs RACK, and at the testbench's near-zero RTT its reorder window is about zero, so it resends the first segment at the first SACK instead of sending new data; limited-transmit-rack checks Limited Transmit on a path with an RTT"
+  },
+  "limited-transmit/no-retransmit-before-third": {
+    "observed": "1 retransmissions",
+    "reason": "wgstack-performance.md, RACK-TLP: RACK, always on, resends the first segment before any duplicate-ACK threshold"
+  },
+  "limited-transmit/second-dupack.new-data": {
+    "observed": "0 new segments",
+    "reason": "as limited-transmit/first-dupack.new-data: RACK has already resent the first segment"
+  }
+}

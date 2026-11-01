@@ -43,12 +43,15 @@ name: CI
 #               same reachability reason as go_code above.
 #
 #   rust    -> crates/**, Cargo.toml, Cargo.lock, rust-toolchain.toml, deny.toml,
-#               internal/tcpharness/scripts/**
+#               internal/tcpharness/scripts/**, testdata/wgstack-rec/**,
+#               internal/tcpharness/rustdut/known-wgstack-rs.json
 #               -> gates rust-check, rust-windows, rust-macos (B13, B14) and rust-deny
 #               (B15). The Rust workspace is the v2 migration's build
 #               (docs/development/architecture.md); it shares nothing with the Go jobs
 #               above except the scenario scripts and their fixtures, which the Go and the
-#               Rust parsers both read, so a Go-only or document-only change leaves these
+#               Rust parsers both read, the Go wgstack's recordings, which the Rust wgstack
+#               replays, and the Rust wgstack's expected-difference list, which its scenario
+#               run reads, so a Go-only or document-only change leaves these
 #               jobs skipped and a Rust-only change leaves the Go jobs to build-test's own
 #               rule. rust-deny additionally runs on the weekly schedule, because new
 #               RustSec advisories affect code nobody touched.
@@ -171,6 +174,10 @@ jobs:
               - 'deny.toml'
               # The scenario scripts and parser fixtures, which the Rust tests read as well.
               - 'internal/tcpharness/scripts/**'
+              # The Go wgstack's recordings and the Rust wgstack's expected-difference list,
+              # which crates/wgft-wgstack-dut replays and runs the scripts against.
+              - 'testdata/wgstack-rec/**'
+              - 'internal/tcpharness/rustdut/known-wgstack-rs.json'
             harness:
               - 'crates/**'
               - 'Cargo.toml'
@@ -424,13 +431,14 @@ jobs:
       # nextest does not run doctests.
       - name: doctests
         run: cargo test --workspace --doc --locked
-      # The test tooling crates never reach the product binary's dependency tree
+      # The test tooling crates, and flate2 that only the recording reader uses, never reach the
+      # product binary's dependency tree
       # (docs/design/v2/wgstack-rs.md, the dependency and isolation checks). Every target and
       # every feature, so a target-specific or optional dependency cannot hide one.
       - name: product tree
         run: |
           tree=$(cargo tree -p wgft -e normal,build --target all --all-features --prefix none --locked)
-          if printf '%s\n' "$tree" | grep -E '^wgft-(tcpharness|wgstack-dut) '; then
+          if printf '%s\n' "$tree" | grep -E '^(wgft-(tcpharness|wgstack-dut)|flate2|miniz_oxide) '; then
             echo "the wgft binary depends on a test tooling crate" >&2
             exit 1
           fi

@@ -2,8 +2,8 @@
 
 この文書は、Rust に移る wgstack を確かめる試験の道具の設計を定めます。
 対象は、適合の台本をデータにする言語、台本を流す 2 つの runner、Rust の DUT を別のプロセスとして叩く標準入出力の口、凍結した Go の wgstack の記録との照合、qbench、fuzz、関門です。
-1 節の台本の言語、2 節の Go の runner と Rust の runner と 2 つの runner の一致の確かめ、Rust の構文解析器と台本の乱数の写し、3 節の口の Go と Rust の符号と `dutserve` と `rustdut` と `ProcessDut` と `wgstack-dut`、4 節の記録は実装済みです。
-記録の Rust での照合と、5 節から後の節は未実装です。
+1 節の台本の言語、2 節の Go の runner と Rust の runner と 2 つの runner の一致の確かめ、Rust の構文解析器と台本の乱数の写し、3 節の口の Go と Rust の符号と `dutserve` と `rustdut` と `ProcessDut` と `wgstack-dut`、4 節の記録とその Rust での照合は実装済みです。
+5 節から後の節は未実装です。
 実装は 8 節の順に積んだ PR で行い、各 PR がこの文書の該当する節を実装に合わせて直します。
 
 Rust の wgstack そのもの (sans-IO の API、crate の分け方、bit の一致の条件、実装の PR の順) は、wgstack の Rust 版の設計 (`docs/design/v2/wgstack-rs.md`) が決めます。
@@ -45,8 +45,8 @@ Rust の wgstack の核は sans-IO で、台本と記録と fuzz は偽の時計
 | DUT の口の符号 | `internal/dutproto` | Go | 3 節の frame の符号化と復号。モジュールの中の何も import しない |
 | Go の DUT の server | `internal/wgstack` の試験のバイナリの `dutserve` の形 | Go | 凍結した Go の wgstack を 3 節の口で出す |
 | 別のプロセスの DUT | `internal/tcpharness/rustdut` | Go | 3 節の口の client。`tcpharness.ClockedDUT` を実装する。相手は Rust の `wgstack-dut` か、確かめのための `dutserve` |
-| Rust の道具の crate | `crates/wgft-tcpharness` | Rust | 口の符号、packet の組み立て、台本の構文解析器と runner、記録の照合 |
-| Rust の DUT | `crates/wgft-wgstack-dut` | Rust | Rust の wgstack を `ClockedDut` に合わせる adapter と、3 節の口の server のバイナリ `wgstack-dut` |
+| Rust の道具の crate | `crates/wgft-tcpharness` | Rust | 口の符号、packet の組み立て、台本の構文解析器と runner |
+| Rust の DUT | `crates/wgft-wgstack-dut` | Rust | Rust の wgstack を `ClockedDut` に合わせる adapter、3 節の口の server のバイナリ `wgstack-dut`、記録の読み込みと照合、核に入った段の表 (`stages.json`) |
 | 記録 | `testdata/wgstack-rec/` | 言語に依らない | 凍結した Go の wgstack の入出力 |
 | wgstack の fuzz | `crates/wgft-wgstack/fuzz/` | Rust | cargo-fuzz の target |
 
@@ -54,6 +54,7 @@ Rust の wgstack の核は sans-IO で、台本と記録と fuzz は偽の時計
 どちらも `publish = false` で、リリースのワークフローはこれらを作りません。
 Rust の wgstack の核の crate は `crates/wgft-wgstack` です。
 試験の道具はこの crate の公開の API だけを使い、核の crate の `[dependencies]` と `[dev-dependencies]` に試験の道具を足しません。
+記録の読み込みは gzip を解く crate (`flate2`) が要るので、標準ライブラリだけに依る `crates/wgft-tcpharness` でなく `crates/wgft-wgstack-dut` に置きます。
 
 ## 1. 台本の言語
 
@@ -469,6 +470,11 @@ adapter は `inject` を同じ時刻の `handle_packet` の列に、`advance` �
 adapter は `poll_event` を呼ばず、操作の結果だけを runner に返します。
 核の知らせは対象と種類ごとに 1 つにまとまるので、読まなくても溜まり続けません。
 台本を Rust の wgstack に流す試験は `crates/wgft-wgstack-dut/tests/scenarios.rs` に置きます。
+この試験は adapter を `dut::Recorded` で包み、別のプロセスを叩く時と同じ送り直さない規則で流します。
+流すのは、台本が使う機能が核に入った台本だけです。
+台本の使う機能は同じ台本の Go の記録 (`testdata/wgstack-rec/scenarios/<台本>.seed-1.rec.gz`) の印で決め、印がすべて核に入った段 (4 節の `stages.json`) の印の中にあれば流します。
+既定の記録が収まらず 4b の変種の記録が収まる台本は、その変種と同じ `HELLO` (NewReno と boost を与えない方針) で流します。
+どちらも収まらない台本は ignored の試験で、`--include-ignored` を与えれば既定の `HELLO` で流れます。
 
 偽の時計の規則は Go の harness と同じです。
 待つ文は `poll` で packet を引き取り、無ければ時計を 1 ms 進めます。
@@ -531,7 +537,7 @@ log の行 (送った segment と見た segment、待ち、確かめの行) も 
 Rust の wgstack の engine の名前は `wgstack-rs` です。
 その期待した差の一覧は、Go の map でなく `internal/tcpharness/rustdut/known-wgstack-rs.json` に置き、Go の `rustdut` と Rust の runner が同じファイルを読みます。
 形は `{"scenario/check": {"observed": "...", "reason": "...", "sometimes": false}}` で、`sometimes` は省けます。
-Rust の runner の読み手 (`runner::parse_known`) は T3b で入れ、ファイルそのものは `wgstack-rs` を流す T3c が作ります。
+Rust の runner の読み手 (`runner::parse_known`) は T3b で入れ、ファイルは T3c で凍結した Go の wgstack の一覧 (`wgstackdut.Known`) から作りました。
 一覧は凍結した Go の wgstack の一覧の写しから始め、行を足せるのは今と同じく試験の担当と所有者だけです。
 届かなかった項目の確かめは台本ごとに行い、その台本の名前で始まる鍵だけを見ます。
 
@@ -558,6 +564,8 @@ Go に残す台本のうち別の goroutine で読み書きする台本 (受信�
 Rust の wgstack ができる前は、DUT に `dutserve` (3 節。凍結した Go の wgstack) を使い、Rust の runner は `ProcessDut` でそれを叩きます。
 これで、Rust の runner の意味を Rust の wgstack を待たずに確かめられます。
 Rust の wgstack ができた後は、`wgstack-dut` のバイナリを両方の runner が叩きます。
+この確かめは、核が台本の使う機能をすべて持つ段 (実装の 6) の後に足します。
+今の `tests/scripts.rs` が transcript を照らす相手は、engine の名前が `wgstack` の DUT だけです。
 
 `dutserve` を相手にした確かめは 2 段です。
 Go の試験 `TestWriteTranscripts` (`internal/tcpharness/rustdut`) が、台本ごとに種 1 から 5 で transcript と `CheckTrace` を、環境変数 `WGFT_TEST_TCPHARNESS_TRANSCRIPTS` の directory に `<台本>/<種>.bin` と `<台本>/<種>.trace.json` として書きます。
@@ -945,6 +953,14 @@ Rust の試験 (`crates/wgft-wgstack-dut/tests/replay.rs`) は、記録ごとに
 相手の後の packet は Go の wgstack の出力から作られているので、食い違った後の比較には意味が無いためです。
 `HELLO_OK` だけは、種類と口の版を比べ、engine の名前を比べません。
 名前は Go の `wgstack` と Rust の `wgstack-rs` で違うためです。
+`WRITE` は 3 節の adapter の写し方のとおり、どの記録でも `write` を 1 回呼びます。
+`testNet` の記録は書ける量までしか渡さないので、照合は照らす前に、その記録のどの `WRITE` も渡した bytes をすべて書いた (`WROTE` が bytes の長さと同じ) ことを確かめ、違えば記録の誤りとして落とします。
+照合は記録の directory を深さを問わずたどり、記録が 1 つも無ければ落ちます。
+
+照合は核の不変条件 (`check_invariants`) も確かめ、破れたらそこで止めます。
+`HELLO` が上限の組を持つ記録は要求ごとに、既定の表の記録は最後の要求の後に確かめます。
+既定の表は大きく、要求ごとに確かめると debug の build で 1 要求に 20 ms ほどかかったためです (1 回の測り)。
+照合そのものの確かめとして、記録の応答の 1 byte を変えるとその要求で止まることと、意図した違いの一覧の照らし方を `tests/rec.rs` が確かめます。
 
 Go の側にも同じ照らし直しがあります。
 `internal/wgstack` の `TestRecordingsReplay` は、git の記録を同じプロセスの `dutserve` の処理に流し、すべての応答が記録と同じことを確かめます。
@@ -964,13 +980,22 @@ Rust の wgstack は段階を踏んで機能を足すので、記録に印を付
 - 入力の種類:IPv4 の断片 (`frag`)、UDP (`udp`)、ICMP (`icmp`)、ほかの IPv4 の protocol (`proto-<番号>`)
 - 要求:UDP の socket (`udp`)、echo の endpoint (`ping`)、`BOOST_POLICY` と `EVENTS` (`boost-hook`)
 
-`replay.rs` は Rust の wgstack が持つと宣言した印の集まりを持ち、印がすべてその中にある記録だけを照らし、残りを数えて報告します。
+Rust の wgstack が持つ印の集まりは、`crates/wgft-wgstack-dut/stages.json` が段ごとの印 (`stages`) と核に入った段の一覧 (`landed`) で持ちます。
+4b の段の印は `dutproto.Stage4bTags` と同じです。
+実装の 5 の段は SACK、timestamp、CUBIC、boost の印を、実装の 6 の段は UDP、ICMP、断片、ping の印を持ちます。
+段を入れる PR が `landed` にその段を足すと、その段の印の記録が照合に入り、2 節の台本の試験にもその段の台本が入ります。
+`replay.rs` は印がすべて入った段の印の中にある記録だけを照らし、残りを ignored の試験にして、足りない印ごとに数を出します。
+ignored の記録も `cargo nextest run --run-ignored all` (`cargo test` では `-- --include-ignored`) で照らせます。
+`proto-<番号>` の印はどの段にも無いので、その印の記録は照合に入りません。
+ほかにどの段にも無い印を持つ記録があれば、段の表の足し忘れか記録の作り方の変化なので、照合の一覧を作る所で落ちます。
+4b の段の印が Go の `dutproto.Stage4bTags` と同じことは、`tests/rec.rs` が Go の定義の行を読んで確かめます。
 すべての記録が一致すること (意図した違いの一覧の行を除く) は、agent を wgstack の上で動かす段 (agent の置き換えの設計の「wgstack の上の agent」) のマージの前の条件で、ラボの一式で Rust の agent が Go の agent を置き換えられるとする判定の前の条件でもあります。
 
 Go の不具合を Rust で直したときのように、意図して出力を変えた所は、意図した違いの一覧 (`testdata/wgstack-rec/divergences.json`) に書きます。
 一覧は JSON の配列で、1 行は `record` (`<元>/<名前>`)、`request` (最初に食い違う応答の要求の番号。0 は `HELLO`)、`response` (Rust の応答の frame の 16 進)、`reason` (理由) を持ちます。
 照合は、一覧と同じ位置で同じ応答に食い違った記録を、そこで止めて既知の違いとして数えます。
 位置か応答が一覧と違えば落とします。
+Rust の試験は一覧を読む時に、要求 0 (`HELLO`) を指す行、空の応答の行、同じ記録の 2 つ目の行を断り、照らす時に、記録の Go の応答そのものを指す行を断ります。
 行を足せるのは、期待した差の一覧と同じく試験の担当と所有者だけです。
 今の一覧は空です。
 Go の `TestDivergencesList` が、どの行も git の記録を指し、番号が記録の中にあり、応答が 1 つの応答の frame で、理由を持つことを確かめます。
@@ -1109,12 +1134,20 @@ T3b で、この job と、testing.md の B 類の表の B16、振り分けの `
 job は `dutserve` を作り、Go の `TestWriteTranscripts` と `TestRustVectors` を流した後、`tests/scripts.rs` を含む `wgft-tcpharness` の試験をすべて流します (2 節の「2 つの runner の一致の確かめ」)。
 crate 全体を流すのは、Rust の試験が読む Go の側のデータ (frame の例、`vectors.json`) だけを変えた PR が、`rust` でなく `harness` の契機にだけ当たるためです。
 
+記録の照合と `wgft-wgstack-dut` の台本の試験は Go を要らないので、`rust-check` (B13) の `cargo nextest run --workspace` で流れます。
+T3c で、`rust` の契機に記録 (`testdata/wgstack-rec/**`) と期待した差の一覧 (`internal/tcpharness/rustdut/known-wgstack-rs.json`) を足しました。
+記録を作り直した PR と一覧だけを変えた PR でも、Rust の照合が流れるためです。
+
 ホストの関門 (`scripts/wgstack-gate.sh`) には、T2a で `rustdut-dutserve` の段を、T3b で `harness-rust-go` の段を足しました。
 `rustdut-dutserve` の段は `dutserve` を作り、`rustdut` を通した適合と輻輳の制御、`wgstackdut` との一致、誤りの道の一致、transcript の繰り返しを種 1 から 5 で流します。
 適合と輻輳の制御は、`wgstackdut` の package の `TestRustdutConformance` と `TestRustdutCongestion` です。
 凍結した Go の wgstack の期待した差の一覧が、その package にあるためです。
 `harness-rust-go` の段は CI の同じ名前の job と同じ確かめを流し、cargo の無いホストと Rust の runner の無い木では SKIP にします。
-今後、Rust の段 (Rust の台本と記録の照合、`wgstack-dut` に対する `rustdut` の適合の種 1 から 5、fuzz の smoke) を足します。
+T3c で `wgstack-rs` の段を足しました。
+この段は `wgft-wgstack-dut` の試験 (記録の照合、台本、adapter とバイナリ) を流し、台本の試験は種 1 から 5 でも流します。
+cargo の無いホストと `wgft-wgstack-dut` の無い木では SKIP にします。
+`wgstack-dut` に対する `rustdut` の適合の種 1 から 5 と fuzz の smoke は、まだ足していません。
+`rustdut` が流す Go の台本は印で段を分けないので、`rustdut` の適合は核が UDP と ICMP を持つ段 (実装の 6) の後に足します。
 対象の crate やバイナリが無い木では、今の段と同じく SKIP にします。
 凍結した Go の wgstack の段は、Go の wgstack を消すまで残します。
 別の script にせず今の script に段を足すのは、1 つの表で全部の段の結果と時間を見られ、並列の数の上限を共有できるためです。
@@ -1147,7 +1180,7 @@ feature はワークスペースの中で統合され、別の crate の試験�
 | T3a | `test(wgstack-rs): add the tcpharness crate with the script parser` | Rust の構文解析器と静的な検査、構文の fixture との byte の一致、台本の乱数の写し、Go と同じ JSON の書き手、`parse_script` の fuzz の target、CI の製品の木の検査 | 約 2,400 行 (実績) | T1b |
 | T3b-1 | `test(wgstack-rs): add the DUT frames and ProcessDut in Rust` | 口の符号、packet の組み立て、`ClockedDut` と transcript の包み、`ProcessDut`、`HELLO` の種、Go の書式の値の書き出し | 約 3,300 行 (実績) | T2a、T3a |
 | T3b-2 | `test(wgstack-rs): run scenario scripts in Rust` | 偽の時計の runner、台本ごとの試験の入口、`dutserve` に対する transcript の一致、CI の `harness-rust-go` | 約 4,400 行 (実績) | T3b-1 |
-| T3c | `test(wgstack-rs): add wgstack-dut and replay the Go recordings` | adapter、`wgstack-dut`、記録の読み込みと照合、意図した違いの一覧、期待した差の一覧のファイル、関門の段 | 約 1,500 行 | T2b、T3b、実装の 4 |
+| T3c | `test(wgstack-rs): add wgstack-dut and replay the Go recordings` | adapter、`wgstack-dut`、記録の読み込みと照合、意図した違いの一覧、期待した差の一覧のファイル、関門の段 | 約 1,900 行 (実績、2 つの積んだ PR) | T2b、T3b、実装の 4 |
 | T4 | `test(wgstack-rs): fuzz targets and adversarial bounds` | `tools/fuzzseed`、`core`、`adversarial_sender`、`replay`、回帰の試験、敵対的な保持の試験、stream の一致の試験、故障を入れた build | 約 3,000 行。段ごとに分ける | 実装の 3 から。4 から 6 に合わせて足す |
 | 8 の試験の側 | `test(wgstack-rs): qbench through wgstack-dut` | `--clock real`、socketpair の `tun.Device`、`wgstack-rs` の engine、判定の切り替え | 約 1,000 行 | 実装の 5 と 7 |
 | 後の段 | 未定 | 台本の相手が SYN から SACK-permitted と timestamp を外す harness の選択と、それを使う台本の 4b の変種の記録 (4 節) | 未見積 | T1b、T2b、T3a |
@@ -1164,7 +1197,7 @@ Rust の wgstack を相手にするのは T3c からで、実装の 4 の API �
 - 口の往復の費用:Rust の runner が `ProcessDut` で `dutserve` を叩くと、1 往復は runner の処理を含めて 5 µs ほどでした。35 秒の待ちを持つ `udp-reassembly-timeout` は 1 回の実行が約 6 万 6 千往復で 0.3 秒ほどです。すべての台本を種 1 から 5 で 1 つずつ流すと 4 秒ほどでした (開発のホスト、Rust は debug の build、1 回の測り)。`POLL` が空の時に時計を進める要求は足しません。Go の `rustdut` の側は締め切りまで壁時計で待つ読みがあり、同じ確かめが 12 秒ほどでした
 - `dutserve` の `udpSendReady`:UDP の会計の不整合の条件は、`TestDutserveReadyMatchesBlocking` の列が通りません
 - `rustdut` の往復の費用:`dutserve` を相手に全部の台本を 1 つの種で流すと、適合と輻輳の制御の実行で 5 秒ほどでした (1 回の測り)。1 往復の時間は測っていません
-- 記録の大きさ:T2b で測り、5 MiB の上限を保ちました (4 節)。Rust の照らし直しが記録を読む時間は測っていません
+- 記録の大きさ:T2b で測り、5 MiB の上限を保ちました (4 節)。Rust の照合は、4b の段の印の記録をすべて 3 秒ほどで照らしました (開発のホスト、debug の build、1 回の測り)
 - 乱数の写し:Go の PCG と `IntN` の写しは、T3a で `rng.json` の値と一致しました。
   `IntN` の棄却の枝は、最初の値が棄却される状態と 2^63 に近い上限で Go の試験が書いた `rng-intn.json` の値と一致しました。
   Go の `strconv.Quote` と `strconv.FormatFloat` の写しは、T3b で Go の試験が書き出した値 (`vectors.json`) と一致しました

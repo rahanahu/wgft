@@ -269,6 +269,10 @@ step recordings-fresh '[[ "$(uname -s) $(uname -m)" == "Linux x86_64" ]] || { ec
 # dutserve, run seeds 1 to 5, and their transcripts and check traces must be equal byte for byte
 # (docs/design/v2/test-tooling.md section 2). SKIP where there is no cargo or no Rust runner.
 step harness-rust-go 'command -v cargo >/dev/null || { echo "SKIP: no cargo"; exit 0; }; [[ -f crates/wgft-tcpharness/tests/scripts.rs ]] || { echo "SKIP: no Rust runner in this tree"; exit 0; }; need_test ./internal/tcpharness/rustdut TestWriteTranscripts; go test -c -o "$logdir/harness-dutserve.test" ./internal/wgstack || exit 1; rm -rf "$logdir/transcripts"; export WGFT_TEST_WGSTACK_DUT="$logdir/harness-dutserve.test" WGFT_TEST_TCPHARNESS_TRANSCRIPTS="$logdir/transcripts"; go test -count=1 -run "TestWriteTranscripts|TestRustVectors" ./internal/tcpharness/rustdut && cargo test -p wgft-tcpharness --locked'
+# The Rust wgstack behind wgstack-dut (docs/design/v2/test-tooling.md sections 2 to 4): the replay of the
+# Go recordings whose tags the landed stages cover, the scenario scripts in process on run seeds 1 to 5,
+# and the adapter and binary tests. SKIP where there is no cargo or no wgstack-dut crate.
+step wgstack-rs 'command -v cargo >/dev/null || { echo "SKIP: no cargo"; exit 0; }; [[ -d crates/wgft-wgstack-dut ]] || { echo "SKIP: no wgstack-dut in this tree"; exit 0; }; cargo test -p wgft-wgstack-dut --locked || exit 1; for s in 1 2 3 4 5; do WGFT_TEST_TCPHARNESS_SEED=$s cargo test -p wgft-wgstack-dut --locked --test scenarios || exit 1; done'
 step stream-seeds-full 'WGFT_WGSTACK_STREAM_SEEDS=full go test -count=1 ./internal/wgstack -run "Stream|Scoreboard|RecvBuf"'
 step adversarial-seeds 'need_test ./internal/wgstack TestAdversarialSender; WGFT_WGSTACK_AUDIT_SEEDS=3000 go test -count=1 ./internal/wgstack -run TestAdversarialSender'
 # FuzzCore runs as 4 single-worker shards, which finish the same executions sooner than one process with
