@@ -23,49 +23,20 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use tokio::sync::{Semaphore, watch};
 use tokio::time::Instant;
 
-/// DNS の名前として引ける形か (Go の `net.isDomainName`)。Go の静的な build の resolver はこの形でない
-/// 名前を問い合わせずに `no such host` で断る。`getaddrinfo` は `/etc/hosts` などから任意の文字列を
-/// 引けるので、Go と同じ名前だけを渡すために先に確かめる。長さは 253 byte まで (末尾の点があれば
-/// 254)、ラベルは 1 から 63 byte で、文字は英字、数字、`_`、`-` だけである。`-` はラベルの先頭と末尾に
-/// 置けず、数字だけの名前は名前としない。
+/// OS の resolver に渡してよい名前か。空でなく、254 byte 以下で、空白と表示できない文字 (Go の
+/// `unicode.IsGraphic` でない文字) を含まない名前である。`getaddrinfo` は `/etc/hosts` などから任意の
+/// 文字列を引けるので、server が配る制御の文字や改行、長い文字列を OS の resolver とその設定のファイルの
+/// 照合に渡さないために断る。Go の `net.isDomainName` の形の全体は求めない。v1 の Go の resolver は
+/// Linux で hosts のファイルを形の判定より先に引き、Windows と macOS では OS の resolver に渡すので、
+/// 全体を求めると Go が引ける名前を断ることになるためである。IP のリテラル (IPv6 の zone の付いた形を
+/// 含む) もこの判定を通る。
 #[must_use]
-pub fn is_domain_name(s: &str) -> bool {
-    if s == "." {
-        return true;
-    }
-    let b = s.as_bytes();
-    let l = b.len();
-    if l == 0 || l > 254 || (l == 254 && b[l - 1] != b'.') {
-        return false;
-    }
-    let mut last = b'.';
-    let mut non_numeric = false;
-    let mut part = 0;
-    for &c in b {
-        match c {
-            b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
-                non_numeric = true;
-                part += 1;
-            }
-            b'0'..=b'9' => part += 1,
-            b'-' => {
-                if last == b'.' {
-                    return false;
-                }
-                part += 1;
-                non_numeric = true;
-            }
-            b'.' => {
-                if last == b'.' || last == b'-' || part > 63 || part == 0 {
-                    return false;
-                }
-                part = 0;
-            }
-            _ => return false,
-        }
-        last = c;
-    }
-    last != b'-' && part <= 63 && non_numeric
+pub fn is_lookup_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 254
+        && !s
+            .chars()
+            .any(|c| c.is_whitespace() || wgft_proto::textsafe::is_unsafe(c))
 }
 
 /// 宛先の名前を同時に引く数。
@@ -212,14 +183,7 @@ impl Resolver {
     }
 
     async fn lookup(&self, kind: Kind, host: &str, deadline: Instant) -> Outcome {
-        // DNS の名前でない名前は、Go の resolver と同じく引かずに断る。IP のリテラル (IPv6 の zone の
-        // 付いた形を含む) は Go と同じく名前として調べない
-        let literal = host
-            .split_once('%')
-            .map_or(host, |(a, _)| a)
-            .parse::<IpAddr>()
-            .is_ok();
-        if !literal && !is_domain_name(host) {
+        if !is_lookup_name(host) {
             return Err(format!("lookup {host}: no such host"));
         }
         let mut rx = self.join(kind, host);
@@ -622,9 +586,9 @@ mod tests {
         s.parse().unwrap()
     }
 
-    /// DNS の名前でない名前は、OS の resolver に渡さずに断る。
+    /// 空白、表示できない文字、長すぎる名前と空の名前は、OS の resolver に渡さずに断る。
     #[tokio::test]
-    async fn names_that_are_not_domain_names_are_not_looked_up() {
+    async fn names_with_unsafe_characters_are_not_looked_up() {
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
         let r = Resolver::with_lookup(
@@ -636,7 +600,8 @@ mod tests {
             }),
         );
         let deadline = Instant::now() + Duration::from_secs(5);
-        for name in ["evil\nname", "a b", "x\u{1b}[2J"] {
+        let long = "a".repeat(255);
+        for name in ["evil\nname", "a b", "x\u{1b}[2J", "a\u{a0}b", "", &long] {
             assert_eq!(
                 r.lookup_target(name, deadline).await,
                 Err(format!("lookup {name}: no such host"))
@@ -652,59 +617,36 @@ mod tests {
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
     }
 
-    /// Go の `TestDNSNames` の例と、長さの境目。
+    /// 形の判定は安全に要る分だけで、Go の `net.isDomainName` が偽でも hosts のファイルや OS の resolver
+    /// が答えうる名前は通す。
     #[test]
-    fn domain_names_like_go() {
+    fn lookup_names_need_only_safe_characters() {
         let ok = [
             "foo.com",
             "_xmpp-server._tcp.google.com",
             "foo.com.",
-            "a.b-c.de",
-            "a_b.c",
-            "1.2.3.example",
-            ".",
-            &format!(
-                "{}.{}.{}.{}",
-                "a".repeat(63),
-                "b".repeat(63),
-                "c".repeat(63),
-                "d".repeat(61)
-            ),
-            &format!(
-                "{}.{}.{}.{}.",
-                "a".repeat(63),
-                "b".repeat(63),
-                "c".repeat(63),
-                "d".repeat(61)
-            ),
+            "-foo.com",
+            "a..b",
+            "ex\u{e4}mple.com",
+            "123",
+            "fe80::1%eth0",
+            &"a".repeat(254),
         ];
         for n in ok {
-            assert!(is_domain_name(n), "{n}");
+            assert!(is_lookup_name(n), "{n}");
         }
         let bad = [
             "",
-            "..",
-            "a..b",
-            "-foo.com",
-            "foo-.com",
-            "foo.com-",
             "foo bar",
+            "foo\tbar",
             "foo\nbar",
             "\u{1b}[2J",
-            "ex\u{e4}mple.com",
-            "1.2.3.4",
-            "123",
-            &"a".repeat(64),
-            &format!(
-                "{}.{}.{}.{}",
-                "a".repeat(63),
-                "b".repeat(63),
-                "c".repeat(63),
-                "d".repeat(62)
-            ),
+            "a\u{200b}b",
+            "fe80::1%eth0\n",
+            &"a".repeat(255),
         ];
         for n in bad {
-            assert!(!is_domain_name(n), "{n:?}");
+            assert!(!is_lookup_name(n), "{n:?}");
         }
     }
 
