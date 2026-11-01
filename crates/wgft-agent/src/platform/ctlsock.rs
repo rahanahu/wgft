@@ -66,6 +66,25 @@ pub struct Listener {
     path: PathBuf,
 }
 
+/// ソケットのファイルを、作った瞬間から持ち主だけが繋げる権限で作る (Unix)。bind が作るファイルの
+/// 権限は umask だけで決まるので、bind の間だけ umask を 0177 にする。既にあったデータディレクトリの
+/// 権限は変えない (仕様) ので、0755 のディレクトリで umask が 0 だと、bind の後の chmod までの間に
+/// 他の利用者が繋げるためである。umask はプロセスで 1 つなので、その間に他のスレッドが作るファイルも
+/// 狭い権限になるが、agent が作るファイルはどれも持ち主だけのものである。
+fn bind_private(socket: &Socket, addr: &SockAddr) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        // SAFETY: umask はプロセスの値を置き換えて前の値を返すだけで、メモリに触れない
+        let old = unsafe { libc::umask(0o177) };
+        let r = socket.bind(addr);
+        // SAFETY: 同じ。前の値に戻す
+        unsafe { libc::umask(old) };
+        r
+    }
+    #[cfg(not(unix))]
+    socket.bind(addr)
+}
+
 impl Listener {
     /// `path` に待ち受けを開く。同じパスの古いファイルは先に消す。権限は Unix では 0600 (失敗は無視)、
     /// Windows では開いた直後に 3 者だけの DACL を付け、付けられなければ閉じて [`BindError::Security`]
@@ -83,7 +102,7 @@ impl Listener {
             Err(e) => return Err(BindError::Io(e)),
         }
         let socket = Socket::new(Domain::UNIX, Type::STREAM, None).map_err(BindError::Io)?;
-        socket.bind(&addr).map_err(BindError::Io)?;
+        bind_private(&socket, &addr).map_err(BindError::Io)?;
         // ここから先の失敗ではファイルを残さない
         let l = Listener {
             socket,
@@ -101,7 +120,8 @@ impl Listener {
     )]
     fn restrict(&self) -> Result<(), BindError> {
         use std::os::unix::fs::PermissionsExt;
-        // 失敗は無視する。ディレクトリが 0700 なので、他の利用者はもともと届かない
+        // 失敗は無視する。bind が 0600 で作り、ディレクトリを作ったときは 0700 なので、他の利用者は
+        // もともと届かない
         let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
         Ok(())
     }
@@ -397,6 +417,30 @@ mod tests {
             std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// bind が作るソケットのファイルは、chmod の前から持ち主だけのものである。umask が 0 でも変わらない。
+    /// umask はプロセスで 1 つなので、試験ごとにプロセスを分ける cargo-nextest の下でだけ確かめる。
+    #[cfg(unix)]
+    #[test]
+    fn the_socket_is_private_from_its_creation() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("NEXTEST_EXECUTION_MODE").is_none_or(|m| m != "process-per-test") {
+            eprintln!("skipped: the umask is per process; this test runs only under cargo-nextest");
+            return;
+        }
+        let d = short_dir("umask");
+        let p = d.join("a.sock");
+        // SAFETY: umask はプロセスの値を置き換えるだけである
+        let old = unsafe { libc::umask(0) };
+        let socket = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+        bind_private(&socket, &sock_addr(&p).unwrap()).unwrap();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        // SAFETY: 同じ。umask は bind_private が戻した 0 のままである
+        let now = unsafe { libc::umask(old) };
+        assert_eq!(now, 0, "bind_private restores the umask");
+        assert_eq!(mode, 0o600);
         let _ = std::fs::remove_dir_all(&d);
     }
 
