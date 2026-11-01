@@ -707,10 +707,11 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
   核の項は、作成の時に作って流れによらず持つ固定の部分 (`Bound::fix`、`core fixed`)、接続の枠が初めて使われた時から持つ floor の記録の輪と区間の表 (`Bound::floor_arrays`、`core arrays`)、残り (`core flows`) に分けます。
   TCP の中継の項は、接続ごとの task と登録の部分 (`tcp relay`) と大きいバッファの部分 (`tcp bulk`) に分けます。
   形は保証の外で、ラボの check 5 と 5b が読みます
-- 使った枠の行:agent は核を作ってから使ったことのある接続の枠 (floor の配列を持つ枠) の数を 1 秒ごとに読み、64 の倍数に切り上げた値が増えたときだけ、`memory: connection slots used so far: at most <N> of <N_c>; their floor arrays hold <K> KiB` を書きます。
+- 使った枠の行:agent は核を作ってから使ったことのある接続の枠 (floor の配列を持つ枠) の数を 1 秒ごとに読み、刻みの倍数に切り上げた値が増えたときだけ、`memory: connection slots used so far: at most <N> of <N_c>; their floor arrays hold <K> KiB` を書きます。
   核は枠が初めて配列を確保する時に数えて持つので (`Stack::slots_used`)、読むのは定数の手間で、データプレーンのスレッドで枠をたどりません。
   枠は配列を持ち続けるので数は減らず、行の値は読んだ時の数の上界です。
-  行の数は N_c を 64 で割った数までです。
+  刻みは N_c を 32 で割って切り上げた値と 64 の大きい方を 64 の倍数に切り上げた値なので、N_c が大きくても行の数は 1 プロセスで 32 までです。
+  洪水で数が一気に増えても行は増えすぎません。
   ラボの check 5 と 5b は、RSS を測った後に最後のこの行を読みます。
   形は保証の外です
 - 単体の試験 (`relay/held_tests.rs`):小さい上限 (UDP 128、TCP 24) の agent を試験の相手と組み、`wgft-alloc-count` で数えた生きている確保を段ごとに測ります。
