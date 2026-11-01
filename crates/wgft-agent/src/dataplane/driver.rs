@@ -18,16 +18,30 @@ use wgft_wireguard::{Device, Event, PublicKey, Transmit};
 
 use super::{Command, Local, Settings, SocketBuffers, Status, Upper, clock, duration_to_nanos};
 
+/// 受ける datagram の buffer と、復号の行き先の長さ。UDP の datagram の最大の長さで、起動の時に 1 回だけ
+/// 確保する。メモリの上界の `device` の項が数える ([`crate::memory`])。
+pub(super) const DATAGRAM_BUF: usize = u16::MAX as usize;
+const _: () = assert!(DATAGRAM_BUF == crate::relay::UDP_BUF);
+
 /// 送り出しの先。製品はソケットで、試験は記録する。
 pub(super) trait Sink {
     /// 1 つの datagram を送る。`WouldBlock` は書けないことを示し、datagram は呼び手が持ち続ける。
-    fn send(&mut self, transmit: &Transmit) -> io::Result<()>;
+    fn send(&mut self, to: SocketAddr, payload: &[u8]) -> io::Result<()>;
 }
 
 impl Sink for &UdpSocket {
-    fn send(&mut self, transmit: &Transmit) -> io::Result<()> {
-        self.try_send_to(&transmit.payload, transmit.to).map(|_| ())
+    fn send(&mut self, to: SocketAddr, payload: &[u8]) -> io::Result<()> {
+        self.try_send_to(payload, to).map(|_| ())
     }
+}
+
+/// ソケットが受け付けなかった datagram。
+#[derive(Debug)]
+pub(super) enum Pending {
+    /// device の層のキューから引いた datagram。
+    Queued(Transmit),
+    /// 暗号化して [`Outbox`] の `sealed` に置いた datagram の送り先と長さ。
+    Sealed { to: SocketAddr, len: usize },
 }
 
 /// 起床をまたいで持つ送り出しの状態。
@@ -35,31 +49,67 @@ impl Sink for &UdpSocket {
 pub(super) struct Outbox {
     /// 上の層が packet を書く buffer。MTU の長さ。
     buf: Vec<u8>,
+    /// device の層が packet を暗号化して書く buffer。device の層が送る最大の datagram の長さ。
+    /// `pending` が `Sealed` の間は書き換えない。
+    sealed: Vec<u8>,
     /// ソケットが受け付けなかった datagram。高々 1 つで、これがある間は何も引かない。
-    pub(super) pending: Option<Transmit>,
+    pub(super) pending: Option<Pending>,
     /// `WouldBlock` 以外の理由で送れず捨てた datagram の数。
     pub(super) send_errors: u64,
 }
 
 impl Outbox {
-    pub(super) fn new(mtu: usize) -> Self {
+    pub(super) fn new(mtu: usize, max_datagram: usize) -> Self {
         Self {
             buf: vec![0; mtu],
+            sealed: vec![0; max_datagram],
             pending: None,
             send_errors: 0,
         }
     }
 
-    /// device の層の送る datagram をソケットが受け付ける間すべて送る。待ち行列が空になれば `true`。
+    /// 確保した buffer の長さの和。メモリの上界の項の試験が使う。
+    #[cfg(test)]
+    pub(super) fn buffer_bytes(&self) -> usize {
+        self.buf.len() + self.sealed.len()
+    }
+
+    /// `sealed` の先頭の `len` byte を `to` へ送る。ソケットが受け付けなければ控えて `false`。
+    fn send_sealed(&mut self, to: SocketAddr, len: usize, sink: &mut impl Sink) -> bool {
+        match sink.send(to, &self.sealed[..len]) {
+            Ok(()) => true,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                self.pending = Some(Pending::Sealed { to, len });
+                false
+            }
+            Err(_) => {
+                self.send_errors += 1;
+                true
+            }
+        }
+    }
+
+    /// 控えた datagram と device の層の送る datagram を、ソケットが受け付ける間すべて送る。待ち行列が
+    /// 空になれば `true`。
     fn drain(&mut self, device: &mut Device, sink: &mut impl Sink) -> bool {
+        let mut held = match self.pending.take() {
+            Some(Pending::Sealed { to, len }) => {
+                if !self.send_sealed(to, len, sink) {
+                    return false;
+                }
+                None
+            }
+            Some(Pending::Queued(t)) => Some(t),
+            None => None,
+        };
         loop {
-            let Some(t) = self.pending.take().or_else(|| device.poll_transmit()) else {
+            let Some(t) = held.take().or_else(|| device.poll_transmit()) else {
                 return true;
             };
-            match sink.send(&t) {
+            match sink.send(t.to, &t.payload) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    self.pending = Some(t);
+                    self.pending = Some(Pending::Queued(t));
                     return false;
                 }
                 Err(_) => self.send_errors += 1,
@@ -109,9 +159,12 @@ pub(super) fn pump<U: Upper>(
             return false;
         };
         pulled += 1;
-        // 上の層は buf より長い長さを返さない。返したら捨てる
-        if let Some(packet) = outbox.buf.get(..len) {
-            device.handle_packet(now, packet);
+        // 上の層は buf より長い長さを返さない。返したら捨てる。暗号文は outbox の buffer に直接書く
+        if let Some(packet) = outbox.buf.get(..len)
+            && let Some(out) = device.handle_packet(now, packet, &mut outbox.sealed)
+            && !outbox.send_sealed(out.to, out.len, sink)
+        {
+            return false;
         }
         if !outbox.drain(device, sink) {
             return false;
@@ -125,6 +178,7 @@ fn receive<U: Upper>(
     local: &Local<U>,
     socket: &UdpSocket,
     buf: &mut [u8],
+    plain: &mut [u8],
     now: Instant,
     cap: usize,
     receive_errors: &mut u64,
@@ -134,9 +188,9 @@ fn receive<U: Upper>(
     for _ in 0..cap {
         match socket.try_recv_from(buf) {
             Ok((n, from)) => {
-                inner.device.handle_datagram(now, from, &buf[..n]);
-                while let Some(packet) = inner.device.poll_packet() {
-                    inner.upper.handle_packet(now, &packet);
+                // 復号は plain に直接行い、上の層には plain を借用で渡す
+                if let Some(len) = inner.device.handle_datagram(now, from, &buf[..n], plain) {
+                    inner.upper.handle_packet(now, &plain[..len]);
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return false,
@@ -194,19 +248,21 @@ pub(super) async fn drive<U: Upper>(
     settings: Settings,
     buffers: SocketBuffers,
 ) -> io::Result<Rest> {
-    let (peer, mtu) = {
+    let (peer, mtu, max_datagram) = {
         let inner = local.0.inner.borrow();
         let peer =
             inner.device.peers().next().ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "the device has no peer")
             })?;
-        (peer, inner.device.mtu())
+        (peer, inner.device.mtu(), inner.device.max_transmit_len())
     };
     let local_addr = socket
         .local_addr()
         .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
-    let mut rx_buf = vec![0u8; usize::from(u16::MAX)];
-    let mut outbox = Outbox::new(mtu);
+    let mut rx_buf = vec![0u8; DATAGRAM_BUF];
+    // 復号の行き先。最大の datagram でも足りる長さ
+    let mut plain = vec![0u8; DATAGRAM_BUF];
+    let mut outbox = Outbox::new(mtu, max_datagram);
     let mut receive_errors = 0u64;
     let mut wakers = Vec::new();
     loop {
@@ -220,6 +276,7 @@ pub(super) async fn drive<U: Upper>(
             &local,
             &socket,
             &mut rx_buf,
+            &mut plain,
             now,
             settings.max_datagrams_per_wake,
             &mut receive_errors,

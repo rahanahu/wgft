@@ -43,6 +43,30 @@ fn the_line_has_the_lab_s_form_and_grows_with_the_caps() {
     }
 }
 
+/// データプレーンが device に渡す使い回しのバッファの項は、device が求める長さと一致する。
+#[test]
+fn the_data_plane_buffers_term_matches_the_device() {
+    use wgft_wireguard::{DATA_OVERHEAD, DEFAULT_KEEPALIVE, Device, DeviceConfig, PrivateKey};
+    let key = PrivateKey::generate(&[1; 32]);
+    let peer = PrivateKey::generate(&[2; 32]).public_key();
+    let mut config = DeviceConfig::agent(
+        key,
+        peer,
+        None,
+        std::net::Ipv4Addr::new(10, 200, 0, 1),
+        DEFAULT_KEEPALIVE,
+    );
+    config.mtu = u16::try_from(MAX_MTU).unwrap();
+    let device = Device::new(config, std::time::Instant::now(), std::time::Duration::ZERO).unwrap();
+    assert_eq!(device.mtu(), MAX_MTU);
+    assert_eq!(device.max_transmit_len(), MAX_MTU + DATA_OVERHEAD);
+    // 駆動が確保する buffer の和と一致する。buffer の大きさを変えたら、項が合わなくなって落ちる
+    assert_eq!(
+        data_plane_buffers(),
+        crate::dataplane::driver_buffer_bytes(device.mtu(), device.max_transmit_len())
+    );
+}
+
 #[test]
 fn the_per_flow_terms_cover_their_types() {
     let (tcp, udp) = crate::relay::future_sizes();

@@ -3,15 +3,19 @@
 //! 入力は 3 種類だけで、どれも呼び手が今の時刻を渡す:
 //! UDP で届いた datagram ([`Device::handle_datagram`])、トンネルへ送る IP の packet
 //! ([`Device::handle_packet`])、timer ([`Device::handle_timeout`])。
-//! 出力は送る datagram、トンネルの側へ渡す packet、event と、次に起こす時刻で、呼び手が
-//! `poll_*` で取り出す。中にスレッド、実の時計、socket を持たない。
+//! 出力は送る datagram、トンネルの側へ渡す packet、event と、次に起こす時刻である。
+//! データの packet は呼び手の buffer を通る。受けた datagram は呼び手の buffer に復号して、その先頭の
+//! 長さを返し、送る packet は呼び手の buffer に暗号化して、送り先と長さを返す。packet ごとに確保も写しも
+//! しない。ハンドシェイクと cookie の datagram と、ハンドシェイクを待っていた packet は、device が持つ
+//! 上限のあるキューに積み、呼び手が `poll_transmit` で取り出す。event も `poll_event` で取り出す。
+//! 中にスレッド、実の時計、socket を持たない。
 //!
 //! sanstun の README の呼び手の責任のうち、次をここで果たす。
 //! - 暗号鍵の経路表:送信は宛先からピアを選び、受信は復号した packet の送信元が送ってきた
 //!   ピアの AllowedIPs に入るものだけを通す
 //! - endpoint の更新:ハンドシェイクかデータを受け付けた後だけ、その datagram の送信元に移す
 //! - 中身の検査:IPv4 のヘッダを確かめ、詰め物を全長で切る
-//! - キューの上界:持つものはすべて件数とバイト数の上限を持ち、溢れたものは捨てて数える。
+//! - キューの上界:device が持つものはすべて件数とバイト数の上限を持ち、溢れたものは捨てて数える。
 //!   暗号の処理はその呼び出しの中で済ませるので、暗号の処理を待つキューは無い
 //! - 誤り:相手には何も返さず、[`Drops`] で数える
 
@@ -36,6 +40,15 @@ pub struct Transmit {
     pub to: SocketAddr,
     /// The WireGuard message.
     pub payload: Vec<u8>,
+}
+
+/// A data datagram that [`Device::handle_packet`] encrypted into the caller's buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Outgoing {
+    /// Where to send it.
+    pub to: SocketAddr,
+    /// Its length: the first `len` bytes of the buffer the caller passed.
+    pub len: usize,
 }
 
 impl ByteLen for Transmit {
@@ -98,10 +111,6 @@ pub struct Held {
     pub transmit_packets: usize,
     /// Their bytes.
     pub transmit_bytes: usize,
-    /// Packets in the delivery queue.
-    pub deliver_packets: usize,
-    /// Their bytes.
-    pub deliver_bytes: usize,
     /// Events in the event queue.
     pub events: usize,
     /// The largest number of staged packets of any peer.
@@ -146,7 +155,6 @@ pub struct Device {
     rekey_timeout: Duration,
     limits: Limits,
     transmits: BoundedQueue<Transmit>,
-    packets: BoundedQueue<Vec<u8>>,
     events: VecDeque<Event>,
     drops: Drops,
     /// これまでに渡された最も新しい時刻。時刻が戻っても sanstun には戻さない。
@@ -265,7 +273,6 @@ impl Device {
             rekey_timeout: config.timers.effective_rekey_timeout(),
             limits: l,
             transmits: BoundedQueue::new(l.transmit_packets, l.transmit_bytes),
-            packets: BoundedQueue::new(l.deliver_packets, l.deliver_bytes),
             events: VecDeque::new(),
             drops: Drops::default(),
             now,
@@ -299,13 +306,26 @@ impl Device {
     }
 
     /// Handles a UDP datagram that arrived from `from`.
-    pub fn handle_datagram(&mut self, now: Instant, from: SocketAddr, datagram: &[u8]) {
+    ///
+    /// A data message is decrypted into `out`, which must hold the datagram's length minus 16 bytes
+    /// (a buffer of the largest datagram, 65535 bytes, always suffices; a shorter one drops a longer
+    /// datagram as malformed). When the datagram carried a packet for the tunnel side, the result is
+    /// its length: the packet is `out[..len]`, a well formed IPv4 packet without padding, from an
+    /// address in its peer's allowed IPs. The packet stays in `out` until the caller reuses it.
+    /// Nothing is allocated or copied for a data message.
+    pub fn handle_datagram(
+        &mut self,
+        now: Instant,
+        from: SocketAddr,
+        datagram: &[u8],
+        out: &mut [u8],
+    ) -> Option<usize> {
         let now = self.clock(now);
-        let inbound = match self.proto.receive(now, from, datagram) {
+        let inbound = match self.proto.receive(now, from, datagram, out) {
             Ok(inbound) => inbound,
             Err(reason) => {
                 self.drops.add(reason, 1);
-                return;
+                return None;
             }
         };
         let rx = datagram.len() as u64;
@@ -342,13 +362,15 @@ impl Device {
                 self.flush_staged(peer, now);
                 self.drain_proto_events(peer, now);
             }
-            Inbound::Data { peer, plaintext } => {
+            Inbound::Data { peer, len } => {
                 self.accepted_from(peer, from, rx);
-                self.deliver(peer, &plaintext);
+                let delivered = self.check_inbound(peer, &out[..len]);
                 self.flush_staged(peer, now);
                 self.drain_proto_events(peer, now);
+                return delivered;
             }
         }
+        None
     }
 
     /// 認証した datagram を数え、keepalive の期限を延ばす。
@@ -373,61 +395,73 @@ impl Device {
         }
     }
 
-    fn deliver(&mut self, peer: PeerId, plaintext: &[u8]) {
+    /// 復号した packet を検査し、詰め物を除いた長さを返す。通らなければ捨てて数える。
+    fn check_inbound(&mut self, peer: PeerId, plaintext: &[u8]) -> Option<usize> {
         let Some(header) = parse_ipv4(plaintext) else {
             self.drops.add(DropReason::InvalidInnerPacket, 1);
-            return;
+            return None;
         };
         if self.routes.lookup(header.src) != Some(peer) {
             self.drops.add(DropReason::DisallowedSource, 1);
-            return;
+            return None;
         }
-        // 詰め物を除いた長さの新しいバッファに写す。復号のバッファは datagram の長さで、相手は
-        // 短い packet を長い詰め物で送れるので、そのまま持つと容量がキューの上限を超える
-        if !self.packets.push(plaintext[..header.total_len].to_vec()) {
-            self.drops.add(DropReason::DeliverOverflow, 1);
-        }
+        Some(header.total_len)
     }
 
     /// Handles an IP packet from the tunnel side, to be encrypted for the peer whose allowed IPs
     /// hold its destination.
-    pub fn handle_packet(&mut self, now: Instant, packet: &[u8]) {
+    ///
+    /// With a session and no packet waiting for a handshake, the packet is encrypted into `out`,
+    /// which must hold [`Device::max_transmit_len`] bytes, and the result names the datagram: the
+    /// first `len` bytes of `out`, to be sent to `to`. Nothing is allocated or copied for it. The
+    /// caller sends it before it calls this again with the same `out`; it should also send what
+    /// [`Device::poll_transmit`] holds first, to keep the order of the messages. Otherwise the result
+    /// is `None`: the packet waits for the handshake that this call starts, or it was dropped and
+    /// counted.
+    pub fn handle_packet(
+        &mut self,
+        now: Instant,
+        packet: &[u8],
+        out: &mut [u8],
+    ) -> Option<Outgoing> {
         let now = self.clock(now);
         let Some(header) = parse_ipv4(packet) else {
             self.drops.add(DropReason::InvalidInnerPacket, 1);
-            return;
+            return None;
         };
         if header.total_len > self.mtu {
             self.drops.add(DropReason::TooBig, 1);
-            return;
+            return None;
         }
         let Some(peer) = self.routes.lookup(header.dst) else {
             self.drops.add(DropReason::NoRoute, 1);
-            return;
+            return None;
         };
-        if self.peers[peer].endpoint.is_none() {
+        let Some(to) = self.peers[peer].endpoint else {
             self.drops.add(DropReason::NoEndpoint, 1);
-            return;
-        }
-        let packet = packet[..header.total_len].to_vec();
+            return None;
+        };
+        let packet = &packet[..header.total_len];
         if self.peers[peer].staged.is_empty() {
-            match self.proto.encapsulate(peer, now, &packet) {
-                Ok(Some(datagram)) => {
-                    self.send_to_peer(peer, datagram);
-                    return;
+            match self.proto.encapsulate_into(peer, now, packet, out) {
+                Ok(Some(len)) => {
+                    self.count_sent(peer, len);
+                    return Some(Outgoing { to, len });
                 }
                 Ok(None) => {}
                 Err(reason) => {
                     self.drops.add(reason, 1);
-                    return;
+                    return None;
                 }
             }
         }
-        // セッションが無いか、先に待っている packet がある。順を保って待たせ、ハンドシェイクを始める
-        let evicted = self.peers[peer].staged.push_evicting(packet);
+        // セッションが無いか、先に待っている packet がある。順を保って待たせ、ハンドシェイクを始める。
+        // 写すのは待たせるときだけで、定常の経路ではない
+        let evicted = self.peers[peer].staged.push_evicting(packet.to_vec());
         self.drops.add(DropReason::StagedOverflow, evicted as u64);
         self.initiate(peer, now, true);
         self.flush_staged(peer, now);
+        None
     }
 
     fn flush_staged(&mut self, peer: PeerId, now: Instant) {
@@ -567,15 +601,20 @@ impl Device {
     }
 
     fn send_to(&mut self, peer: PeerId, to: SocketAddr, payload: Vec<u8>) {
-        let len = payload.len() as u64;
+        let len = payload.len();
         if self.transmits.push(Transmit { to, payload }) {
-            let now = self.now;
-            let p = &mut self.peers[peer];
-            p.tx_bytes = p.tx_bytes.saturating_add(len);
-            p.keepalive_at = p.keepalive.map(|interval| now + interval);
+            self.count_sent(peer, len);
         } else {
             self.drops.add(DropReason::TransmitOverflow, 1);
         }
+    }
+
+    /// 送る datagram を数え、keepalive の期限を延ばす。
+    fn count_sent(&mut self, peer: PeerId, len: usize) {
+        let now = self.now;
+        let p = &mut self.peers[peer];
+        p.tx_bytes = p.tx_bytes.saturating_add(len as u64);
+        p.keepalive_at = p.keepalive.map(|interval| now + interval);
     }
 
     fn push_transmit(&mut self, to: SocketAddr, payload: Vec<u8>) {
@@ -592,15 +631,11 @@ impl Device {
         self.events.push_back(event);
     }
 
-    /// The next datagram to send.
+    /// The next datagram to send that the device queued itself: a handshake message, a cookie reply
+    /// or a keepalive, and the packets that waited for a handshake. Data packets that find a session
+    /// at once do not pass through here; [`Device::handle_packet`] returns them.
     pub fn poll_transmit(&mut self) -> Option<Transmit> {
         self.transmits.pop()
-    }
-
-    /// The next decrypted packet for the tunnel side. It is a well formed IPv4 packet without
-    /// padding, from an address in its peer's allowed IPs.
-    pub fn poll_packet(&mut self) -> Option<Vec<u8>> {
-        self.packets.pop()
     }
 
     /// The next event.
@@ -721,8 +756,6 @@ impl Device {
         Held {
             transmit_packets: self.transmits.len(),
             transmit_bytes: self.transmits.bytes(),
-            deliver_packets: self.packets.len(),
-            deliver_bytes: self.packets.bytes(),
             events: self.events.len(),
             staged_packets_max: self.peers.iter().map(|p| p.staged.len()).max().unwrap_or(0),
             staged_bytes_max: self

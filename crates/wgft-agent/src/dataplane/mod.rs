@@ -16,6 +16,12 @@
 
 pub(crate) mod clock;
 mod driver;
+
+/// 駆動が起動の時に確保する、device に渡す buffer の長さの和。メモリの上界の項の試験が、項の値と比べる。
+#[cfg(test)]
+pub(crate) fn driver_buffer_bytes(mtu: usize, max_datagram: usize) -> usize {
+    2 * driver::DATAGRAM_BUF + driver::Outbox::new(mtu, max_datagram).buffer_bytes()
+}
 mod socket;
 pub(crate) mod stack;
 #[cfg(test)]

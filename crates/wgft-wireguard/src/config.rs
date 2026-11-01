@@ -215,10 +215,6 @@ pub struct Limits {
     pub transmit_packets: usize,
     /// Total payload bytes of those datagrams.
     pub transmit_bytes: usize,
-    /// Inner packets waiting for [`crate::Device::poll_packet`].
-    pub deliver_packets: usize,
-    /// Total bytes of those packets.
-    pub deliver_bytes: usize,
     /// Events waiting for [`crate::Device::poll_event`].
     pub events: usize,
 }
@@ -238,8 +234,6 @@ impl Default for Limits {
             staged_packets: 128,
             transmit_packets: 256,
             transmit_bytes: 512 * 1024,
-            deliver_packets: 256,
-            deliver_bytes: 512 * 1024,
             events: 64,
         }
     }
@@ -277,8 +271,6 @@ impl DeviceConfig {
             ("staged_packets", l.staged_packets, MAX_LIMIT_PACKETS),
             ("transmit_packets", l.transmit_packets, MAX_LIMIT_PACKETS),
             ("transmit_bytes", l.transmit_bytes, MAX_LIMIT_BYTES),
-            ("deliver_packets", l.deliver_packets, MAX_LIMIT_PACKETS),
-            ("deliver_bytes", l.deliver_bytes, MAX_LIMIT_BYTES),
             ("events", l.events, MAX_LIMIT_PACKETS),
         ] {
             if v == 0 {
