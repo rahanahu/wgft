@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use socket2::{SockRef, TcpKeepalive};
-use tokio::net::{TcpSocket, TcpStream};
+use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use tokio::time::Instant;
 
 /// もう一方の族を試し始めるまでの待ち。Go の `net.Dialer` の `FallbackDelay` の既定と同じ。
@@ -169,6 +169,32 @@ pub async fn connect_tcp(addr: SocketAddr, deadline: Instant) -> Result<TcpStrea
     };
     // Go の net.Dialer と同じく、繋がった後に付ける。付けられなくても接続は使う
     let _ = set_keepalive(&s);
+    Ok(s)
+}
+
+/// 1 つのアドレスへ接続した UDP のソケットを開く。ソケットは同じ族の任意のアドレスとポートに bind し、
+/// 宛先へ `connect` する。UDP の `connect` は packet を送らないので待たず、`deadline` は試し方の部品と
+/// 形を揃えるためだけに受ける。誤りの文は Go の `net` の形 (`dial udp <アドレス>: connect: <理由>`) に
+/// する。
+///
+/// # Errors
+///
+/// ソケットを開けないか接続できなければ誤りの文を返す。
+pub async fn connect_udp(addr: SocketAddr, _deadline: Instant) -> Result<UdpSocket, String> {
+    let any: SocketAddr = if addr.is_ipv4() {
+        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+    } else {
+        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    };
+    let open = || -> io::Result<UdpSocket> {
+        let s = std::net::UdpSocket::bind(any)?;
+        s.set_nonblocking(true)?;
+        UdpSocket::from_std(s)
+    };
+    let s = open().map_err(|e| format!("dial udp {addr}: socket: {}", errno_text(&e)))?;
+    s.connect(addr)
+        .await
+        .map_err(|e| format!("dial udp {addr}: connect: {}", errno_text(&e)))?;
     Ok(s)
 }
 

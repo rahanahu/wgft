@@ -166,6 +166,7 @@ impl Agent {
                         t.dataplane().clone(),
                         Arc::clone(&self.targets),
                         self.opts.limits,
+                        crate::relay::udp_idle_timeout(st.wg.udp_timeout_stream),
                     ));
                     self.tunnel = Some(t);
                     self.wg = Some(st.wg.clone());
@@ -892,6 +893,7 @@ mod tests {
             peer.agent().handle(),
             Arc::clone(&targets),
             Limits::default(),
+            crate::relay::DEFAULT_UDP_IDLE,
         );
         m.apply(&[rule(format!("nas.lan:{dead}"))]).await;
         let mut a = agent();

@@ -253,6 +253,14 @@ pub fn check_supported(s: &Settings) -> Result<(), Refusal> {
 pub fn startup_lines(c: &Config, s: &Settings) -> Vec<LogLine> {
     let mut out = vec![LogLine::Plain("effective config:".to_owned())];
     out.extend(c.effective_lines().into_iter().map(LogLine::Plain));
+    // Go の `memory soft limit:` の行の代わり。フロー数の上限から導く (agent-parity.md のメモリの上界の行)
+    out.push(LogLine::Stamped(
+        crate::memory::MemoryBound::for_limits(crate::flowpool::Limits {
+            udp: s.max_udp_flows as usize,
+            tcp: s.max_tcp_flows as usize,
+        })
+        .line(),
+    ));
     // 送信の向きのバッチは、値から導く量が wgstack の送信の経路で決まるまで効かせない
     if !c.get("WGFT_AGENT_BATCH_MIB").is_empty() {
         out.push(LogLine::Stamped(
@@ -358,9 +366,12 @@ mod tests {
         let lines = startup_lines(&c, &s);
         assert_eq!(lines[0], LogLine::Plain("effective config:".into()));
         let st = stamped(&lines);
+        let bound =
+            crate::memory::MemoryBound::for_limits(crate::flowpool::Limits::default()).line();
         assert_eq!(
             st,
             vec![
+                bound.as_str(),
                 "no target allowlist: WGFT_AGENT_ALLOW_TARGETS is not set; the server can direct this agent to any address it can reach"
             ]
         );
@@ -373,9 +384,12 @@ mod tests {
             &[],
         );
         assert_eq!(check_supported(&s), Ok(()));
+        let bound =
+            crate::memory::MemoryBound::for_limits(crate::flowpool::Limits::default()).line();
         assert_eq!(
             stamped(&startup_lines(&c, &s)),
             vec![
+                bound.as_str(),
                 "target allowlist WGFT_AGENT_ALLOW_TARGETS=10.0.0.0/8,192.168.1.10/32:80; the server can direct this agent only to these addresses"
             ]
         );

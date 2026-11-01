@@ -184,8 +184,8 @@ shard の割り当ては `labhost run -shard K/N all` が決めます。
 結果の回収は 1 回 300 秒で打ち切ります。
 終了コードは、組ごとの結果を合わせたものです。
 組の結果は、どれかの shard の失敗、VM の中の後片付けの漏れ、中断、統合の不整合で失敗になります。
-`rust` の組は「UDP の中継」の段まで報告だけなので、`go` の組も流したときは、`rust` の組の失敗をその旨の行で示すだけで終了コードに入れません。
-その段が入った後は、`rust` の組の失敗も終了コードに入れます (`lab/lab` の `SUITE_RUST_GATES`)。
+`go` の組も流したときも、`rust` の組の失敗を終了コードに入れます (`lab/lab` の `SUITE_RUST_GATES`)。
+「UDP の中継」の段までは報告だけでした。
 `rust` の組だけを流したときは、その結果が終了コードです。
 VM の削除の失敗は、終了コードに入れません。
 最後に統合までの所要時間を出し、VM を消した後に削除までを含めた所要時間を出します。
@@ -275,8 +275,7 @@ lab/lab exec vm bash /wgft/lab/agent-handover.sh userspace
 ```
 
 今の Rust の agent は Rust の wgstack の上で動き、root も TUN も要りません。
-UDP の中継はまだ無いので、`rust` の組では UDP のルールを使う確認と、`lifecycle.sh` の check 5 と 5b のメモリの上界の行の確認が落ちます。
-「UDP の中継」の段が入るまでの扱いは [テストの規範](../docs/development/testing.md#マージの前に流すテスト) にあります。
+`rust` の組の扱いは [テストの規範](../docs/development/testing.md#マージの前に流すテスト) にあります。
 
 ## 対応する VPS の環境
 

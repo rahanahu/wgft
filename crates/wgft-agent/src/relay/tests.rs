@@ -16,7 +16,7 @@ use super::{ListenerStat, Manager};
 use crate::flowpool::{self, Limits};
 use crate::targets::Targets;
 
-fn rule(id: &str, proto: Proto, port: &str, target: &str, enabled: bool) -> AgentRule {
+pub(super) fn rule(id: &str, proto: Proto, port: &str, target: &str, enabled: bool) -> AgentRule {
     AgentRule {
         id: id.into(),
         proto,
@@ -34,7 +34,7 @@ fn tcp(id: &str, port: u16, target: &str) -> [AgentRule; 1] {
 /// ポートの範囲 (Linux の既定は 32768 から、macOS と Windows は 49152 から) の下から選ぶ。一時の
 /// ポートを手放して使い直すと、並行に走る試験のポート 0 の bind が間で同じポートを取りうるためである。
 /// 始まりの位置はプロセスごとに乱し、nextest の別のプロセスと重なりにくくする。
-fn free_port() -> u16 {
+pub(super) fn free_port() -> u16 {
     use std::hash::{BuildHasher, RandomState};
     use std::sync::atomic::{AtomicU16, Ordering};
     const LOW: u16 = 20000;
@@ -53,7 +53,7 @@ fn free_port() -> u16 {
 }
 
 /// 試験の宛先の規則。ホストのインタフェースは読まず、名前は `names` の表で引く。
-fn targets(allow: &str, names: Vec<(&'static str, &'static str)>) -> Arc<Targets> {
+pub(super) fn targets(allow: &str, names: Vec<(&'static str, &'static str)>) -> Arc<Targets> {
     use crate::targets::resolve::Resolver;
     use crate::targets::unicast::Unicast;
     let allow = crate::config::allow_targets::parse(allow).unwrap();
@@ -118,7 +118,13 @@ async fn round_trip(c: &mut Client, msg: &[u8]) -> Result<Vec<u8>, Outcome> {
 }
 
 fn manager_with(peer: &Peer, targets: Arc<Targets>, limits: Limits) -> Manager {
-    Manager::new(AGENT_IP, peer.agent().handle(), targets, limits)
+    Manager::new(
+        AGENT_IP,
+        peer.agent().handle(),
+        targets,
+        limits,
+        super::DEFAULT_UDP_IDLE,
+    )
 }
 
 fn manager(peer: &Peer) -> Manager {
@@ -126,7 +132,7 @@ fn manager(peer: &Peer) -> Manager {
 }
 
 /// `f` が真を返すまで待つ。5 秒で諦める。
-async fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
+pub(super) async fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
     for _ in 0..250 {
         if f() {
             return;
@@ -224,7 +230,13 @@ async fn reports_unsupported_unusable_and_failed_listeners() {
         .unwrap();
     let mut m = manager(&peer);
     m.apply(&[
-        rule("r_u", Proto::Udp, "27015", "192.0.2.1:27015", true),
+        rule(
+            "r_u",
+            Proto::Other("sctp".into()),
+            "27015",
+            "192.0.2.1:27015",
+            true,
+        ),
         rule("r_t", Proto::Tcp, "80", &target.to_string(), true),
         rule("r_x", Proto::Tcp, "40000-40001", "192.0.2.1:65535", true),
     ])
@@ -394,7 +406,7 @@ async fn listener_stats_and_rule_reasons_follow_go_s_key_order() {
     m.apply(&[rule("r_a", Proto::Tcp, "9-10", "192.0.2.1:80", true)])
         .await;
     let st = m.listener_stats();
-    let keys: Vec<String> = st.iter().map(ListenerStat::key).collect();
+    let keys: Vec<String> = st.iter().map(ListenerStat::name).collect();
     assert_eq!(keys, ["tcp/10", "tcp/9"]);
     assert!(st.iter().all(|s| !s.listening && s.err.is_some()));
     let rs = m.status();

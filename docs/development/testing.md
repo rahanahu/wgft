@@ -54,9 +54,8 @@ Rust の agent のビルドに入るものを変える PR は、ラボの一式�
 積んだ PR では、積みの先頭で 1 回流し、下の PR はその結果で足ります。
 `rust` の組は、ユーザー空間モードのエージェントを Rust の agent に替えて一式を流し、カーネルモードのエージェントの確認の結果は `go` の組から取ります ([ラボの切り替え](../design/v2/agent-parity.md#ラボの切り替え))。
 「wgstack の上の agent」の段 ([段の計画](../design/v2/agent-parity.md#段の計画)) が入るまでは、Rust の agent は TUN の試作だったので、`rust` の組の結果は PR の本文に報告するだけで、マージの関門にしませんでした。
-「wgstack の上の agent」の段から「UDP の中継」の段までは、UDP のルールを使う確認と、`lifecycle.sh` の check 5 と 5b (UDP の洪水とメモリの上界の行) が落ちます。
-この間は `lab/lab suite` の終了コードに `rust` の組を入れず、前の積みの `rust` の組と比べて新しく落ちた確認が無いことを手で確かめ、落ちた確認とその理由を PR の本文に書きます。
-「UDP の中継」の段が入った後は、`rust` の組で[完成の条件に入る確認](../design/v2/agent-parity.md#確認の分け方)がすべて PASS であることをマージの関門にします。
+「wgstack の上の agent」の段から「UDP の中継」の段までは、UDP のルールを使う確認が落ちたので、前の積みの `rust` の組と比べる手の確認を関門にしていました。
+「UDP の中継」の段からは、`rust` の組で[完成の条件に入る確認](../design/v2/agent-parity.md#確認の分け方)がすべて PASS であることをマージの関門にし、`lab/lab suite` の終了コードにも `rust` の組を入れます。
 
 ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、現在は L1 から L20 です。
 1 台の Lab Host VM の中で `labhost run -parallel 8 all` を実行して流します。
@@ -113,7 +112,7 @@ B 類の契機は、次のテストを選ぶために使います。
 | `build` | `.goreleaser.yaml`、`scripts/build-release.sh`、`scripts/goreleaser-checksum.sh`、`scripts/third-party-licenses.sh`、`scripts/check-release-assets.sh`、`scripts/docker-smoke.sh`、`deploy/Dockerfile.*`、`deploy/*.compose.yaml`、`go.mod`、`go.sum`、`.github/workflows/**` | B5、B6、B10 | 無し |
 | `rust` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、`internal/tcpharness/scripts/**`、`testdata/wgstack-rec/**`、`internal/tcpharness/rustdut/known-wgstack-rs.json` | B13、B14、B15 | 無し |
 | `harness` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`internal/tcpharness/**`、`internal/dutproto/**`、`internal/wgstack/**`、`internal/ipv4frag/**`、`go.mod`、`go.sum` | B16 | 無し |
-| `rust-agent` | `crates/**` のうち `crates/wgft-wireguard-tun/**` 以外、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` | 無し | ラボの一式の `rust` の組を積みの先頭で 1 回。「UDP の中継」の段までは前の積みと比べる手の確認、その後はマージの関門 ([マージの前に流すテスト](#マージの前に流すテスト)) |
+| `rust-agent` | `crates/**` のうち `crates/wgft-wireguard-tun/**` 以外、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` | 無し | ラボの一式の `rust` の組を積みの先頭で 1 回。マージの関門 ([マージの前に流すテスト](#マージの前に流すテスト)) |
 | `dataplane-net` | `internal/dataplane/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` の転送の経路 | 無し (C1 と C5 は次の段階の完了時に流し直す) | L1 |
 | `phase` | 関係する実装の段階の完了 | C 類 | すべて |
 | `rc` | リリースの候補の版 | 「リリース候補ごと」の項目 | すべて |

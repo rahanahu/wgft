@@ -53,9 +53,16 @@ pub(crate) struct Seg {
     pub(crate) payload: Vec<u8>,
 }
 
+/// 台本の UDP の endpoint が受けた datagram の送信元のポートと中身。
+type Datagram = (u16, Vec<u8>);
+
 struct Inner {
     out: mpsc::UnboundedSender<Vec<u8>>,
     conns: Mutex<HashMap<u16, mpsc::UnboundedSender<Seg>>>,
+    /// 台本の UDP の endpoint。受けた datagram を送信元のポートと中身で渡す。
+    udp: Mutex<HashMap<u16, mpsc::UnboundedSender<Datagram>>>,
+    /// echo の応答でない ICMP の packet (Port Unreachable など)。
+    icmp: Mutex<Vec<Vec<u8>>>,
     next_port: AtomicU16,
 }
 
@@ -129,6 +136,8 @@ impl Peer {
         let inner = Arc::new(Inner {
             out,
             conns: Mutex::new(HashMap::new()),
+            udp: Mutex::new(HashMap::new()),
+            icmp: Mutex::new(Vec::new()),
             next_port: AtomicU16::new(40000),
         });
         let task = tokio::spawn(serve(device, sock, out_rx, Arc::clone(&inner)));
@@ -162,6 +171,23 @@ impl Peer {
         if let Some(a) = self.agent.take() {
             a.stop().await;
         }
+    }
+
+    /// A scripted UDP endpoint on the server's tunnel address, on a port of its own.
+    pub(crate) fn udp(&self) -> UdpClient {
+        let lport = self.inner.next_port.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.inner.udp.lock().unwrap().insert(lport, tx);
+        UdpClient {
+            inner: Arc::clone(&self.inner),
+            lport,
+            rx,
+        }
+    }
+
+    /// The ICMP packets other than echo replies that came out of the tunnel so far.
+    pub(crate) fn icmp_errors(&self) -> usize {
+        self.inner.icmp.lock().unwrap().len()
     }
 
     /// Opens a connection from the server's tunnel address to the agent's `port`.
@@ -337,6 +363,37 @@ impl Client {
     }
 }
 
+/// A scripted UDP endpoint on the server's side of the tunnel.
+pub(crate) struct UdpClient {
+    inner: Arc<Inner>,
+    lport: u16,
+    rx: mpsc::UnboundedReceiver<(u16, Vec<u8>)>,
+}
+
+impl Drop for UdpClient {
+    fn drop(&mut self) {
+        self.inner.udp.lock().unwrap().remove(&self.lport);
+    }
+}
+
+impl UdpClient {
+    /// Sends `data` as one datagram to the agent's `port`. It must fit the tunnel's MTU.
+    pub(crate) fn send(&self, port: u16, data: &[u8]) {
+        let _ = self
+            .inner
+            .out
+            .send(udp_packet(SERVER_IP, AGENT_IP, self.lport, port, data));
+    }
+
+    /// The next datagram with its source port, or `None` after `wait`.
+    pub(crate) async fn recv(&mut self, wait: Duration) -> Option<(u16, Vec<u8>)> {
+        tokio::time::timeout(wait, self.rx.recv())
+            .await
+            .ok()
+            .flatten()
+    }
+}
+
 /// server の側の device を動かす task。
 async fn serve(
     mut device: Device,
@@ -387,6 +444,18 @@ fn route(p: &[u8], inner: &Inner) -> Option<Vec<u8>> {
             if let Some(tx) = inner.conns.lock().unwrap().get(&dport) {
                 let _ = tx.send(seg);
             }
+            None
+        }
+        17 => {
+            let sport = u16::from_be_bytes([body[0], body[1]]);
+            let dport = u16::from_be_bytes([body[2], body[3]]);
+            if let Some(tx) = inner.udp.lock().unwrap().get(&dport) {
+                let _ = tx.send((sport, body.get(8..)?.to_vec()));
+            }
+            None
+        }
+        1 if body.first() != Some(&8) && body.first() != Some(&0) => {
+            inner.icmp.lock().unwrap().push(body.to_vec());
             None
         }
         1 if body.first() == Some(&8) => {
@@ -459,4 +528,22 @@ fn tcp_packet(
     let sum = checksum(&t, pseudo);
     t[16..18].copy_from_slice(&sum.to_be_bytes());
     ipv4(src, dst, 6, &t)
+}
+
+fn udp_packet(src: Ipv4Addr, dst: Ipv4Addr, sport: u16, dport: u16, payload: &[u8]) -> Vec<u8> {
+    let len = 8 + payload.len();
+    let mut u = vec![0u8; len];
+    u[0..2].copy_from_slice(&sport.to_be_bytes());
+    u[2..4].copy_from_slice(&dport.to_be_bytes());
+    u[4..6].copy_from_slice(&u16::try_from(len).unwrap().to_be_bytes());
+    u[8..].copy_from_slice(payload);
+    let mut pseudo = 0u32;
+    for w in [src.octets(), dst.octets()] {
+        pseudo += u32::from(u16::from_be_bytes([w[0], w[1]]));
+        pseudo += u32::from(u16::from_be_bytes([w[2], w[3]]));
+    }
+    pseudo += 17 + u32::try_from(len).unwrap();
+    let sum = checksum(&u, pseudo);
+    u[6..8].copy_from_slice(&if sum == 0 { 0xffff } else { sum }.to_be_bytes());
+    ipv4(src, dst, 17, &u)
 }

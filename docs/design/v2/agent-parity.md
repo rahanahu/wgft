@@ -4,7 +4,7 @@
 対象は、Rust の wgstack 自身を除くすべてです。
 契約は [agent と server の境目の仕様](../spec/README.md) です。
 この文書は、その契約を Rust の agent でどう満たすかと、どの順で作るかを書きます。
-実装済みの段は「設定の層」、「platform の層」、「agent の device の殻」、「宛先と予算」、「制御ソケット」、「agent doctor の骨組み」、「agent doctor の稼働中の検査」、[ラボの切り替え](#ラボの切り替え)、「wgstack の上の agent」です。ほかの内容は未実装です。
+実装済みの段は「設定の層」、「platform の層」、「agent の device の殻」、「宛先と予算」、「制御ソケット」、「agent doctor の骨組み」、「agent doctor の稼働中の検査」、[ラボの切り替え](#ラボの切り替え)、「wgstack の上の agent」、「UDP の中継」です。ほかの内容は未実装です。
 
 ## 範囲と完成の条件
 
@@ -44,11 +44,10 @@ event loop とスレッドの形は、#681 の `docs/design/v2/wgstack-rs.md` �
 | `wgft-wireguard` | sanstun の上の sans-IO の WireGuard の device |
 | `wgft-wgstack` と `wgft-netstack` | Rust の wgstack の sans-IO の核と、その上の非同期の handle |
 | `wgft-wireguard-tun` | 試作の Linux の TUN の殻。agent は使わず、`lab/wg-interop.sh` の道具として残す |
-| `wgft-agent` | 登録、認証情報、stream、全体状態の適用、ハートビート、トンネルの監視と作り直し、データプレーンのスレッド、wgstack の上の TCP の中継、制御ソケット、設定の層 (module `config`) |
+| `wgft-agent` | 登録、認証情報、stream、全体状態の適用、ハートビート、トンネルの監視と作り直し、データプレーンのスレッド、wgstack の上の TCP と UDP の中継、メモリの上界の行 (module `memory`)、制御ソケット、設定の層 (module `config`) |
 | `wgft` | `wgft agent` のコマンドと `wgft version`。clap への接続と、設定を読んで入口を通す手順 |
 
 トンネルの packet はプロセスの中の wgstack で終わるので、root も `CAP_NET_ADMIN` も要りません。
-UDP のルールは `error` を報告するだけです。
 設定は[設定の層](#設定の層)が読みます。カーネルモードは持たない機能なので終了コード 3 で拒みます。宛先の許可一覧とフロー数の上限は[宛先と予算](#宛先と予算)の作りで効かせます。バッチの予算は、値を受けて、まだ効かせていない旨を 1 行出します。
 
 ## 差分の一覧
@@ -88,8 +87,8 @@ Go の v1 の agent と仕様に対して、今の Rust の agent に無いも�
 | 宛先の試し接続 | [tunnel.md の宛先の試し接続](../spec/tunnel.md#宛先の試し接続)。待ち受けを開いたときと 30 秒ごと、2 秒、32 件 | 仕様のとおり。期限 2 秒は名前の解決を含む | 「宛先と予算」で済み |
 | 宛先の許可一覧 | [targets.md の宛先の許可一覧](../userspace/targets.md#宛先の許可一覧) | IP リテラルは適用のとき、ホスト名は接続のときに判定する | 「設定の層」と「宛先と予算」で済み |
 | ブロードキャストとマルチキャスト | [targets.md](../userspace/targets.md#ブロードキャストとマルチキャストの宛先) | 拒む。判定の単位と報告は許可一覧と同じ | 「宛先と予算」で済み |
-| フロー数の上限 | [tunnel.md のフロー数の上限](../spec/tunnel.md#フロー数の上限) と [flow-limits.md](../userspace/flow-limits.md)。プロセス全体とルールごと、最低分と予備、拒否の理由 | TCP の中継が使う。UDP の pool は作るが、使うのは「UDP の中継」 | 「宛先と予算」で済み |
-| UDP の中継 | [tunnel.md の UDP の中継](../spec/tunnel.md#udp-の中継) | ルールを `error` にする | 「UDP の中継」。設計は [UDP の中継](#udp-の中継) |
+| フロー数の上限 | [tunnel.md のフロー数の上限](../spec/tunnel.md#フロー数の上限) と [flow-limits.md](../userspace/flow-limits.md)。プロセス全体とルールごと、最低分と予備、拒否の理由 | TCP と UDP の中継が使う | 「宛先と予算」と「UDP の中継」で済み |
+| UDP の中継 | [tunnel.md の UDP の中継](../spec/tunnel.md#udp-の中継) | 仕様のとおり。wgstack の UDP の endpoint で受け、送信元ごとのセッションで中継する | 「UDP の中継」で済み。作りは [UDP の中継](#udp-の中継) |
 
 ### 制御ソケットと診断
 
@@ -116,7 +115,7 @@ Go の v1 の agent と仕様に対して、今の Rust の agent に無いも�
 | フラグの誤りの出力と終了コード | `Error: <文>` の 1 行で使い方を書かない。終了コード 1、`agent doctor` は 2 | 仕様のとおり | 済み |
 | 既定のパス | Linux、macOS、Windows の表。macOS は `$HOME`、Windows は `%ProgramData%` | 済み (`platform::paths`)。3 つの OS の表をどの OS の試験でも確かめる。設定の層の `config::Defaults::for_host` はその薄い包みである | 済み |
 | 設定ファイルの権限の警告 | Unix で other が読める dotenv が `WGFT_JOIN` を持つとき | 仕様のとおり | 済み |
-| メモリの行 | `memory soft limit:` の行。Go 以外は書かなくてよい | 無い | 「UDP の中継」が `memory bound:` の行を書く。[メモリの上界の行](#メモリの上界の行) |
+| メモリの行 | `memory soft limit:` の行。Go 以外は書かなくてよい | 代わりに `memory bound:` の行を書く ([メモリの上界の行](#メモリの上界の行)) | 「UDP の中継」で済み |
 | `docs/cli.md` | Go の `TestCLIDocUpToDate` | 無い | 「CLI の文書の照合」 |
 
 ### 認証情報と platform
@@ -211,7 +210,10 @@ CI の単体の試験で確かめる予定です。
   Go の pool は返されたバッファの回収を GC に任せましたが、Rust の pool は作った分を持ち続けるので、置き場も上界に入れて数えます
 - 枠を持つ間の仕事:読み取り 1 回と、`send_to` での 1 回の受け渡しです。
   `send_to` が `WouldBlock` を返して `UdpWritable` を待つ間は枠を持ち続けます。
-  v1 と同じく、送信の予算が尽きるのはトンネルの送信が止まったときで、そのときは全ルールの応答が同じく止まるので、枠がルールの間の新しい飢餓を作りません
+  送信の予算には endpoint 1 つの持ち分 (Device の全体の 4 分の 1) があるので、応答の多い 1 つの待ち受けのセッションは、トンネルの送信が止まっていなくても持ち分が空くのを待ちえます。
+  その間、そのセッションたちが 64 の枠をすべて持つことがあり、ほかの待ち受けのセッションは枠を待ちます。
+  枠の待ちは来た順に解けるので、ほかの待ち受けの応答は遅れますが、止まり続けはしません。
+  v1 も枠を持ったまま送信を待つので、同じ性質です
 - 待ちを解くとき:待ち受けを閉じたときと、セッションを閉じたときです
 - 待ちの観測:待った回数と時間を内部で数えます。
   ログ、`agent doctor`、wire には出しません
@@ -255,6 +257,43 @@ TCP と UDP の中継の両方がこの pool を使うので、「宛先と予�
   期限、点検の間隔、枠の数の上限、待ち受けの閉鎖で待ちが解けること、宛先の Port Unreachable でセッションが閉じること、フロー数の拒否で ICMP を返さないことを確かめます
 - OS:同じ試験を CI の Windows と macOS でも流します
 - ラボ:`e2e.sh` の UDP と 3000 byte の UDP、`usage.sh` のゲームのような UDP、`split-merge.sh` のセッションの継続、`lifecycle.sh` の予算の確認です
+
+### 実装で決めたこと
+
+「UDP の中継」の段は、この節を `crates/wgft-agent/src/relay` の `udp`、`replies` に実装しました。
+上の規則に次のことを足しました。
+
+- リスナーの鍵:中継のリスナーはプロトコルとポートの組で区別します (Go の `relay.Key`)。
+  同じポートの TCP と UDP のルールは別のリスナーです。
+  並びと名前 (`tcp/<port>`、`udp/<port>`) は Go の `Key.String` の文字列の順で、TCP が先です
+- セッションの表:待ち受けの task が送信元の `SocketAddrV4` を鍵にした表を 1 つ持ちます。
+  セッションを作るのも閉じるのもこの task だけなので、Go の `pending` と `cut` の印は要りません。
+  表は自分では縮まないので、閉じた後に容量 (`capacity`) が数の 4 倍と 64 の和を超えれば、数の 2 倍に縮めます。
+  一度多くのセッションを持った待ち受けが、その容量を持ち続けないためです
+- 応答の task の終わり:応答の task は宛先の誤りかトンネルへの送信の失敗で終わり、送信元を返します。
+  待ち受けの task は `JoinSet` でその終わりを受け、同じ task のセッションなら表から外して枠を返します。
+  無通信と待ち受けの閉鎖で止めた task の終わりは、表のセッションが無いか別の task のものなので触りません
+- 誤りの準備の扱い:誤りの準備で `take_error` が誤りを返さなければ、tokio の `try_io` の中で `WouldBlock` を返して誤りの準備を消し、待ちに戻ります。
+  誤りを読み取りが先に取り出した場合に、同じ準備で回り続けないためです
+- 止める知らせ:待ち受けの task は、名前の解決と宛先への書き込みを待つ間も止める知らせで止まります。
+  Go は解決の後にセッションを登録せずに捨てました。
+  Rust は待ちごと落とすので、ルールの削除と適用が解決の期限を待ちません
+- 宛先への書き込み:接続した UDP のソケットへの `send` を待ちます。
+  Go の `conn.Write` が送信のバッファの空きを待つのと同じです
+- トンネルの側の読み取りの失敗:Go と同じく、待ち受けを開いたまま 5 ミリ秒から 1 秒まで倍に伸ばして試し直し、1 分に 1 回までログに出します
+- 期限の値:`wg.udp_timeout_stream` の 0 はログを出さずに 120 秒にし、負の値と 2147483647 を超える値は Go と同じ文の 1 行を出して 120 秒にします
+- 時計:無通信の期限と点検は tokio の時計で測ります。
+  Go の `time.Now` と同じく、データプレーンの時計とは別です
+- 試し接続:UDP の宛先は到達を確かめる手段が無いので、Go と同じく試し接続をしません。
+  IP リテラルの宛先の判定は TCP と同じく適用のときに行い、ホスト名の宛先はセッションを作るときに判定してリスナーの状態に載せます
+- 応答のバッファの枠:プロセスで 1 つの static に置きます。
+  試験は小さい枠を `Manager` に渡し、待ちと取り消しの数を読みます
+- ログ:次の行は Go と同じ文です。
+  `listener udp/<port> -> <宛先> opened; rule <ID>`、`listener udp/<port> closed`、`udp/<port>: <拒否の文>; dropping new flows`、`udp/<port>: dial <宛先>: <誤り>`、`udp/<port>: write <N> bytes to <宛先>: <誤り>; closing session`、`udp/<port>: read failed: <誤り>; the listener stays open and retries` です。
+  拒否、接続の失敗、書き込みの失敗、読み取りの失敗は、それぞれ待ち受けごとに 1 分に 1 回までです
+- 試験:試験の相手 (`relay/testpeer.rs`) に台本の UDP の endpoint を足し、ループバックの宛先と組む中継の試験を `relay/udp_tests.rs` に置きました。
+  両向きの中継とセッションの数、無通信の期限の幅、両向きの延長、宛先の Port Unreachable での閉鎖とトンネルへ ICMP を送らないこと、予算の拒否、待ち受けの閉鎖で枠の待ちが解けること、枠の数の上限、TCP と UDP のリスナーの並び、許可一覧の判定、期限の値と fixture の照合です。
+  試験の相手はトンネルの中の断片を組み立てないので、MTU を超える datagram はラボの `e2e.sh` の 3000 byte の UDP で確かめます
 
 ## データプレーンのスレッドと送る経路
 
@@ -522,7 +561,7 @@ Go の `memory soft limit:` の行の代わりで、ラボの `lifecycle.sh` の
 `<N>` は次の和で、`WGFT_MAX_UDP_FLOWS` と `WGFT_MAX_TCP_FLOWS` から導きます。
 
 - 固定の基礎:実行ファイル、tokio の実行環境、制御ソケットのスレッド、stream と TLS の状態です。
-  起動の直後のラボの測定から定数を決めます
+  値は見積もりで、起動の直後の RSS の測定で確かめる予定です
 - wgstack の上界:核の `bound()` が返す値と、handle の層の waker の表の上界 (`Netstack::waker_bound`) です (#681)
 - データプレーンの駆動:1 回の起床で起こす waker を移す `Vec` です。
   waker の表の行の数で頭を打ちます
@@ -540,6 +579,34 @@ v1 と同じく、宛先のソケットの受信バッファは大きくしま�
 上界は保持するバイトを数え、RSS は割り当て器の管理の領域と断片化、触れたスタックの頁、実行ファイルの頁を含むためです。
 Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するもので、Rust の上界には大きすぎます。
 32 MiB は見積もりで、「UDP の中継」の段のラボの測定で確かめ、足りなければ理由を書いて直します。
+
+「UDP の中継」の段は、この行を `crates/wgft-agent/src/memory.rs` に実装しました。
+行は起動ログの有効な設定の行の後に、時刻を付けて書きます。
+次のことを決めました。
+
+- MTU:起動の時には server の MTU を知らないので、核と device の項は受け付ける最大の 9216 で数えます
+- 核:核の `Bound::for_limits` の和です。
+  接続の枠の数は `WGFT_MAX_TCP_FLOWS` から作る核の表の大きさ (`Limits::with_max_flows`) で決まります
+- 表:handle の層の waker の表の上界と、核の hook が持つ LAN の側のソケットの表です。
+  後者は作成の時に接続の枠の数だけ確保し、育ちません
+- データプレーンの駆動:waker を移す `Vec` は表の行の数 (`Netstack::waker_slots`) まで育ち、容量はその 2 倍までなので、2 × 行の数 × `Waker` の大きさです
+- WireGuard の device:device の上限の件数とバイト数に、件数ごとの `Vec` の頭と、復号の一時のバッファと、データプレーンの受信と送り出しのバッファを足します
+- TCP の中継:接続 1 本につき、中継の task の future (8 KiB)、tokio の task と I/O の登録の余裕 (各 512 byte)、2 つの向きの大きいバッファ (32 KiB ずつ) です。
+  データプレーンのスレッドが使い回しに残す大きいバッファ 16 個を足します
+- UDP の中継:応答のバッファの枠の 64 × 65535 byte と、セッション 1 つにつき、表の項と容量の余裕と共有の値 (512 byte。表の容量は数の 4 倍までで、hash の表の bucket はその 8 分の 7 の逆数倍なので、項 5 つ分を数えます)、応答の task の future (1 KiB)、tokio の task と I/O の登録の余裕です。
+  待ち受け 1 つの固定の大きさ (受け取りのバッファの 65535 byte と task) は、上のとおり行の式から外しました
+- 名前の解決:スレッド 1 本を Rust の既定のスタックの 2 MiB と `getaddrinfo` の作業の 64 KiB とします
+- future の大きさ:中継の task と応答の task の future の大きさは、型から読む単体の試験で定数を超えないことを確かめます。
+  tokio の task と I/O の登録の大きさは tokio の内部の型なので、余裕のある定数にしました
+- 固定の基礎:16 MiB です。
+  静的なビルドの実行ファイルが約 6 MiB で、tokio の実行環境と制御ソケットと stream の状態を足した見積もりです。
+  起動の直後の RSS はまだ測っていません
+
+核の項は接続の枠ごとの floor の項が大部分を占め、`WGFT_MAX_TCP_FLOWS` が 1024 で約 1 GiB です。
+このため行の値は RSS よりずっと大きく、check 5 と 5b の RSS の比較はこの上界の中に収まることだけを確かめます。
+「UDP の中継」の段のラボでは、UDP 4096 と TCP 1024 の上限で行が 1092 MiB、洪水の間の RSS が 74 MiB でした。
+既定の上限では行が 1713 MiB、RSS が 126 MiB でした。
+余裕の 32 MiB を使う場面はまだ無く、余裕が足りるかは、上界が RSS に近づく使い方でしか確かめられません。
 
 ラボの静的なビルドは musl の割り当て器を使います。
 musl の割り当て器は解放したメモリを早く OS に返しますが、スレッドの間の競合で遅くなります。
@@ -621,8 +688,9 @@ agent の応答は Go の v1 の応答と同じ形です。
 - `tunnel.udp_accounting`:核の `udp_receive_fault` です。
   データプレーンのスレッドが終わっていて読めなければ載せません
 
-今の中継は TCP だけを開くので、UDP のルールは待ち受けを持たない `error` のルールとして載り、UDP の予算はフローを持ちません。
-「UDP の中継」の段が UDP の待ち受けを足すと、同じ集計に入ります。
+「UDP の中継」の段で、UDP の待ち受けも同じ集計に入りました。
+UDP のリスナーの `sessions` はセッションの数で、`flows` は UDP の予算の枠の数です。
+ルールの `proto` はリスナーのプロトコルです。
 
 ### DoctorResponse
 
@@ -666,7 +734,7 @@ Go の v1 のユーザー空間モードと同じです。
 - `host.platform`:OS、アーキテクチャ、版を示します。
   Go の「memory soft limit would be」の予測の代わりに、[メモリの上界の行](#メモリの上界の行)と同じ値を示します。
   `detail` は人向けなので、この置き換えは保証の範囲を変えません。
-  上界の行が入る「UDP の中継」の段までは、値の代わりにフロー数の上限と、上界をまだ示さない旨を書きます。
+  Go の文の形を写し、`the memory bound would be <N> MiB, computed here from the flow caps <U> UDP and <T> TCP, not read from the running agent` と書きます。
   設定ファイルを読めない実行の `unknown` と `config_unreadable` は Go と同じです
 - `host.privileges`:Windows では Go と同じく作成の可否を判定せず `permission_not_determined` にします
 - カーネルモードの検査:`dataplane.interface`、`dataplane.table`、`host.forwarding` は、ユーザー空間モードでは Go と同じく `not_tested` と `userspace_mode` です
@@ -1009,7 +1077,7 @@ Rust の agent は netstack を 1 つしか持たないので、`--netstack` の
   `--agent-impl rust` だけで流したときは、`go` の組が無い旨を出します。
   `-go-summary` のファイルが読めないか、`summary.json` でないか、`go` の組のものでなければ、警告にして取った結果を出さず、`rust` の組の統合はそのまま書いて示します
 - `lab/lab suite` の終了コードは組ごとの結果を合わせます。
-  `rust` の組は「UDP の中継」の段まで報告だけなので、`go` の組も流したときは `rust` の組の失敗を示すだけにし、終了コードに入れません。
+  `rust` の組は「UDP の中継」の段まで報告だけで、`go` の組も流したときは `rust` の組の失敗を示すだけにし、終了コードに入れませんでした。
   その段で `lab/lab` の `SUITE_RUST_GATES` を 1 にし、`rust` の組の失敗も終了コードに入れます。
   初めの計画は「wgstack の上の agent」の段で 1 にすることでしたが、UDP の中継の前は UDP のルールを使う確認が必ず落ちるので、1 つ後の段に移しました
   `rust` の組だけを流したときは、その結果が終了コードです
@@ -1030,8 +1098,7 @@ Rust の agent は試作のあいだ root で動きます。
 
 ラボの切り替えが入った後、agent の crate を変える PR は、ラボの一式の `rust` の組を積みの先頭で 1 回流します。
 「wgstack の上の agent」の段より前は、Rust の agent が TUN の試作の形だったので、`rust` の組の結果は報告だけに使い、マージの関門にしませんでした。
-「wgstack の上の agent」の段から「UDP の中継」の段までは、UDP のルールを使う確認と `lifecycle.sh` の check 5 と 5b が `rust` の組で落ちます。
-その間は、`rust` の組の結果を前の積みの結果と比べ、新しく落ちた確認が無いことを手で確かめます ([テストの規範](../../development/testing.md#マージの前に流すテスト))。
+「wgstack の上の agent」の段から「UDP の中継」の段までは、UDP のルールを使う確認と `lifecycle.sh` の check 5 と 5b が `rust` の組で落ちたので、`rust` の組の結果を前の積みの結果と比べ、新しく落ちた確認が無いことを手で確かめました。
 「UDP の中継」の段から後は、`rust` の組の結果をマージの関門にします。
 ラボの切り替えの PR は、この扱いを[テストの規範](../../development/testing.md)の契機の表に `rust-agent` として書きました。
 対象は、`crates/**` のうち TUN の殻の `crates/wgft-wireguard-tun/**` を除くものと、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` です。
@@ -1155,8 +1222,9 @@ wgstack の口が前提と違えば、wgstack の上の agent と UDP の中継�
 - MTU の範囲:決めました。
   server が送る 576 から 9216 をそのまま wgstack の核に渡し、範囲の外だけ 1420 にします。
   核の受ける範囲も 576 から 9216 です
-- メモリの上界の行の式:wgstack の項は #681 の `bound()` に合わせます。
-  余裕の 32 MiB は「UDP の中継」の段のラボの測定で確かめます
+- メモリの上界の行の式:決めました ([メモリの上界の行](#メモリの上界の行))。
+  wgstack の項は核の `Bound::for_limits` です。
+  余裕の 32 MiB は、ラボの RSS が行の値よりずっと小さいので、足りるかを確かめる場面がまだありません
 - `WGFT_AGENT_BATCH_MIB` から導く量:Rust の wgstack の送信の経路が決まるまで決めません。
   受け付ける値と誤りの文面は今の仕様のままです
 - インタフェースの一覧の取り方:決めました。
@@ -1175,6 +1243,7 @@ wgstack の口が前提と違えば、wgstack の上の agent と UDP の中継�
   実際の挙動は確かめていません
 - エンドポイントの名前を `AF_INET` で引く Windows の経路は、Windows の CI の build と試験だけで、実機では確かめていません
 - wgstack の UDP の口は #681 の提案で、#681 のレビューで変わりえます
+- メモリの上界の行の固定の基礎の 16 MiB は見積もりで、起動の直後の RSS を測っていません
 - macOS の kqueue と Windows の AFD の poll で、接続した UDP のソケットへの ICMP の拒否が読みか誤りの準備として届くこと
 - Windows の接続した UDP のソケットが、宛先の Port Unreachable の後に `WSAECONNRESET` を返すこと
 - `GetAdaptersAddresses` が返す adapter の名前 (FriendlyName) が、TUN の名前と一致すること

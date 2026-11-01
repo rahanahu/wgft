@@ -134,6 +134,13 @@ impl<H: Hook> Netstack<H> {
         Wakers::bound_bytes(conns)
     }
 
+    /// The most wakers one [`Netstack::poll_wakers`] can move out for a core with `conns`
+    /// connection slots: every row of the table and the one UDP send waker. The driver's waker list
+    /// grows to at most this many entries.
+    pub fn waker_slots(conns: usize) -> usize {
+        Wakers::slots(conns)
+    }
+
     /// Takes a packet the device decrypted and checked.
     pub fn handle_packet(&mut self, now: Instant, packet: &[u8]) {
         let now = self.time(now);
