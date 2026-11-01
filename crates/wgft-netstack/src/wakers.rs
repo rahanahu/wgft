@@ -118,6 +118,12 @@ impl Wakers {
             + ARC_BYTES
     }
 
+    /// 1 回の [`Wakers::collect`] の列で移しうる waker の数の上限です。表の行の数と、UDP の送りの待ち手の
+    /// 1 つです。
+    pub(crate) fn slots(conns: usize) -> usize {
+        2 * (conns + PAGES * PAGE) + MAX_PINGS + 1
+    }
+
     pub(crate) fn conn_read(&mut self, id: ConnId, w: &Waker) {
         if let Some(p) = self.conns.get_mut(id.index()) {
             set(&mut p.first, w);

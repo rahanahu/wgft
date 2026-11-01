@@ -1,27 +1,33 @@
-//! ルールの中継 (今は TCP だけ)。
+//! ルールの中継。
 //!
-//! ルールのポートごとに、Rust の wgstack の核でトンネルのアドレスに待ち受け、受けた接続をルールの
-//! 宛先へ中継する。待ち受けと中継の接続は、データプレーンのスレッドの local の task として動き、
+//! ルールのプロトコルとポートごとに、Rust の wgstack の核でトンネルのアドレスに待ち受け、受けた接続と
+//! datagram をルールの宛先へ中継する。待ち受けと中継の接続は、データプレーンのスレッドの local の task として動き、
 //! `wgft_netstack` の handle で核を呼ぶ。LAN の側はカーネルの TCP ソケットで、同じスレッドの tokio の
 //! 実行環境の上で読み書きする。[`Manager`] は制御プレーンにあり、待ち受けの開閉をデータプレーンに頼む。
 //! 核に届く packet の送信元は、WireGuard の device の層の AllowedIPs が server の /32 に限るので、待ち受け
 //! は送信元で絞らない。
 //!
-//! リスナーはポートで区別し、そのリスナーの中継の接続をすべて持つ。ルールが消えるか、無効になるか、
+//! リスナーはプロトコルとポートで区別し、そのリスナーの中継の接続と UDP のセッションをすべて持つ。ルールが消えるか、無効になるか、
 //! 実効宛先が変わると、リスナーを閉じ、持っている接続をトンネルの側に RST を送って切る。
 //!
 //! 新しい接続は、フロー数の予算 ([`crate::flowpool`]) から枠を取ってから宛先へ接続する。宛先の許可一覧、
 //! ブロードキャストとマルチキャストの拒否、名前の解決、接続の試し方、試し接続は [`crate::targets`] が
-//! 持つ。中継が終わった後は、Go の agent と同じく、両側が送り残しを届け終えるまで枠を持つ。
+//! 持つ。中継が終わった後は、Go の agent と同じく、両側が送り残しを届け終えるまで枠を持つ。UDP の
+//! 中継は [`udp`] にあり、送信元ごとのセッションを無通信の期限で閉じる。
 
 mod lansock;
 mod pipe;
+mod replies;
 #[cfg(test)]
 pub(crate) mod testpeer;
 #[cfg(test)]
 mod tests;
+mod udp;
+#[cfg(test)]
+mod udp_tests;
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -41,6 +47,8 @@ use crate::tunnel::{Net, Stack};
 
 pub use lansock::{BOOST_WINDOW, LanConn, RECV_BOOST, RECV_FLOOR};
 pub use pipe::{BULK_BUF, BULK_KEEP, BULK_WAIT, IDLE_BUF};
+pub use replies::{REPLY_SLOTS, UDP_BUF};
+pub use udp::{DEFAULT_UDP_IDLE, MIN_SWEEP, sweep_interval, udp_idle_timeout};
 
 /// 宛先への接続の期限。
 pub const DIAL_TIMEOUT: Duration = crate::targets::DIAL_TIMEOUT;
@@ -52,6 +60,47 @@ pub const DELIVERY_POLL_MIN: Duration = Duration::from_millis(50);
 /// The longest interval between two delivery checks (Go's `deliveryPollMax`).
 pub const DELIVERY_POLL_MAX: Duration = Duration::from_secs(2);
 
+/// A listener's protocol. TCP sorts before UDP, as Go's `Key.String` names do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Kind {
+    /// A TCP listener.
+    Tcp,
+    /// A UDP listener.
+    Udp,
+}
+
+impl Kind {
+    /// `tcp` or `udp`, the protocol word of Go's `proto.Proto`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Tcp => "tcp",
+            Kind::Udp => "udp",
+        }
+    }
+}
+
+impl fmt::Display for Kind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A listener's protocol and port (Go's `relay.Key`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Key {
+    /// The protocol.
+    pub kind: Kind,
+    /// The port on the tunnel address.
+    pub port: u16,
+}
+
+impl fmt::Display for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.kind, self.port)
+    }
+}
+
 /// 試し接続の 1 周。[`Manager`] を借りずに走らせる。
 #[derive(Debug)]
 pub struct ProbeRound {
@@ -61,7 +110,7 @@ pub struct ProbeRound {
 
 #[derive(Debug)]
 struct ProbeEntry {
-    port: u16,
+    key: Key,
     target: (String, u16),
     /// 試したときのリスナー。結果を書くときに、同じリスナーかを確かめる。
     shared: Arc<Shared>,
@@ -126,6 +175,9 @@ struct Shared {
     dial_log: Mutex<Gate>,
     /// 中継が持っている接続の数。トンネルの側と宛先の側を 1 本ずつ数える (Go の `Status.Sessions`)。
     sessions: AtomicUsize,
+    /// 宛先への書き込みの失敗で閉じた UDP のセッションの数。試験だけが読む。
+    #[cfg(test)]
+    write_closes: AtomicUsize,
 }
 
 /// 中継の接続 1 本が終わるまで持つもの。落とすと、予算の枠とトンネルの側の接続の数えが同時に戻る。
@@ -198,7 +250,7 @@ struct Running {
 #[derive(Debug)]
 struct Listener {
     rule_id: String,
-    port: u16,
+    key: Key,
     target: (String, u16),
     /// 待ち受けを開けていれば、その受け付けの task。
     task: Option<Running>,
@@ -235,36 +287,42 @@ impl Drop for Listener {
     }
 }
 
-/// リスナー 1 つの状態 (Go の `relay.Status`)。今の中継は TCP だけを開く。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// リスナー 1 つの状態 (Go の `relay.Status`)。
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ListenerStat {
     /// 属するルールの ID。
     pub rule_id: String,
-    /// 待ち受けのポート。名前は [`ListenerStat::key`]。
-    pub port: u16,
+    /// 待ち受けのプロトコルとポート。名前は [`ListenerStat::key`]。
+    pub key: Key,
     /// 待ち受けを開けているか。偽なら `err` は開けなかった理由 (bind の失敗か、IP リテラルの宛先の
     /// 拒否) で、真で `err` があれば待ち受けは開いていて宛先に届かない。
     pub listening: bool,
     /// 開けなかった理由か、開いている待ち受けの宛先の誤り。開けなかった理由が先。
     pub err: Option<String>,
-    /// 中継が持っている接続の数。トンネルの側と宛先の側の両方を数えるので、フロー数の上限の対象とは
-    /// 一致しない。
+    /// 中継が持っている接続の数。TCP はトンネルの側と宛先の側の両方を数えるので、フロー数の上限の対象
+    /// とは一致しない。UDP はセッションの数である。
     pub sessions: usize,
     /// この待ち受けがフロー数の予算から取っている枠の数。上限の判定の対象の数である。
     pub flows: usize,
 }
 
 impl ListenerStat {
-    /// `tcp/<port>` の形の名前 (Go の `Key.String`)。
+    /// `tcp/<port>` か `udp/<port>` の形の名前 (Go の `Key.String`)。
     #[must_use]
-    pub fn key(&self) -> String {
-        format!("tcp/{}", self.port)
+    pub fn name(&self) -> String {
+        self.key.to_string()
     }
 }
 
-/// Go の `Key.String` の文字列の順。プロトコルが同じなら、ポートの 10 進の文字列の順である。文字列を
-/// 作らずに比べる。
-fn go_key_order(a: u16, b: u16) -> std::cmp::Ordering {
+/// Go の `Key.String` の文字列の順。プロトコルの語の順 (`tcp` が先) で、プロトコルが同じなら、ポートの
+/// 10 進の文字列の順である。文字列を作らずに比べる。
+fn go_key_order(a: Key, b: Key) -> std::cmp::Ordering {
+    a.kind
+        .cmp(&b.kind)
+        .then_with(|| go_port_order(a.port, b.port))
+}
+
+fn go_port_order(a: u16, b: u16) -> std::cmp::Ordering {
     fn decimal(mut n: u16, buf: &mut [u8; 5]) -> &[u8] {
         let mut i = buf.len();
         loop {
@@ -280,29 +338,35 @@ fn go_key_order(a: u16, b: u16) -> std::cmp::Ordering {
     decimal(a, &mut x).cmp(decimal(b, &mut y))
 }
 
-/// 中継の全体。トンネルと一緒に作り、一緒に閉じる。リスナーはポートで区別するので、数は TCP の
-/// ポートの数を超えない。v1 もルールの範囲の幅に上限を置かない。フロー数の予算もトンネルごとに作るので、
+/// 中継の全体。トンネルと一緒に作り、一緒に閉じる。リスナーはプロトコルとポートで区別するので、数は
+/// TCP と UDP のポートの数を超えない。v1 もルールの範囲の幅に上限を置かない。フロー数の予算もトンネルごとに作るので、
 /// 拒否の数はトンネルを作り直すと 0 に戻る。
 #[derive(Debug)]
 pub struct Manager {
     addr: Ipv4Addr,
     dataplane: Handle<Stack>,
-    listeners: BTreeMap<u16, Listener>,
+    listeners: BTreeMap<Key, Listener>,
     unsupported: BTreeMap<String, String>,
     targets: Arc<Targets>,
     tcp: Pool,
     udp: Pool,
+    /// UDP のセッションを閉じる無通信の期限。
+    udp_idle: Duration,
+    /// UDP の応答のバッファの枠。製品はプロセスで 1 つの [`replies::REPLIES`] を使う。
+    replies: &'static replies::Replies,
 }
 
 impl Manager {
     /// トンネルのアドレス `addr` で待ち受ける中継を作る。待ち受けと中継の接続は `dataplane` のスレッドで
-    /// 動く。宛先の規則は `targets`、フロー数の上限は `limits` に従う。
+    /// 動く。宛先の規則は `targets`、フロー数の上限は `limits` に従う。UDP のセッションは `udp_idle` の
+    /// 間どちらの向きにも datagram が無ければ閉じる ([`udp_idle_timeout`] が全体状態の値から作る)。
     #[must_use]
     pub fn new(
         addr: Ipv4Addr,
         dataplane: Handle<Stack>,
         targets: Arc<Targets>,
         limits: Limits,
+        udp_idle: Duration,
     ) -> Self {
         Manager {
             addr,
@@ -312,7 +376,25 @@ impl Manager {
             targets,
             tcp: Pool::new(limits.tcp),
             udp: Pool::new(limits.udp),
+            udp_idle,
+            replies: &replies::REPLIES,
         }
+    }
+
+    /// 宛先への書き込みの失敗で閉じた UDP のセッションの数。
+    #[cfg(test)]
+    pub(crate) fn write_closes(&self) -> usize {
+        self.listeners
+            .values()
+            .map(|l| l.shared.write_closes.load(Ordering::Relaxed))
+            .sum()
+    }
+
+    /// 応答のバッファの枠を替える。試験が小さい枠を渡す。
+    #[cfg(test)]
+    pub(crate) fn with_replies(mut self, replies: &'static replies::Replies) -> Self {
+        self.replies = replies;
+        self
     }
 
     /// TCP のフロー数の予算。
@@ -321,7 +403,7 @@ impl Manager {
         &self.tcp
     }
 
-    /// UDP のフロー数の予算。UDP の中継が入るまで、枠を取る者はいない。
+    /// UDP のフロー数の予算。
     #[must_use]
     pub fn udp_pool(&self) -> &Pool {
         &self.udp
@@ -332,75 +414,74 @@ impl Manager {
     /// [`Manager::retry`] が開き直す。開いたリスナーの宛先へ試し接続し、その結果を待ってから戻るので、
     /// 最初の状態は適用の直後のハートビートに載る。戻り値は操作の数。
     pub async fn apply(&mut self, rules: &[AgentRule]) -> usize {
-        let mut want: BTreeMap<u16, (String, (String, u16))> = BTreeMap::new();
+        let mut want: BTreeMap<Key, (String, (String, u16))> = BTreeMap::new();
         self.unsupported.clear();
         for r in rules.iter().filter(|r| r.enabled) {
-            match &r.proto {
-                Proto::Tcp => {
-                    let targets: Option<Vec<_>> = r
-                        .listen_port
-                        .ports()
-                        .map(|p| r.effective_target(p).map(|t| (p, t)))
-                        .collect();
-                    // 使えない宛先のルールはリスナーを 1 つも開かない
-                    let Some(targets) = targets else {
-                        self.unsupported.insert(
-                            r.id.clone(),
-                            format!(
-                                "tcp/{}: target {:?} is not a usable host:port",
-                                r.listen_port, r.target
-                            ),
-                        );
-                        continue;
-                    };
-                    for (p, t) in targets {
-                        want.insert(p, (r.id.clone(), t));
-                    }
-                }
-                Proto::Udp => {
-                    self.unsupported.insert(
-                        r.id.clone(),
-                        "udp rules are not supported by this build yet".into(),
-                    );
-                }
+            let kind = match &r.proto {
+                Proto::Tcp => Kind::Tcp,
+                Proto::Udp => Kind::Udp,
                 Proto::Other(s) => {
                     self.unsupported
                         .insert(r.id.clone(), format!("unknown protocol {s:?}"));
+                    continue;
                 }
+            };
+            let targets: Option<Vec<_>> = r
+                .listen_port
+                .ports()
+                .map(|p| r.effective_target(p).map(|t| (p, t)))
+                .collect();
+            // 使えない宛先のルールはリスナーを 1 つも開かない
+            let Some(targets) = targets else {
+                self.unsupported.insert(
+                    r.id.clone(),
+                    format!(
+                        "{kind}/{}: target {:?} is not a usable host:port",
+                        r.listen_port, r.target
+                    ),
+                );
+                continue;
+            };
+            for (port, t) in targets {
+                want.insert(Key { kind, port }, (r.id.clone(), t));
             }
         }
         let mut actions = 0;
-        let stale: Vec<u16> = self
+        let stale: Vec<Key> = self
             .listeners
             .iter()
-            .filter(|(p, l)| want.get(p).is_none_or(|(_, t)| *t != l.target))
-            .map(|(p, _)| *p)
+            .filter(|(k, l)| want.get(k).is_none_or(|(_, t)| *t != l.target))
+            .map(|(k, _)| *k)
             .collect();
         actions += stale.len();
         let closing = stale
             .into_iter()
-            .filter_map(|p| self.listeners.remove(&p).map(|l| (p, l)))
+            .filter_map(|k| self.listeners.remove(&k).map(|l| (k, l)))
             .collect();
         close_all(closing).await;
         let mut opened = Vec::new();
-        for (p, (id, target)) in want {
-            if let Some(l) = self.listeners.get_mut(&p) {
+        for (k, (id, target)) in want {
+            if let Some(l) = self.listeners.get_mut(&k) {
                 l.budget.set_rule(&id);
                 l.rule_id = id;
                 continue;
             }
-            let budget = Arc::new(self.tcp.pending_listener(&id));
+            let pool = match k.kind {
+                Kind::Tcp => &self.tcp,
+                Kind::Udp => &self.udp,
+            };
+            let budget = Arc::new(pool.pending_listener(&id));
             let l = Listener {
                 rule_id: id,
-                port: p,
+                key: k,
                 target,
                 task: None,
                 bind_err: None,
                 budget,
                 shared: Arc::default(),
             };
-            self.listeners.insert(p, l);
-            opened.push(p);
+            self.listeners.insert(k, l);
+            opened.push(k);
             actions += 1;
         }
         self.open_listeners(&opened).await;
@@ -410,6 +491,7 @@ impl Manager {
     }
 
     /// 30 秒ごとの見回り。開けなかったリスナーを開き直し、開いている TCP のリスナーの宛先へ試し接続する。
+    /// UDP は到達を確かめる手段が無いので試さない (Go と同じ)。
     /// 宛先が戻れば誤りが消え、落ちれば付く。状態の変化はハートビートで報告される。
     pub async fn retry(&mut self) {
         let round = self.retry_round().await;
@@ -421,25 +503,26 @@ impl Manager {
     /// agent の排他を放してから [`ProbeRound::run`] を走らせ、結果を [`Manager::finish_probes`] で書く。
     /// 試し接続の 1 周は宛先の数と応えない宛先で長くなるので、その間ハートビートと適用を止めないため。
     pub async fn retry_round(&mut self) -> ProbeRound {
-        let closed: Vec<u16> = self
+        let closed: Vec<Key> = self
             .listeners
             .values()
             .filter(|l| l.task.is_none())
-            .map(|l| l.port)
+            .map(|l| l.key)
             .collect();
         self.open_listeners(&closed).await;
-        let ports: Vec<u16> = self.listeners.keys().copied().collect();
-        self.probe_round(&ports)
+        let keys: Vec<Key> = self.listeners.keys().copied().collect();
+        self.probe_round(&keys)
     }
 
-    /// 開いているリスナーのうち `ports` の宛先への試し接続の 1 周。
-    fn probe_round(&self, ports: &[u16]) -> ProbeRound {
-        let entries = ports
+    /// 開いている TCP のリスナーのうち `keys` の宛先への試し接続の 1 周。
+    fn probe_round(&self, keys: &[Key]) -> ProbeRound {
+        let entries = keys
             .iter()
-            .filter_map(|p| self.listeners.get(p))
+            .filter(|k| k.kind == Kind::Tcp)
+            .filter_map(|k| self.listeners.get(k))
             .filter(|l| l.task.is_some())
             .map(|l| ProbeEntry {
-                port: l.port,
+                key: l.key,
                 target: l.target.clone(),
                 shared: Arc::clone(&l.shared),
             })
@@ -454,7 +537,7 @@ impl Manager {
     /// その結果を捨てる (Go の `applyProbes` と同じ)。到達性が変わったリスナーだけ、ログを 1 行出す。
     pub fn finish_probes(&self, done: ProbeResults) {
         for (e, r) in done.entries.into_iter().zip(done.results) {
-            let Some(l) = self.listeners.get(&e.port) else {
+            let Some(l) = self.listeners.get(&e.key) else {
                 continue;
             };
             if !Arc::ptr_eq(&l.shared, &e.shared) || l.target != e.target || l.task.is_none() {
@@ -464,15 +547,11 @@ impl Manager {
             let now = r.err();
             let before = l.shared.set_probe(now.clone());
             match (before, now) {
-                (None, Some(e)) => logf!(
-                    "listener tcp/{}: cannot connect to target {target}: {e}",
-                    l.port
-                ),
+                (None, Some(e)) => {
+                    logf!("listener {}: cannot connect to target {target}: {e}", l.key);
+                }
                 (Some(_), None) => {
-                    logf!(
-                        "listener tcp/{}: target {target} is reachable again",
-                        l.port
-                    );
+                    logf!("listener {}: target {target} is reachable again", l.key);
                 }
                 _ => {}
             }
@@ -484,48 +563,51 @@ impl Manager {
         close_all(std::mem::take(&mut self.listeners).into_iter().collect()).await;
     }
 
-    /// `ports` のリスナーの待ち受けを開いて中継を始める。IP リテラルの宛先が拒まれれば開かない。開くのは
+    /// `keys` のリスナーの待ち受けを開いて中継を始める。IP リテラルの宛先が拒まれれば開かない。開くのは
     /// データプレーンのスレッドへの 1 回の頼みでまとめて行い、範囲の広いルールでも往復は 1 回である。
     /// 待ち受けを開けてから予算の枠を受け付けにする。逆の順にすると、開けなかった待ち受けのルールが
     /// 予算のルールの数に入り、その間だけ他のルールの最低分が減る。
-    async fn open_listeners(&mut self, ports: &[u16]) {
+    async fn open_listeners(&mut self, keys: &[Key]) {
         let mut specs = Vec::new();
-        for p in ports {
-            let Some(l) = self.listeners.get_mut(p) else {
+        for k in keys {
+            let Some(l) = self.listeners.get_mut(k) else {
                 continue;
             };
             let (host, tport) = l.target.clone();
             if let Some(e) = self.targets.refuse_literal(&host, tport) {
-                logf!("listener tcp/{}: {e}", l.port);
+                logf!("listener {}: {e}", l.key);
                 l.bind_err = Some(e.text);
                 continue;
             }
             specs.push(Spec {
-                addr: SocketAddrV4::new(self.addr, l.port),
+                key: l.key,
+                addr: SocketAddrV4::new(self.addr, l.key.port),
                 host,
                 tport,
                 budget: Arc::clone(&l.budget),
                 shared: Arc::clone(&l.shared),
                 targets: Arc::clone(&self.targets),
+                udp_idle: self.udp_idle,
+                replies: self.replies,
             });
         }
         if specs.is_empty() {
             return;
         }
-        let addrs: Vec<SocketAddrV4> = specs.iter().map(|s| s.addr).collect();
+        let opened: Vec<(Key, SocketAddrV4)> = specs.iter().map(|s| (s.key, s.addr)).collect();
         let results = match self
             .dataplane
             .call(move |net| specs.into_iter().map(|s| start(net, s)).collect())
             .await
         {
             Ok(r) => r,
-            Err(e) => addrs
+            Err(e) => opened
                 .iter()
-                .map(|a| Err(format!("bind tcp {a}: {e}")))
+                .map(|(k, a)| Err(format!("bind {} {a}: {e}", k.kind)))
                 .collect::<Vec<_>>(),
         };
-        for (addr, r) in addrs.into_iter().zip(results) {
-            let Some(l) = self.listeners.get_mut(&addr.port()) else {
+        for ((key, _), r) in opened.into_iter().zip(results) {
+            let Some(l) = self.listeners.get_mut(&key) else {
                 continue;
             };
             match r {
@@ -533,14 +615,14 @@ impl Manager {
                     l.bind_err = None;
                     l.task = Some(running);
                     logf!(
-                        "listener tcp/{} -> {} opened; rule {}",
-                        l.port,
+                        "listener {} -> {} opened; rule {}",
+                        l.key,
                         crate::targets::join_host_port(&l.target.0, l.target.1),
                         l.rule_id
                     );
                 }
                 Err(e) => {
-                    logf!("listener tcp/{}: {e}", l.port);
+                    logf!("listener {}: {e}", l.key);
                     l.bind_err = Some(e);
                 }
             }
@@ -553,7 +635,8 @@ impl Manager {
         self.listeners.values().filter(|l| l.task.is_some()).count()
     }
 
-    /// リスナーごとの状態。並びは Go の `Manager.Status` と同じく名前 (`tcp/<port>`) の文字列の順で、
+    /// リスナーごとの状態。並びは Go の `Manager.Status` と同じく名前 (`tcp/<port>`、`udp/<port>`) の
+    /// 文字列の順で、
     /// ルールの状態の理由と `agent doctor` の最初の誤りは、この順で最初のリスナーから取る。接続の数と
     /// 予算の枠の数も読む。枠の数は予算の排他を 1 回取って読む。
     #[must_use]
@@ -565,9 +648,22 @@ impl Manager {
     /// それらを使わないので、30 秒ごとに予算の排他を取らない。
     fn stats(&self, counts: bool) -> Vec<ListenerStat> {
         let mut ls: Vec<&Listener> = self.listeners.values().collect();
-        ls.sort_unstable_by(|a, b| go_key_order(a.port, b.port));
+        ls.sort_unstable_by(|a, b| go_key_order(a.key, b.key));
         let flows = if counts {
-            self.tcp.flows_of(ls.iter().map(|l| &*l.budget))
+            // TCP が先に並ぶので、2 つの予算の読みをその順に繋ぐ
+            let mut f = self.tcp.flows_of(
+                ls.iter()
+                    .filter(|l| l.key.kind == Kind::Tcp)
+                    .map(|l| &*l.budget),
+            );
+            f.extend(
+                self.udp.flows_of(
+                    ls.iter()
+                        .filter(|l| l.key.kind == Kind::Udp)
+                        .map(|l| &*l.budget),
+                ),
+            );
+            f
         } else {
             vec![0; ls.len()]
         };
@@ -575,7 +671,7 @@ impl Manager {
             .zip(flows)
             .map(|(l, flows)| ListenerStat {
                 rule_id: l.rule_id.clone(),
-                port: l.port,
+                key: l.key,
                 listening: l.task.is_some(),
                 err: l.err(),
                 sessions: if counts {
@@ -619,7 +715,7 @@ impl Manager {
                 && r.state == STATUS_OK
             {
                 r.state = STATUS_ERROR.into();
-                r.reason = format!("{}: {e}", l.key());
+                r.reason = format!("{}: {e}", l.key);
             }
         }
         for (id, reason) in &self.unsupported {
@@ -638,30 +734,43 @@ impl Manager {
 
 /// リスナーを閉じる。先にすべてに止める知らせを送り、それから終わりを待つ。範囲の広いルールでも、
 /// データプレーンのスレッドとの往復を待ち受けの数だけ重ねないためである。
-async fn close_all(mut ls: Vec<(u16, Listener)>) {
+async fn close_all(mut ls: Vec<(Key, Listener)>) {
     let tasks: Vec<_> = ls.iter_mut().map(|(_, l)| l.stop()).collect();
-    for ((p, l), t) in ls.iter().zip(tasks) {
+    for ((k, l), t) in ls.iter().zip(tasks) {
         if let Some(t) = t {
             let _ = t.await;
         }
         l.budget.close();
-        logf!("listener tcp/{p} closed");
+        logf!("listener {k} closed");
     }
 }
 
 /// データプレーンのスレッドで待ち受けを開くための材料。
 struct Spec {
+    key: Key,
     addr: SocketAddrV4,
     host: String,
     tport: u16,
     budget: Arc<flowpool::Listener>,
     shared: Arc<Shared>,
     targets: Arc<Targets>,
+    /// UDP のセッションの無通信の期限。TCP では使わない。
+    udp_idle: Duration,
+    /// UDP の応答のバッファの枠。TCP では使わない。
+    replies: &'static replies::Replies,
 }
 
-/// データプレーンのスレッドの上で、核に待ち受けを開き、受け付けの task を立てる。予算の枠は開けてから
-/// 受け付けにする。task が最初の接続を取る前なので、開いた直後の接続も枠を取れる。
+/// データプレーンのスレッドの上で、核に待ち受けを開き、受け付けの task を立てる。
 fn start(net: &Net, s: Spec) -> Result<Running, String> {
+    match s.key.kind {
+        Kind::Tcp => start_tcp(net, s),
+        Kind::Udp => udp::start(net, s),
+    }
+}
+
+/// TCP の待ち受けを開く。予算の枠は開けてから受け付けにする。task が最初の接続を取る前なので、開いた
+/// 直後の接続も枠を取れる。
+fn start_tcp(net: &Net, s: Spec) -> Result<Running, String> {
     let listener =
         TcpListener::bind(net, s.addr).map_err(|e| format!("bind tcp {}: {e}", s.addr))?;
     s.budget.accept();
@@ -806,6 +915,22 @@ async fn relay_one(mut down: TcpStream<Net>, held: Held, flow: Flow) {
         lansock::Stopped::Closing => None,
     };
     deliver(closing, lan).await;
+}
+
+/// 中継の task の future の大きさ (TCP の中継 1 本、UDP のセッションの応答 1 つ)。メモリの上界の試験が
+/// 使う。
+#[cfg(test)]
+pub(crate) fn future_sizes() -> (usize, usize) {
+    fn output_size<A, B, C, F: Future>(_: impl FnOnce(A, B, C) -> F) -> usize {
+        size_of::<F>()
+    }
+    (output_size(relay_one), udp::reply_future_size())
+}
+
+/// UDP のセッション 1 つの表の項と確保のバイト。
+#[cfg(test)]
+pub(crate) fn udp_session_bytes() -> usize {
+    udp::session_entry_bytes()
 }
 
 /// 届け終えるのを待つトンネルの側の接続。待ちの途中で落とすと (リスナーを閉じたとき)、RST で切る。

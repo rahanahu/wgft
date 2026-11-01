@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::Instant;
 
 use crate::config::allow_targets::{self, AllowList};
@@ -195,6 +195,20 @@ impl Targets {
     ) -> Result<TcpStream, TargetError> {
         let (addrs, deadline) = self.addresses(host, port, limit).await?;
         dial::race(&addrs, true, deadline, dial::connect_tcp)
+            .await
+            .map_err(TargetError::failed)
+    }
+
+    /// 宛先へ接続した UDP のソケットを開く。UDP の中継のセッション 1 つにつき 1 回呼ぶ。名前の解決と
+    /// 宛先の判定は [`Targets::connect_tcp`] と同じで、拒まないアドレスを族を分けずに解決の結果の順に
+    /// 試す (Go の `net.Dialer` が UDP で行う `dialSerial`)。
+    ///
+    /// # Errors
+    ///
+    /// 接続しなかった理由か、接続の失敗を返す。
+    pub async fn connect_udp(&self, host: &str, port: u16) -> Result<UdpSocket, TargetError> {
+        let (addrs, deadline) = self.addresses(host, port, DIAL_TIMEOUT).await?;
+        dial::race(&addrs, false, deadline, dial::connect_udp)
             .await
             .map_err(TargetError::failed)
     }

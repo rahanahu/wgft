@@ -109,8 +109,8 @@ pub(crate) fn inspect_process(input: &Input) -> RunState {
 
 // --- Host 群 ---
 
-/// OS、アーキテクチャ、版を示す。Go の「memory soft limit」の予測は持たない。Rust の agent は Go の
-/// 実行環境のソフト上限を使わず、それに代わるメモリの上界の行はまだ無いためである。
+/// OS、アーキテクチャ、版を示す。Go の「memory soft limit」の予測の代わりに、agent が起動の時に書く
+/// メモリの上界の行と同じ値を、同じ設定から求めて示す。
 pub(crate) fn platform(input: &Input) -> Check {
     let mut c = Check::new(CHECK_PLATFORM, GROUP_HOST, "platform");
     c.status = status::OK;
@@ -124,9 +124,15 @@ pub(crate) fn platform(input: &Input) -> Check {
         SAME_PRINCIPAL_NEXT.clone_into(&mut c.next);
         return c;
     }
+    let bound = wgft_agent::memory::MemoryBound::for_limits(wgft_agent::flowpool::Limits {
+        udp: input.max_udp_flows as usize,
+        tcp: input.max_tcp_flows as usize,
+    });
     c.detail = format!(
-        "{head}; the flow caps are {} UDP and {} TCP, read here from the same settings the agent reads, not from the running agent; this build reports no memory bound yet",
-        input.max_udp_flows, input.max_tcp_flows
+        "{head}; the memory bound would be {} MiB, computed here from the flow caps {} UDP and {} TCP, not read from the running agent",
+        bound.mib(),
+        input.max_udp_flows,
+        input.max_tcp_flows
     );
     c
 }

@@ -301,7 +301,7 @@ fn rules(states: &[wgft_proto::RuleStatus], listeners: &[ListenerStat]) -> Vec<D
         let Some(r) = at.get(l.rule_id.as_str()).map(|&i| &mut out[i]) else {
             continue;
         };
-        "tcp".clone_into(&mut r.proto);
+        l.key.kind.as_str().clone_into(&mut r.proto);
         r.listeners += 1;
         r.sessions += count(l.sessions);
         r.flows += count(l.flows);
@@ -312,14 +312,14 @@ fn rules(states: &[wgft_proto::RuleStatus], listeners: &[ListenerStat]) -> Vec<D
                 if r.bind_error.is_empty()
                     && let Some(e) = err
                 {
-                    r.bind_error = clip_text(&format!("{}: {e}", l.key()));
+                    r.bind_error = clip_text(&format!("{}: {e}", l.key));
                 }
             }
             (Some(e), true) => {
                 r.listening += 1;
                 r.target_errors += 1;
                 if r.target_error.is_empty() {
-                    r.target_error = clip_text(&format!("{}: {e}", l.key()));
+                    r.target_error = clip_text(&format!("{}: {e}", l.key));
                 }
             }
             (None, true) => r.listening += 1,
@@ -335,10 +335,14 @@ mod tests {
     fn stat(rule: &str, port: u16, listening: bool, err: Option<&str>) -> ListenerStat {
         ListenerStat {
             rule_id: rule.into(),
-            port,
+            key: crate::relay::Key {
+                kind: crate::relay::Kind::Tcp,
+                port,
+            },
             listening,
             err: err.map(Into::into),
-            ..ListenerStat::default()
+            sessions: 0,
+            flows: 0,
         }
     }
 
@@ -531,6 +535,7 @@ mod tests {
             peer.agent().handle(),
             std::sync::Arc::new(Targets::new(None)),
             flowpool::Limits { udp: 64, tcp: 32 },
+            crate::relay::DEFAULT_UDP_IDLE,
         );
         m.apply(&[AgentRule {
             id: "r_a".into(),
@@ -577,6 +582,7 @@ mod tests {
             peer.agent().handle(),
             std::sync::Arc::new(crate::targets::Targets::new(None)),
             flowpool::Limits::default(),
+            crate::relay::DEFAULT_UDP_IDLE,
         );
         let mut st = DoctorRuntimeState::default();
         st.tunnel.started_at =

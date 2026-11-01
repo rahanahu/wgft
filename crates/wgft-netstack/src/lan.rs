@@ -71,6 +71,11 @@ impl<T> LanSockets<T> {
         })
     }
 
+    /// The bytes the table of a core with `conns` connection slots allocates; it does not grow.
+    pub fn table_bytes(conns: usize) -> usize {
+        conns * size_of::<Option<Row<T>>>() + size_of::<Self>()
+    }
+
     /// Pairs `socket` with the tunnel connection `conn` until the returned registration is
     /// dropped. A registration of the same slot that is still alive, for this connection or an
     /// older one, is replaced; dropping the replaced registration later leaves the new pairing

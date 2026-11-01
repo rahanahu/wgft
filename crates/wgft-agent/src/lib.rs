@@ -15,6 +15,7 @@ pub mod error;
 pub mod flowpool;
 pub mod hostaddr;
 pub mod logging;
+pub mod memory;
 pub mod platform;
 pub mod relay;
 mod run;
