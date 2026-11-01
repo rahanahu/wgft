@@ -773,6 +773,9 @@ fn check_conn(t: &Tcb, b: &ConnBufs) -> Result<(), InvariantError> {
     if t.tail_off < t.una_off || t.tail_off - t.una_off > b.snd.cap() {
         return Err("the send ring holds more than its capacity".into());
     }
+    if b.snd.holds_outside(t.una_off, t.tail_off) {
+        return Err("the send ring holds a chunk outside its unacknowledged data".into());
+    }
     if b.recs.len() > b.recs.capacity() {
         return Err("a record ring holds more than its capacity".into());
     }

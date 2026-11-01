@@ -199,6 +199,13 @@ impl Ring {
             .count()
     }
 
+    /// 生きている範囲 [lo, hi) に掛からない位置に chunk を持つかを返します。送信の輪は確認した分の chunk を返す
+    /// ので持ちません。段を変える間の保持の上界 (`bound::STAGE_CHANGE_FITS`) はこれを前提にし、不変条件の検査が
+    /// 確かめます。
+    pub(crate) fn holds_outside(&self, lo: u64, hi: u64) -> bool {
+        (0..self.slots()).any(|i| self.chunks[us(i)].is_some() && !self.live(i, lo, hi))
+    }
+
     /// 容量の外の位置に chunk が無いことを確かめます。途中で止まらない畳み込みにして、位置の比べを vector の
     /// 命令にします。`any` は位置ごとに分岐するので、容量の外の位置の多い floor の輪で遅くなります。
     pub(crate) fn check(&self) -> Result<(), &'static str> {

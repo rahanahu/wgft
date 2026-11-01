@@ -228,13 +228,14 @@ fn demote_holds_within_the_connection_s_reservation() {
     (t.una_off, t.tail_off) = (una, una + SEND_FLOOR);
     t.snd_cap = BOOST_SIZE;
     t.cwnd = 1;
-    // 受信:順序どおりの未読は floor の内で、その先の boost の段の輪の残りを順序外のデータで満たします。
+    // 受信:順序どおりの未読は floor の内で、小さな穴の先の boost の段の輪の残りを順序外のデータで満たします。
+    // 順序外のデータのうち floor の内の分は取り消しの後も残るので、新しい floor の輪も満ちます。
     c.rcv.resize_ring(BOOST_SIZE, pool).unwrap();
     c.spare_iv = c.rcv.set_intervals(iv).unwrap();
     k.rcv_boost = true;
     t.rcv_cap = BOOST_SIZE;
     assert_eq!(c.rcv.insert(0, &[1; 1000], BOOST_SIZE, pool).accepted, 1000);
-    let ooo = RECV_FLOOR + CHUNK_SIZE as u64;
+    let ooo = 2000;
     let data = vec![2u8; usize::try_from(BOOST_SIZE - ooo).unwrap()];
     assert_eq!(
         c.rcv.insert(ooo, &data, BOOST_SIZE, pool).accepted,
@@ -256,7 +257,12 @@ fn demote_holds_within_the_connection_s_reservation() {
     eprintln!(
         "demote: the connection held {conn_before} chunks, grew by at most {growth} while it moved, against a reservation of {reservation}"
     );
-    assert!(conn_before > usize::try_from(BOOST_SIZE / c).unwrap() - 2);
+    // 最も多く持つ場合 (bound::STAGE_CHANGE_FITS の demote の和) に届きます。
+    let (f, b) = (RECV_FLOOR / c, BOOST_SIZE / c);
+    assert_eq!(
+        conn_before + growth,
+        usize::try_from(b + 3 * f + 1).unwrap()
+    );
     assert!(
         conn_before + growth <= reservation,
         "the connection held {conn_before} chunks and grew by {growth} while it moved, above its reservation of {reservation}"
