@@ -340,6 +340,9 @@ struct Cell {
     lis: LisId,
     reg: RegId,
     n: usize,
+    /// 登録の `cells` と待ち受けの `cells` の中の位置。外すときに探さずに済ませる。
+    at_reg: usize,
+    at_lis: usize,
 }
 
 #[derive(Debug)]
@@ -644,9 +647,9 @@ impl Inner {
         let cell = self.cell.get_mut(c.0);
         cell.n -= 1;
         if cell.n == 0 {
-            remove_id(&mut self.reg_mut(g).cells, &c);
+            self.unlink_reg(c);
+            self.unlink_lis(c);
             let lis = self.lis_mut(l);
-            remove_id(&mut lis.cells, &c);
             if lis.cur == Some(c) {
                 lis.cur = None;
             }
@@ -667,12 +670,53 @@ impl Inner {
             lis: l,
             reg: g,
             n: 0,
+            at_reg: 0,
+            at_lis: 0,
         }));
-        let lis = self.lis_mut(l);
-        lis.cells.push(c);
-        lis.cur = Some(c);
-        self.reg_mut(g).cells.push(c);
+        self.link_lis(c);
+        self.lis_mut(l).cur = Some(c);
+        self.link_reg(c);
         c
+    }
+
+    /// cell を、cell が指す登録の一覧の末尾に加える。
+    fn link_reg(&mut self, c: CellId) {
+        let g = self.cell.get(c.0).reg;
+        let v = &mut self.reg.get_mut(g.0).cells;
+        self.cell.get_mut(c.0).at_reg = v.len();
+        v.push(c);
+    }
+
+    /// cell を、cell が指す登録の一覧から外す。末尾の cell を空いた位置へ移し、その位置を書き直す。
+    fn unlink_reg(&mut self, c: CellId) {
+        let cell = self.cell.get(c.0);
+        let (g, i) = (cell.reg, cell.at_reg);
+        let v = &mut self.reg.get_mut(g.0).cells;
+        debug_assert_eq!(v[i], c);
+        v.swap_remove(i);
+        if let Some(&moved) = v.get(i) {
+            self.cell.get_mut(moved.0).at_reg = i;
+        }
+    }
+
+    /// cell を、cell の待ち受けの一覧の末尾に加える。
+    fn link_lis(&mut self, c: CellId) {
+        let l = self.cell.get(c.0).lis;
+        let v = &mut self.lis.get_mut(l.0).cells;
+        self.cell.get_mut(c.0).at_lis = v.len();
+        v.push(c);
+    }
+
+    /// cell を、cell の待ち受けの一覧から外す。
+    fn unlink_lis(&mut self, c: CellId) {
+        let cell = self.cell.get(c.0);
+        let (l, i) = (cell.lis, cell.at_lis);
+        let v = &mut self.lis.get_mut(l.0).cells;
+        debug_assert_eq!(v[i], c);
+        v.swap_remove(i);
+        if let Some(&moved) = v.get(i) {
+            self.cell.get_mut(moved.0).at_lis = i;
+        }
     }
 
     /// 今の N から m を求め、S と S_f を A の全登録について作り直す。N が変わったときだけ呼ぶ。
@@ -750,11 +794,11 @@ impl Inner {
             let cell = self.cell.get(c.0);
             (cell.reg, cell.n)
         };
-        remove_id(&mut self.reg_mut(from).cells, &c);
+        self.unlink_reg(c);
         let n = isize::try_from(n).expect("flow count fits isize");
         self.add_count(from, -n);
         self.cell.get_mut(c.0).reg = to;
-        self.reg_mut(to).cells.push(c);
+        self.link_reg(c);
         self.add_count(to, n);
     }
 
@@ -834,12 +878,6 @@ impl Inner {
             }
         }
         self.maybe_free_reg(g);
-    }
-}
-
-fn remove_id<T: PartialEq>(v: &mut Vec<T>, x: &T) {
-    if let Some(i) = v.iter().position(|y| y == x) {
-        v.swap_remove(i);
     }
 }
 
@@ -988,8 +1026,8 @@ impl Pool {
                     return Err(format!("cell of {} points elsewhere or is empty", r.rule));
                 }
                 let lis = g.lis(cell.lis);
-                if !lis.cells.contains(c) {
-                    return Err(format!("cell of {} is missing from its listener", r.rule));
+                if lis.cells.get(cell.at_lis) != Some(c) || r.cells.get(cell.at_reg) != Some(c) {
+                    return Err(format!("cell of {} is not where its positions say", r.rule));
                 }
                 cs += cell.n;
                 *flows.entry(cell.lis).or_default() += cell.n;

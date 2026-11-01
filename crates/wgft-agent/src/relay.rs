@@ -32,6 +32,46 @@ pub const DIAL_TIMEOUT: Duration = crate::targets::DIAL_TIMEOUT;
 /// 待ち受けている TCP のポートの集まり。トンネルの入口の検査 (`tunnel`) が読む。
 pub type OpenPorts = Arc<RwLock<BTreeSet<u16>>>;
 
+/// 試し接続の 1 周。[`Manager`] を借りずに走らせる。
+#[derive(Debug)]
+pub struct ProbeRound {
+    targets: Arc<Targets>,
+    entries: Vec<ProbeEntry>,
+}
+
+#[derive(Debug)]
+struct ProbeEntry {
+    port: u16,
+    target: (String, u16),
+    /// 試したときのリスナー。結果を書くときに、同じリスナーかを確かめる。
+    shared: Arc<Shared>,
+}
+
+/// 試し接続の 1 周の結果。
+#[derive(Debug)]
+pub struct ProbeResults {
+    entries: Vec<ProbeEntry>,
+    results: Vec<Result<(), TargetError>>,
+}
+
+impl ProbeRound {
+    /// 試す宛先が無いか。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// 試し接続を走らせる。同時に 32 件まで、1 件 2 秒。
+    pub async fn run(self) -> ProbeResults {
+        let list = self.entries.iter().map(|e| e.target.clone()).collect();
+        let results = self.targets.probe_all(list).await;
+        ProbeResults {
+            entries: self.entries,
+            results,
+        }
+    }
+}
+
 /// 1 分に 1 回までのログの門。
 #[derive(Debug, Default)]
 struct Gate(Option<Instant>);
@@ -290,13 +330,23 @@ impl Manager {
             actions += 1;
         }
         self.publish();
-        self.probe(&opened).await;
+        let done = self.probe_round(&opened).run().await;
+        self.finish_probes(done);
         actions
     }
 
     /// 30 秒ごとの見回り。開けなかったリスナーを開き直し、開いている TCP のリスナーの宛先へ試し接続する。
     /// 宛先が戻れば誤りが消え、落ちれば付く。状態の変化はハートビートで報告される。
     pub async fn retry(&mut self) {
+        let round = self.retry_round();
+        let done = round.run().await;
+        self.finish_probes(done);
+    }
+
+    /// 見回りのうち排他を要る前半。開けなかったリスナーを開き直し、試し接続の 1 周を返す。呼び手は
+    /// agent の排他を放してから [`ProbeRound::run`] を走らせ、結果を [`Manager::finish_probes`] で書く。
+    /// 試し接続の 1 周は宛先の数と応えない宛先で長くなるので、その間ハートビートと適用を止めないため。
+    pub fn retry_round(&mut self) -> ProbeRound {
         let mut ls = std::mem::take(&mut self.listeners);
         for l in ls.values_mut().filter(|l| l.task.is_none()) {
             self.open_listener(l);
@@ -304,35 +354,51 @@ impl Manager {
         self.listeners = ls;
         self.publish();
         let ports: Vec<u16> = self.listeners.keys().copied().collect();
-        self.probe(&ports).await;
+        self.probe_round(&ports)
     }
 
-    /// 開いているリスナーのうち `ports` の宛先へ試し接続し、結果を状態に書く。到達性が変わったリスナー
-    /// だけ、ログを 1 行出す。
-    async fn probe(&self, ports: &[u16]) {
-        let ls: Vec<&Listener> = ports
+    /// 開いているリスナーのうち `ports` の宛先への試し接続の 1 周。
+    fn probe_round(&self, ports: &[u16]) -> ProbeRound {
+        let entries = ports
             .iter()
             .filter_map(|p| self.listeners.get(p))
             .filter(|l| l.task.is_some())
+            .map(|l| ProbeEntry {
+                port: l.port,
+                target: l.target.clone(),
+                shared: Arc::clone(&l.shared),
+            })
             .collect();
-        if ls.is_empty() {
-            return;
+        ProbeRound {
+            targets: Arc::clone(&self.targets),
+            entries,
         }
-        let list: Vec<(String, u16)> = ls.iter().map(|l| l.target.clone()).collect();
-        let results = self.targets.probe_all(&list).await;
-        for (l, r) in ls.into_iter().zip(results) {
-            let (host, tport) = &l.target;
+    }
+
+    /// 試し接続の結果を書く。走らせている間にリスナーが閉じたか、開き直されたか、宛先が変わった場合は、
+    /// その結果を捨てる (Go の `applyProbes` と同じ)。到達性が変わったリスナーだけ、ログを 1 行出す。
+    pub fn finish_probes(&self, done: ProbeResults) {
+        for (e, r) in done.entries.into_iter().zip(done.results) {
+            let Some(l) = self.listeners.get(&e.port) else {
+                continue;
+            };
+            if !Arc::ptr_eq(&l.shared, &e.shared) || l.target != e.target || l.task.is_none() {
+                continue;
+            }
+            let target = crate::targets::join_host_port(&l.target.0, l.target.1);
             let now = r.err();
             let before = l.shared.set_probe(now.clone());
             match (before, now) {
                 (None, Some(e)) => logf!(
-                    "listener tcp/{}: cannot connect to target {host}:{tport}: {e}",
+                    "listener tcp/{}: cannot connect to target {target}: {e}",
                     l.port
                 ),
-                (Some(_), None) => logf!(
-                    "listener tcp/{}: target {host}:{tport} is reachable again",
-                    l.port
-                ),
+                (Some(_), None) => {
+                    logf!(
+                        "listener tcp/{}: target {target} is reachable again",
+                        l.port
+                    );
+                }
                 _ => {}
             }
         }
@@ -383,8 +449,9 @@ impl Manager {
                     targets: Arc::clone(&self.targets),
                 })));
                 logf!(
-                    "listener tcp/{} -> {host}:{tport} opened; rule {}",
+                    "listener tcp/{} -> {} opened; rule {}",
                     l.port,
+                    crate::targets::join_host_port(&host, tport),
                     l.rule_id
                 );
             }
@@ -546,7 +613,10 @@ async fn relay_one(
         Ok(s) => s,
         Err(e) => {
             if lock(&shared.dial_log).allow() {
-                logf!("tcp/{port}: dial {host}:{tport}: {e}");
+                logf!(
+                    "tcp/{port}: dial {}: {e}",
+                    crate::targets::join_host_port(&host, tport)
+                );
             }
             // 宛先の拒否は、上限の拒否と同じく RST で終える。宛先に繋がらなければ、仕様のとおり
             // トンネルの側を FIN で閉じる
@@ -620,7 +690,7 @@ mod tests {
         let resolver = Resolver::with_lookup(
             8,
             1,
-            Arc::new(move |h: &str| {
+            Arc::new(move |h: &str, _| {
                 names
                     .iter()
                     .find(|(n, _)| *n == h)
@@ -886,6 +956,40 @@ mod tests {
         // ルールを無効にすると予算からも外れる
         m.apply(&[]).await;
         assert_eq!(m.tcp_pool().rules(), 0);
+    }
+
+    /// ルールの ID だけが変わると、待ち受けと接続は残り、予算の枠は新しいルールに付け替わる。
+    #[tokio::test]
+    async fn a_relabel_keeps_the_flows_and_moves_them_to_the_new_rule() {
+        let target = echo().await;
+        let port = free_port();
+        let mut m = manager();
+        let r = |id: &str| {
+            [rule(
+                id,
+                Proto::Tcp,
+                &port.to_string(),
+                &target.to_string(),
+                true,
+            )]
+        };
+        m.apply(&r("r_a")).await;
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            let mut c = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            assert_eq!(round_trip(&mut c, b"x").await.unwrap(), b"x");
+            held.push(c);
+        }
+        assert_eq!(m.tcp_pool().rule_flows("r_a"), 3);
+        assert_eq!(m.apply(&r("r_b")).await, 0);
+        assert_eq!(m.tcp_pool().rules(), 1);
+        assert_eq!(m.tcp_pool().rule_flows("r_a"), 0);
+        assert_eq!(m.tcp_pool().rule_flows("r_b"), 3);
+        assert_eq!(m.tcp_pool().ledger().reg_flows["r_b"], 3);
+        for c in &mut held {
+            assert_eq!(round_trip(c, b"y").await.unwrap(), b"y");
+        }
+        assert_eq!(m.status()[0].id, "r_b");
     }
 
     #[tokio::test]

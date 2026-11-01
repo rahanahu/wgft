@@ -1,38 +1,105 @@
 //! 名前の解決 (`docs/design/v2/agent-parity.md` の「名前の解決」)。
 //!
-//! OS の `getaddrinfo` (`std::net::ToSocketAddrs`) を、引く名前ごとに 1 本の OS のスレッドで呼ぶ。
-//! スレッドの数は許可の数で抑える。宛先の名前は同時に 8 つまで、WireGuard のエンドポイントの名前は
-//! 別の許可 1 つで引くので、宛先の解決が許可を使い切ってもトンネルの名前の引き直しは止まらない。
-//! 許可を待つ時間も期限に含める。期限を過ぎた呼び手は誤りを受けて結果を待たず、スレッドは
-//! `getaddrinfo` が戻るまで動き続け、結果を捨ててから許可を返す。
+//! OS の `getaddrinfo` を、引く名前ごとに 1 本の OS のスレッドで呼ぶ。同じ名前を引いている途中の呼び手は、
+//! 新しく引かずにその結果を待つ (Go の `net.Resolver` と同じ相乗り)。同時に引く名前の数を許可の数で抑え、
+//! 宛先の名前は 8 つまで、WireGuard のエンドポイントの名前は別の許可 2 つで引く。宛先の解決が許可を
+//! 使い切っても、トンネルの名前の引き直しは止まらない。
+//!
+//! 呼び手はそれぞれの期限で待ち、期限を過ぎれば誤りを受けて去る。スレッドは `getaddrinfo` が戻るまで
+//! 動き続け、結果を待っている呼び手に配ってから許可を返す。
 //!
 //! tokio の `spawn_blocking` を使わないのは、実行環境を落とすときに blocking のタスクの終わりを待つため
 //! である。応答しない resolver があると、トンネルの世代を閉じる処理がそこで止まる。
 //!
 //! 宛先の名前は、Go の resolver と同じ RFC 6724 の宛先の規則で並べ直す。`getaddrinfo` の順は libc と
-//! 設定 (`gai.conf`) で変わるためである。
+//! 設定 (`gai.conf`) で変わるためである。エンドポイントの名前は A レコードだけを引く。
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket};
-use std::sync::{Arc, LazyLock};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::{Semaphore, watch};
 use tokio::time::Instant;
 
 /// 宛先の名前を同時に引く数。
 pub const TARGET_PERMITS: usize = 8;
-/// WireGuard のエンドポイントの名前を同時に引く数。
-pub const ENDPOINT_PERMITS: usize = 1;
+/// WireGuard のエンドポイントの名前を同時に引く数。期限で去った引き直しが応答しない resolver に
+/// 許可を握られても、次の引き直しが 1 つ残る。
+pub const ENDPOINT_PERMITS: usize = 2;
+
+/// 引くアドレスの族。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Family {
+    /// A と AAAA。
+    Any,
+    /// A だけ。
+    V4,
+}
 
 /// 名前を引く関数。OS の resolver を呼ぶ既定の関数を、試験が差し替える。
-pub type LookupFn = Arc<dyn Fn(&str) -> std::io::Result<Vec<IpAddr>> + Send + Sync>;
+pub type LookupFn = Arc<dyn Fn(&str, Family) -> std::io::Result<Vec<IpAddr>> + Send + Sync>;
+
+/// 1 回の解決の結果。誤りは `lookup <名前>: ` で始まる文。
+type Outcome = Result<Vec<IpAddr>, String>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Kind {
+    Target,
+    Endpoint,
+}
+
+type Key = (Kind, String);
+
+/// 結果を待つための受け手。結果が出るまで `None`。
+type Waiter = watch::Receiver<Option<Outcome>>;
+
+/// 引いている途中の名前の表。値は解決の番号と受け手。
+#[derive(Default)]
+struct Flights {
+    map: Mutex<HashMap<Key, (u64, Waiter)>>,
+    next: AtomicU64,
+}
+
+impl Flights {
+    fn remove(&self, key: &Key, id: u64) {
+        let mut m = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+        if m.get(key).is_some_and(|(i, _)| *i == id) {
+            m.remove(key);
+        }
+    }
+}
+
+/// 1 つの名前の解決。結果を配る前に表から外し、配った後の呼び手は新しく引く。結果を配らずに落ちた
+/// (実行環境が落ちた、スレッドを作れなかった) ときも表から外し、待っている呼び手は誤りを受ける。
+struct Flight {
+    flights: Arc<Flights>,
+    key: Key,
+    id: u64,
+    tx: watch::Sender<Option<Outcome>>,
+}
+
+impl Flight {
+    fn finish(self, r: Outcome) {
+        self.flights.remove(&self.key, self.id);
+        self.tx.send_replace(Some(r));
+    }
+}
+
+impl Drop for Flight {
+    fn drop(&mut self) {
+        self.flights.remove(&self.key, self.id);
+    }
+}
 
 /// 上限のある resolver。プロセスで 1 つを [`Resolver::shared`] で分け合う。トンネルの世代をまたいで
-/// 許可の数を保つためである。
+/// 許可の数と相乗りの表を保つためである。
 pub struct Resolver {
     targets: Arc<Semaphore>,
     endpoint: Arc<Semaphore>,
     lookup: LookupFn,
+    flights: Arc<Flights>,
 }
 
 impl std::fmt::Debug for Resolver {
@@ -52,11 +119,14 @@ static SHARED: LazyLock<Arc<Resolver>> = LazyLock::new(|| {
     ))
 });
 
-/// OS の resolver で引く。`getaddrinfo` の誤りの文の前置きは落とす。
-fn os_lookup(host: &str) -> std::io::Result<Vec<IpAddr>> {
-    (host, 0)
-        .to_socket_addrs()
-        .map(|it| it.map(|a| a.ip()).collect())
+/// OS の resolver で引く。
+fn os_lookup(host: &str, family: Family) -> std::io::Result<Vec<IpAddr>> {
+    match family {
+        Family::Any => (host, 0)
+            .to_socket_addrs()
+            .map(|it| it.map(|a| a.ip()).collect()),
+        Family::V4 => sys::lookup_v4(host),
+    }
 }
 
 impl Resolver {
@@ -73,6 +143,7 @@ impl Resolver {
             targets: Arc::new(Semaphore::new(targets)),
             endpoint: Arc::new(Semaphore::new(endpoint)),
             lookup,
+            flights: Arc::default(),
         }
     }
 
@@ -81,64 +152,81 @@ impl Resolver {
     /// # Errors
     ///
     /// 期限までに引けなければ、`lookup <名前>: ` で始まる誤りの文を返す。
-    pub async fn lookup_target(
-        &self,
-        host: &str,
-        deadline: Instant,
-    ) -> Result<Vec<IpAddr>, String> {
-        self.lookup(&self.targets, host, deadline, true).await
+    pub async fn lookup_target(&self, host: &str, deadline: Instant) -> Outcome {
+        self.lookup(Kind::Target, host, deadline).await
     }
 
-    /// WireGuard のエンドポイントの名前を、宛先とは別の許可で引く。順は並べ直さない。
+    /// WireGuard のエンドポイントの名前の A レコードを、宛先とは別の許可で引く。順は並べ直さない。
     ///
     /// # Errors
     ///
     /// 期限までに引けなければ、`lookup <名前>: ` で始まる誤りの文を返す。
-    pub async fn lookup_endpoint(
-        &self,
-        host: &str,
-        deadline: Instant,
-    ) -> Result<Vec<IpAddr>, String> {
-        self.lookup(&self.endpoint, host, deadline, false).await
+    pub async fn lookup_endpoint(&self, host: &str, deadline: Instant) -> Outcome {
+        self.lookup(Kind::Endpoint, host, deadline).await
     }
 
-    async fn lookup(
-        &self,
-        sem: &Arc<Semaphore>,
-        host: &str,
-        deadline: Instant,
-        sort: bool,
-    ) -> Result<Vec<IpAddr>, String> {
+    async fn lookup(&self, kind: Kind, host: &str, deadline: Instant) -> Outcome {
+        let mut rx = self.join(kind, host);
         // Go の resolver が期限で打ち切ったときと同じ語にする
-        let timeout = || format!("lookup {host}: i/o timeout");
-        let permit = tokio::time::timeout_at(deadline, Arc::clone(sem).acquire_owned())
-            .await
-            .map_err(|_| timeout())?
-            .map_err(|_| format!("lookup {host}: the resolver is closed"))?;
-        let (tx, rx) = oneshot::channel();
-        let lookup = Arc::clone(&self.lookup);
-        let name = host.to_owned();
-        std::thread::Builder::new()
-            .name("wgft-resolve".into())
-            .spawn(move || {
-                let r = lookup(&name).map(|mut v| {
-                    dedup(&mut v);
-                    if sort {
-                        sort_by_rfc6724(&mut v);
-                    }
-                    v
-                });
-                // 呼び手が期限で去っていれば結果は捨てられる。許可は送った後に返す
-                let _ = tx.send(r);
-                drop(permit);
-            })
-            .map_err(|e| format!("lookup {host}: cannot start a resolver thread: {e}"))?;
-        match tokio::time::timeout_at(deadline, rx).await {
-            Err(_) => Err(timeout()),
-            Ok(Err(_)) => Err(format!("lookup {host}: the resolver thread ended")),
-            Ok(Ok(Err(e))) => Err(format!("lookup {host}: {}", lookup_error_text(&e))),
-            Ok(Ok(Ok(v))) => Ok(v),
+        match tokio::time::timeout_at(deadline, rx.wait_for(Option::is_some)).await {
+            Err(_) => Err(format!("lookup {host}: i/o timeout")),
+            Ok(Err(_)) => Err(format!("lookup {host}: the resolver could not run")),
+            Ok(Ok(v)) => v
+                .clone()
+                .unwrap_or_else(|| Err(format!("lookup {host}: no result"))),
         }
+    }
+
+    /// 同じ名前を引いている途中なら、その結果の受け手を返す。無ければ新しく引き始める。
+    fn join(&self, kind: Kind, host: &str) -> Waiter {
+        let key = (kind, host.to_owned());
+        let mut m = self
+            .flights
+            .map
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some((_, rx)) = m.get(&key) {
+            return rx.clone();
+        }
+        let (tx, rx) = watch::channel(None);
+        let id = self.flights.next.fetch_add(1, AtomicOrdering::Relaxed);
+        m.insert(key.clone(), (id, rx.clone()));
+        drop(m);
+        let flight = Flight {
+            flights: Arc::clone(&self.flights),
+            key,
+            id,
+            tx,
+        };
+        let (sem, family, sort) = match kind {
+            Kind::Target => (Arc::clone(&self.targets), Family::Any, true),
+            Kind::Endpoint => (Arc::clone(&self.endpoint), Family::V4, false),
+        };
+        let lookup = Arc::clone(&self.lookup);
+        // 許可を待つのは呼び手でなくこのタスクで、呼び手はそれぞれの期限で結果を待つ
+        tokio::spawn(async move {
+            let Ok(permit) = sem.acquire_owned().await else {
+                return;
+            };
+            // スレッドを作れなければ、閉包と一緒に flight が落ち、待っている呼び手は誤りを受ける
+            let _ = std::thread::Builder::new()
+                .name("wgft-resolve".into())
+                .spawn(move || {
+                    let host = flight.key.1.clone();
+                    let r = lookup(&host, family)
+                        .map(|mut v| {
+                            dedup(&mut v);
+                            if sort {
+                                sort_by_rfc6724(&mut v);
+                            }
+                            v
+                        })
+                        .map_err(|e| format!("lookup {host}: {}", lookup_error_text(&e)));
+                    flight.finish(r);
+                    drop(permit);
+                });
+        });
+        rx
     }
 }
 
@@ -163,6 +251,134 @@ fn dedup(v: &mut Vec<IpAddr>) {
     });
     for a in v.iter_mut() {
         *a = a.to_canonical();
+    }
+}
+
+#[cfg(unix)]
+mod sys {
+    use std::ffi::{CStr, CString};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    /// `getaddrinfo` を `AF_INET` で呼び、A レコードだけを引く。
+    pub(super) fn lookup_v4(host: &str) -> std::io::Result<Vec<IpAddr>> {
+        let name = CString::new(host)
+            .map_err(|_| std::io::Error::other("the name contains a NUL byte"))?;
+        // SAFETY: addrinfo は C の構造体で、すべて 0 の値が正しい初期値である
+        let mut hints: libc::addrinfo = unsafe { std::mem::zeroed() };
+        hints.ai_family = libc::AF_INET;
+        hints.ai_socktype = libc::SOCK_STREAM;
+        let mut res: *mut libc::addrinfo = std::ptr::null_mut();
+        // SAFETY: name は NUL で終わり、hints と res は書き込める場所を指す
+        let rc = unsafe {
+            libc::getaddrinfo(
+                name.as_ptr(),
+                std::ptr::null(),
+                &raw const hints,
+                &raw mut res,
+            )
+        };
+        if rc != 0 {
+            if rc == libc::EAI_SYSTEM {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: gai_strerror は静的な NUL 終わりの文を返す
+            let msg = unsafe { CStr::from_ptr(libc::gai_strerror(rc)) };
+            return Err(std::io::Error::other(msg.to_string_lossy().into_owned()));
+        }
+        let mut out = Vec::new();
+        let mut cur = res;
+        while !cur.is_null() {
+            // SAFETY: cur は getaddrinfo が返した一覧の要素で、freeaddrinfo までは有効である
+            let ai = unsafe { &*cur };
+            cur = ai.ai_next;
+            if ai.ai_family != libc::AF_INET || ai.ai_addr.is_null() {
+                continue;
+            }
+            // SAFETY: family が AF_INET なので ai_addr は sockaddr_in を指す
+            let sin = unsafe { ai.ai_addr.cast::<libc::sockaddr_in>().read_unaligned() };
+            out.push(IpAddr::V4(Ipv4Addr::from(u32::from_be(
+                sin.sin_addr.s_addr,
+            ))));
+        }
+        // SAFETY: res は getaddrinfo が返した一覧で、ここで 1 回だけ解放する
+        unsafe { libc::freeaddrinfo(res) };
+        Ok(out)
+    }
+}
+
+#[cfg(windows)]
+mod sys {
+    use std::ffi::CString;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Once;
+
+    use windows_sys::Win32::Networking::WinSock::{
+        ADDRINFOA, AF_INET, SOCK_STREAM, SOCKADDR_IN, WSADATA, WSAStartup, freeaddrinfo,
+        getaddrinfo,
+    };
+
+    /// `getaddrinfo` を `AF_INET` で呼び、A レコードだけを引く。
+    pub(super) fn lookup_v4(host: &str) -> std::io::Result<Vec<IpAddr>> {
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            // SAFETY: WSADATA は C の構造体で、すべて 0 の値が正しい初期値である
+            let mut data: WSADATA = unsafe { std::mem::zeroed() };
+            // SAFETY: data は書き込める場所を指す。Winsock の初期化は回数を数えるので、std の初期化と
+            // 重なってもよい。std と同じく後始末は呼ばない
+            let _ = unsafe { WSAStartup(0x202, &raw mut data) };
+        });
+        let name = CString::new(host)
+            .map_err(|_| std::io::Error::other("the name contains a NUL byte"))?;
+        let hints = ADDRINFOA {
+            ai_family: i32::from(AF_INET),
+            ai_socktype: SOCK_STREAM,
+            ..ADDRINFOA::default()
+        };
+        let mut res: *mut ADDRINFOA = std::ptr::null_mut();
+        // SAFETY: name は NUL で終わり、hints と res は書き込める場所を指す
+        let rc = unsafe {
+            getaddrinfo(
+                name.as_ptr().cast(),
+                std::ptr::null(),
+                &raw const hints,
+                &raw mut res,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::from_raw_os_error(rc));
+        }
+        let mut out = Vec::new();
+        let mut cur = res;
+        while !cur.is_null() {
+            // SAFETY: cur は getaddrinfo が返した一覧の要素で、freeaddrinfo までは有効である
+            let ai = unsafe { &*cur };
+            cur = ai.ai_next;
+            if ai.ai_family != i32::from(AF_INET) || ai.ai_addr.is_null() {
+                continue;
+            }
+            // SAFETY: family が AF_INET なので ai_addr は SOCKADDR_IN を指す
+            let sin = unsafe { ai.ai_addr.cast::<SOCKADDR_IN>().read_unaligned() };
+            // SAFETY: IN_ADDR の共用体はどの読み方も同じ 4 byte である
+            let a = unsafe { sin.sin_addr.S_un.S_addr };
+            out.push(IpAddr::V4(Ipv4Addr::from(u32::from_be(a))));
+        }
+        // SAFETY: res は getaddrinfo が返した一覧で、ここで 1 回だけ解放する
+        unsafe { freeaddrinfo(res) };
+        Ok(out)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+mod sys {
+    use std::net::{IpAddr, ToSocketAddrs};
+
+    /// 他の OS では族を指定できないので、引いた後に IPv4 だけを残す。
+    pub(super) fn lookup_v4(host: &str) -> std::io::Result<Vec<IpAddr>> {
+        Ok((host, 0)
+            .to_socket_addrs()?
+            .map(|a| a.ip())
+            .filter(IpAddr::is_ipv4)
+            .collect())
     }
 }
 
@@ -414,7 +630,7 @@ mod tests {
     }
 
     fn slow(started: Arc<AtomicUsize>, wait: Duration) -> LookupFn {
-        Arc::new(move |h: &str| {
+        Arc::new(move |h: &str, family| {
             started.fetch_add(1, AtomicOrdering::SeqCst);
             std::thread::sleep(wait);
             if h == "missing" {
@@ -422,11 +638,11 @@ mod tests {
                     "failed to lookup address information: Name or service not known",
                 ));
             }
-            Ok(vec![
-                ip("192.0.2.1"),
-                ip("::ffff:192.0.2.1"),
-                ip("192.0.2.2"),
-            ])
+            let mut v = vec![ip("192.0.2.1"), ip("::ffff:192.0.2.1"), ip("192.0.2.2")];
+            if family == Family::Any {
+                v.push(ip("2001:db8::1"));
+            }
+            Ok(v)
         })
     }
 
@@ -434,8 +650,11 @@ mod tests {
     async fn returns_deduplicated_addresses_and_strips_the_std_prefix() {
         let r = Resolver::with_lookup(2, 1, slow(Arc::default(), Duration::ZERO));
         let soon = Instant::now() + Duration::from_secs(2);
+        // エンドポイントは A レコードだけを引く
         let got = r.lookup_endpoint("h", soon).await.unwrap();
         assert_eq!(got, vec![ip("192.0.2.1"), ip("192.0.2.2")]);
+        let got = r.lookup_target("h", soon).await.unwrap();
+        assert_eq!(got.len(), 3, "{got:?}");
         assert_eq!(
             r.lookup_target("missing", soon).await.unwrap_err(),
             "lookup missing: Name or service not known"
@@ -453,22 +672,21 @@ mod tests {
             .unwrap_err();
         assert_eq!(e, "lookup h: i/o timeout");
         assert!(t0.elapsed() < Duration::from_millis(250));
-        // スレッドが戻るまで許可は返らないので、次の解決は許可を待って期限で失敗する
+        // スレッドが戻るまで許可は返らないので、別の名前の解決は許可を待って期限で失敗する
         let e = r
-            .lookup_target("h", Instant::now() + Duration::from_millis(50))
+            .lookup_target("h2", Instant::now() + Duration::from_millis(50))
             .await
             .unwrap_err();
-        assert_eq!(e, "lookup h: i/o timeout");
+        assert_eq!(e, "lookup h2: i/o timeout");
         assert_eq!(started.load(AtomicOrdering::SeqCst), 1);
         // エンドポイントの許可は別なので待たない
         let ep = r
             .lookup_endpoint("h", Instant::now() + Duration::from_secs(2))
             .await;
         assert!(ep.is_ok(), "{ep:?}");
-        // 最初のスレッドが戻れば許可が返る
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // 最初のスレッドが戻れば許可が返り、待っていた名前も引かれる
         assert!(
-            r.lookup_target("h", Instant::now() + Duration::from_secs(2))
+            r.lookup_target("h2", Instant::now() + Duration::from_secs(2))
                 .await
                 .is_ok()
         );
@@ -484,15 +702,85 @@ mod tests {
         ));
         let deadline = Instant::now() + Duration::from_millis(100);
         let tasks: Vec<_> = (0..6)
-            .map(|_| {
+            .map(|i| {
                 let r = Arc::clone(&r);
-                tokio::spawn(async move { r.lookup_target("h", deadline).await })
+                tokio::spawn(async move { r.lookup_target(&format!("h{i}"), deadline).await })
             })
             .collect();
         for t in tasks {
             assert!(t.await.unwrap().is_err());
         }
         assert_eq!(started.load(AtomicOrdering::SeqCst), 3);
+    }
+
+    /// 32 ポートの範囲のルールが 1 つの名前を同時に引いても、問い合わせは 1 回で、遅い DNS でも全部が
+    /// 期限の中で結果を受ける。
+    #[tokio::test]
+    async fn concurrent_lookups_of_one_name_share_one_query() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let r = Arc::new(Resolver::with_lookup(
+            8,
+            2,
+            slow(Arc::clone(&started), Duration::from_millis(600)),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let tasks: Vec<_> = (0..32)
+            .map(|_| {
+                let r = Arc::clone(&r);
+                tokio::spawn(async move { r.lookup_target("nas.lan", deadline).await })
+            })
+            .collect();
+        for t in tasks {
+            assert!(t.await.unwrap().is_ok());
+        }
+        assert_eq!(started.load(AtomicOrdering::SeqCst), 1);
+        // 終わった後の呼び手は新しく引く
+        r.lookup_target("nas.lan", Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(started.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    /// 1 つの名前への接続のフラッドは許可を 1 つしか使わないので、他の名前の解決は待たない。
+    #[tokio::test]
+    async fn a_flood_on_one_name_does_not_starve_another() {
+        let r = Arc::new(Resolver::with_lookup(
+            2,
+            1,
+            Arc::new(|h: &str, _| {
+                if h == "busy" {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                Ok(vec![ip("192.0.2.1")])
+            }),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let flood: Vec<_> = (0..100)
+            .map(|_| {
+                let r = Arc::clone(&r);
+                tokio::spawn(async move { r.lookup_target("busy", deadline).await })
+            })
+            .collect();
+        tokio::task::yield_now().await;
+        let t0 = Instant::now();
+        r.lookup_target("other", deadline).await.unwrap();
+        assert!(
+            t0.elapsed() < Duration::from_millis(300),
+            "{:?}",
+            t0.elapsed()
+        );
+        for t in flood {
+            assert!(t.await.unwrap().is_ok());
+        }
+    }
+
+    #[test]
+    fn the_os_resolver_returns_only_a_records_for_the_endpoint() {
+        let got = os_lookup("localhost", Family::V4).unwrap();
+        assert!(
+            !got.is_empty() && got.iter().all(|a| a.is_ipv4() && a.is_loopback()),
+            "{got:?}"
+        );
     }
 
     #[tokio::test]

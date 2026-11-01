@@ -14,8 +14,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::StreamExt as _;
 use tokio::net::TcpStream;
-use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 use crate::config::allow_targets::{self, AllowList};
@@ -215,32 +215,38 @@ impl Targets {
             Ok(Ok(_conn)) => Ok(()),
             Ok(Err(e)) => Err(e),
             Err(_) => Err(TargetError::failed(format!(
-                "target {host}:{port} did not answer within {}s",
+                "target {} did not answer within {}s",
+                join_host_port(host, port),
                 PROBE_TIMEOUT.as_secs()
             ))),
         }
     }
 
-    /// 試し接続をまとめて行う。同時に試すのは 32 件までで、結果は `list` と同じ順で返す。
-    pub async fn probe_all(&self, list: &[(String, u16)]) -> Vec<Result<(), TargetError>> {
-        let sem = Semaphore::new(PROBE_CONCURRENCY);
-        // 閉包を通すと、future の Send の判定が借用の寿命について一般化できなくなるので、列を先に作る
-        let mut probes = Vec::with_capacity(list.len());
-        for (h, p) in list {
-            probes.push(self.probe_limited(&sem, h, *p));
-        }
-        futures_util::future::join_all(probes).await
+    /// 試し接続をまとめて行う。同時に試すのは 32 件までで、結果は `list` と同じ順で返す。試し接続の
+    /// future は走らせる分だけを作るので、待ち受けの数によらず保持は 32 件分である。
+    pub async fn probe_all(
+        self: Arc<Self>,
+        list: Vec<(String, u16)>,
+    ) -> Vec<Result<(), TargetError>> {
+        // 値を持ち込む閉包にする。借用を持つ閉包では、future の Send の判定が寿命について一般化できない
+        futures_util::stream::iter(list)
+            .map(move |(h, p)| {
+                let t = Arc::clone(&self);
+                async move { t.probe(&h, p).await }
+            })
+            .buffered(PROBE_CONCURRENCY)
+            .collect()
+            .await
     }
+}
 
-    async fn probe_limited(
-        &self,
-        sem: &Semaphore,
-        host: &str,
-        port: u16,
-    ) -> Result<(), TargetError> {
-        // 閉じない semaphore なので取得は失敗しない
-        let _permit = sem.acquire().await;
-        self.probe(host, port).await
+/// Go の `net.JoinHostPort` と同じく、`:` を含むホストを角括弧で囲んで `host:port` にする。
+#[must_use]
+pub fn join_host_port(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
     }
 }
 
@@ -265,7 +271,7 @@ mod tests {
         Arc::new(Resolver::with_lookup(
             8,
             1,
-            Arc::new(move |h: &str| {
+            Arc::new(move |h: &str, _| {
                 names
                     .iter()
                     .find(|(n, _)| *n == h)
@@ -376,8 +382,12 @@ mod tests {
             l.local_addr().unwrap().port()
         };
         let t = Targets::with(None, unicast_lan(), table(vec![]));
+        let t = Arc::new(t);
         let got = t
-            .probe_all(&[("127.0.0.1".into(), up.port()), ("127.0.0.1".into(), dead)])
+            .probe_all(vec![
+                ("127.0.0.1".into(), up.port()),
+                ("127.0.0.1".into(), dead),
+            ])
             .await;
         assert_eq!(got[0], Ok(()));
         let e = got[1].clone().unwrap_err();
@@ -390,6 +400,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn join_host_port_brackets_ipv6_like_go() {
+        assert_eq!(join_host_port("nas.lan", 80), "nas.lan:80");
+        assert_eq!(join_host_port("10.0.0.1", 80), "10.0.0.1:80");
+        assert_eq!(
+            join_host_port("::ffff:10.0.0.1", 80),
+            "[::ffff:10.0.0.1]:80"
+        );
+    }
+
+    /// 32 ポートの範囲のルールが 1 つの名前を宛先にし、DNS が 600 ミリ秒かかっても、名前の解決を
+    /// 相乗りするので、32 件の試し接続が 2 秒の期限に収まる。
+    #[tokio::test]
+    async fn probes_of_a_port_range_share_one_slow_lookup() {
+        let probe_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = probe_listener.local_addr().unwrap().port();
+        drop(probe_listener);
+        let lookups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&lookups);
+        let resolver = Arc::new(Resolver::with_lookup(
+            8,
+            2,
+            Arc::new(move |_h: &str, _| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(600));
+                Ok(vec!["127.0.0.1".parse().unwrap()])
+            }),
+        ));
+        let t = Arc::new(Targets::with(None, unicast_lan(), resolver));
+        let list: Vec<(String, u16)> = (0..32)
+            .map(|i| ("nas.lan".to_owned(), base.wrapping_add(i)))
+            .collect();
+        let got = t.probe_all(list).await;
+        assert_eq!(lookups.load(Ordering::SeqCst), 1);
+        for g in got {
+            let e = g.unwrap_err();
+            // 閉じたポートなので拒まれるが、期限切れにはならない。Windows はループバックの拒否にも SYN を
+            // 送り直すので、文は照らさない
+            #[cfg(not(windows))]
+            assert!(!e.text.contains("did not answer"), "{e}");
+            let _ = e;
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn a_probe_that_hangs_did_not_answer_within_2s() {
         // 応えない resolver で、試し接続の全体が 2 秒で打ち切られることを確かめる
@@ -398,7 +452,7 @@ mod tests {
         let r = Arc::new(Resolver::with_lookup(
             8,
             1,
-            Arc::new(move |_h: &str| {
+            Arc::new(move |_h: &str, _| {
                 while !r_flag.load(Ordering::Acquire) {
                     std::thread::sleep(Duration::from_millis(5));
                 }
