@@ -16,10 +16,11 @@ use crate::config::Limits;
 use crate::frag;
 use crate::icmp::{PING_ENDPOINTS, Pings};
 use crate::index;
+use crate::output::Dlist;
 use crate::stack::{EventTargets, NoHook, Stack};
 use crate::tcp::NUM_TIMERS;
 use crate::tcp::conn;
-use crate::tcp::listen::{Listener, PORTS, PortRow};
+use crate::tcp::listen::{Listener, PortTable};
 use crate::tcp::syn::SynRow;
 use crate::tcp::timewait::TwRow;
 use crate::udp::{self, Udp, UdpEp};
@@ -105,7 +106,7 @@ pub(crate) fn fix_parts(l: &Limits, mtu: usize, stack_size: usize) -> FixParts {
     let n = l.conns();
     let ent = size_of::<index::IndexEnt>();
     let nodes = n * NUM_TIMERS;
-    let dlist = |k: usize| b(k * (2 * size_of::<u32>() + size_of::<bool>()));
+    let dlist = |k: usize| b(Dlist::bytes_for(k));
     FixParts {
         stack: b(stack_size),
         conn_slots: b(n * conn::slot_bytes()),
@@ -115,8 +116,8 @@ pub(crate) fn fix_parts(l: &Limits, mtu: usize, stack_size: usize) -> FixParts {
         tw: b(l.tw_rows * (size_of::<TwRow>() + 3 * size_of::<u32>())
             + index::capacity_for(l.tw_rows) * ent
             + n * size_of::<u32>()),
-        listeners: b(PORTS * size_of::<PortRow<Listener>>()),
-        udp_endpoints: b(PORTS * size_of::<PortRow<UdpEp>>()),
+        listeners: b(PortTable::<Listener>::bytes()),
+        udp_endpoints: b(PortTable::<UdpEp>::bytes()),
         wheel: b(
             nodes * (size_of::<u64>() + 2 * size_of::<u32>() + size_of::<u16>())
                 + nodes * size_of::<u32>(),
@@ -162,6 +163,11 @@ impl Bound {
 }
 
 /// 核が今持つ可変の保持の量です。表の固定の配列は含みません。核を閉じた後はすべて 0 です。
+///
+/// 核を作った直後から増えた heap の byte は、`chunk_bytes + record_bytes + interval_bytes + frag_bytes +
+/// udp_rx_bytes + udp_tx_bytes + pool_bytes - lent_array_bytes` とちょうど一致します。boost の配列は `Budget` が
+/// 作った時に確保し、接続が借りている間は `record_bytes` と `interval_bytes` にも数えるので、その分
+/// (`lent_array_bytes`) を引きます。試験はこの式で確保の数えと会計を照らします。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Held {
     /// 使っている接続の枠です。
@@ -178,6 +184,11 @@ pub struct Held {
     pub chunk_bytes: usize,
     /// 置き場に残した chunk の数です。上限の分は上界の M_fix に入ります。
     pub pool_chunks: usize,
+    /// 置き場に残した chunk の中身の byte です (`pool_chunks` × chunk の大きさ)。
+    pub pool_bytes: usize,
+    /// `record_bytes` と `interval_bytes` のうち、boost の枠を持つ接続が `Budget` から借りている記録の輪と区間の
+    /// 表の byte です。
+    pub lent_array_bytes: usize,
     /// 送信の記録の輪が持つ byte (floor の輪と、借りている boost の輪) です。
     pub record_bytes: usize,
     /// 順序外の区間の表が持つ byte (floor の表と、借りている boost の表) です。

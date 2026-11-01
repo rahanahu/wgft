@@ -307,6 +307,20 @@ impl ConnBufs {
         )
     }
 
+    /// boost の枠を持つ接続が `Budget` から借りている配列 (boost の記録の輪と区間の表) の byte です。区間の表は、
+    /// 受信が boost の段に移っていれば使っている表、移っていなければ控えです ([`ConnBufs::take_boost_arrays`])。
+    pub(crate) fn lent_array_bytes(&self) -> usize {
+        if self.boost.is_none() {
+            return 0;
+        }
+        let iv = if self.rcv.intervals_capacity() == BOOST_INTERVALS {
+            self.rcv.intervals_heap_bytes()
+        } else {
+            self.spare_iv.heap_bytes()
+        };
+        self.recs.heap_bytes() + iv
+    }
+
     /// boost の配列を取り出し、boost の印を外します。受信が boost の段に移っていれば、使っている区間の表が boost
     /// のもので、移っていなければ控えが boost のものです。輪の中身は移さないので、呼び手は続けて枠を返します。
     pub(crate) fn take_boost_arrays(&mut self) -> (FixedVec<Record>, FixedVec<Interval>) {
@@ -510,20 +524,18 @@ impl ConnSlots {
 
     /// 空きの list `free` と使っている印が一致し、輪と段が合うことを確かめます。
     pub(crate) fn check(&self, free: &[u32], links: &[QLink]) -> Result<(), &'static str> {
-        let mut seen = FixedVec::try_filled(self.hot.len(), |_| false)
+        // 印は 1 枠 1 bit で、検査の間だけ確保します (wgstack-rs.md の「不変条件の検査の手間」)。
+        let mut seen = crate::bitset::BitSet::new(self.hot.len())
             .map_err(|_| "allocation failed while checking")?;
         for &i in free {
             let t = self
                 .hot
                 .get(i as usize)
                 .ok_or("a free slot number is out of range")?;
-            let mark = seen
-                .get_mut(i as usize)
-                .ok_or("a free slot number is out of range")?;
-            if *mark {
+            if seen.get(i) {
                 return Err("a slot is twice in the free list");
             }
-            *mark = true;
+            seen.set(i);
             let b = &self.bufs[i as usize];
             if t.state != State::Free
                 || t.in_index

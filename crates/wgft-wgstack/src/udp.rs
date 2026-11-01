@@ -674,6 +674,7 @@ impl Udp {
 
     /// 会計の不変条件を確かめます。
     pub(crate) fn check(&self) -> Result<(), &'static str> {
+        self.eps.check()?;
         let mut held_chunks = 0usize;
         let mut live = 0u64;
         for r in self.ck.iter() {
@@ -699,17 +700,9 @@ impl Udp {
         let mut small = 0u64;
         for d in [RX, TX] {
             let b = &self.dev[d];
-            let used = self.dg[d].iter().filter(|g| g.used).count();
-            if b.count != i64::try_from(used).unwrap_or(-1) || b.count > b.max_count {
-                return Err("a UDP datagram count disagrees with the budget");
-            }
-            if b.bytes > b.max_bytes || b.bytes < 0 {
-                return Err("a UDP byte budget is out of range");
-            }
-            if used + self.dg_free[d].len() != self.dg[d].len() {
-                return Err("the UDP datagram free list disagrees with the used datagrams");
-            }
+            let mut used = 0usize;
             for g in self.dg[d].iter().filter(|g| g.used) {
+                used += 1;
                 let n = if g.class == LARGE {
                     usize::try_from(g.n).unwrap_or(0).div_ceil(CHUNK_SIZE)
                 } else {
@@ -721,6 +714,15 @@ impl Udp {
                         return Err("a UDP datagram points to a free chunk");
                     }
                 }
+            }
+            if b.count != i64::try_from(used).unwrap_or(-1) || b.count > b.max_count {
+                return Err("a UDP datagram count disagrees with the budget");
+            }
+            if b.bytes > b.max_bytes || b.bytes < 0 {
+                return Err("a UDP byte budget is out of range");
+            }
+            if used + self.dg_free[d].len() != self.dg[d].len() {
+                return Err("the UDP datagram free list disagrees with the used datagrams");
             }
         }
         if small != live {

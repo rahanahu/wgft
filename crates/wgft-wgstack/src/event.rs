@@ -78,14 +78,21 @@ impl EventList {
         }
     }
 
-    /// list の対象と印のある対象が同じであることを確かめます。
+    /// list の対象と印のある対象が同じであることを確かめます。list の対象はどれも印を持ち、印のある対象の数が
+    /// list の長さと等しいことを確かめます。list は同じ対象を 2 度持たない ([`Dlist::check`]) ので、2 つの集まりは
+    /// 等しくなります。手間は list の長さと対象の数に比例しますが、印の数え上げは対象ごとの分岐を持ちません。
     pub(crate) fn check(&self) -> Result<(), &'static str> {
+        const BAD: &str = "an event target has bits but is not queued, or the other way round";
         self.order.check()?;
-        for (t, &b) in self.bits.iter().enumerate() {
-            let t = u32::try_from(t).map_err(|_| "an event target number overflows")?;
-            if (b != 0) != self.order.contains(t) {
-                return Err("an event target has bits but is not queued, or the other way round");
-            }
+        let mut unmarked = false;
+        self.order
+            .for_each(|t| unmarked |= self.bits.get(t as usize).is_none_or(|&b| b == 0));
+        // 128 個ずつ u8 で数えると、byte の比べと足し算が vector の命令になります。
+        let (blocks, rest) = self.bits.as_chunks::<128>();
+        let count = |c: &[u8]| usize::from(c.iter().fold(0u8, |a, &b| a + u8::from(b != 0)));
+        let marked = blocks.iter().map(|c| count(c)).sum::<usize>() + count(rest);
+        if unmarked || marked != self.order.len() {
+            return Err(BAD);
         }
         Ok(())
     }
@@ -122,6 +129,14 @@ mod tests {
         e.check().unwrap();
         assert!(e.heap_bytes() > 0);
         e.bits[1] = 4;
+        assert_eq!(
+            e.check(),
+            Err("an event target has bits but is not queued, or the other way round")
+        );
+        // list にある対象の印を消します。
+        e.bits[1] = 0;
+        e.raise(2, 1);
+        e.bits[2] = 0;
         assert_eq!(
             e.check(),
             Err("an event target has bits but is not queued, or the other way round")

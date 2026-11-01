@@ -33,16 +33,17 @@ pub(crate) fn check_free_list(
     rows: usize,
     used: impl Fn(usize) -> bool,
 ) -> Result<(), &'static str> {
-    let mut seen = crate::fixed_vec::FixedVec::try_filled(rows, |_| false)
-        .map_err(|_| "allocation failed while checking")?;
+    // 印は 1 行 1 bit で、検査の間だけ確保します (wgstack-rs.md の「不変条件の検査の手間」)。
+    let mut seen =
+        crate::bitset::BitSet::new(rows).map_err(|_| "allocation failed while checking")?;
     for &i in free {
-        let mark = seen
-            .get_mut(i as usize)
-            .ok_or("a free list number is out of range")?;
-        if *mark {
+        if i as usize >= rows {
+            return Err("a free list number is out of range");
+        }
+        if seen.get(i) {
             return Err("a row is twice in a free list");
         }
-        *mark = true;
+        seen.set(i);
         if used(i as usize) {
             return Err("a free list holds a used row");
         }

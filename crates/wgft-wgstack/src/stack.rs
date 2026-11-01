@@ -285,6 +285,7 @@ impl<H: Hook> Stack<H> {
                 h.reserved += b.snd.cap() + b.rcv.r.cap();
                 if b.boost.is_some() {
                     h.boosted += 1;
+                    h.lent_array_bytes += b.lent_array_bytes();
                 }
             }
         }
@@ -298,6 +299,7 @@ impl<H: Hook> Stack<H> {
         h.ping_endpoints = self.s.pings.used();
         h.events = self.s.events.len();
         h.pool_chunks = self.s.chunks.kept();
+        h.pool_bytes = h.pool_chunks * CHUNK_SIZE;
         h
     }
 
@@ -316,6 +318,7 @@ impl<H: Hook> Stack<H> {
         s.budget.check()?;
         s.udp.check()?;
         s.pings.check()?;
+        s.listeners.check()?;
         if s.udp.held(crate::udp::TX).1 != s.out.udp_queued {
             return Err("the UDP output count disagrees with the send FIFO".into());
         }
@@ -352,7 +355,7 @@ impl<H: Hook> Stack<H> {
             if used {
                 reserved += b.snd.cap() + b.rcv.r.cap();
                 check_conn(t, b)?;
-                crate::tcp::sack::check_scoreboard(t, &b.recs)?;
+                crate::tcp::sack::check_sender(t, &b.recs)?;
             }
             for (k, &d) in t.tdl.iter().enumerate() {
                 let node = i * NUM_TIMERS32 + u32::try_from(k).unwrap_or(0);

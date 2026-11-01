@@ -8,6 +8,7 @@
 //! 別の配列 ([`QLink`]) に持ちます。
 
 use super::conn::QLink;
+use crate::bitset::BitSet;
 use crate::fixed_vec::{AllocError, FixedVec};
 use crate::output::NIL;
 
@@ -19,15 +20,16 @@ pub(crate) const PORTS: usize = 1 << 16;
 pub(crate) struct PortRow<R> {
     /// 開くたびに進める世代です。閉じた後の handle を見分けます。
     pub(crate) generation: u32,
-    pub(crate) open: bool,
     pub(crate) row: R,
 }
 
-/// ポートの番号で引く固定の行の表です。
+/// ポートの番号で引く固定の行の表です。行が開いているかは行に持たず、ポートごとに 1 bit の集合 `open` だけに
+/// 持ちます。開いている行をたどるときと検査は、表の行でなく bit の集合の語 (ポート 64 個で 1 語) をたどります。
 #[derive(Debug)]
 pub(crate) struct PortTable<R> {
     rows: FixedVec<PortRow<R>>,
-    open: usize,
+    open: BitSet,
+    count: usize,
 }
 
 /// 開く時の誤りです。
@@ -40,36 +42,49 @@ impl<R: Default + Copy> PortTable<R> {
     pub(crate) fn new() -> Result<Self, AllocError> {
         Ok(Self {
             rows: FixedVec::try_filled(PORTS, |_| PortRow::default())?,
-            open: 0,
+            open: BitSet::new(PORTS)?,
+            count: 0,
         })
     }
 
+    /// 表の配列の byte です。上界の式が使います。
+    pub(crate) const fn bytes() -> usize {
+        PORTS * size_of::<PortRow<R>>() + BitSet::bytes_for(PORTS)
+    }
+
     pub(crate) fn heap_bytes(&self) -> usize {
-        self.rows.heap_bytes()
+        self.rows.heap_bytes() + self.open.heap_bytes()
     }
 
     /// 開いている行の数です。
     pub(crate) fn open_count(&self) -> usize {
-        self.open
+        self.count
+    }
+
+    /// ポート `port` の行が開いているかです。
+    #[inline]
+    fn is_open(&self, port: u16) -> bool {
+        self.open.get(u32::from(port))
     }
 
     /// ポート `port` の行を開き、世代を返します。開いていれば誤りです。
     pub(crate) fn open(&mut self, port: u16) -> Result<u32, OpenError> {
-        let r = &mut self.rows[usize::from(port)];
-        if r.open {
+        if self.is_open(port) {
             return Err(OpenError::InUse);
         }
+        self.open.set(u32::from(port));
+        self.count += 1;
+        let r = &mut self.rows[usize::from(port)];
         r.generation = r.generation.wrapping_add(1);
-        r.open = true;
         r.row = R::default();
-        self.open += 1;
         Ok(r.generation)
     }
 
     /// handle (ポートと世代) が開いている行を指していれば、その行を返します。
     pub(crate) fn get(&mut self, port: u16, generation: u32) -> Option<&mut R> {
+        let open = self.is_open(port);
         let r = &mut self.rows[usize::from(port)];
-        (r.open && r.generation == generation).then_some(&mut r.row)
+        (open && r.generation == generation).then_some(&mut r.row)
     }
 
     /// ポート `port` の行の今の世代です。閉じた行は最後に開いた時の世代です。
@@ -79,35 +94,40 @@ impl<R: Default + Copy> PortTable<R> {
 
     /// 開いているポート `port` の行です。
     pub(crate) fn by_port(&self, port: u16) -> Option<&R> {
-        let r = &self.rows[usize::from(port)];
-        r.open.then_some(&r.row)
+        self.is_open(port)
+            .then(|| &self.rows[usize::from(port)].row)
     }
 
     pub(crate) fn by_port_mut(&mut self, port: u16) -> Option<&mut R> {
-        let r = &mut self.rows[usize::from(port)];
-        r.open.then_some(&mut r.row)
+        self.is_open(port)
+            .then(|| &mut self.rows[usize::from(port)].row)
     }
 
     /// handle の行を閉じ、閉じる前の行を返します。古い handle なら `None` です。
     pub(crate) fn close(&mut self, port: u16, generation: u32) -> Option<R> {
-        let r = &mut self.rows[usize::from(port)];
-        if !r.open || r.generation != generation {
+        if !self.is_open(port) || self.rows[usize::from(port)].generation != generation {
             return None;
         }
-        r.open = false;
-        self.open -= 1;
-        Some(core::mem::take(&mut r.row))
+        self.open.unset(u32::from(port));
+        self.count -= 1;
+        Some(core::mem::take(&mut self.rows[usize::from(port)].row))
     }
 
-    /// 開いている行をポートの順に渡します。
+    /// 開いている行をポートの順に渡します。手間は開いている行の数と、bit の集合の語の数に比例します。
     pub(crate) fn for_each_open(&self, mut f: impl FnMut(u16, &R)) {
-        for (port, r) in self.rows.iter().enumerate() {
-            if r.open
-                && let Ok(port) = u16::try_from(port)
-            {
-                f(port, &r.row);
+        self.open.for_each(|i| {
+            if let Ok(port) = u16::try_from(i) {
+                f(port, &self.rows[usize::from(port)].row);
             }
+        });
+    }
+
+    /// 開いている行の数が bit の集合と合うことを確かめます。
+    pub(crate) fn check(&self) -> Result<(), &'static str> {
+        if self.open.count() != self.count {
+            return Err("the open port count disagrees with the open ports");
         }
+        Ok(())
     }
 }
 
@@ -225,8 +245,14 @@ mod tests {
             seen += 1;
         });
         assert_eq!((seen, t.open_count()), (1, 1));
-        assert_eq!(t.heap_bytes(), PORTS * size_of::<PortRow<Listener>>());
+        assert_eq!(t.heap_bytes(), PortTable::<Listener>::bytes());
         assert!(t.by_port_mut(80).is_some());
+        t.check().unwrap();
+        t.count += 1;
+        assert_eq!(
+            t.check(),
+            Err("the open port count disagrees with the open ports")
+        );
     }
 
     #[test]
@@ -254,7 +280,7 @@ mod tests {
     #[test]
     fn listener_row_stays_small() {
         assert!(
-            size_of::<PortRow<Listener>>() <= 20,
+            size_of::<PortRow<Listener>>() <= 16,
             "a listener row is {} bytes",
             size_of::<PortRow<Listener>>()
         );

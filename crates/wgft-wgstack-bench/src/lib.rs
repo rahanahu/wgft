@@ -5,7 +5,7 @@
 //! 「接続の枠の配置」にあります。
 
 use core::net::{Ipv4Addr, SocketAddrV4};
-use wgft_wgstack::{Budget, Config, ConnId, NoHook, Stack, Time};
+use wgft_wgstack::{BoostPolicy, Bound, Budget, Config, ConnId, Held, Limits, NoHook, Stack, Time};
 
 const DUT: Ipv4Addr = Ipv4Addr::new(10, 9, 0, 1);
 const PEER: Ipv4Addr = Ipv4Addr::new(10, 9, 0, 2);
@@ -34,6 +34,9 @@ pub struct Rig {
     stack: Stack<NoHook>,
     now: Time,
     peers: Vec<Peer>,
+    /// 握手を終えて accept の待ち行列にいる接続の相手の、ポートと次の番号と核の次の番号です。
+    queued: Vec<(u16, u32, u32)>,
+    listener: wgft_wgstack::ListenerId,
     pkt: Vec<u8>,
     out: Vec<u8>,
     data: Vec<u8>,
@@ -109,21 +112,34 @@ impl Rig {
     /// `new` と同じで、`sack` が真なら相手が SACK-permitted を示し、SACK を交渉した接続の経路 (RACK の状態の更新と
     /// TLP の期限) を通ります。
     pub fn with_sack(conns: usize, sack: bool) -> Self {
-        let config = Config::new(DUT, MTU);
+        Self::build(conns, sack, Limits::default(), BoostPolicy::OnDemand)
+    }
+
+    /// `with_sack` と同じで、表の大きさ `limits` と boost の与え方 `boost` を選びます。
+    pub fn build(conns: usize, sack: bool, limits: Limits, boost: BoostPolicy) -> Self {
+        let config = Config {
+            limits,
+            boost,
+            ..Config::new(DUT, MTU)
+        };
         let stack =
             Stack::new(config, Budget::new().expect("budget"), &[7; 64], NoHook).expect("stack");
+        let mut stack = stack;
+        let l = stack
+            .listen_tcp(Time::ZERO, SocketAddrV4::new(DUT, 80))
+            .expect("listen");
+        // 試験の側が確保の数えに混ざらないよう、list は表の枠の数の容量を先に取ります。
+        let slots = conns.max(limits.conns());
         let mut r = Self {
             stack,
             now: Time::ZERO,
-            peers: Vec::with_capacity(conns),
+            peers: Vec::with_capacity(slots),
+            queued: Vec::with_capacity(slots),
+            listener: l,
             pkt: Vec::with_capacity(MTU + 64),
             out: vec![0; MTU],
             data: vec![0x5a; MSS],
         };
-        let l = r
-            .stack
-            .listen_tcp(r.now, SocketAddrV4::new(DUT, 80))
-            .expect("listen");
         // MSS 1380 と窓の scale 7 と、NOP NOP SACK-permitted です。
         let opts: &[u8] = if sack {
             &[2, 4, 0x05, 0x64, 1, 3, 3, 7, 1, 1, 4, 2]
@@ -223,6 +239,148 @@ impl Rig {
         while self.stack.poll_event().is_some() {}
     }
 
+    /// 相手のポート `port` から握手を終え、accept せずに `segments` 個の中身の segment を届けます。核は接続を
+    /// accept の待ち行列に置いたまま受けます。確立できれば真を返します。
+    pub fn connect_unaccepted(&mut self, port: u16, segments: usize) -> bool {
+        build(
+            &mut self.pkt,
+            port,
+            1000,
+            0,
+            SYN,
+            &[2, 4, 0x05, 0x64, 1, 3, 3, 7],
+            &[],
+        );
+        self.stack.handle_packet(self.now, &self.pkt);
+        let Some(n) = self.stack.poll_transmit(self.now, &mut self.out) else {
+            return false;
+        };
+        let (_, iss, _) = parse(&self.out[..n]);
+        let before = self.stack.held().accept_queued;
+        build(
+            &mut self.pkt,
+            port,
+            1001,
+            iss.wrapping_add(1),
+            ACK,
+            &[],
+            &[],
+        );
+        self.stack.handle_packet(self.now, &self.pkt);
+        if self.stack.held().accept_queued == before {
+            return false;
+        }
+        self.queued.push((port, 1001, iss.wrapping_add(1)));
+        let k = self.queued.len() - 1;
+        for _ in 0..segments {
+            self.deliver(k, true);
+        }
+        while self.stack.poll_transmit(self.now, &mut self.out).is_some() {}
+        while self.stack.poll_event().is_some() {}
+        true
+    }
+
+    /// 相手が中身の segment を 1 つ送ります。`queued` なら待ち行列の `k` 番目の相手、偽なら `k` 番目の接続です。
+    /// 窓の外の分は核が捨てます。
+    fn deliver(&mut self, k: usize, queued: bool) {
+        let (port, snd, rcv) = if queued {
+            self.queued[k]
+        } else {
+            let p = self.peers[k];
+            (p.port, p.snd, p.rcv)
+        };
+        build(&mut self.pkt, port, snd, rcv, ACK | PSH, &[], &self.data);
+        self.stack.handle_packet(self.now, &self.pkt);
+        // 相手の次の番号は、核が確認した番号です。窓の外で捨てた分は送り直しません。
+        let mut next = snd;
+        while let Some(n) = self.stack.poll_transmit(self.now, &mut self.out) {
+            let o = &self.out[..n];
+            let hl = usize::from(o[0] & 0x0f) * 4;
+            let (dport, _, _) = parse(o);
+            let ack = u32::from_be_bytes([o[hl + 8], o[hl + 9], o[hl + 10], o[hl + 11]]);
+            if dport == port && ack.wrapping_sub(next).cast_signed() > 0 {
+                next = ack;
+            }
+        }
+        if queued {
+            self.queued[k].1 = next;
+        } else {
+            self.peers[k].snd = next;
+        }
+    }
+
+    /// accept の待ち行列の接続をすべて accept し、接続の列に足します。accept した数を返します。
+    pub fn accept_queued(&mut self) -> usize {
+        let n = self.queued.len();
+        for (port, snd, rcv) in self.queued.drain(..) {
+            let (id, _) = self.stack.accept(self.now, self.listener).expect("accept");
+            self.peers.push(Peer { id, port, snd, rcv });
+        }
+        while self.stack.poll_event().is_some() {}
+        n
+    }
+
+    /// 接続 `k` に書けなくなるまで書き、核が送る segment を取り出しますが、相手は確認しません。送信の輪が満ちます。
+    pub fn fill_send(&mut self, k: usize) {
+        let p = self.peers[k];
+        while self
+            .stack
+            .write(self.now, p.id, &self.data)
+            .is_ok_and(|n| n > 0)
+        {}
+        let mut acked = p.rcv;
+        while let Some(n) = self.stack.poll_transmit(self.now, &mut self.out) {
+            let (port, seq, len) = parse(&self.out[..n]);
+            let end = seq.wrapping_add(u32::try_from(len).unwrap_or(0));
+            if port == p.port && end.wrapping_sub(acked).cast_signed() > 0 {
+                acked = end;
+            }
+        }
+        self.peers[k].rcv = acked;
+        while self.stack.poll_event().is_some() {}
+    }
+
+    /// 相手が接続 `k` に `segments` 個の中身の segment を送り、アプリケーションは読みません。受信の輪が満ちます。
+    pub fn fill_recv(&mut self, k: usize, segments: usize) {
+        for _ in 0..segments {
+            self.deliver(k, false);
+        }
+        while self.stack.poll_event().is_some() {}
+    }
+
+    /// 相手が接続 `k` で受けたデータを確認し、核が続けて送る分も確認し続けます。核の送信の輪は空になり、送り
+    /// 終えた chunk は置き場に戻ります。
+    pub fn ack(&mut self, k: usize) {
+        loop {
+            let p = self.peers[k];
+            build(&mut self.pkt, p.port, p.snd, p.rcv, ACK, &[], &[]);
+            self.stack.handle_packet(self.now, &self.pkt);
+            let mut acked = p.rcv;
+            while let Some(n) = self.stack.poll_transmit(self.now, &mut self.out) {
+                let (port, seq, len) = parse(&self.out[..n]);
+                let end = seq.wrapping_add(u32::try_from(len).unwrap_or(0));
+                if port == p.port && end.wrapping_sub(acked).cast_signed() > 0 {
+                    acked = end;
+                }
+            }
+            if acked == p.rcv {
+                break;
+            }
+            self.peers[k].rcv = acked;
+        }
+        while self.stack.poll_event().is_some() {}
+    }
+
+    /// 核の会計です。
+    pub fn held(&self) -> Held {
+        self.stack.held()
+    }
+
+    /// 核の上界です。
+    pub fn bound(&self) -> Bound {
+        self.stack.bound()
+    }
+
     /// 接続の数です。
     pub fn conns(&self) -> usize {
         self.peers.len()
@@ -232,6 +390,19 @@ impl Rig {
     pub fn check(&self) {
         self.stack.check_invariants().expect("invariants");
     }
+
+    /// 核の不変条件を確かめ、合っていれば真を返します。不変条件の検査の手間を測るのに使います。
+    pub fn check_ok(&self) -> bool {
+        self.stack.check_invariants().is_ok()
+    }
+}
+
+/// 既定の表の大きさの核を作って閉じます。核の作成の手間を測るのに使います。
+pub fn new_and_close() {
+    let config = Config::new(DUT, MTU);
+    let stack =
+        Stack::new(config, Budget::new().expect("budget"), &[7; 64], NoHook).expect("stack");
+    core::hint::black_box(stack.close(Time::ZERO));
 }
 
 #[cfg(test)]
