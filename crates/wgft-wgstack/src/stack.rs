@@ -168,7 +168,8 @@ impl SlotTally {
 
 /// [`Stack::check_invariants_touched`] が呼び出しの間に持つ、接続の枠ごとの数えとその和です。
 ///
-/// 核の外の値で、核の型は持ちません。1 つの核に 1 つを使い、核を作り直したら [`TouchedCheck::new`] で作り直します。
+/// 核の外の値で、核の型は持ちません。1 つの核に属します。別の核に渡すと、印の無い枠の数えが前の核の値のまま残り、
+/// 答えが変わります。核を作り直したら [`TouchedCheck::new`] で作り直します。
 /// 試験と fuzz の build (`cfg(test)` か feature `harness`) だけにあります。
 #[cfg(any(test, feature = "harness"))]
 #[derive(Debug, Default)]
@@ -195,9 +196,10 @@ fn slot_u32(i: usize) -> u32 {
 
 /// 試験と fuzz の build (`cfg(test)` か feature `harness`) だけにある核の欄の byte です。接続の枠の表の書き換えの印
 /// (`ConnSlots::touched`)、印を持つ知らせの対象の数 (`EventList::marked`)、待ち受けの表と UDP の endpoint の表の
-/// 開いたことのある印 (`PortTable::opened`) です。
+/// 開いたことのある印 (`PortTable::opened`)、配列を返された boost の枠の印 (`Budget::dirty`) です。
 #[cfg(any(test, feature = "harness"))]
-const HARNESS_BYTES: usize = 3 * size_of::<crate::bitset::BitSet>() + size_of::<usize>();
+const HARNESS_BYTES: usize =
+    3 * size_of::<crate::bitset::BitSet>() + size_of::<usize>() + size_of::<u64>();
 
 /// 上界の式が使う核の値の大きさです。製品の核の大きさで数え、試験と fuzz の build だけにある欄を入れません。
 pub(crate) const fn stack_size<H: Hook>() -> usize {
@@ -433,7 +435,7 @@ impl<H: Hook> Stack<H> {
         for i in 0..self.conns.len() {
             sum.add(self.check_slot(slot_u32(i))?);
         }
-        self.check_shared(&sum, EventList::check)
+        self.check_shared(&sum, EventList::check, u64::MAX)
     }
 
     /// [`Stack::check_invariants`] と同じ不変条件を、前の呼び出しから書き換えた接続の枠だけを確かめて確かめます
@@ -463,6 +465,9 @@ impl<H: Hook> Stack<H> {
         self.conns.take_touched(|i| {
             let _ = pending.try_push(i);
         });
+        // 空きの boost の枠の chunk の表は、配列を返された枠だけを確かめ直します。最初の呼び出しはすべてを確かめます。
+        let dirty = self.s.budget.take_dirty();
+        let budget_scan = if ready { dirty } else { u64::MAX };
         let s = &self.s;
         self.conns.check_free(&s.conn_free, &s.qlinks)?;
         if ready {
@@ -485,7 +490,7 @@ impl<H: Hook> Stack<H> {
                 c.tally[i] = t;
             }
         }
-        self.check_shared(&c.sum, EventList::check_counted)?;
+        self.check_shared(&c.sum, EventList::check_counted, budget_scan)?;
         c.primed = true;
         Ok(())
     }
@@ -507,11 +512,12 @@ impl<H: Hook> Stack<H> {
     }
 
     /// 共有の表と、枠と共有の表の間の不変条件を確かめ、枠の数えの和 `sum` を表の数と比べます。知らせの list は
-    /// `events` で確かめます。
+    /// `events` で確かめ、空きの boost の枠の chunk の表は `budget_scan` の bit の立った枠だけで確かめます。
     fn check_shared(
         &self,
         sum: &SlotTally,
         events: fn(&EventList) -> Result<(), &'static str>,
+        budget_scan: u64,
     ) -> Result<(), InvariantError> {
         let s = &self.s;
         s.conn_idx.check()?;
@@ -521,7 +527,7 @@ impl<H: Hook> Stack<H> {
         s.out.rows.check()?;
         events(&s.events)?;
         s.wheel.check()?;
-        s.budget.check()?;
+        s.budget.check_scanning(budget_scan)?;
         s.udp.check()?;
         s.pings.check()?;
         s.listeners.check()?;
