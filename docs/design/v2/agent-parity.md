@@ -727,6 +727,7 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
   数えはプロセスで 1 つなので、試験ごとにプロセスを分けて流す cargo-nextest の下でだけ測り、`cargo test` では測らずに終わります
 - packet ごとの確保の呼び出しの数の試験 (`relay/alloc_tests.rs`、`wgft-wireguard` の `tests/alloc_calls.rs`、`wgft-netstack` の `tests/alloc_calls.rs`):慣らしの後の定常で、トンネルの受信と送信、TCP と UDP の中継の両向き、核と handle の層を流し、確保の呼び出しの数 (`wgft-alloc-count` の `thread_alloc_calls`) を数えます。
   許容は測った値で、確保の出どころを file:line でコメントに書きます。新しい確保は試験が落ち、確保を減らしたら許容を下げます。
+  全体の試験の許容は、agent と試験の相手の間を通った datagram 1 つにつき 2 回で、通った数は試験の相手が数えます。TCP の ACK も数えるので、ACK の数が揺れても結果は揺れません。
   中継はデータプレーンのスレッドの上で動くので、そのスレッドで数を読み、試験の相手と宛先の確保は数えません
 - ラボの check 5 と 5b:Rust の agent では、洪水の前 (トンネルと待ち受けを開いた後) の RSS を測り、洪水の間の RSS の育ちが、洪水が満たせる項と余裕の 32 MiB の和を超えないことも確かめます。
   洪水は黙った TCP の接続と 1 byte の datagram なので、満たせる項は核の固定の部分 (触れていなかった表)、洪水が使った接続の枠の配列、表、駆動、device、TCP の中継の接続ごとの部分、UDP の中継です。

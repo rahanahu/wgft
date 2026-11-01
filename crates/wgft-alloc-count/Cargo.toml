@@ -1,6 +1,6 @@
 [package]
 name = "wgft-alloc-count"
-description = "A counting global allocator for wgstack memory tests; not part of the product"
+description = "A counting global allocator for memory and allocation-count tests; not part of the product"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

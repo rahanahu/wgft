@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -64,6 +64,9 @@ struct Inner {
     /// echo の応答でない ICMP の packet (Port Unreachable など)。
     icmp: Mutex<Vec<Vec<u8>>>,
     next_port: AtomicU16,
+    /// agent との間で通った WireGuard の datagram の数 (受けたものと送ったものの和)。確保の数を datagram の
+    /// 数で割る試験が読む。
+    datagrams: AtomicUsize,
 }
 
 /// The server side of a tunnel to an agent data plane, with a scripted TCP client.
@@ -139,6 +142,7 @@ impl Peer {
             udp: Mutex::new(HashMap::new()),
             icmp: Mutex::new(Vec::new()),
             next_port: AtomicU16::new(40000),
+            datagrams: AtomicUsize::new(0),
         });
         let task = tokio::spawn(serve(device, sock, out_rx, Arc::clone(&inner)));
         let peer = Peer {
@@ -159,6 +163,11 @@ impl Peer {
     /// The server's UDP endpoint.
     pub(crate) fn endpoint(&self) -> SocketAddr {
         self.endpoint
+    }
+
+    /// The datagrams that crossed between the agent and this server so far, both ways.
+    pub(crate) fn datagrams(&self) -> usize {
+        self.inner.datagrams.load(Ordering::Relaxed)
     }
 
     /// The agent's data plane.
@@ -407,6 +416,7 @@ async fn serve(
         tokio::select! {
             r = sock.recv_from(&mut buf) => {
                 let Ok((n, from)) = r else { continue };
+                inner.datagrams.fetch_add(1, Ordering::Relaxed);
                 device.handle_datagram(clock::now(), from, &buf[..n]);
                 while let Some(p) = device.poll_packet() {
                     if let Some(reply) = route(&p, &inner) {
@@ -421,7 +431,9 @@ async fn serve(
         }
         while let Some(t) = device.poll_transmit() {
             let to: SocketAddr = t.to;
-            let _ = sock.send_to(&t.payload, to).await;
+            if sock.send_to(&t.payload, to).await.is_ok() {
+                inner.datagrams.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
