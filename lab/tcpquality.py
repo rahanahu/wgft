@@ -35,6 +35,17 @@
 #       and CPU shares, then the ratio of the wgstack and gVisor medians with a bootstrap 95%
 #       interval, resampling each netstack's runs on their own 10,000 times. A run whose sender
 #       used SENDER_BOUND or more of one CPU measured the sender, and is left out and counted.
+#   cpupaired <logfile>
+#       over the PAIRED lines `lab/lab paired` writes: two arms, x and y, ran at the same time in
+#       two VMs, a and b, and swapped VMs every round. A pair is the run of x and the run of y with
+#       the same round and run number; its ratio is x's agent CPU seconds per GB over y's. Per arm
+#       it prints the median, quartiles and range, as cpuratio does. The estimate is the geometric
+#       mean of the median ratio of the pairs with x in VM a and the median ratio of those with x
+#       in VM b, which cancels a steady difference between the two VMs' CPUs; that difference is
+#       printed as vm_a_over_b. The 95% interval resamples the pairs of each side on their own
+#       10,000 times. A pair is left out when either run lacks a result or measured its sender.
+#       It also prints the median share of the longer run's window that the two runs overlapped,
+#       from the windows by each VM's clock.
 #   udpgso <ifname> on|off|show
 #       sets or reads the device's tx-udp-segmentation feature through the SIOCETHTOOL ioctl, as
 #       `ethtool -K <ifname> tx-udp-segmentation off` would, for lab VMs without ethtool; run it in
@@ -44,6 +55,7 @@
 import ctypes
 import fcntl
 import hashlib
+import math
 import os
 import random
 import socket
@@ -183,7 +195,7 @@ def median(resultfile):
             vals = [float(r[k]) for r in done if k in r]
         except ValueError:
             continue
-        if vals and k not in ("undetermined",):
+        if vals and k not in ("undetermined", "t_start", "t_end"):
             out.append("%s=%g" % (k, statistics.median(vals)))
     print(" ".join(out))
 
@@ -221,6 +233,74 @@ def cpuratio(logfile):
                   for _ in range(10000))
     print("RATIO wgstack_over_gvisor=%.3f ci95_low=%.3f ci95_high=%.3f"
           % (statistics.median(w) / statistics.median(g), boot[249], boot[9749]))
+    return 0
+
+
+def cpupaired(logfile):
+    runs = {}
+    names = {}
+    for l in open(logfile):
+        if not l.startswith("PAIRED "):
+            continue
+        r = dict(kv.split("=", 1) for kv in l.split()[1:] if "=" in kv)
+        if r.get("arm") not in ("x", "y") or r.get("vm") not in ("a", "b"):
+            continue
+        names[r["arm"]] = r.get("name", r["arm"])
+        runs[(r.get("round"), r.get("run"), r["arm"])] = r
+    keys = sorted({(k[0], k[1]) for k in runs}, key=lambda k: (int(k[0]), int(k[1])))
+    pairs = {"a": [], "b": []}
+    arm_vals = {"x": [], "y": []}
+    left_out = 0
+    overlaps = []
+    for rnd, run in keys:
+        x, y = runs.get((rnd, run, "x")), runs.get((rnd, run, "y"))
+        usable = []
+        for r in (x, y):
+            if r is None or "agent_cpu_s_per_gb" not in r or float(r["agent_cpu_s_per_gb"]) <= 0:
+                usable.append(None)
+                continue
+            sender = float(r.get("client_cpu_share", r.get("lan_cpu_share", "0")))
+            usable.append(None if sender >= SENDER_BOUND else (float(r["agent_cpu_s_per_gb"]),
+                                                                float(r["overall_mbit"]),
+                                                                float(r["agent_cpu_share"]), sender))
+        if None in usable:
+            left_out += 1
+            continue
+        arm_vals["x"].append(usable[0])
+        arm_vals["y"].append(usable[1])
+        pairs[x["vm"]].append(usable[0][0] / usable[1][0])
+        if all(k in r for r in (x, y) for k in ("t_start", "t_end")):
+            xs, xe, ys, ye = (float(v) for v in (x["t_start"], x["t_end"], y["t_start"], y["t_end"]))
+            longer = max(xe - xs, ye - ys)
+            if longer > 0:
+                overlaps.append(max(0.0, min(xe, ye) - max(xs, ys)) / longer)
+    for arm in ("x", "y"):
+        rs = arm_vals[arm]
+        if len(rs) < 2:
+            continue
+        c = [r[0] for r in rs]
+        q1, _, q3 = statistics.quantiles(c, n=4, method="inclusive")
+        print("CPU arm=%s name=%s runs=%d cpu_s_per_gb=%.3f q1=%.3f q3=%.3f min=%.3f max=%.3f "
+              "mbit=%.1f agent_cpu_share=%.2f sender_cpu_share=%.2f"
+              % (arm, names.get(arm, arm), len(rs), statistics.median(c), q1, q3, min(c), max(c),
+                 statistics.median(r[1] for r in rs), statistics.median(r[2] for r in rs),
+                 statistics.median(r[3] for r in rs)))
+    for vm in ("a", "b"):
+        if len(pairs[vm]) < 2:
+            print("PAIRS x_in_vm=%s pairs=%d left_out=%d too few pairs" % (vm, len(pairs[vm]), left_out))
+            return 1
+    ma, mb = statistics.median(pairs["a"]), statistics.median(pairs["b"])
+    for vm, m in (("a", ma), ("b", mb)):
+        print("PAIRS x_in_vm=%s pairs=%d ratio_median=%.3f min=%.3f max=%.3f"
+              % (vm, len(pairs[vm]), m, min(pairs[vm]), max(pairs[vm])))
+    rng = random.Random(1)
+    boot = sorted(math.sqrt(statistics.median(rng.choices(pairs["a"], k=len(pairs["a"])))
+                            * statistics.median(rng.choices(pairs["b"], k=len(pairs["b"]))))
+                  for _ in range(10000))
+    print("RATIO x_over_y=%.3f ci95_low=%.3f ci95_high=%.3f pairs=%d left_out=%d vm_a_over_b=%.3f overlap=%s x=%s y=%s"
+          % (math.sqrt(ma * mb), boot[249], boot[9749], len(pairs["a"]) + len(pairs["b"]), left_out,
+             math.sqrt(ma / mb), "%.2f" % statistics.median(overlaps) if overlaps else "unknown",
+             names.get("x", "x"), names.get("y", "y")))
     return 0
 
 
@@ -279,4 +359,4 @@ def udpgso(ifname, op):
 if __name__ == "__main__":
     cmd, args = sys.argv[1], sys.argv[2:]
     sys.exit({"serve": serve, "fetch": fetch, "push": push, "analyze": analyze, "median": median,
-              "cpuratio": cpuratio, "udpgso": udpgso}[cmd](*args))
+              "cpuratio": cpuratio, "cpupaired": cpupaired, "udpgso": udpgso}[cmd](*args))

@@ -7,7 +7,14 @@
 #   lab/lab exec vm env CPU=1 bash /wgft/lab/tcpquality.sh gvisor wgstack
 #
 # The modes are kernel, userspace, which leaves WGFT_AGENT_NETSTACK unset, and gvisor and wgstack,
-# which run the userspace-mode agent with WGFT_AGENT_NETSTACK set to that name.
+# which run the Go agent in userspace mode with WGFT_AGENT_NETSTACK set to that name; all four run
+# the Go wgft on PATH. rust runs the Rust agent, which has one netstack, its own wgstack: the
+# binary `lab/lab build` installs when WGFT_LAB_AGENT_IMPL=rust (RUST_WGFT in sandbox.sh). The
+# server is always the Go wgft in kernel mode.
+#
+# WGFT_BIN_DIR, when set, runs another build: it is put first on PATH, so the server and a Go agent
+# are its wgft, and the rust mode runs its rust/wgft. `lab/lab paired --base` uses it to run the
+# build of a base commit beside the work tree's.
 #
 # With a kernel-mode agent the client's TCP ends at the LAN host's kernel; with a userspace-mode
 # agent it ends at the agent's netstack, gVisor or wgstack, which relays to the LAN host. The path
@@ -55,6 +62,14 @@
 # NETEM_SEED fixes netem's loss pattern where tc and the kernel accept netem's seed option; where
 # they do not, the script says so and the loss differs from run to run.
 #
+# SYNC=1 lines each run up with a run in another VM, for `lab/lab paired`: before the client
+# connects it prints "SYNC ready mode=<mode> run=<run>" and waits up to SYNC_WAIT_S seconds, 300 by
+# default, for the file $W/wgft-tq-go-<mode>-<run>. The host writes into it a start time, in
+# seconds since the epoch, a little ahead, and the run starts at that time by this VM's clock; the
+# line "SYNC go" gives the wait, negative when the file came after the time. Without the file in
+# time the run starts anyway, with a line "SYNC timeout". With CPU=1 the result line also has the
+# run's window, t_start and t_end, by this VM's clock.
+#
 # Requires `lab/lab build` and the netns topology (`lab/lab net up`).
 set -u
 MODES=${*:-kernel userspace}
@@ -69,8 +84,17 @@ NETEM_SEED=${NETEM_SEED:-}
 RATE_MBIT=${RATE_MBIT:-}
 QUEUE_PKTS=${QUEUE_PKTS:-200}
 CPU=${CPU:-}
+SYNC=${SYNC:-}
+SYNC_WAIT_S=${SYNC_WAIT_S:-300}
+if [ -n "${WGFT_BIN_DIR:-}" ]; then
+  PATH=$WGFT_BIN_DIR:$PATH
+  export PATH
+fi
 
 . "$(dirname "$0")/sandbox.sh"
+# the Rust agent of the rust mode: the one lab/lab build installs, or the one of WGFT_BIN_DIR's build
+RUST_AGENT=${WGFT_BIN_DIR:+$WGFT_BIN_DIR/rust/wgft}
+RUST_AGENT=${RUST_AGENT:-$RUST_WGFT}
 Q="python3 $(cd "$(dirname "$0")" && pwd)/tcpquality.py"
 ADMIN=127.0.0.1:8686
 DATA=$W/wgft-tq-server
@@ -174,7 +198,11 @@ cleanup() {
 trap cleanup EXIT
 
 for mode in $MODES; do
-  case "$mode" in kernel|userspace|gvisor|wgstack) ;; *) echo "usage: tcpquality.sh [kernel|userspace|gvisor|wgstack]..." >&2; exit 2;; esac
+  case "$mode" in kernel|userspace|gvisor|wgstack|rust) ;; *) echo "usage: tcpquality.sh [kernel|userspace|gvisor|wgstack|rust]..." >&2; exit 2;; esac
+  if [ "$mode" = rust ] && [ ! -x "$RUST_AGENT" ]; then
+    echo "tcpquality.sh: the rust mode needs the Rust agent at $RUST_AGENT; build it with WGFT_LAB_AGENT_IMPL=rust lab/lab build" >&2
+    exit 2
+  fi
 done
 case "$DIRECTION" in
   down) transfer=download reader="the client" writer="the LAN host" dir_field= ;;
@@ -218,7 +246,10 @@ gso_now=$(ip netns exec "$HOME_NS" $Q udpgso eth0 off) ||
 echo "   agent eth0: $gso_now"
 for mode in $MODES; do
   agent_env=(-u WGFT_AGENT_NETSTACK WGFT_MODE="$mode")
-  case "$mode" in gvisor|wgstack) agent_env=(WGFT_MODE=userspace WGFT_AGENT_NETSTACK="$mode");; esac
+  case "$mode" in
+    gvisor|wgstack) agent_env=(WGFT_MODE=userspace WGFT_AGENT_NETSTACK="$mode") ;;
+    rust) agent_env=(-u WGFT_AGENT_NETSTACK WGFT_MODE=userspace) ;;
+  esac
   if [ "$OUTAGE_S" = 0 ]; then outage="no outage"; else outage="${OUTAGE_S}s outage after ${OUTAGE_AFTER} bytes"; fi
   path="delay ${DELAY_MS}ms and loss ${LOSS_PCT}%${RATE_MBIT:+ at ${RATE_MBIT} Mbit/s with a ${QUEUE_PKTS}-packet queue}"
   echo "== agent $mode: $path each way, ${BYTES}-byte $transfer, $outage, $RUNS runs"
@@ -229,8 +260,13 @@ for mode in $MODES; do
   disown
   wait_until 30 vps wgft agent ls --admin "$ADMIN" || { echo "FAIL  the server did not come up"; fail=1; continue; }
   join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  env "${agent_env[@]}" WGFT_JOIN="$join" "WGFT_AGENT_ALLOW_TARGETS=$TARGET" \
-    ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > "$W/wgft-tq-agent-$mode.log" 2>&1 < /dev/null &  # lab: go agent
+  if [ "$mode" = rust ]; then
+    env "${agent_env[@]}" WGFT_JOIN="$join" "WGFT_AGENT_ALLOW_TARGETS=$TARGET" \
+      ip netns exec "$HOME_NS" setsid nohup "$RUST_AGENT" agent run --data-dir "$ADATA" > "$W/wgft-tq-agent-$mode.log" 2>&1 < /dev/null &
+  else
+    env "${agent_env[@]}" WGFT_JOIN="$join" "WGFT_AGENT_ALLOW_TARGETS=$TARGET" \
+      ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > "$W/wgft-tq-agent-$mode.log" 2>&1 < /dev/null &  # lab: go agent
+  fi
   disown
   wait_until 30 handshaken || { echo "FAIL  the agent did not register"; fail=1; continue; }
   : > "$W/wgft-tq-serve-$mode.log"
@@ -258,6 +294,19 @@ for mode in $MODES; do
     mark=$W/wgft-tq-mark-$mode
     rm -f "$mark" "$W/wgft-tq-samples-$mode"
     impair
+    if [ -n "$SYNC" ]; then
+      go=$W/wgft-tq-go-$mode-$run
+      rm -f "$go"
+      echo "SYNC ready mode=$mode run=$run"
+      if wait_until "$SYNC_WAIT_S" test -s "$go"; then
+        wait_s=$(awk -v t="$(cat "$go")" -v n="$(date +%s.%N)" 'BEGIN { printf "%.3f", t - n }')
+        case "$wait_s" in -*) ;; *) sleep "$wait_s" ;; esac
+        echo "SYNC go mode=$mode run=$run wait_s=$wait_s"
+      else
+        echo "SYNC timeout mode=$mode run=$run"
+      fi
+      rm -f "$go"
+    fi
     if [ -n "$CPU" ]; then
       t0=$(date +%s.%N) a0=$(cpu_us "$agent_pid" "$agent_cg") s0=$(cpu_us "$server_pid" "$server_cg") l0=$(cpu_us "$lan_pid" "$lan_cg")
     fi
@@ -297,8 +346,8 @@ for mode in $MODES; do
       stats="$stats $(awk -v t0="$t0" -v t1="$t1" -v n="$(field received "$got")" -v c="$(field cpu_s "$sent")" \
         -v a="$((${a1:-0} - ${a0:-0}))" -v s="$((${s1:-0} - ${s0:-0}))" -v l="$((${l1:-0} - ${l0:-0}))" 'BEGIN {
           t = t1 - t0
-          printf "window_s=%.3f agent_cpu_s=%.3f agent_cpu_s_per_gb=%.3f agent_cpu_share=%.3f server_cpu_s=%.3f lan_cpu_share=%.3f",
-            t, a / 1e6, (n > 0 ? a / 1e6 / (n / 1e9) : -1), a / 1e6 / t, s / 1e6, l / 1e6 / t
+          printf "t_start=%.3f t_end=%.3f window_s=%.3f agent_cpu_s=%.3f agent_cpu_s_per_gb=%.3f agent_cpu_share=%.3f server_cpu_s=%.3f lan_cpu_share=%.3f",
+            t0, t1, t, a / 1e6, (n > 0 ? a / 1e6 / (n / 1e9) : -1), a / 1e6 / t, s / 1e6, l / 1e6 / t
           if (c != "") printf " client_cpu_share=%.3f", c / t }')"
     fi
     echo "   run $run sent:     $sent"
