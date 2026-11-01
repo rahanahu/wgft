@@ -12,6 +12,7 @@
 )]
 
 use super::*;
+use crate::buf::BOOST_SIZE;
 use crate::buf::chunk::CHUNK_SIZE;
 use crate::config::Limits;
 use crate::tcp::listen::enqueue;
@@ -83,10 +84,25 @@ fn close_returns_everything() {
     }
     let first = s.conns.id(0);
     let (b, recs, iv) = s.budget.acquire(first).unwrap();
+    // 送信と受信の両方を boost の段に移します。
     let c = s.conns.slot_mut(0);
     c.boost = Some(b);
+    c.snd
+        .resize(BOOST_SIZE, &mut s.chunks, |f| f(0, 3 * CHUNK_SIZE as u64))
+        .unwrap();
     c.spare_recs = c.recs.resize(recs);
+    c.rcv.resize_ring(BOOST_SIZE, &mut s.chunks).unwrap();
     c.spare_iv = c.rcv.set_intervals(iv).unwrap();
+    // 2 本目は送信だけを boost の段に移し、boost の区間の表を控えに持ちます。
+    let second = s.conns.id(1);
+    let (b2, recs2, iv2) = s.budget.acquire(second).unwrap();
+    let c = s.conns.slot_mut(1);
+    c.boost = Some(b2);
+    c.snd
+        .resize(BOOST_SIZE, &mut s.chunks, |f| f(0, 3 * CHUNK_SIZE as u64))
+        .unwrap();
+    c.spare_recs = c.recs.resize(recs2);
+    c.spare_iv = iv2;
     s.syn
         .insert(SynRow {
             tup: tup(2000),
@@ -113,7 +129,7 @@ fn close_returns_everything() {
             h.boosted,
             h.events
         ),
-        (2, 1, 1, 2, 1, 1, 1)
+        (2, 1, 1, 2, 1, 2, 1)
     );
     assert_eq!(h.chunk_bytes, 6 * CHUNK_SIZE);
     assert!(h.record_bytes > 0 && h.interval_bytes > 0 && h.reserved > 0);
@@ -140,6 +156,14 @@ fn invariants_catch_a_broken_count() {
         "a slot that claims a boost slot it does not hold"
     );
     s.conns.slot_mut(i).boost = None;
+    s.check_invariants().unwrap();
+    // 輪の外に出した chunk は置き場の数と合いません。
+    let c = s.chunks.get().unwrap();
+    assert_eq!(
+        s.check_invariants().unwrap_err().what(),
+        "the chunk pool count disagrees with the rings"
+    );
+    s.chunks.put(c);
     s.check_invariants().unwrap();
     let text = s
         .check_invariants()

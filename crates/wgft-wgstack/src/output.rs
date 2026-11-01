@@ -103,7 +103,12 @@ impl Dlist {
         let mut prev = NIL;
         let mut i = self.head;
         while i != NIL {
-            if !self.in_list[i as usize] || self.prev[i as usize] != prev {
+            let (Some(&marked), Some(&p)) =
+                (self.in_list.get(i as usize), self.prev.get(i as usize))
+            else {
+                return Err("a list link is out of range");
+            };
+            if !marked || p != prev {
                 return Err("a list node is linked but not marked");
             }
             count += 1;
@@ -213,6 +218,14 @@ mod tests {
         assert_eq!(l.pop_front(), None);
         assert!(l.is_empty());
         l.check().unwrap();
+        // 印だけが残った節と、範囲の外の link の検出。
+        l.in_list[2] = true;
+        assert_eq!(l.check(), Err("a list count disagrees with its nodes"));
+        l.in_list[2] = false;
+        l.push_back(1);
+        l.next[1] = 42;
+        l.tail = 42;
+        assert_eq!(l.check(), Err("a list link is out of range"));
     }
 
     #[test]

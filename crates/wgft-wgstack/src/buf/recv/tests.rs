@@ -14,6 +14,7 @@
 
 use super::super::{BOOST_INTERVALS, BOOST_SIZE, FLOOR_INTERVALS, MIN_MSS, RECV_FLOOR};
 use super::*;
+use crate::buf::chunk::fail_chunks_after;
 use crate::rng::ChaCha8;
 use crate::seq;
 
@@ -77,6 +78,14 @@ fn recv_intervals() {
             right: last - 9
         }
     );
+    b.check().unwrap();
+    // 数と byte の合計が木と合わないことの検出。
+    b.n += 1;
+    assert_eq!(b.check(), Err("an interval tree disagrees with its counts"));
+    b.n -= 1;
+    b.ooo += 1;
+    assert_eq!(b.check(), Err("an interval tree disagrees with its counts"));
+    b.ooo -= 1;
     b.check().unwrap();
     b.r.release(&mut p);
 }
@@ -444,4 +453,62 @@ fn run_model(seed: u8) -> (usize, usize) {
     }
     b.r.release(&mut pool);
     (block_count, deviate)
+}
+
+/// 確保の失敗の後に状態が変わっていないことを比べる写しです。
+fn snapshot(b: &RecvBuf, p: &ChunkPool) -> impl PartialEq + core::fmt::Debug + use<> {
+    (
+        (
+            b.r.held_chunks(),
+            b.r.cap(),
+            b.read_off,
+            b.nxt_off,
+            p.held(),
+        ),
+        (b.root, b.free, b.used, b.n, b.ooo, b.ctr),
+        (b.recent, b.nrecent),
+        intervals(b),
+    )
+}
+
+/// chunk の確保に失敗した挿入と輪の移しは、木、数、印、輪、置き場のどれも変えません。
+#[test]
+fn failed_allocation_changes_nothing() {
+    let mut p = ChunkPool::new().unwrap();
+    let mut b = RecvBuf::new(BOOST_SIZE, table(8), 99);
+    b.insert(0, &[1; 100], BOOST_SIZE, &mut p);
+    b.insert(200, &[2; 50], BOOST_SIZE, &mut p);
+    b.check().unwrap();
+    // (offset, 長さ, 失敗までに取れる chunk の数)。どれも、取れる数より多くの新しい chunk を要します。
+    let cases: [(u64, usize, usize); 5] = [
+        (100, 40_000, 1),
+        (40_000, 10, 0),
+        (150, 50_000, 1),
+        (100, 20_000, 0),
+        (70_000, 40_000, 2),
+    ];
+    for (off, len, after) in cases {
+        let before = snapshot(&b, &p);
+        fail_chunks_after(Some(after));
+        let res = b.insert(off, &vec![3; len], BOOST_SIZE, &mut p);
+        fail_chunks_after(None);
+        assert!(res.no_memory, "insert({off}, {len}) after {after}: {res:?}");
+        assert_eq!(
+            snapshot(&b, &p),
+            before,
+            "insert({off}, {len}) after {after}"
+        );
+        b.check().unwrap();
+    }
+    let before = snapshot(&b, &p);
+    fail_chunks_after(Some(0));
+    assert!(b.resize_ring(RECV_FLOOR, &mut p).is_err());
+    fail_chunks_after(None);
+    assert_eq!(snapshot(&b, &p), before, "a failed ring move");
+    // 失敗しなければ同じ操作は通ります。
+    assert!(b.insert(40_000, &[4; 10], BOOST_SIZE, &mut p).ooo);
+    b.resize_ring(RECV_FLOOR * 2, &mut p).unwrap();
+    b.check().unwrap();
+    b.r.release(&mut p);
+    assert_eq!(p.held(), 0);
 }

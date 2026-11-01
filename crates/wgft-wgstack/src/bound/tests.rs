@@ -6,6 +6,10 @@
     clippy::disallowed_macros,
     reason = "the test writes the table as a string"
 )]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "buffer sizes of at most 4 MiB"
+)]
 
 use super::*;
 use crate::config::Config;
@@ -161,3 +165,74 @@ fn bound_does_not_depend_on_use() {
 }
 
 use crate::time::Time;
+
+/// すべての枠を使い、boost の枠をすべて貸し、どの輪も満たした核の保持を、上界の項ごとに比べます。
+/// 再組み立ての表の余地のような別の項の余りが、足りない項を隠さないためです。
+#[test]
+fn a_full_stack_meets_each_term() {
+    use crate::buf::{BOOST_INTERVALS, BOOST_RECORDS};
+    let limits = Limits {
+        max_flows: 16,
+        accept_queue: 8,
+        syn_rows: 4,
+        tw_rows: 4,
+        ctl_slots: 2,
+        frag_entries: 4,
+        frag_pieces: 8,
+    };
+    let config = Config {
+        addr: Ipv4Addr::new(10, 9, 0, 1),
+        mtu: 1420,
+        limits,
+    };
+    let mut s = Stack::new(config, Budget::new().unwrap(), &[3; 64], NoHook).unwrap();
+    let data = vec![7u8; BOOST_SIZE as usize];
+    for _ in 0..limits.conns() {
+        let i = s.conns.alloc().unwrap().unwrap();
+        let id = s.conns.id(i);
+        let boosted = s.budget.acquire(id);
+        let c = s.conns.slot_mut(i);
+        if let Some((b, recs, iv)) = boosted {
+            c.boost = Some(b);
+            c.snd = crate::buf::ring::Ring::new(BOOST_SIZE);
+            c.spare_recs = c.recs.resize(recs);
+            c.rcv.r = crate::buf::ring::Ring::new(BOOST_SIZE);
+            c.spare_iv = c.rcv.set_intervals(iv).unwrap();
+        }
+        let (snd_cap, rcv_cap) = (c.snd.cap(), c.rcv.r.cap());
+        c.snd
+            .write(0, &data[..snd_cap as usize], &mut s.chunks)
+            .unwrap();
+        assert_eq!(
+            c.rcv
+                .insert(0, &data[..rcv_cap as usize], rcv_cap, &mut s.chunks)
+                .accepted,
+            rcv_cap as usize
+        );
+    }
+    s.check_invariants().unwrap();
+    let h = s.held();
+    let bound = s.bound();
+    let (n, slots) = (b(limits.conns()), b(BOOST_SLOTS));
+    assert_eq!(h.boosted as u64, slots);
+    let chunk_terms = n * (SEND_FLOOR + RECV_FLOOR)
+        + slots * ((BOOST_SIZE - SEND_FLOOR) + (BOOST_SIZE - RECV_FLOOR));
+    let record_terms =
+        n * b(FLOOR_RECORDS * size_of::<Record>()) + slots * b(BOOST_RECORDS * size_of::<Record>());
+    let interval_terms = n * b(FLOOR_INTERVALS * size_of::<Interval>())
+        + slots * b(BOOST_INTERVALS * size_of::<Interval>());
+    assert_eq!(b(h.chunk_bytes), chunk_terms, "chunk bytes");
+    assert_eq!(b(h.record_bytes), record_terms, "record bytes");
+    assert_eq!(b(h.interval_bytes), interval_terms, "interval bytes");
+    assert_eq!(
+        chunk_terms + record_terms + interval_terms,
+        bound.floor_conn + bound.boost - b(Budget::slot_bytes()),
+        "the filled stack reaches exactly the floor and boost terms"
+    );
+    assert!(
+        h.reserved
+            <= n * (SEND_FLOOR + RECV_FLOOR) + slots * (2 * BOOST_SIZE - SEND_FLOOR - RECV_FLOOR)
+    );
+    let closed = s.close(Time::ZERO);
+    assert!(closed.held.is_zero());
+}

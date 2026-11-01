@@ -10,7 +10,10 @@ use crate::buf::chunk::ChunkPool;
 use crate::buf::records::{Record, RecordRing};
 use crate::buf::recv::{Interval, RecvBuf};
 use crate::buf::ring::Ring;
-use crate::buf::{FLOOR_INTERVALS, FLOOR_RECORDS, RECV_FLOOR, SEND_FLOOR};
+use crate::buf::{
+    BOOST_INTERVALS, BOOST_RECORDS, BOOST_SIZE, FLOOR_INTERVALS, FLOOR_RECORDS, RECV_FLOOR,
+    SEND_FLOOR,
+};
 use crate::fixed_vec::{AllocError, FixedVec};
 use crate::output::NIL;
 use crate::wire::Tuple;
@@ -21,6 +24,13 @@ use crate::wire::Tuple;
 pub struct ConnId {
     pub(crate) slot: u32,
     pub(crate) generation: u64,
+}
+
+impl ConnId {
+    /// 接続の枠の番号です。呼び手が接続ごとの表を核の外に持つ時の位置に使えます。
+    pub fn index(&self) -> usize {
+        self.slot as usize
+    }
 }
 
 /// 接続の枠です。
@@ -39,7 +49,8 @@ pub(crate) struct ConnSlot {
     pub(crate) snd: Ring,
     pub(crate) rcv: RecvBuf,
     pub(crate) recs: RecordRing,
-    /// boost の間、使っていない floor の配列をここに置きます。
+    /// 使っていない方の配列の控えです。boost の間の floor の記録の輪と、受信が boost の段に移るまでの boost の
+    /// 区間の表 (移った後は floor の区間の表) を置きます。
     pub(crate) spare_recs: FixedVec<Record>,
     pub(crate) spare_iv: FixedVec<Interval>,
     /// 借りている boost の枠の番号です。
@@ -72,6 +83,20 @@ impl ConnSlot {
             self.recs.heap_bytes() + self.spare_recs.heap_bytes(),
             self.rcv.intervals_heap_bytes() + self.spare_iv.heap_bytes(),
         )
+    }
+
+    /// boost の配列を取り出し、boost の印を外します。受信が boost の段に移っていれば、使っている区間の表が boost
+    /// のもので、移っていなければ控えが boost のものです。核を閉じる時に、配列を `Budget` へ返すために使います。
+    /// 輪の中身は移さないので、呼び手は続けて枠を返します。
+    pub(crate) fn take_boost_arrays(&mut self) -> (FixedVec<Record>, FixedVec<Interval>) {
+        self.boost = None;
+        let recs = self.recs.take();
+        let iv = if self.rcv.intervals_capacity() == BOOST_INTERVALS {
+            self.rcv.take_intervals()
+        } else {
+            core::mem::take(&mut self.spare_iv)
+        };
+        (recs, iv)
     }
 
     /// 送受信の輪が持つ chunk の数です。
@@ -207,30 +232,71 @@ impl ConnSlots {
 
     /// 空きの list と使っている印が一致することを確かめます。
     pub(crate) fn check(&self) -> Result<(), &'static str> {
-        let mut free = 0;
+        let mut seen = FixedVec::try_filled(self.slots.len(), |_| false)
+            .map_err(|_| "allocation failed while checking")?;
         for &i in self.free.iter() {
             let s = self
                 .slots
                 .get(i as usize)
                 .ok_or("a free slot number is out of range")?;
+            let mark = seen
+                .get_mut(i as usize)
+                .ok_or("a free slot number is out of range")?;
+            if *mark {
+                return Err("a slot is twice in the free list");
+            }
+            *mark = true;
             if s.in_use || s.in_index || s.queued || s.boost.is_some() {
                 return Err("a free slot is still in use");
             }
             if s.held_chunks() != 0 {
                 return Err("a free slot holds chunks");
             }
-            free += 1;
         }
-        if free + self.slots.iter().filter(|s| s.in_use).count() != self.slots.len() {
+        if self.free.len() + self.slots.iter().filter(|s| s.in_use).count() != self.slots.len() {
             return Err("the free slots and the used slots do not add up");
         }
         for (_, s) in self.iter() {
             s.snd.check()?;
             s.rcv.r.check()?;
             s.rcv.check()?;
+            check_stage(s)?;
         }
         Ok(())
     }
+}
+
+/// 枠の段と配列が合うことを確かめます。boost の無い枠は floor の容量と floor の長さの配列を持ちます。boost の
+/// 枠は送信が boost の段で、使っていない floor の記録の輪を控えに持ちます。受信は floor か boost の段で、使って
+/// いない方の区間の表を控えに持ちます。使っていない枠は floor の配列を持つか、まだ何も持ちません。
+fn check_stage(s: &ConnSlot) -> Result<(), &'static str> {
+    let ivs = s.rcv.intervals_capacity();
+    if !s.in_use || s.boost.is_none() {
+        let arrays = (s.recs.capacity(), ivs);
+        let fresh = !s.in_use && arrays == (0, 0);
+        if s.snd.cap() != SEND_FLOOR
+            || s.rcv.r.cap() != RECV_FLOOR
+            || !(fresh || arrays == (FLOOR_RECORDS, FLOOR_INTERVALS))
+            || s.spare_recs.capacity() != 0
+            || s.spare_iv.capacity() != 0
+        {
+            return Err("a slot without boost is not at the floor stage");
+        }
+        return Ok(());
+    }
+    let recv_ok = match (ivs, s.spare_iv.len()) {
+        (FLOOR_INTERVALS, BOOST_INTERVALS) => s.rcv.r.cap() == RECV_FLOOR,
+        (BOOST_INTERVALS, FLOOR_INTERVALS) => s.rcv.r.cap() == BOOST_SIZE,
+        _ => false,
+    };
+    if s.snd.cap() != BOOST_SIZE
+        || s.recs.capacity() != BOOST_RECORDS
+        || s.spare_recs.len() != FLOOR_RECORDS
+        || !recv_ok
+    {
+        return Err("a boosted slot's stage disagrees with its arrays");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -256,6 +322,46 @@ mod tests {
         assert_eq!(t.alloc().unwrap(), Some(3));
         assert_eq!(t.alloc().unwrap(), None);
         assert_eq!(t.in_use(), 4);
+        t.check().unwrap();
+    }
+
+    #[test]
+    fn check_catches_broken_free_lists_and_stages() {
+        let mut p = ChunkPool::new().unwrap();
+        let mut t = ConnSlots::new(3).unwrap();
+        t.check().unwrap();
+        let i = t.alloc().unwrap().unwrap();
+        t.check().unwrap();
+        // 同じ枠を 2 度 free list に入れる。
+        let _ = t.free.try_push(1);
+        assert_eq!(t.check(), Err("a slot is twice in the free list"));
+        t.free.pop();
+        t.free[0] = 99;
+        assert_eq!(t.check(), Err("a free slot number is out of range"));
+        t.free[0] = 2;
+        t.check().unwrap();
+        // 使っている枠が floor でない段を持つ。
+        t.slot_mut(i).snd = Ring::new(BOOST_SIZE);
+        assert_eq!(
+            t.check(),
+            Err("a slot without boost is not at the floor stage")
+        );
+        t.slot_mut(i).boost = Some(0);
+        assert_eq!(
+            t.check(),
+            Err("a boosted slot's stage disagrees with its arrays")
+        );
+        t.slot_mut(i).boost = None;
+        t.slot_mut(i).snd = Ring::new(SEND_FLOOR);
+        t.check().unwrap();
+        // 数が合わない:使っている印だけを消す。
+        t.slot_mut(i).in_use = false;
+        assert_eq!(
+            t.check(),
+            Err("the free slots and the used slots do not add up")
+        );
+        t.slot_mut(i).in_use = true;
+        t.release(i, &mut p);
         t.check().unwrap();
     }
 

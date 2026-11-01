@@ -180,8 +180,9 @@ impl Wheel {
         }
     }
 
-    /// 時刻を `ns` まで進め、期限の来た節を外して `fired` に足します。
+    /// 時刻を `ns` まで進め、期限の来た節を外して `fired` に入れます。`fired` は先に空にします。
     pub(crate) fn advance(&mut self, ns: u64, fired: &mut FixedVec<u32>) {
+        fired.clear();
         let now = ns / TICK_NS;
         while self.tick < now {
             if self.count == 0 {
@@ -387,5 +388,13 @@ mod tests {
             "a deadline in the past moves to the next tick"
         );
         assert!(w.heap_bytes() >= 2 * (8 + 4 + 4 + 2));
+        w.check().unwrap();
+        w.bm[0] = 0;
+        assert_eq!(w.check(), Err("a wheel bucket bit disagrees with its list"));
+        w.bm[0] = 1 << 6;
+        w.count = 2;
+        assert_eq!(w.check(), Err("the wheel count disagrees with its buckets"));
+        w.count = 1;
+        w.check().unwrap();
     }
 }

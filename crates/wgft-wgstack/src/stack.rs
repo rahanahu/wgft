@@ -329,10 +329,7 @@ impl<H: Hook> Stack<H> {
                     .find(|(_, s)| s.boost == Some(i))
                     .map(|(n, _)| n);
                 if let Some(n) = s {
-                    let slot = self.conns.slot_mut(n);
-                    slot.boost = None;
-                    let recs = slot.recs.take();
-                    let iv = slot.rcv.take_intervals();
+                    let (recs, iv) = self.conns.slot_mut(n).take_boost_arrays();
                     self.budget.release(i, recs, iv);
                 }
             }

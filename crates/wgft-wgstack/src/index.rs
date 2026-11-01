@@ -237,4 +237,28 @@ mod tests {
         x.for_each(|_, _| n += 1);
         assert_eq!(n, 0);
     }
+
+    #[test]
+    fn check_catches_unreachable_and_stale_entries() {
+        let mut x = Index::new(4, SipKey { k0: 3, k1: 4 }, false).unwrap();
+        let t = Tuple {
+            laddr: 1,
+            raddr: 2,
+            lport: 3,
+            rport: 4,
+        };
+        x.insert(t, 0, 0);
+        x.check().unwrap();
+        let i = x.ents.iter().position(|e| e.id != 0).unwrap();
+        // 本来の位置から空きを挟んだ位置へ動かすと、探索で届きません。
+        let j = (i + 2) % x.ents.len();
+        x.ents[j] = x.ents[i];
+        x.ents[i] = IndexEnt::default();
+        assert_eq!(
+            x.check(),
+            Err("an index entry is not reachable from its home position")
+        );
+        x.ents[j].hash ^= 1;
+        assert_eq!(x.check(), Err("an index entry has a stale hash"));
+    }
 }

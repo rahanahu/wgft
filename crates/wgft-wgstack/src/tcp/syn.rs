@@ -210,6 +210,7 @@ impl SynTable {
     /// 表、list、空きの list、使っている印、数が一致することを確かめます。
     pub(crate) fn check(&self) -> Result<(), &'static str> {
         self.idx.check()?;
+        super::check_free_list(&self.free, self.rows.len(), |i| self.rows[i].used)?;
         let used = self.rows.iter().filter(|r| r.used).count();
         if used != self.n || used + self.free.len() != self.rows.len() || self.idx.len() != used {
             return Err("the half-open table counts disagree");
@@ -219,7 +220,10 @@ impl SynTable {
             let mut prev = NIL;
             let mut id = l.head;
             while id != NIL {
-                let r = &self.rows[id as usize];
+                let r = self
+                    .rows
+                    .get(id as usize)
+                    .ok_or("a half-open list link is out of range")?;
                 if !r.used || usize::from(r.retries) != retries || r.prev != prev {
                     return Err("a half-open row is in the wrong list");
                 }
@@ -290,5 +294,16 @@ mod tests {
             (0, None, false)
         );
         assert!(t.heap_bytes() > 3 * size_of::<SynRow>());
+        // 空きの list の重なり、範囲の外の番号、壊れた list の検出。
+        let orig = t.free[0];
+        t.free[0] = t.free[1];
+        assert_eq!(t.check(), Err("a row is twice in a free list"));
+        t.free[0] = 7;
+        assert_eq!(t.check(), Err("a free list number is out of range"));
+        t.free[0] = orig;
+        t.check().unwrap();
+        let id = t.insert(row(1, 1)).unwrap();
+        t.rows[id as usize].next = 77;
+        assert_eq!(t.check(), Err("a half-open list link is out of range"));
     }
 }

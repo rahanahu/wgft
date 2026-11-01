@@ -38,6 +38,7 @@ impl EventList {
 
     /// 対象 `t` に印 `bit` を付けます。既に list にあれば順番は変えません。
     pub(crate) fn raise(&mut self, t: u32, bit: Bits) {
+        debug_assert!(bit != 0, "an event needs a kind");
         self.bits[t as usize] |= bit;
         self.order.push_back(t);
     }
@@ -102,5 +103,10 @@ mod tests {
         assert_eq!(e.pop(), None, "a reset target delivers nothing");
         e.check().unwrap();
         assert!(e.heap_bytes() > 0);
+        e.bits[1] = 4;
+        assert_eq!(
+            e.check(),
+            Err("an event target has bits but is not queued, or the other way round")
+        );
     }
 }

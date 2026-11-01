@@ -9,6 +9,15 @@ pub const MIN_MTU: usize = 576;
 pub const MAX_MTU: usize = 9216;
 
 /// 表の大きさです。本番は [`Limits::with_max_flows`] の値で、試験だけが小さな値を渡します。
+///
+/// 一部の値だけを変えるときは、既定の値から作ります。
+///
+/// ```
+/// use wgft_wgstack::Limits;
+///
+/// let small = Limits { max_flows: 8, accept_queue: 4, tw_rows: 32, ..Limits::default() };
+/// assert_eq!(small.conns(), 12);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// 同時に確立できる接続の数 K です (`WGFT_MAX_TCP_FLOWS`)。
@@ -50,7 +59,7 @@ impl Limits {
 
     /// 接続の枠の数 N_c = K + Q です。
     pub const fn conns(&self) -> usize {
-        self.max_flows + self.accept_queue
+        self.max_flows.saturating_add(self.accept_queue)
     }
 }
 
@@ -100,6 +109,8 @@ impl fmt::Display for ConfigError {
     }
 }
 
+impl core::error::Error for ConfigError {}
+
 impl Config {
     /// 設定を確かめます。
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -107,21 +118,30 @@ impl Config {
             return Err(ConfigError::Mtu(self.mtu));
         }
         let l = &self.limits;
+        // 番号は u32 に収め、タイマーの輪の節 (枠の数 × 4) も溢れない大きさにします。
         let fits = |n: usize| u32::try_from(n).is_ok_and(|n| n < u32::MAX / 8);
+        let (Some(conns), Some(rows)) = (
+            l.max_flows.checked_add(l.accept_queue),
+            l.syn_rows.checked_add(l.tw_rows),
+        ) else {
+            return Err(ConfigError::Limits);
+        };
+        // 待ち受け 1 つの accept の待ち行列と握手の途中の行の数は、その半分までで、16 bit の欄に数えます。
+        let per_listener = |n: usize| u16::try_from(n / 2).is_ok();
+        let frag = crate::frag::Limits {
+            entries: l.frag_entries,
+            fragments: l.frag_pieces,
+            ..crate::frag::LIMITS
+        };
         if l.max_flows == 0
             || l.tw_rows == 0
             || l.ctl_slots == 0
-            || !fits(l.conns())
-            || !fits(l.syn_rows + l.tw_rows)
             || l.ctl_slots > 1 << 16
-            || l.max_flows.checked_add(l.accept_queue).is_none()
-            || (crate::frag::Limits {
-                entries: l.frag_entries,
-                fragments: l.frag_pieces,
-                ..crate::frag::LIMITS
-            })
-            .base_cost()
-            .is_err()
+            || !fits(conns)
+            || !fits(rows)
+            || !per_listener(l.accept_queue)
+            || !per_listener(l.syn_rows)
+            || frag.base_cost().is_err()
         {
             return Err(ConfigError::Limits);
         }

@@ -5,7 +5,7 @@
 //! 置き場に返す chunk は 0 で埋めます。`--cfg wgstack_sentinel` の build は目印の byte で埋め、試験は目印が
 //! 出力と読み取りに現れないことを確かめます (wgstack-rs.md の「故障の注入と目印の build」)。
 
-use crate::fixed_vec::{AllocError, FixedVec, try_boxed_bytes};
+use crate::fixed_vec::{AllocError, BoxedBytes, FixedVec, try_boxed_bytes};
 
 pub(crate) const CHUNK_SHIFT: u32 = 14;
 /// バッファの中身を持つ chunk の大きさです。
@@ -19,7 +19,7 @@ pub(crate) const FILL: u8 = 0;
 pub(crate) const FILL: u8 = 0xa5;
 
 /// バッファの中身の 16 KiB です。
-pub(crate) type Chunk = Box<[u8; CHUNK_SIZE]>;
+pub(crate) type Chunk = BoxedBytes<CHUNK_SIZE>;
 
 /// chunk の置き場です。
 #[derive(Debug)]
@@ -27,6 +27,19 @@ pub(crate) struct ChunkPool {
     free: FixedVec<Chunk>,
     /// 輪が今持つ chunk の数です。
     held: usize,
+}
+
+// 試験だけが使う確保の失敗の注入です。`Some(n)` なら、この thread の n 回の取得の後の取得を失敗させます。
+// 置き場の型の大きさを試験の build で変えないよう、型の外に置きます (上界の表は型の大きさで決まります)。
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_AFTER: core::cell::Cell<Option<usize>> = const { core::cell::Cell::new(None) };
+}
+
+/// 試験だけが使う、chunk の確保の失敗の注入を設定します。
+#[cfg(test)]
+pub(crate) fn fail_chunks_after(n: Option<usize>) {
+    FAIL_AFTER.set(n);
 }
 
 impl ChunkPool {
@@ -44,6 +57,13 @@ impl ChunkPool {
 
     /// chunk を 1 つ取ります。置き場が空なら確保します。
     pub(crate) fn get(&mut self) -> Result<Chunk, AllocError> {
+        #[cfg(test)]
+        if let Some(n) = FAIL_AFTER.get() {
+            if n == 0 {
+                return Err(AllocError);
+            }
+            FAIL_AFTER.set(Some(n - 1));
+        }
         let c = match self.free.pop() {
             Some(c) => c,
             None => try_boxed_bytes::<CHUNK_SIZE>()?,

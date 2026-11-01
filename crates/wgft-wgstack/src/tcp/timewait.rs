@@ -179,6 +179,7 @@ impl TwTable {
     /// 表、list、空きの list、使っている印、数が一致することを確かめます。
     pub(crate) fn check(&self) -> Result<(), &'static str> {
         self.idx.check()?;
+        super::check_free_list(&self.free, self.rows.len(), |i| self.rows[i].used)?;
         let used = self.rows.iter().filter(|r| r.used).count();
         if used != self.n || used + self.free.len() != self.rows.len() || self.idx.len() != used {
             return Err("the TIME_WAIT table counts disagree");
@@ -187,7 +188,10 @@ impl TwTable {
         let mut prev = NIL;
         let mut id = self.head;
         while id != NIL {
-            let r = &self.rows[id as usize];
+            let r = self
+                .rows
+                .get(id as usize)
+                .ok_or("a TIME_WAIT list link is out of range")?;
             if !r.used || r.prev != prev || self.find(r.tup) != Some(id) {
                 return Err("a TIME_WAIT row is linked wrongly");
             }
@@ -242,6 +246,12 @@ mod tests {
         t.check().unwrap();
         assert_eq!(t.len(), 0);
         assert!(t.heap_bytes() > 0);
+        let (id, _) = t.insert(row(5));
+        let _ = t.free.try_push(id);
+        assert_eq!(t.check(), Err("a free list holds a used row"));
+        t.free.pop();
+        t.rows[id as usize].next = 9;
+        assert_eq!(t.check(), Err("a TIME_WAIT list link is out of range"));
     }
 
     #[test]

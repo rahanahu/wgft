@@ -21,9 +21,17 @@ struct Slot {
 }
 
 /// boost の枠の集まりです。プロセスで 1 つ作り、核から核へ渡します。
-#[derive(Debug)]
 pub struct Budget {
     slots: FixedVec<Slot>,
+}
+
+impl core::fmt::Debug for Budget {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Budget")
+            .field("slots", &self.slots())
+            .field("lent", &self.lent())
+            .finish()
+    }
 }
 
 /// `Budget` を作れなかった理由です。確保に失敗しました。
@@ -105,15 +113,25 @@ impl Budget {
         Some((i, core::mem::take(&mut s.recs), core::mem::take(&mut s.iv)))
     }
 
-    /// 枠 `i` の保有者を `c` に替えます。枠の取り合いで、floor に戻した保有者の枠を受け取る時に使います。
-    /// 配列は前の保有者から返してもらってから貸します。
-    pub(crate) fn hand_over(&mut self, i: usize, c: ConnId) {
-        self.slots[i].holder = Some(c);
+    /// 空きの枠 `i` を `c` に貸し、boost の配列を返します。枠の取り合いで、floor に戻した保有者が
+    /// [`Budget::release`] で返した枠を受け取る時に使います。枠が空きでなければ `None` です。
+    pub(crate) fn hand_over(
+        &mut self,
+        i: usize,
+        c: ConnId,
+    ) -> Option<(FixedVec<Record>, FixedVec<Interval>)> {
+        let s = self.slots.get_mut(i)?;
+        if s.holder.is_some() || self.slots.iter().any(|o| o.holder == Some(c)) {
+            return None;
+        }
+        let s = &mut self.slots[i];
+        s.holder = Some(c);
+        Some((core::mem::take(&mut s.recs), core::mem::take(&mut s.iv)))
     }
 
     /// 枠 `i` の保有者です。保有者をたどる順は枠の番号の順です。
     pub(crate) fn holder(&self, i: usize) -> Option<ConnId> {
-        self.slots[i].holder
+        self.slots.get(i).and_then(|s| s.holder)
     }
 
     /// 枠 `i` に配列を返し、枠を空きにします。
@@ -124,30 +142,15 @@ impl Budget {
         s.iv = iv;
     }
 
-    /// 枠 `i` の配列を借ります (保有者は変えません)。
-    pub(crate) fn take_arrays(&mut self, i: usize) -> (FixedVec<Record>, FixedVec<Interval>) {
-        let s = &mut self.slots[i];
-        (core::mem::take(&mut s.recs), core::mem::take(&mut s.iv))
-    }
-
-    /// 枠 `i` に配列を返します (保有者は変えません)。
-    pub(crate) fn return_arrays(
-        &mut self,
-        i: usize,
-        recs: FixedVec<Record>,
-        iv: FixedVec<Interval>,
-    ) {
-        let s = &mut self.slots[i];
-        s.recs = recs;
-        s.iv = iv;
-    }
-
-    /// 空きの枠が配列を持ち、保有者が重ならないことを確かめます。
+    /// 空きの枠が配列を持ち、貸した枠が配列を持たず、保有者が重ならないことを確かめます。
     pub(crate) fn check(&self) -> Result<(), &'static str> {
         for (i, s) in self.slots.iter().enumerate() {
             match s.holder {
                 None if s.recs.len() != BOOST_RECORDS || s.iv.len() != BOOST_INTERVALS => {
                     return Err("a free boost slot lost its arrays");
+                }
+                Some(_) if s.recs.capacity() != 0 || s.iv.capacity() != 0 => {
+                    return Err("a lent boost slot still holds its arrays");
                 }
                 Some(h) if self.slots[..i].iter().any(|o| o.holder == Some(h)) => {
                     return Err("a connection holds two boost slots");
@@ -161,6 +164,12 @@ impl Budget {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::disallowed_macros,
+        clippy::many_single_char_names,
+        reason = "test names and formatting"
+    )]
+
     use super::*;
 
     fn conn(slot: u32) -> ConnId {
@@ -192,11 +201,36 @@ mod tests {
             "the lowest free slot is lent first"
         );
         assert_eq!((b.lent(), b.holder(1)), (2, Some(conn(8))));
-        b.hand_over(1, conn(10));
         b.release(1, r2, i2);
-        let (r0, i0) = b.take_arrays(0);
-        b.return_arrays(0, r0, i0);
+        let (r2, i2) = b.hand_over(1, conn(10)).unwrap();
+        assert!(
+            b.hand_over(1, conn(11)).is_none(),
+            "a lent slot is not handed over"
+        );
+        assert!(b.hand_over(2, conn(10)).is_none(), "a holder gets one slot");
+        assert!(b.hand_over(99, conn(12)).is_none());
+        assert_eq!(
+            (r2.len(), i2.len(), b.holder(1), b.holder(99)),
+            (BOOST_RECORDS, BOOST_INTERVALS, Some(conn(10)), None)
+        );
+        b.check().unwrap();
+        b.release(1, r2, i2);
         assert_eq!(b.lent(), 1);
+        assert_eq!(format!("{b:?}"), "Budget { slots: 16, lent: 1 }");
+        // 貸した印が付いたまま配列を持つ枠と、2 つの枠を持つ接続の検出。
+        b.slots[5].holder = Some(conn(20));
+        assert_eq!(b.check(), Err("a lent boost slot still holds its arrays"));
+        b.slots[5].holder = None;
+        let (k, r, i) = b.acquire(conn(21)).unwrap();
+        b.slots[2].holder = Some(conn(21));
+        let (r2, i2) = (
+            core::mem::take(&mut b.slots[2].recs),
+            core::mem::take(&mut b.slots[2].iv),
+        );
+        assert_eq!(b.check(), Err("a connection holds two boost slots"));
+        b.release(2, r2, i2);
+        b.release(k, r, i);
+        b.check().unwrap();
         assert!(b.heap_bytes() <= full);
     }
 }
