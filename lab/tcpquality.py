@@ -36,16 +36,19 @@
 #       interval, resampling each netstack's runs on their own 10,000 times. A run whose sender
 #       used SENDER_BOUND or more of one CPU measured the sender, and is left out and counted.
 #   cpupaired <logfile>
-#       over the PAIRED lines `lab/lab paired` writes: two arms, x and y, ran at the same time in
-#       two VMs, a and b, and swapped VMs every round. A pair is the run of x and the run of y with
-#       the same round and run number; its ratio is x's agent CPU seconds per GB over y's. Per arm
-#       it prints the median, quartiles and range, as cpuratio does. The estimate is the geometric
-#       mean of the median ratio of the pairs with x in VM a and the median ratio of those with x
-#       in VM b, which cancels a steady difference between the two VMs' CPUs; that difference is
-#       printed as vm_a_over_b. The 95% interval resamples the pairs of each side on their own
-#       10,000 times. A pair is left out when either run lacks a result or measured its sender.
-#       It also prints the median share of the longer run's window that the two runs overlapped,
-#       from the windows by each VM's clock.
+#       over the PLAN line and the PAIRED lines `lab/lab paired` writes: two arms, x and y, ran at
+#       the same time in two VMs, a and b, and swapped VMs every round. A pair is the run of x and
+#       the run of y with the same round and run number; its ratio is x's agent CPU seconds per GB
+#       over y's. Per arm it prints the median, quartiles and range, as cpuratio does, and per
+#       round the median ratio. The estimate is the geometric mean of the median ratio of the pairs
+#       with x in VM a and the median ratio of those with x in VM b, which cancels a steady
+#       difference between the two VMs' CPUs; that difference is printed as vm_a_over_b. The 95%
+#       interval resamples the pairs of each side on their own 10,000 times. A pair is left out
+#       when a run is missing, failed (pass=0, no CPU time, undetermined), started without the
+#       start barrier (sync=timeout) or measured its sender; the counts are printed against the
+#       PLAN's rounds times runs. With fewer than half the planned pairs on either side it prints
+#       no RATIO line and fails. It also prints the median share of the longer run's window that
+#       the two runs overlapped, and warns below OVERLAP_WARN and for runs that started late.
 #   udpgso <ifname> on|off|show
 #       sets or reads the device's tx-udp-segmentation feature through the SIOCETHTOOL ioctl, as
 #       `ethtool -K <ifname> tx-udp-segmentation off` would, for lab VMs without ethtool; run it in
@@ -195,7 +198,7 @@ def median(resultfile):
             vals = [float(r[k]) for r in done if k in r]
         except ValueError:
             continue
-        if vals and k not in ("undetermined", "t_start", "t_end"):
+        if vals and k not in ("undetermined", "t_start", "t_end", "pass"):
             out.append("%s=%g" % (k, statistics.median(vals)))
     print(" ".join(out))
 
@@ -236,39 +239,67 @@ def cpuratio(logfile):
     return 0
 
 
+OVERLAP_WARN = 0.9
+
+
 def cpupaired(logfile):
     runs = {}
     names = {}
+    plan = {}
     for l in open(logfile):
+        if l.startswith("PLAN "):
+            plan = dict(kv.split("=", 1) for kv in l.split()[1:] if "=" in kv)
+            continue
         if not l.startswith("PAIRED "):
             continue
         r = dict(kv.split("=", 1) for kv in l.split()[1:] if "=" in kv)
         if r.get("arm") not in ("x", "y") or r.get("vm") not in ("a", "b"):
             continue
         names[r["arm"]] = r.get("name", r["arm"])
-        runs[(r.get("round"), r.get("run"), r["arm"])] = r
-    keys = sorted({(k[0], k[1]) for k in runs}, key=lambda k: (int(k[0]), int(k[1])))
+        runs[(int(r.get("round", 0)), int(r.get("run", 0)), r["arm"])] = r
+    if "rounds" in plan and "runs" in plan:
+        keys = [(rnd, run) for rnd in range(1, int(plan["rounds"]) + 1) for run in range(1, int(plan["runs"]) + 1)]
+    else:
+        keys = sorted({(k[0], k[1]) for k in runs})
+    # x is in VM a in odd rounds and in VM b in even rounds
+    side_of = lambda rnd: "a" if rnd % 2 == 1 else "b"
+    expected = {"a": 0, "b": 0}
     pairs = {"a": [], "b": []}
+    by_round = {}
     arm_vals = {"x": [], "y": []}
-    left_out = 0
+    counts = {"missing": 0, "failed": 0, "sync_timeout": 0, "sender_bound": 0}
+    late = 0
     overlaps = []
     for rnd, run in keys:
+        side = side_of(rnd)
+        expected[side] += 1
         x, y = runs.get((rnd, run, "x")), runs.get((rnd, run, "y"))
-        usable = []
-        for r in (x, y):
-            if r is None or "agent_cpu_s_per_gb" not in r or float(r["agent_cpu_s_per_gb"]) <= 0:
-                usable.append(None)
-                continue
-            sender = float(r.get("client_cpu_share", r.get("lan_cpu_share", "0")))
-            usable.append(None if sender >= SENDER_BOUND else (float(r["agent_cpu_s_per_gb"]),
-                                                                float(r["overall_mbit"]),
-                                                                float(r["agent_cpu_share"]), sender))
-        if None in usable:
-            left_out += 1
+        if x is None or y is None:
+            counts["missing"] += 1
             continue
-        arm_vals["x"].append(usable[0])
-        arm_vals["y"].append(usable[1])
-        pairs[x["vm"]].append(usable[0][0] / usable[1][0])
+        late += sum(r.get("sync") == "late" for r in (x, y))
+        why = None
+        vals = []
+        for r in (x, y):
+            if (r.get("pass") == "0" or r.get("undetermined") == "1" or "agent_cpu_s_per_gb" not in r
+                    or float(r["agent_cpu_s_per_gb"]) <= 0):
+                why = why or "failed"
+            elif r.get("sync") == "timeout":
+                why = why or "sync_timeout"
+            else:
+                sender = float(r.get("client_cpu_share", r.get("lan_cpu_share", "0")))
+                if sender >= SENDER_BOUND:
+                    why = why or "sender_bound"
+                vals.append((float(r["agent_cpu_s_per_gb"]), float(r["overall_mbit"]),
+                             float(r["agent_cpu_share"]), sender))
+        if why:
+            counts[why] += 1
+            continue
+        arm_vals["x"].append(vals[0])
+        arm_vals["y"].append(vals[1])
+        ratio = vals[0][0] / vals[1][0]
+        pairs[side].append(ratio)
+        by_round.setdefault(rnd, []).append(ratio)
         if all(k in r for r in (x, y) for k in ("t_start", "t_end")):
             xs, xe, ys, ye = (float(v) for v in (x["t_start"], x["t_end"], y["t_start"], y["t_end"]))
             longer = max(xe - xs, ye - ys)
@@ -285,22 +316,39 @@ def cpupaired(logfile):
               % (arm, names.get(arm, arm), len(rs), statistics.median(c), q1, q3, min(c), max(c),
                  statistics.median(r[1] for r in rs), statistics.median(r[2] for r in rs),
                  statistics.median(r[3] for r in rs)))
-    for vm in ("a", "b"):
-        if len(pairs[vm]) < 2:
-            print("PAIRS x_in_vm=%s pairs=%d left_out=%d too few pairs" % (vm, len(pairs[vm]), left_out))
-            return 1
+    for rnd in sorted(by_round):
+        print("ROUND round=%d x_in_vm=%s pairs=%d ratio_median=%.3f" % (rnd, side_of(rnd), len(by_round[rnd]),
+                                                                         statistics.median(by_round[rnd])))
+    print("LEFT_OUT planned=%d used=%d %s" % (len(keys), len(pairs["a"]) + len(pairs["b"]),
+                                              " ".join("%s=%d" % kv for kv in counts.items())))
+    if late:
+        print("WARN %d runs started after the planned start time (SYNC go with a negative wait); the pairs are kept" % late)
+    ok = True
+    for side in ("a", "b"):
+        if len(pairs[side]) < 2 or 2 * len(pairs[side]) < expected[side]:
+            print("TOO FEW x_in_vm=%s pairs=%d of %d planned; fewer than half remain, so no ratio is given"
+                  % (side, len(pairs[side]), expected[side]))
+            ok = False
+    if not ok:
+        return 1
     ma, mb = statistics.median(pairs["a"]), statistics.median(pairs["b"])
-    for vm, m in (("a", ma), ("b", mb)):
+    for side, m in (("a", ma), ("b", mb)):
         print("PAIRS x_in_vm=%s pairs=%d ratio_median=%.3f min=%.3f max=%.3f"
-              % (vm, len(pairs[vm]), m, min(pairs[vm]), max(pairs[vm])))
+              % (side, len(pairs[side]), m, min(pairs[side]), max(pairs[side])))
     rng = random.Random(1)
     boot = sorted(math.sqrt(statistics.median(rng.choices(pairs["a"], k=len(pairs["a"])))
                             * statistics.median(rng.choices(pairs["b"], k=len(pairs["b"]))))
                   for _ in range(10000))
+    overlap = statistics.median(overlaps) if overlaps else None
     print("RATIO x_over_y=%.3f ci95_low=%.3f ci95_high=%.3f pairs=%d left_out=%d vm_a_over_b=%.3f overlap=%s x=%s y=%s"
-          % (math.sqrt(ma * mb), boot[249], boot[9749], len(pairs["a"]) + len(pairs["b"]), left_out,
-             math.sqrt(ma / mb), "%.2f" % statistics.median(overlaps) if overlaps else "unknown",
+          % (math.sqrt(ma * mb), boot[249], boot[9749], len(pairs["a"]) + len(pairs["b"]), sum(counts.values()),
+             math.sqrt(ma / mb), "%.2f" % overlap if overlap is not None else "unknown",
              names.get("x", "x"), names.get("y", "y")))
+    if overlap is not None and overlap < OVERLAP_WARN:
+        print("WARN overlap %.2f is below %.1f: the faster arm's run ends first and the slower arm finishes without "
+              "the other VM's load, so the slower arm's CPU per byte comes out low; with the 3-5%% the VMs add to each "
+              "other, the ratio of the faster arm over the slower one may be about %.1f%% too high"
+              % (overlap, OVERLAP_WARN, (1 - overlap) * 4))
     return 0
 
 

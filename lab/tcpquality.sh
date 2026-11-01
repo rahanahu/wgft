@@ -67,8 +67,10 @@
 # default, for the file $W/wgft-tq-go-<mode>-<run>. The host writes into it a start time, in
 # seconds since the epoch, a little ahead, and the run starts at that time by this VM's clock; the
 # line "SYNC go" gives the wait, negative when the file came after the time. Without the file in
-# time the run starts anyway, with a line "SYNC timeout". With CPU=1 the result line also has the
-# run's window, t_start and t_end, by this VM's clock.
+# time the run starts anyway, with a line "SYNC timeout". The result line then has sync=go, late
+# (the wait was negative) or timeout; without SYNC it has sync=-. With CPU=1 the result line also
+# has the run's window, t_start and t_end, by this VM's clock. Every result line has pass=1 when
+# the run passed and pass=0 when it failed, so that an analysis can leave failed runs out.
 #
 # Requires `lab/lab build` and the netns topology (`lab/lab net up`).
 set -u
@@ -294,15 +296,17 @@ for mode in $MODES; do
     mark=$W/wgft-tq-mark-$mode
     rm -f "$mark" "$W/wgft-tq-samples-$mode"
     impair
+    run_pass=1 sync_state=-
     if [ -n "$SYNC" ]; then
       go=$W/wgft-tq-go-$mode-$run
       rm -f "$go"
       echo "SYNC ready mode=$mode run=$run"
       if wait_until "$SYNC_WAIT_S" test -s "$go"; then
         wait_s=$(awk -v t="$(cat "$go")" -v n="$(date +%s.%N)" 'BEGIN { printf "%.3f", t - n }')
-        case "$wait_s" in -*) ;; *) sleep "$wait_s" ;; esac
+        case "$wait_s" in -*) sync_state=late ;; *) sync_state=go; sleep "$wait_s" ;; esac
         echo "SYNC go mode=$mode run=$run wait_s=$wait_s"
       else
+        sync_state=timeout
         echo "SYNC timeout mode=$mode run=$run"
       fi
       rm -f "$go"
@@ -341,7 +345,7 @@ for mode in $MODES; do
     if [ "$DIRECTION" = up ]; then swap=$got; got=$sent; sent=$swap; fi
     stats=$($Q analyze "$W/wgft-tq-samples-$mode" "$out_start" "$out_end")
     if [ -n "$CPU" ] && [ -n "$agent_pid" ] && { [ -z "$a0" ] || [ -z "$a1" ] || [ "$a1" -lt "$a0" ]; }; then
-      echo "FAIL  agent $mode run $run: the agent's CPU time could not be read over the whole transfer"; fail=1
+      echo "FAIL  agent $mode run $run: the agent's CPU time could not be read over the whole transfer"; fail=1 run_pass=0
     elif [ -n "$CPU" ] && [ -n "$agent_pid" ]; then
       stats="$stats $(awk -v t0="$t0" -v t1="$t1" -v n="$(field received "$got")" -v c="$(field cpu_s "$sent")" \
         -v a="$((${a1:-0} - ${a0:-0}))" -v s="$((${s1:-0} - ${s0:-0}))" -v l="$((${l1:-0} - ${l0:-0}))" 'BEGIN {
@@ -355,12 +359,12 @@ for mode in $MODES; do
     if [ -n "$(field sha256 "$got")" ] && [ "$(field sha256 "$got")" = "$(field sha256 "$sent")" ] && [ "$(field received "$got")" = "$(field sent "$sent")" ]; then
       echo "PASS  agent $mode run $run: $reader read exactly the stream $writer sent"
     else
-      echo "FAIL  agent $mode run $run: the stream differs"; fail=1
+      echo "FAIL  agent $mode run $run: the stream differs"; fail=1 run_pass=0
     fi
     if [ "$(field undetermined "$stats")" = 1 ]; then
       echo "UNDETERMINED  agent $mode run $run: no reads on both sides of the outage; $stats"
     fi
-    echo "RESULT mode=$mode run=$run ${dir_field}delay_ms=$DELAY_MS loss_pct=$LOSS_PCT ${RATE_MBIT:+rate_mbit=$RATE_MBIT }$stats bytes=$(field received "$got")"
+    echo "RESULT mode=$mode run=$run ${dir_field}delay_ms=$DELAY_MS loss_pct=$LOSS_PCT ${RATE_MBIT:+rate_mbit=$RATE_MBIT }$stats bytes=$(field received "$got") pass=$run_pass sync=$sync_state"
     echo "$stats" >> "$results"
   done
   echo "MEDIAN mode=$mode $($Q median "$results")"

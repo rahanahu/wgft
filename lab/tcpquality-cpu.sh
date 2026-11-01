@@ -14,8 +14,9 @@
 # netstack goes first every round, so both netstacks see the same periods of the VM. It then prints
 # tcpquality.py cpuratio's lines: per netstack the median, quartiles and range of the agent's CPU
 # seconds per GB, and the ratio of the wgstack and gVisor medians with a bootstrap 95% interval.
-# The defaults, 3 rounds of 3 runs, give the 9 runs per case of the design's gate. Run it alone in
-# the VM. Requires `lab/lab build` and the netns topology (`lab/lab net up`).
+# The defaults are 3 rounds of 3 runs. This in-VM ratio is a quick estimate: the design's CPU gate
+# and before/after comparisons use `lab/lab paired`, whose ratio is not comparable with this one.
+# Run it alone in the VM. Requires `lab/lab build` and the netns topology (`lab/lab net up`).
 #
 # With a mode of tcpquality.sh after the path, it runs only that mode, RUNS runs on the path, and
 # prints tcpquality.sh's lines without the ratio; `lab/lab paired` runs it so in two VMs at once:
