@@ -51,19 +51,33 @@ pub struct Bound {
 
 /// 段を変える間の一時の保持が、その接続の boost の予約の内にあることです (wgstack-rs.md の「上界の式の写し方」)。
 ///
-/// 段を変えるのは枠を持つ接続だけで、枠は段を移した後に初めて返し、移す前に受け取ります (`try_boost`、`grow_recv`、
+/// 段を変えるのは枠を持つ接続だけで、枠は段を移す前に受け取り、移した後に返します (`try_boost`、`grow_recv`、
 /// `demote`)。核は 1 つのスレッドで動くので、1 回の移しは 1 本の接続の 1 回の呼び出しの中で終わり、その間にほかの
-/// 接続が枠や chunk を取ることはありません。移す間の 1 つの向きの輪は、古い輪と新しい輪の chunk を合わせて持ちます。
-/// 写すのは生きている範囲で、floor に上がる時も floor に戻る時も floor 以下なので、それぞれの輪は floor の chunk の数に
-/// 境目のずれの 1 つを足した数以下です。その和は boost の段の 1 つの向きの chunk の数以下で、boost の項はその接続の
-/// 枠に両方の向きの boost の段を数えます。
+/// 接続が枠や chunk を取ることはありません。枠を持つ接続の予約は、両方の向きの boost の段で 2B 個の chunk です
+/// (B は boost の段の chunk の数、F は floor の段の chunk の数)。
+///
+/// 移す間に接続が持つ chunk は、呼び出しごとに次の数以下です。送信の輪は確認した分の chunk を返すので、生きている
+/// 範囲 (floor 以下) に掛かる chunk だけを持ち、境目がそろわなければ F + 1 個です。新しい floor の輪は位置を
+/// floor で割った余りに置くので F 個以下です。
+///
+/// - `enter_boost`:送信の古い floor の輪 F、新しい boost の輪 F + 1、floor の受信の輪 F で、3F + 1 です
+/// - `grow_recv`:boost の送信の輪 B、受信の古い floor の輪 F、新しい boost の輪 F + 1 で、B + 2F + 1 です
+/// - `demote`:受信の取り消しは区間の表だけを変え、古い boost の受信の輪は chunk を B 個まで持ったままです。
+///   受信の古い輪 B と新しい floor の輪 F、送信の古い boost の輪 F + 1 と新しい floor の輪 F で、B + 3F + 1 です
+///
+/// 最も大きい `demote` の和が 2B 以下であることを確かめます。
 pub(crate) const STAGE_CHANGE_FITS: bool = {
+    let c = CHUNK_SIZE as u64;
     let floor = (if SEND_FLOOR > RECV_FLOOR {
         SEND_FLOOR
     } else {
         RECV_FLOOR
-    }) / CHUNK_SIZE as u64;
-    2 * (floor + 1) <= BOOST_SIZE / CHUNK_SIZE as u64
+    }) / c;
+    let boost = BOOST_SIZE / c;
+    let enter_boost = 3 * floor + 1;
+    let grow_recv = boost + 2 * floor + 1;
+    let demote = boost + 3 * floor + 1;
+    enter_boost <= demote && grow_recv <= demote && demote <= 2 * boost
 };
 const _: () = assert!(STAGE_CHANGE_FITS);
 

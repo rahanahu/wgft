@@ -202,3 +202,73 @@ fn invariants_catch_a_broken_count() {
     let _ = format!("{s:?}");
     let _ = s.close(Time::ZERO);
 }
+
+/// floor に戻す間に接続が持つ chunk は、その接続の boost の枠の予約 (両方の向きの boost の段) の内にあります
+/// (`bound::STAGE_CHANGE_FITS`)。受信の取り消しは区間の表だけを変えるので、順序外のデータで満ちた古い受信の輪は、
+/// 新しい floor の輪を作る間も chunk を持ったままです。
+#[test]
+fn demote_holds_within_the_connection_s_reservation() {
+    use crate::buf::chunk::{held_peak, reset_held_peak};
+    use crate::buf::{RECV_FLOOR, SEND_FLOOR};
+    use crate::tcp::boost::IDLE_RECLAIM;
+    let mut s = Stack::new(small(), Budget::new().unwrap(), &[7; 64], NoHook).unwrap();
+    let i = s.conns.alloc(&mut s.s.conn_free).unwrap().unwrap();
+    let id = s.conns.id(i);
+    let (b, recs, iv) = s.s.budget.acquire(id).unwrap();
+    let pool = &mut s.s.chunks;
+    let (t, k, c) = s.conns.parts_mut(i);
+    c.boost = Some(b);
+    // 送信:boost の段の輪に、境目のそろわない floor の分の送り残しを持ちます。
+    let una = 100;
+    c.snd.resize(BOOST_SIZE, pool, |_| Ok(())).unwrap();
+    c.snd
+        .write(una, &vec![5u8; usize::try_from(SEND_FLOOR).unwrap()], pool)
+        .unwrap();
+    c.spare_recs = c.recs.resize(recs);
+    (t.una_off, t.tail_off) = (una, una + SEND_FLOOR);
+    t.snd_cap = BOOST_SIZE;
+    t.cwnd = 1;
+    // 受信:順序どおりの未読は floor の内で、その先の boost の段の輪の残りを順序外のデータで満たします。
+    c.rcv.resize_ring(BOOST_SIZE, pool).unwrap();
+    c.spare_iv = c.rcv.set_intervals(iv).unwrap();
+    k.rcv_boost = true;
+    t.rcv_cap = BOOST_SIZE;
+    assert_eq!(c.rcv.insert(0, &[1; 1000], BOOST_SIZE, pool).accepted, 1000);
+    let ooo = RECV_FLOOR + CHUNK_SIZE as u64;
+    let data = vec![2u8; usize::try_from(BOOST_SIZE - ooo).unwrap()];
+    assert_eq!(
+        c.rcv.insert(ooo, &data, BOOST_SIZE, pool).accepted,
+        data.len()
+    );
+    k.last_demand = 0;
+    let conn_before = c.held_chunks();
+    let held_before = s.s.chunks.held();
+    s.check_invariants().unwrap();
+
+    reset_held_peak(held_before);
+    assert!(
+        s.demote(id, IDLE_RECLAIM + 1),
+        "the idle holder returns to the floor"
+    );
+    let growth = held_peak() - held_before;
+    let c = CHUNK_SIZE as u64;
+    let reservation = usize::try_from(2 * BOOST_SIZE / c).unwrap();
+    eprintln!(
+        "demote: the connection held {conn_before} chunks, grew by at most {growth} while it moved, against a reservation of {reservation}"
+    );
+    assert!(conn_before > usize::try_from(BOOST_SIZE / c).unwrap() - 2);
+    assert!(
+        conn_before + growth <= reservation,
+        "the connection held {conn_before} chunks and grew by {growth} while it moved, above its reservation of {reservation}"
+    );
+    let after = s.conns.bufs_mut(i).held_chunks();
+    assert!(
+        after <= usize::try_from((SEND_FLOOR + RECV_FLOOR) / c).unwrap(),
+        "{after} chunks after demote"
+    );
+    assert_eq!(s.s.chunks.held(), held_before - conn_before + after);
+    assert_eq!(s.s.budget.lent(), 0);
+    s.check_invariants().unwrap();
+    let closed = s.close(Time::from_nanos(IDLE_RECLAIM.unsigned_abs() + 2));
+    assert!(closed.held.is_zero(), "{:?}", closed.held);
+}
