@@ -107,8 +107,11 @@ pub(super) fn measure_send(mut agent: Link, server: Link, plan: &Plan) -> Result
             calls.wake += 1;
             for _ in 0..plan.burst {
                 agent.encrypt(now, &plan.packet);
-                agent.send_pending(&mut calls)?;
+                if agent.send_each() {
+                    agent.send_pending(&mut calls)?;
+                }
             }
+            agent.send_pending(&mut calls)?;
             cpu = cpu.plus(Cpu::now().since(start));
             target += plan.burst as u64;
             while seen < target {
@@ -223,8 +226,11 @@ fn sender_thread(
         let now = Instant::now();
         for _ in 0..n {
             agent.encrypt(now, packet);
-            agent.send_pending(&mut calls)?;
+            if agent.send_each() {
+                agent.send_pending(&mut calls)?;
+            }
         }
+        agent.send_pending(&mut calls)?;
         if sent.send(()).is_err() {
             break;
         }

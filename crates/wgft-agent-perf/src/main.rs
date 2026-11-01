@@ -34,9 +34,21 @@
 //!   receiving socket's queueing, as the lab's veth path includes the softirq after a send.
 //!
 //! The code is in `linux.rs` and the modules under `linux/`: `cpu` (thread CPU time, pinning, the
-//! readiness check), `link` (one end: a socket and the device layer, the adapters a batched data
-//! plane would replace), `measure` (the two loops) and `error`. The plan for batching the data
-//! plane is in `docs/design/v2/agent-throughput.md`.
+//! readiness check), `link` (one end: a socket and the device layer, and the batched path), `measure`
+//! (the two loops) and `error`. The batching of the data plane is in
+//! `docs/design/v2/agent-throughput.md`.
+//!
+//! Batching. By default each end uses the data plane's batch store and system calls from
+//! `wgft-udp-batch`, the code the agent runs: a burst's packets are copied into the store's packet
+//! slots as the core writes them, sealed by the device layer into its send slots, laid out into
+//! messages that join runs of one length with UDP GSO, and sent with `sendmmsg`; datagrams are
+//! read with `recvmmsg` with UDP GRO on and decrypted, segment by segment, into the store's
+//! plaintext area. `data_syscalls` counts one per batch call. `--one-by-one` keeps the earlier
+//! path, one `sendto` or `recvfrom` per datagram, for a comparison inside one build; a base build
+//! from before the batching runs that path by itself. The workload (sizes, burst, packet pattern)
+//! stays the same, so a base build and a head build stay comparable. In `recv` mode the second
+//! thread sends with the same path, so with batching the measured end reads GRO buffers that
+//! loopback hands over whole.
 
 #[cfg(target_os = "linux")]
 mod linux;
