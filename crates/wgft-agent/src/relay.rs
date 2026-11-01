@@ -134,6 +134,16 @@ impl Manager {
             .filter(|(p, l)| want.get(p).is_none_or(|(_, t)| *t != l.target))
             .map(|(p, _)| *p)
             .collect();
+        // 入口の検査に先に知らせ、閉じるポートの packet を通さなくしてからリスナーを閉じる
+        {
+            let mut open = self
+                .open
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for p in &stale {
+                open.remove(p);
+            }
+        }
         for p in stale {
             if let Some(mut l) = self.listeners.remove(&p) {
                 l.close().await;
@@ -310,10 +320,13 @@ async fn relay_one(mut down: TunnelSide, from: SocketAddr, port: u16, host: Stri
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             logf!("relay: tcp/{port}: from {from}: dial {host}:{tport}: {e}");
+            // 宛先に繋がらなければ、仕様のとおりトンネルの側を FIN で閉じる
+            down.finished = true;
             return;
         }
         Err(_) => {
             logf!("relay: tcp/{port}: from {from}: dial {host}:{tport}: timed out");
+            down.finished = true;
             return;
         }
     };
@@ -486,6 +499,29 @@ mod tests {
         );
         assert_eq!(m.status()[0].id, "r_b");
         assert_eq!(round_trip(&mut c, b"still").await.unwrap(), b"still");
+    }
+
+    #[tokio::test]
+    async fn closes_with_fin_when_the_target_refuses() {
+        // 待ち受けの無い宛先
+        let dead = free_port();
+        let port = free_port();
+        let mut m = manager();
+        m.apply(&[rule(
+            "r_a",
+            Proto::Tcp,
+            &port.to_string(),
+            &format!("127.0.0.1:{dead}"),
+            true,
+        )])
+        .await;
+        let mut c = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut buf = [0u8; 8];
+        let r = tokio::time::timeout(Duration::from_secs(5), c.read(&mut buf))
+            .await
+            .unwrap();
+        // FIN なら EOF (0 byte)、RST なら ConnectionReset
+        assert!(matches!(r, Ok(0)), "{r:?}");
     }
 
     #[tokio::test]

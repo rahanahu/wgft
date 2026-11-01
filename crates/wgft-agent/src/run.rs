@@ -136,12 +136,12 @@ impl Agent {
             let cfg = tunnel::Config::from_wg(&st.wg).map_err(|e| format!("wireguard: {e}"))?;
             let open = OpenPorts::default();
             let server = cfg.server_address;
-            // ホストに既にあるアドレスはトンネルに使わない。ホストのアドレスに bind できるかで確かめる
-            if std::net::UdpSocket::bind((cfg.address, 0)).is_ok() {
-                return Err(format!(
-                    "wireguard: address {} is already assigned on this host; the server must assign a tunnel address the host does not use",
-                    cfg.address
-                ));
+            // ホストに既にあるアドレスと、ホストに繋がった帯のアドレスはトンネルに使わない。LAN の帯に
+            // 重なると、LAN の機器と ARP で取り合う。拒んでも止まらず、作成の失敗と同じく試し直す
+            let host = crate::hostaddr::read()
+                .map_err(|e| format!("wireguard: read this host's addresses: {e}"))?;
+            if let Some(why) = crate::hostaddr::conflict(cfg.address, &host, &self.opts.tun_name) {
+                return Err(self.schedule_retry(st, &why));
             }
             let clock = self.opts.clock_path();
             match Tunnel::start(
@@ -167,13 +167,7 @@ impl Agent {
                     self.retry_at = None;
                     self.retry_failures = 0;
                 }
-                Err(e) => {
-                    let wait = REBUILD_BACKOFF[self.retry_failures.min(REBUILD_BACKOFF.len() - 1)];
-                    self.retry = Some(st.clone());
-                    self.retry_at = Some(Instant::now() + wait);
-                    self.retry_failures += 1;
-                    return Err(format!("wireguard: {e}; retrying in {}s", wait.as_secs()));
-                }
+                Err(e) => return Err(self.schedule_retry(st, &e)),
             }
         }
         let relay = self.relay.as_mut().ok_or("no relay")?;
@@ -210,6 +204,15 @@ impl Agent {
             && self.retry.is_none()
             && st.generation == self.generation
             && self.creds.last_state.as_ref() == Some(st)
+    }
+
+    /// トンネルを立てられなかった全体状態を控え、立て直しの時刻を決めて、誤りの文言を返す。
+    fn schedule_retry(&mut self, st: &State, why: &str) -> String {
+        let wait = REBUILD_BACKOFF[self.retry_failures.min(REBUILD_BACKOFF.len() - 1)];
+        self.retry = Some(st.clone());
+        self.retry_at = Some(Instant::now() + wait);
+        self.retry_failures += 1;
+        format!("wireguard: {why}; retrying in {}s", wait.as_secs())
     }
 
     pub(crate) async fn close(&mut self) {

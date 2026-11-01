@@ -36,7 +36,7 @@ enum AgentCmd {
     Run(Box<RunArgs>),
 }
 
-#[derive(Args, Debug)]
+#[derive(Args)]
 struct RunArgs {
     /// data dir, env WGFT_DATA_DIR; holds agent.json
     #[arg(long = "data-dir", env = "WGFT_DATA_DIR", default_value = default_data_dir())]
@@ -87,6 +87,27 @@ struct RunArgs {
     /// env WGFT_MAX_UDP_FLOWS; not supported by this prototype
     #[arg(long = "max-udp-flows", env = "WGFT_MAX_UDP_FLOWS", default_value = "")]
     max_udp_flows: String,
+}
+
+// 接続文字列は秘密なので Debug に出さない
+impl std::fmt::Debug for RunArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunArgs")
+            .field("data_dir", &self.data_dir)
+            .field(
+                "join",
+                &if self.join.is_empty() {
+                    ""
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("name", &self.name)
+            .field("mode", &self.mode)
+            .field("wg_interface", &self.wg_interface)
+            .field("agent_netstack", &self.agent_netstack)
+            .finish_non_exhaustive()
+    }
 }
 
 fn default_data_dir() -> &'static str {
@@ -245,6 +266,12 @@ mod tests {
             } => *a,
             Cmd::Version => panic!("not agent run"),
         }
+    }
+
+    #[test]
+    fn debug_hides_the_join_string() {
+        let a = parse(&["--join", "wgft://h:1/secret#sha256:00"]);
+        assert!(!format!("{a:?}").contains("secret"));
     }
 
     #[test]

@@ -179,6 +179,8 @@ pub struct Tunnel {
     counts: Arc<Counts>,
     started_at: Instant,
     clock: Option<PathBuf>,
+    /// device の時計の始まりの値。device は下限より 1 秒新しい値と壁時計の大きい方から数える。
+    clock_base: Duration,
 }
 
 impl Tunnel {
@@ -201,6 +203,10 @@ impl Tunnel {
         set_endpoint(&shared, ep.clone());
         let counts = Arc::new(Counts::default());
         let floor = stamp::floor(clock);
+        let wall = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        let clock_base = wall.max(floor + Duration::from_secs(1));
         let device = Arc::new(
             device::start(
                 private_key,
@@ -234,6 +240,7 @@ impl Tunnel {
             counts,
             started_at: Instant::now(),
             clock: clock.map(Path::to_path_buf),
+            clock_base,
         })
     }
 
@@ -256,10 +263,20 @@ impl Tunnel {
     }
 
     /// handshake の時刻の印の高い水位をファイルに残す。
+    ///
+    /// 残す値は、device が使った印の高い水位と、device の時計の今の値の大きい方である。印は handshake の
+    /// ときにしか進まないので今の値で測り、keepalive の間隔が長くても次の印が残した値を超えないように
+    /// する。
     pub async fn persist_clock(&self) {
-        if let Ok(d) = device::read(&self.device).await {
-            stamp::record(self.clock.as_deref(), d.unix_high_water, true);
-        }
+        stamp::record(self.clock.as_deref(), self.clock_now().await, true);
+    }
+
+    async fn clock_now(&self) -> Duration {
+        let hw = device::read(&self.device)
+            .await
+            .map(|d| d.unix_high_water)
+            .unwrap_or_default();
+        hw.max(self.clock_base + self.started_at.elapsed())
     }
 
     /// 自分のトンネルのアドレス。
@@ -291,9 +308,7 @@ impl Tunnel {
 
     /// 閉じる。TUN を消す。
     pub async fn close(self) {
-        if let Ok(d) = device::read(&self.device).await {
-            stamp::record(self.clock.as_deref(), d.unix_high_water, false);
-        }
+        stamp::record(self.clock.as_deref(), self.clock_now().await, false);
         self.monitor.abort();
         let _ = self.monitor.await;
         match Arc::try_unwrap(self.device) {
@@ -652,15 +667,31 @@ mod stamp {
         if read(Some(file)).is_some_and(|saved| saved.as_secs() == secs) {
             return;
         }
-        let tmp = file.with_extension("tmp");
-        let ok =
-            std::fs::write(&tmp, format!("{secs}\n")).and_then(|()| std::fs::rename(&tmp, file));
+        let mut tmp_name = file.as_os_str().to_owned();
+        tmp_name.push(".tmp");
+        let tmp = std::path::PathBuf::from(tmp_name);
+        let ok = write_synced(&tmp, file, &format!("{secs}\n"));
         if let Err(e) = ok {
             crate::logf!(
                 "cannot record the handshake clock in {}: {e}",
                 file.display()
             );
         }
+    }
+
+    /// 一時ファイルに書いて fsync し、rename してからディレクトリも fsync する。
+    fn write_synced(tmp: &Path, file: &Path, text: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(tmp, file)?;
+        #[cfg(unix)]
+        if let Some(dir) = file.parent() {
+            std::fs::File::open(dir)?.sync_all()?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -677,6 +708,7 @@ mod stamp {
             let saved = future + Duration::from_secs(1) + SAVE_MARGIN;
             assert_eq!(read(Some(&f)), Some(saved));
             assert!(floor(Some(&f)) >= saved);
+            assert!(!dir.join("agent.json.clock.tmp").exists());
             // 閉じるときは余裕を足さない。プロセスの中の水位は下がらない
             record(Some(&f), Duration::from_secs(10), false);
             assert_eq!(read(Some(&f)), Some(future + Duration::from_secs(1)));
