@@ -105,9 +105,9 @@ func fuzzCorePrograms(t *testing.T, generated int) map[string][]byte {
 	return progs
 }
 
-// parseFuzzBytes は `go test fuzz v1` の形式の 1 つの []byte の値を読む。
+// parseFuzzBytes は `go test fuzz v1` の形式の 1 つの []byte の値を読む。CRLF の checkout の行末も読む。
 func parseFuzzBytes(s string) ([]byte, error) {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
+	lines := strings.Split(strings.TrimSpace(strings.ReplaceAll(s, "\r\n", "\n")), "\n")
 	if len(lines) != 2 || lines[0] != "go test fuzz v1" {
 		return nil, fmt.Errorf("not a go test fuzz v1 file with one value")
 	}
@@ -138,7 +138,8 @@ func recordSetFor(t *testing.T) recordSet {
 		// 選んだ。送信の stream の試験は、損失の多い種で 1 つの記録が 1 MB 近くになるので、その種を除く
 		return recordSet{
 			fuzzGenerated: 8,
-			rxSeeds:       []uint64{5, 9, 10}, txSeeds: []uint64{4, 5, 6, 7, 9, 15}, advSeeds: []uint64{1, 2, 3, 6, 9, 12, 15},
+			// 4b の変種と輻輳の制御と boost の方針だけが違う既定の記録 (送信の 7、敵対的な送り手の 3) は入れない
+			rxSeeds: []uint64{5, 9, 10}, txSeeds: []uint64{4, 5, 6, 9, 15}, advSeeds: []uint64{1, 2, 6, 9, 12, 15},
 			rx4b: []uint64{1, 4}, tx4b: []uint64{1, 4, 6, 7}, adv4b: []uint64{1, 2, 3, 7},
 			length: 30000,
 		}
@@ -439,5 +440,15 @@ func TestRecordingsBudget(t *testing.T) {
 	t.Logf("the recordings take %d bytes of %d", total, recordingsBudget)
 	if total > recordingsBudget {
 		t.Errorf("the recordings take %d bytes, over the budget of %d", total, recordingsBudget)
+	}
+}
+
+// TestParseFuzzBytes reads the go test fuzz v1 form with LF and with CRLF line ends.
+func TestParseFuzzBytes(t *testing.T) {
+	for _, in := range []string{"go test fuzz v1\n[]byte(\"a\\x00b\")\n", "go test fuzz v1\r\n[]byte(\"a\\x00b\")\r\n"} {
+		got, err := parseFuzzBytes(in)
+		if err != nil || string(got) != "a\x00b" {
+			t.Errorf("parseFuzzBytes(%q) = %q, %v", in, got, err)
+		}
 	}
 }

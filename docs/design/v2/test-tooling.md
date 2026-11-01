@@ -723,7 +723,7 @@ Go の送信のバッチの印の鍵は `crypto/rand` から読みますが、�
 
 | 元 | 置き場所の名前 | 中身 |
 | --- | --- | --- |
-| 適合の台本 | `scenarios` | `tcpharness.Scenarios` のすべてを、`rustdut` で `dutserve` に流します。種は関門と同じ 1 から 5 です |
+| 適合の台本 | `scenarios` | `tcpharness.Scenarios` のすべてを、`rustdut` で `dutserve` に流します。種は関門と同じ 1 から 5 です。受信の溢れと窓の開き方の台本 (`rcv-overflow-` と `rcv-window-pacing` で始まる台本) は、git の集まりは種 1 だけ、手元の cache の集まりは 1 から 5 です |
 | 輻輳の制御の台本 | `scenarios` | `tcpharness.CongestionScenarios` を同じく流します。git の集まりは種 1 だけ、手元の cache の集まりは 1 から 5 です |
 | `FuzzCore` | `fuzzcore` | `f.Add` の列、repo の corpus、種から作った 8 つの列 |
 | `TestReceiveStreamIntegrity` | `stream-rx` | 選んだ種。git の集まりは stream の長さを 30,000 byte までに縮めます。試験が boost を内部から切り替える種は、切り替えを止めた変種 (`noflip`) で記録します |
@@ -787,7 +787,7 @@ meta の欄は次のとおりです。
 | `test` | 記録を作った Go の試験 |
 | `scenario`、`run_seed`、`scenario_seed` | 台本の記録の台本の名前、関門の種、台本の種 |
 | `seed` | `internal/wgstack` の試験の種 |
-| `variant` | `4b` か空 |
+| `variant` | `4b`、`noflip`、空のどれか |
 | `go_commit` | Go の wgstack の製品のコードを最後に変えた commit。試験と testdata の変更では変わりません |
 | `go_version`、`goarch`、`goamd64` | 作った Go の版と target |
 | `tags` | 印 (後述) |
@@ -814,7 +814,7 @@ CUBIC の浮動小数点の値は、Go の compiler が積和の命令を使う�
 
 置き場所は `testdata/wgstack-rec/<元>/<名前>.rec.gz` です。
 台本の記録の名前は `<台本>.seed-<種>` で、`internal/wgstack` の試験の記録の名前は `seed-<種>` と、`FuzzCore` の `seed-<n>`、`corpus-<ファイル名>`、`gen-<n>` です。
-変種は後ろに `.4b` を付けます。
+変種は後ろに `.4b` か `.noflip` を付けます。
 Go の符号は `internal/dutproto` の `WriteRecord`、`ReadRecord`、`SplitFrames`、`Tags` です。
 Rust で読むのに使う crate は、gzip に flate2、meta に serde と serde_json です。
 どれも寛容なライセンスで、`deny.toml` の許可の範囲です。
@@ -864,6 +864,8 @@ Go の `TestDivergencesList` が、どの行も git の記録を指し、番号�
 `scripts/wgstack-reccmp` が 2 回の結果を比べ、大きさを元ごとに出します。
 `--check` は git の集まりを 1 回だけ作り、git の記録と同じ (上の規則) ことを確かめます。
 ホストの関門の `recordings-fresh` の段がこれを流すので、Go の wgstack、`dutserve`、`rustdut`、記録の元の試験を変えて記録を作り直し忘れた変更は関門で落ちます。
+`concurrent` の記録も meta の `checks` を比べるので、goroutine の進み方で結果が変わる確かめがあれば、この段が落ちて、その確かめを表に出します。
+その時は、確かめを直すか、台本を記録の元から外します。
 `go_commit` は、`internal/wgstack` と、Go の wgstack が使う `internal/ipv4frag` の製品のコードを最後に変えた commit です。
 `.gitattributes` は記録を binary として扱い、git の差分を出しません。
 `testNet` の記録は 1 つずつ順に作ります。
@@ -874,21 +876,29 @@ git に入れるのは、圧縮した合計が 5 MiB 以下の集まりです。
 `TestRecordingsBudget` がこれを確かめます。
 2026-11-01 に測った大きさは次のとおりです (`GOAMD64=v1`、go1.27.2)。
 
-| 元 | 大きさ |
+| 元 | git の集まりの大きさ |
 | --- | --- |
-| 適合の台本 (種 1 から 5) と輻輳の制御の台本 (種 1) | 3,628,435 byte |
+| 台本 (適合の台本は種 1 から 5、輻輳の制御と受信の溢れと窓の開き方の台本は種 1) | 3,052,210 byte |
 | `FuzzCore` | 62,166 byte |
 | 受信の stream | 333,980 byte |
-| 送信の stream | 364,195 byte |
-| 敵対的な送り手 | 364,924 byte |
-| 合計 | 4,753,700 byte |
+| 送信の stream | 328,656 byte |
+| 敵対的な送り手 | 328,577 byte |
+| 合計 | 4,105,589 byte |
 
 `concurrent` の記録の大きさは作るたびに変わります。
 書き手の goroutine が待ちの間に送り直す `WRITE` の数が、goroutine の進み方で変わるためです。
-同じ台本の記録が 182 KB と 259 KB になったこともあり、作った集まりの台本の合計は 3.6 MB から 4.0 MB の間でした。
+同じ台本の記録が 182 KB と 259 KB になったこともあります。
 git の `concurrent` の記録は meta が変わらない限り残すので、上限は作った集まりでなく git の集まりで確かめます (`TestRecordingsBudget`)。
-適合の台本の 1 つの種の記録は 0.55 MB ほどで、輻輳の制御の台本の 1 つの種の記録は 0.93 MB ほどです。
-輻輳の制御の台本の種 1 から 5 をすべて入れると、それだけで 4.7 MB になります。
+それでも `go_commit` が変われば `concurrent` の記録はすべて作り直しになるので、作った集まりの大きさにも上限との間の余裕が要ります。
+
+受信の溢れと窓の開き方の台本を種 1 だけにする前は、作った集まりの台本の合計は 3.6 MB から 4.06 MB、全体の合計は 4.75 MB から 5.19 MB でした。
+5.19 MB は上限の 5 MiB (5,242,880 byte) まで 56 KB しかありません。
+受信の溢れと窓の開き方の台本の記録は種ごとに 85 KB から 150 KB で、種 2 から 5 を外すと 0.58 MB ほど減ります。
+4b の変種と輻輳の制御と boost の方針だけが違う既定の記録 (送信の stream の種 7、敵対的な送り手の種 3) も外しました。
+外した後に作った 5 つの集まりの合計は 4.32 MB から 4.45 MB でした。
+外す前の最大の 5.19 MB から外した量を引くと、作り直しの最大は 4.6 MB ほどと見込みます (見込み)。
+受信の溢れと窓の開き方の台本を除く適合の台本の 1 つの種の記録は 0.41 MB ほどで、輻輳の制御の台本の 1 つの種の記録は作るたびに 0.84 MB から 1.16 MB の間で変わります。
+輻輳の制御の台本の種 1 から 5 をすべて入れると、それだけで 4 MB を超えます。
 このため git の集まりは輻輳の制御の台本を種 1 だけにし、残りの種は手元の cache の集まりに入れました。
 送信の stream の試験は、損失の多い種では最後の確認まで数十万の歩を進め、1 つの記録が 0.79 MB から 0.96 MB になります。
 git の集まりの種は、測った大きさを見て、上限に収まり、印の組み合わせが偏らないように選びました。
