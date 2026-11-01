@@ -1,7 +1,6 @@
 package wgstack
 
 import (
-	"net/netip"
 	"testing"
 	"time"
 )
@@ -10,15 +9,20 @@ import (
 // 後に保持が上界の内側にあり、表の数と予約が一致することを確かめる。最後に Device の Close の後に予約が 0 に
 // 戻ることを確かめる(wgstack-verification.md の fuzzing)。
 func FuzzCore(f *testing.F) {
-	f.Add([]byte{0, 1, 3, 0, 1, 1, 0, 2, 5, 3, 1, 4, 2, 9, 3, 2, 1, 5, 6, 7})
-	f.Add([]byte{0, 0, 0, 1, 1, 1, 1, 1, 2, 200, 4, 0, 1, 3, 3, 3, 0, 2, 255, 2, 255})
+	for _, p := range fuzzCoreSeeds {
+		f.Add(p)
+	}
 	f.Fuzz(func(t *testing.T, prog []byte) { fuzzCoreBody(t, prog) })
 }
 
 // fuzzCoreBody は FuzzCore の 1 回分。ベンチマークからも呼ぶ。
-func fuzzCoreBody(t testing.TB, prog []byte) {
+func fuzzCoreBody(t testing.TB, prog []byte) { fuzzCoreRun(t, prog, recSpec{}) }
+
+// fuzzCoreRun は fuzzCoreBody で、spec の記録を作る (record_test.go)。
+func fuzzCoreRun(t testing.TB, prog []byte, spec recSpec) {
 	n := newTestNet(t, fuzzLimits())
-	l, err := n.d.ListenTCP(netip.AddrPortFrom(dutAddr, 80))
+	n.record(spec)
+	l, err := n.listenTCP(80)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +42,9 @@ func fuzzCoreBody(t testing.TB, prog []byte) {
 		p := peers[port]
 		switch op % 8 {
 		case 0: // SYN
-			n.inject(tseg{sport: port, dport: 80, seq: uint32(arg) << 20, flags: flagSYN, wnd: 65535, mss: 1380, ws: 7, sackOK: arg&1 == 0, ts: arg&2 == 0, tsVal: 1})
+			// 4b の変種の記録では、相手は SACK も timestamp も示さない (recordings_test.go)
+			plain := spec.variant == "4b"
+			n.inject(tseg{sport: port, dport: 80, seq: uint32(arg) << 20, flags: flagSYN, wnd: 65535, mss: 1380, ws: 7, sackOK: arg&1 == 0 && !plain, ts: arg&2 == 0 && !plain, tsVal: 1})
 			for _, o := range n.drain() {
 				if o.seg.flags == flagSYN|flagACK && o.seg.tup.lport == port {
 					peers[port] = &peerConn{n: n, sport: port, dport: 80, snd: o.seg.ack, rcv: o.seg.seq + 1, ts: o.seg.opt.hasTS, tsVal: 2, dutTS: o.seg.opt.tsVal, wnd: 65535}
@@ -76,28 +82,28 @@ func fuzzCoreBody(t testing.TB, prog []byte) {
 				if !ready {
 					break
 				}
-				conns = append(conns, acceptOne(t, l))
+				conns = append(conns, n.accept(l))
 			}
 		case 5: // アプリケーションの操作
 			if len(conns) > 0 {
 				c := conns[int(arg)%len(conns)]
 				switch next() % 6 {
 				case 0:
-					c.Close()
+					n.closeConn(c)
 				case 1:
-					c.Abort()
+					n.abort(c)
 				case 2:
-					c.CloseWrite()
+					n.closeWrite(c)
 				case 3:
 					if room(c) > 1000 {
-						c.Write(make([]byte, 1000))
+						n.writeConn(c, make([]byte, 1000))
 					}
 				case 4:
 					if readable(c) {
-						c.Read(make([]byte, 3000))
+						n.read(c, make([]byte, 3000))
 					}
 				case 5:
-					c.Delivered()
+					n.delivered(c)
 				}
 			}
 		case 6: // 出力を読み、相手が確認する

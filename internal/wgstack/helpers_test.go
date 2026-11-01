@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/rahanahu/wgft/internal/dutproto"
 )
 
 var (
@@ -31,6 +33,7 @@ type testNet struct {
 	d   *Device
 	clk *ManualClock
 	buf []byte
+	rec *netRecorder // 記録を求めた試験だけ (record_test.go)
 }
 
 func newTestNet(t testing.TB, lim limits) *testNet {
@@ -98,7 +101,7 @@ func buildPeer(s tseg) []byte {
 func (n *testNet) inject(s tseg) {
 	n.t.Helper()
 	pkt := buildPeer(s)
-	if _, err := n.d.Write([][]byte{pkt}, 0); err != nil {
+	if _, err := n.writePkts(pkt); err != nil {
 		n.t.Fatalf("Write: %v", err)
 	}
 }
@@ -127,7 +130,7 @@ func (n *testNet) drain() []out {
 	n.t.Helper()
 	var res []out
 	for range 100000 {
-		k := n.d.Poll(n.buf)
+		k := n.poll(n.buf)
 		if k == 0 {
 			return res
 		}
@@ -155,6 +158,9 @@ func (n *testNet) drain() []out {
 func (n *testNet) advance(d time.Duration) {
 	n.clk.Advance(d)
 	n.d.Tick()
+	if n.rec != nil {
+		n.rec.emit(&dutproto.Advance{D: d}, &dutproto.Time{Now: n.clk.Now()}, false)
+	}
 }
 
 // accepted は 80 番で待ち受け、相手の 40000 番から窓の scale を付けて接続を開き、Accept で受け取った接続と
@@ -281,7 +287,7 @@ func (n *testNet) drainRaw() [][]byte {
 	n.t.Helper()
 	var res [][]byte
 	for range 100000 {
-		k := n.d.Poll(n.buf)
+		k := n.poll(n.buf)
 		if k == 0 {
 			return res
 		}
@@ -328,7 +334,7 @@ func buildICMP(src netip.Addr, msg []byte) []byte {
 
 func (n *testNet) write(pkt []byte) {
 	n.t.Helper()
-	if _, err := n.d.Write([][]byte{pkt}, 0); err != nil {
+	if _, err := n.writePkts(pkt); err != nil {
 		n.t.Fatalf("Write: %v", err)
 	}
 }

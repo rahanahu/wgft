@@ -5,3 +5,6 @@ internal/tcpharness/scripts/** text eol=lf
 # binary, and their JSON keeps LF line ends in every checkout.
 internal/dutproto/testdata/frames/*.bin -text -diff
 internal/dutproto/testdata/frames/*.json text eol=lf
+# The Go wgstack's recordings are binary; git neither converts nor diffs them. divergences.json
+# beside them stays text.
+testdata/wgstack-rec/**/*.rec.gz -text -diff

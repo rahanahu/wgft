@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -314,10 +316,18 @@ func TestConcurrentScenariosExist(t *testing.T) {
 
 // transcriptEngine is Engine with every DUT's transcript written to w.
 func transcriptEngine(bin string, w io.Writer) tcpharness.Engine {
+	e := transcriptEngineWith(bin, w, dutproto.CongestionCubic, dutproto.BoostOnDemand)
+	e.NewPerformance = transcriptEngineWith(bin, w, dutproto.CongestionCubic, dutproto.BoostAtAccept).New
+	return e
+}
+
+// transcriptEngineWith is transcriptEngine with HELLO's congestion control and boost policy for
+// every scenario, Performance or not.
+func transcriptEngineWith(bin string, w io.Writer, cc dutproto.Congestion, boost dutproto.Boost) tcpharness.Engine {
 	e := Engine(nil)
 	build := func(boost dutproto.Boost) func(tb testing.TB, seed uint64) tcpharness.DUT {
 		return func(tb testing.TB, seed uint64) tcpharness.DUT {
-			d, err := New(Config{Bin: bin, Boost: boost, Log: tb.Logf, Transcript: w}, tcpharness.DUTAddr, tcpharness.MTU, seed)
+			d, err := New(Config{Bin: bin, Boost: boost, Congestion: cc, Log: tb.Logf, Transcript: w}, tcpharness.DUTAddr, tcpharness.MTU, seed)
 			if err != nil {
 				tb.Fatalf("rustdut: %v", err)
 			}
@@ -325,7 +335,7 @@ func transcriptEngine(bin string, w io.Writer) tcpharness.Engine {
 			return d
 		}
 	}
-	e.New, e.NewPerformance = build(dutproto.BoostOnDemand), build(dutproto.BoostAtAccept)
+	e.New, e.NewPerformance = build(boost), build(boost)
 	return e
 }
 
@@ -416,5 +426,117 @@ func TestErrorsAsWgstackdut(t *testing.T) {
 	}
 	if len(want.Checks) < 9 {
 		t.Errorf("the error scenario ran %d checks; it stopped early", len(want.Checks))
+	}
+}
+
+// fitsStage4b reports whether a default-variant recording's tags, other than the congestion
+// control and the boost policy the 4b variant replaces, stay within the 4b tags.
+func fitsStage4b(tags []string) bool {
+	var rest []string
+	for _, t := range tags {
+		switch t {
+		case "cubic", "newreno", "boost-on-demand", "boost-at-accept", "boost-never":
+		default:
+			rest = append(rest, t)
+		}
+	}
+	return tags != nil && dutproto.Within(rest, dutproto.Stage4bTags)
+}
+
+// recordEnv is the directory TestWriteScenarioRecordings writes to (test-tooling.md section 4).
+const recordEnv = "WGFT_WGSTACK_RECORD"
+
+// recordCommitEnv is the last commit of the Go wgstack's product code, for the recordings' meta.
+const recordCommitEnv = "WGFT_WGSTACK_RECORD_COMMIT"
+
+// TestWriteScenarioRecordings records every conformance and congestion scenario, run through
+// rustdut on dutserve with run seeds 1 to 5, as the Go wgstack's recordings of the scenarios
+// source. A scenario whose peers offer neither SACK nor timestamps is also recorded in the 4b
+// variant: NewReno and no boost. It writes only from scripts/wgstack-record.sh, which builds
+// dutserve with GOAMD64=v1 on linux/amd64.
+func TestWriteScenarioRecordings(t *testing.T) {
+	dir := os.Getenv(recordEnv)
+	if dir == "" {
+		t.Skipf("set %s to a directory to write the scenario recordings", recordEnv)
+	}
+	bin := requireDutserve(t)
+	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" || os.Getenv("GOAMD64") != "v1" || os.Getenv(recordCommitEnv) == "" {
+		t.Fatalf("recordings are made on linux/amd64 with GOAMD64=v1 and %s set; use scripts/wgstack-record.sh", recordCommitEnv)
+	}
+	// The congestion scenarios' recordings are the largest; the git set has their run seed 1 only
+	// (test-tooling.md section 4), the full set for a local cache all five.
+	ccRuns := uint64(1)
+	switch v := os.Getenv("WGFT_WGSTACK_RECORD_SET"); v {
+	case "", "git":
+	case "full":
+		ccRuns = 5
+	default:
+		t.Fatalf("WGFT_WGSTACK_RECORD_SET=%q; want git or full", v)
+	}
+	type planned struct {
+		s    tcpharness.Scenario
+		runs uint64
+	}
+	var plan []planned
+	for _, s := range tcpharness.Scenarios {
+		plan = append(plan, planned{s, 5})
+	}
+	for _, s := range tcpharness.CongestionScenarios {
+		plan = append(plan, planned{s, ccRuns})
+	}
+	for _, p := range plan {
+		s := p.s
+		for run := uint64(1); run <= p.runs; run++ {
+			var defaultTags []string
+			for _, variant := range []string{"", "4b"} {
+				name := fmt.Sprintf("%s.seed-%d", s.Name, run)
+				if variant != "" {
+					name += "." + variant
+				}
+				t.Run(name, func(t *testing.T) {
+					if variant == "4b" && !fitsStage4b(defaultTags) {
+						t.Skipf("the scenario's peers or inputs go beyond the 4b tags %v: %v", dutproto.Stage4bTags, defaultTags)
+					}
+					seed := tcpharness.ScenarioSeed(run, s.Name)
+					var tr bytes.Buffer
+					e := transcriptEngine(bin, &tr)
+					if variant == "4b" {
+						e = transcriptEngineWith(bin, &tr, dutproto.CongestionNewReno, dutproto.BoostNever)
+					}
+					trace := tcpharness.RecordChecks(t, e, s, seed)
+					fr, err := dutproto.SplitFrames(tr.Bytes())
+					if err != nil {
+						t.Fatal(err)
+					}
+					tags := dutproto.Tags(fr)
+					if variant == "" {
+						defaultTags = tags
+					} else if !dutproto.Within(tags, dutproto.Stage4bTags) {
+						t.Fatalf("the 4b variant has the tags %v, beyond %v", tags, dutproto.Stage4bTags)
+					}
+					var checks []dutproto.RecCheck
+					for _, c := range trace.Checks {
+						if c.Outcome != "measure" {
+							checks = append(checks, dutproto.RecCheck{Key: c.Key, Outcome: c.Outcome})
+						}
+					}
+					meta := dutproto.RecMeta{Source: "scenarios", Name: name, Test: "tcpharness." + s.Name, Scenario: s.Name,
+						RunSeed: run, ScenarioSeed: seed, Variant: variant, GoCommit: os.Getenv(recordCommitEnv),
+						GoVersion: runtime.Version(), GOARCH: runtime.GOARCH, GOAMD64: os.Getenv("GOAMD64"), Tags: tags,
+						Checks: checks, Concurrent: concurrentScenarios[s.Name]}
+					var out bytes.Buffer
+					if err := dutproto.WriteRecord(&out, meta, tr.Bytes()); err != nil {
+						t.Fatal(err)
+					}
+					path := filepath.Join(dir, "scenarios", name+".rec.gz")
+					if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(path, out.Bytes(), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				})
+			}
+		}
 	}
 }

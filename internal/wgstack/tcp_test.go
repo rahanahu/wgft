@@ -14,7 +14,7 @@ import (
 
 func listen(t testing.TB, n *testNet, port uint16) *TCPListener {
 	t.Helper()
-	l, err := n.d.ListenTCP(netip.AddrPortFrom(dutAddr, port))
+	l, err := n.listenTCP(port)
 	if err != nil {
 		t.Fatal(err)
 	}
