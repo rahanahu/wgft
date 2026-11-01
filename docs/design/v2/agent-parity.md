@@ -1046,11 +1046,8 @@ Rust の側は、agent のホストのコマンドのフラグが Go と同じ�
 - 比べるもの:Rust のビルドが持つコマンドごとの、フラグの表 (名前、型、既定の値) と 1 行の説明 (`Short`) です。
   `docs/cli.md` の同じ見出しの節から読み、Rust の clap のコマンドの情報と比べます
 - 比べないもの:長い説明 (`Long`) と使用例 (`Example`) です。
-  Rust の説明は Rust の agent を説明し、CLAUDE.md の約束のとおりラボで確かめた挙動だけを書きます。
-  Go の説明を写すと、Rust で確かめていない挙動を書くことになるためです
-- 説明の置き場:Go の `cmd/wgft/helptext.go` に当たる module を `crates/wgft` に置きます。
-  clap のコマンドの定義には 1 行の `about` だけを置きます
-- 使用例:実行できるコマンドに使用例があることを、Go の `TestHelpTextsCoverCommands` と同じく確かめます
+  Rust のビルドはどちらも持たず、clap のコマンドの定義に 1 行の `about` とフラグの説明だけを置きます。
+  Go の説明を写さないのは、Rust で確かめていない挙動を書くことになるためです
 - 比べる範囲:コマンドの 1 行の説明は `docs/cli.md` の冒頭の表にある葉のコマンドだけを比べます。
   `wgft` と `wgft agent` の節には 1 行の説明が無いので比べません。
   型は `string`、`int`、真偽値に分け、既定の値は `docs/cli.md` の `(default ...)` と clap の説明の `[default: ...]` から読みます

@@ -1166,7 +1166,7 @@ git の seed の写しから固定の `-runs` を流し、壁時計の時間で�
 | --- | --- | --- |
 | Go の試験 | `go test ./...`。台本の構文の fixture、移した台本の表、`rustdut` の SKIP、記録の Go の照らし直しと上限 (1 秒ほど) | 今と同じ |
 | Rust の試験 (B13) | `cargo nextest`。構文の fixture、乱数の照合、台本を偽の時計で同じプロセスで、記録の照合、fuzz の回帰 | 1 分未満 (推定) |
-| 道具の照合 | Go の runner の `rustdut` で `dutserve` と `wgstack-dut` に全部の台本を種 1 から 5 で、Rust の runner との transcript の一致 | `dutserve` で Go の側が 12 秒ほど、Rust の側が 4 秒ほど (build を除く、1 回の測り)。`wgstack-dut` は未測定 |
+| 道具の照合 | Go の runner の `rustdut` で `dutserve` に全部の台本を種 1 から 5 で、Rust の runner との transcript の一致 | Go の側が 12 秒ほど、Rust の側が 4 秒ほど (build を除く、1 回の測り) |
 | fuzz の smoke | `parse` を 2,000,000 回、`core` を 2,500 回、`replay` を 20,000 回、`adversarial_sender` を 200 回、libFuzzer の `-runs` で流す。`core` は長さの制御を切り、最大の長さを 1024 byte にします | 1 段 2 分以内を目指します。ほかの段と並べた関門では `replay` が 1 秒に 170 回ほどに落ちました。`core` は全長の入力で、1 つの車線で 1 秒に 34 回ほどでした (1 回の測り) |
 | ラボ | `linuxdut` の適合の実行は表を使うので、移した台本も今と同じく流れる | 今と同じ |
 

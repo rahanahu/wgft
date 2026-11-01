@@ -67,7 +67,7 @@ bit の一致を求める間は、写し方も Go と同じ順と同じ算術に
 | `ack.go`、`ackpolicy.go`、`rcvwin.go` | `tcp::ack`、`tcp::ack_policy`、`tcp::rcv_window` | RTT と RTO、受け手の ACK、受信の窓の自動調整 |
 | `scoreboard.go`、`rack.go`、`undo.go` | `tcp::sack`、`tcp::rack`、`tcp::undo` | SACK の scoreboard と回復、RACK-TLP、不要な再送の取り消し |
 | `cc.go`、`hystart.go`、`cwndval.go`、`lazyegress.go` | `tcp::cc` | NewReno、CUBIC、HyStart++、窓の使用の判定、遅れた送り出し |
-| `boost.go` | `budget` | boost の枠、回収、取り消し |
+| `boost.go` | `budget`、`tcp::boost`、`stack::boost` | boost の枠、回収、取り消し |
 | `output.go` | `output` | 出力の 4 つの組と deficit round robin、制御の輪 |
 | `wheel.go` | `wheel` | タイマーの輪 |
 | `index.go`、`siphash.go` | `index`、`siphash` | 4 つ組の hash の表と SipHash-2-4 |
@@ -75,7 +75,7 @@ bit の一致を求める間は、写し方も Go と同じ順と同じ算術に
 | `udp.go` | `udp` | UDP の endpoint、受信と送信の予算、送信の断片化 |
 | `icmp.go` | `icmp` | echo、ping の endpoint、ICMP の誤り |
 | `frag.go` と `internal/ipv4frag` | `frag` | 断片の入口と再組み立ての表 |
-| `trace.go` | `trace` | 試験と測定のための観測 |
+| `trace.go` | 移しません | 試験と測定は、ACK ごとの観測の代わりに `Stats` と知らせと `check_invariants` を読みます |
 
 Go の `internal/ipv4frag` は gVisor の経路と共有する葉の package ですが、Rust には gVisor の経路が無いので、wgstack の crate の module にします。
 
@@ -319,7 +319,6 @@ Go の `OnBoost(f)` は、接続の錠の中で f を呼び、`f(false)` が偽�
 - `boost_granted(conn)`:boost を得た時に呼びます
 - `may_return(conn) -> bool`:需要の無い保有者を floor に戻す前に呼び、偽なら戻りを取り消します
 - `boost_returned(conn)`:floor に戻した後に呼びます
-- `trace(event)`:Go の `Config.Trace` に当たる観測です。製品の hook は何もしません
 
 hook は核への参照を受け取らないので、核を呼び返せません。
 中継の層は、`ConnId` から LAN 側のソケットを引く固定の大きさの表を核の外に持ち、`may_return` の中でそのソケットの受信のデータの量を読みます。
