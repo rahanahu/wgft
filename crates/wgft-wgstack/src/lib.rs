@@ -41,12 +41,12 @@ pub use bound::{Bound, Held};
 pub use budget::{Budget, BudgetError};
 pub use config::{BoostPolicy, Config, ConfigError, Congestion, Limits, MAX_MTU, MIN_MTU};
 pub use icmp::PingId;
-#[cfg(any(test, feature = "harness"))]
-pub use stack::TouchedCheck;
 pub use stack::{
     Closed, Error, Event, Hook, InvariantError, ListenerId, LogKind, LogLine, NewError,
     NewErrorKind, NoHook, Stack, Stats,
 };
+#[cfg(any(test, feature = "harness"))]
+pub use stack::{Spare, TouchedCheck};
 pub use tcp::conn::ConnId;
 pub use time::Time;
 pub use udp::{UdpFault, UdpId};

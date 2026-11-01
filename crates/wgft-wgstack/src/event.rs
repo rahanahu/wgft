@@ -36,6 +36,12 @@ impl EventList {
         })
     }
 
+    /// 対象の数です。
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn targets(&self) -> usize {
+        self.bits.len()
+    }
+
     #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.bits.heap_bytes() + self.order.heap_bytes()
@@ -90,6 +96,19 @@ impl EventList {
         if bits == 0 {
             self.order.remove(t);
         }
+    }
+
+    /// 印を持つ対象が無く、list が空かを返します。list の外の節は作成の時の値なので ([`Dlist::remove`])、真なら
+    /// 作成の時の値と同じです。
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.order.is_empty() && self.marked == 0
+    }
+
+    /// すべての印と節が作成の時の値かを返します。手間は対象の数に比例し、試験が使います。
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn is_fresh(&self) -> bool {
+        self.marked == 0 && self.check().is_ok() && self.order.is_fresh()
     }
 
     /// すべての対象の印を外します。

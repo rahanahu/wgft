@@ -194,9 +194,10 @@ fn slot_u32(i: usize) -> u32 {
 }
 
 /// 試験と fuzz の build (`cfg(test)` か feature `harness`) だけにある核の欄の byte です。接続の枠の表の書き換えの印
-/// (`ConnSlots::touched`) と、印を持つ知らせの対象の数 (`EventList::marked`) です。
+/// (`ConnSlots::touched`)、印を持つ知らせの対象の数 (`EventList::marked`)、待ち受けの表と UDP の endpoint の表の
+/// 開いたことのある印 (`PortTable::opened`) です。
 #[cfg(any(test, feature = "harness"))]
-const HARNESS_BYTES: usize = size_of::<crate::bitset::BitSet>() + size_of::<usize>();
+const HARNESS_BYTES: usize = 3 * size_of::<crate::bitset::BitSet>() + size_of::<usize>();
 
 /// 上界の式が使う核の値の大きさです。製品の核の大きさで数え、試験と fuzz の build だけにある欄を入れません。
 pub(crate) const fn stack_size<H: Hook>() -> usize {
@@ -240,13 +241,55 @@ impl<H: Hook> Stack<H> {
     /// 核を作り、表をすべて確保します。`seed` は 64 byte の乱数の種で、製品は OS の乱数から作り、試験は固定の
     /// 種を渡します。失敗したら渡した `Budget` を誤りに入れて返します。
     pub fn new(config: Config, budget: Budget, seed: &[u8; 64], hook: H) -> Result<Self, NewError> {
+        Self::create(config, budget, hook, |c| Tables::new(c, seed))
+    }
+
+    /// [`Stack::new`] と同じく核を作り、`spare` の表 ([`Stack::close_keeping`] が返した表) を新しく作る代わりに
+    /// 使います。大きさが合わない表と `spare` に無い表は新しく作ります。ほかの表は [`Stack::new`] と同じ口で
+    /// 作るので、作った核は [`Stack::new`] が作る核と同じ状態です。試験と fuzz の build だけにあります。
+    #[cfg(any(test, feature = "harness"))]
+    pub fn new_reusing(
+        config: Config,
+        budget: Budget,
+        spare: Spare,
+        seed: &[u8; 64],
+        hook: H,
+    ) -> Result<Self, NewError> {
+        Self::create(config, budget, hook, |c| {
+            let n = c.limits.conns();
+            Tables::with_ports(
+                c,
+                seed,
+                match spare.listeners {
+                    Some(t) => t,
+                    None => PortTable::new()?,
+                },
+                match spare.eps {
+                    Some(t) => t,
+                    None => PortTable::new()?,
+                },
+                match spare.events {
+                    Some(e) if e.targets() == EventTargets::count(n) => e,
+                    _ => EventList::new(EventTargets::count(n))?,
+                },
+            )
+        })
+    }
+
+    /// 設定を確かめ、`tables` で表を作り、核を組み立てます。
+    fn create(
+        config: Config,
+        budget: Budget,
+        hook: H,
+        tables: impl FnOnce(&Config) -> Result<Tables, AllocError>,
+    ) -> Result<Self, NewError> {
         if let Err(e) = config.validate() {
             return Err(NewError {
                 kind: NewErrorKind::Config(e),
                 budget,
             });
         }
-        match Tables::new(&config, seed) {
+        match tables(&config) {
             Ok(t) => Ok(Self {
                 conns: t.conns,
                 s: Shared {
@@ -559,6 +602,44 @@ impl<H: Hook> Stack<H> {
 
     /// 待ち受けと接続とソケットをすべて閉じ、`Budget` と最後の会計を返します。最後の会計はすべて 0 です。
     pub fn close(mut self, now: Time) -> Closed {
+        let held = self.close_tables(now);
+        Closed {
+            budget: self.s.budget,
+            held,
+        }
+    }
+
+    /// [`Stack::close`] と同じく核を閉じ、加えてポートの数の行を持つ表を作成の時の値に戻して返します
+    /// (wgstack-rs.md の「核の使い回し」)。試験と fuzz が、次の核を [`Stack::new_reusing`] で作るために使います。
+    ///
+    /// ポートの行は開いた時にだけ世代が進み、閉じた行は世代のほかは作成の時の値です。ポートの表は開いたことのある
+    /// 行に印を持つので (試験と fuzz の build だけ)、その行を戻せば表は作成の時と同じになります。印の残る知らせの
+    /// list は返さず、次の核はそれを新しく作ります。試験と fuzz の build だけにあります。
+    #[cfg(any(test, feature = "harness"))]
+    pub fn close_keeping(mut self, now: Time) -> (Closed, Spare) {
+        let held = self.close_tables(now);
+        let Self { s, .. } = self;
+        let mut spare = Spare::default();
+        let mut listeners = s.listeners;
+        listeners.restore();
+        spare.listeners = Some(listeners);
+        let mut eps = s.udp.eps;
+        eps.restore();
+        spare.eps = Some(eps);
+        if s.events.is_empty() {
+            spare.events = Some(s.events);
+        }
+        (
+            Closed {
+                budget: s.budget,
+                held,
+            },
+            spare,
+        )
+    }
+
+    /// 核の表を空にし、最後の会計を返します。会計はすべて 0 です。
+    fn close_tables(&mut self, now: Time) -> Held {
         self.clock(now);
         let s = &mut self.s;
         // 借りている boost の配列を枠に返します。
@@ -589,10 +670,7 @@ impl<H: Hook> Stack<H> {
         s.queued = 0;
         let held = self.held();
         debug_assert!(held.is_zero(), "close left {held:?}");
-        Closed {
-            budget: self.s.budget,
-            held,
-        }
+        held
     }
 
     /// トンネルから届いた IPv4 の packet を 1 つ処理します。packet は呼び出しの間だけ読み、保持するものは自分の
@@ -945,6 +1023,41 @@ fn check_conn(t: &Tcb, b: &ConnBufs) -> Result<(), InvariantError> {
     Ok(())
 }
 
+/// 閉じた核から次の核へ渡す、ポートの数の行を持つ表です (wgstack-rs.md の「核の使い回し」)。
+///
+/// 待ち受けの表、UDP の endpoint の表、知らせの list はポートの数 (65,536) の行を持ち、小さな表の核の作成の手間の
+/// 大部分を占めます。[`Stack::close_keeping`] が閉じた核から取り出して作成の時の値に戻し、
+/// [`Stack::new_reusing`] が新しく作る代わりに使います。試験と fuzz の build だけにあります。
+#[cfg(any(test, feature = "harness"))]
+#[derive(Debug, Default)]
+pub struct Spare {
+    listeners: Option<PortTable<Listener>>,
+    eps: Option<PortTable<crate::udp::UdpEp>>,
+    events: Option<EventList>,
+}
+
+#[cfg(any(test, feature = "harness"))]
+impl Spare {
+    /// 表を持たない値です。[`Stack::new_reusing`] はすべての表を新しく作ります。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 持っている表の数です。3 なら次の核はポートの数の行を持つ表を作りません。
+    pub fn kept(&self) -> usize {
+        usize::from(self.listeners.is_some())
+            + usize::from(self.eps.is_some())
+            + usize::from(self.events.is_some())
+    }
+
+    /// 持っている表が、新しく作った表とすべての行で同じ値かを返します。試験が使い、手間は表を作るのと同じほどです。
+    pub fn is_fresh(&self) -> bool {
+        self.listeners.as_ref().is_none_or(PortTable::is_fresh)
+            && self.eps.as_ref().is_none_or(PortTable::is_fresh)
+            && self.events.as_ref().is_none_or(EventList::is_fresh)
+    }
+}
+
 /// 核の表です。作成の途中で確保に失敗したら、確保した分を解放して誤りを返します。
 struct Tables {
     seeds: Seeds,
@@ -969,6 +1082,25 @@ struct Tables {
 
 impl Tables {
     fn new(config: &Config, seed: &[u8; 64]) -> Result<Self, AllocError> {
+        let n = config.limits.conns();
+        Self::with_ports(
+            config,
+            seed,
+            PortTable::new()?,
+            PortTable::new()?,
+            EventList::new(EventTargets::count(n))?,
+        )
+    }
+
+    /// ポートの数の行を持つ表 (待ち受けの表 `listeners`、UDP の endpoint の表 `eps`、知らせの list `events`) を
+    /// 使い、ほかの表を作ります。
+    fn with_ports(
+        config: &Config,
+        seed: &[u8; 64],
+        listeners: PortTable<Listener>,
+        eps: PortTable<crate::udp::UdpEp>,
+        events: EventList,
+    ) -> Result<Self, AllocError> {
         let l = &config.limits;
         let n = l.conns();
         let seeds = Seeds::new(seed);
@@ -984,16 +1116,16 @@ impl Tables {
             conn_idx: Index::new(n, seeds.table_key, true)?,
             syn: SynTable::new(l.syn_rows, seeds.table_key)?,
             tw: TwTable::new(l.tw_rows, seeds.table_key, n)?,
-            listeners: PortTable::new()?,
+            listeners,
             out_conns: Dlist::new(n)?,
             out_rows: Dlist::new(l.syn_rows + l.tw_rows)?,
             ctl: CtlRing::new(l.ctl_slots, config.mtu)?,
-            events: EventList::new(EventTargets::count(n))?,
+            events,
             wheel: Wheel::new(n * NUM_TIMERS)?,
             fired: FixedVec::try_with_capacity(n * NUM_TIMERS)?,
             chunks: ChunkPool::new()?,
             frag: frag::Table::new(frag_limits).map_err(|_| AllocError)?,
-            udp: Udp::new(l)?,
+            udp: Udp::with_eps(l, eps)?,
             pings: Pings::new(config.mtu)?,
             seeds,
         })
