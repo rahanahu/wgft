@@ -3,6 +3,7 @@
 //! 接続文字列と登録、認証情報 (`agent.json`)、stream、全体状態の適用、ハートビート、TCP の中継を
 //! 持つ。WireGuard の device の層は `tunnel` だけが扱う。作りは `docs/design/v2/agent-control.md` に書く。
 
+pub mod config;
 pub mod credentials;
 pub mod enroll;
 pub mod error;

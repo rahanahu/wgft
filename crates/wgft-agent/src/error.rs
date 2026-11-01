@@ -40,6 +40,10 @@ pub struct Refusal {
     pub reason: String,
     /// 前に付ける文脈。例えば `re-register failed`。
     pub context: Option<&'static str>,
+    /// 直し方。理由の後ろに別の文として足す。
+    pub hint: Option<String>,
+    /// 常駐プロセスを起動しないコマンドの拒否か。書き出しが `cannot continue` になる。
+    pub one_shot: bool,
 }
 
 impl Refusal {
@@ -51,6 +55,8 @@ impl Refusal {
             subject: subject.to_owned(),
             reason: reason.into(),
             context: None,
+            hint: None,
+            one_shot: false,
         }
     }
 
@@ -62,6 +68,8 @@ impl Refusal {
             subject: subject.to_owned(),
             reason: reason.into(),
             context: None,
+            hint: None,
+            one_shot: false,
         }
     }
 
@@ -73,6 +81,8 @@ impl Refusal {
             subject: subject.to_owned(),
             reason: reason.into(),
             context: None,
+            hint: None,
+            one_shot: false,
         }
     }
 }
@@ -86,7 +96,23 @@ impl Refusal {
             subject: subject.to_owned(),
             reason: reason.into(),
             context: None,
+            hint: None,
+            one_shot: false,
         }
+    }
+
+    /// 直し方を足す。
+    #[must_use]
+    pub fn hint(mut self, h: impl Into<String>) -> Self {
+        self.hint = Some(h.into());
+        self
+    }
+
+    /// 常駐プロセスを起動しないコマンドの拒否にする。書き出しだけが変わり、終了コードは 3 のままである。
+    #[must_use]
+    pub fn one_shot(mut self) -> Self {
+        self.one_shot = true;
+        self
     }
 
     /// 前に文脈を付ける。終了コードは変わらない。
@@ -102,11 +128,20 @@ impl fmt::Display for Refusal {
         if let Some(c) = self.context {
             write!(f, "{c}: ")?;
         }
-        write!(f, "refusing to start [{}", self.category.as_str())?;
+        let lead = if self.one_shot {
+            "cannot continue"
+        } else {
+            "refusing to start"
+        };
+        write!(f, "{lead} [{}", self.category.as_str())?;
         if !self.subject.is_empty() {
             write!(f, " {}", self.subject)?;
         }
-        write!(f, "]: {}", self.reason)
+        write!(f, "]: {}", self.reason)?;
+        if let Some(h) = &self.hint {
+            write!(f, ". {h}")?;
+        }
+        Ok(())
     }
 }
 
@@ -142,6 +177,17 @@ impl fmt::Display for AgentError {
 }
 
 impl std::error::Error for AgentError {}
+
+impl AgentError {
+    /// 常駐プロセスを起動しないコマンドの失敗にする。拒否の書き出しだけが変わる。
+    #[must_use]
+    pub fn one_shot(self) -> Self {
+        match self {
+            AgentError::Refused(r) => AgentError::Refused(r.one_shot()),
+            other @ AgentError::Other(_) => other,
+        }
+    }
+}
 
 impl From<Refusal> for AgentError {
     fn from(r: Refusal) -> Self {

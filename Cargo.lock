@@ -1231,6 +1231,9 @@ name = "wgft"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
  "wgft-agent",
  "wgft-proto",
 ]
@@ -1250,10 +1253,12 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2",
+ "tempfile",
  "time",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "unicode-general-category",
  "wgft-proto",
  "wgft-wireguard",
  "wgft-wireguard-tun",
