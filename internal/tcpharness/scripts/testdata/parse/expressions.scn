@@ -1,0 +1,15 @@
+# Operator precedence, literals, calls with named arguments, fields, index and slice.
+scenario expressions
+refs: parser fixture
+linux: net/ipv4/tcp_recovery=1
+
+let a = 1 + 2 * 3 - -4 % 5
+let b = !true || false && 1 < 2
+let c = SYN|ACK
+let d = 500ms + 2s / 2 - 10us
+let e = "q\"uote\\ \n\t\x00\xff"
+let f = with(opts_standard(), mss=536, ts=none)
+let g = e[1:3]
+let h = e[2]
+let i = e[:2]
+let j = 0xd1 == 209 && a != b

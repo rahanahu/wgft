@@ -1,0 +1,46 @@
+# 試験の道具 (docs/design/v2/test-tooling.md)。Rust の wgstack を 3 節の DUT の口で出します。
+# 製品のバイナリに入らず、配布しません。
+[package]
+name = "wgft-wgstack-dut"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "wgstack-dut"
+path = "src/main.rs"
+
+[dependencies]
+flate2.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "sync", "macros"] }
+wgft-netstack.workspace = true
+wgft-tcpharness.workspace = true
+wgft-wgstack.workspace = true
+
+[lints]
+workspace = true
+
+[[test]]
+name = "replay"
+harness = false
+
+[[test]]
+name = "scenarios"
+harness = false
+
+[dev-dependencies]
+libtest-mimic.workspace = true
+tempfile.workspace = true
+wgft-alloc-count.workspace = true
+
+[[test]]
+name = "fuzz_corpus"
+harness = false
+
+[[test]]
+name = "holding"
+harness = false

@@ -1,0 +1,14 @@
+# The scenario scripts and their fixtures are read byte for byte by the Go and the Rust parsers
+# and compared with golden files, so every checkout keeps LF line ends.
+internal/tcpharness/scripts/** text eol=lf
+# The DUT frame examples are compared byte for byte by the Go and the Rust codecs: the frames are
+# binary, and their JSON keeps LF line ends in every checkout.
+internal/dutproto/testdata/frames/*.bin -text -diff
+internal/dutproto/testdata/frames/*.json text eol=lf
+# The Go wgstack's recordings are binary; git neither converts nor diffs them. divergences.json
+# beside them stays text.
+testdata/wgstack-rec/**/*.rec.gz -text -diff
+
+# The fuzz targets' seeds and found inputs are bytes that the Rust targets read as they are.
+crates/wgft-wgstack/fuzz/corpus/** -text -diff
+crates/wgft-wgstack/fuzz/regressions/** -text -diff

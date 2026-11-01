@@ -219,6 +219,37 @@ func RecordFailures(t *testing.T, e Engine, s Scenario, seed uint64) (map[string
 	return a.outcome, a.msgs
 }
 
+// CheckRecord is one check or measurement of a scenario: its "scenario/check" key, its outcome, one
+// of the Outcome constants or "measure", and the observation or the measured value.
+type CheckRecord struct {
+	Key     string
+	Outcome string
+	Got     string
+}
+
+// CheckTrace is what one run of a scenario did, in order: its checks and measurements, the
+// failures it recorded, and whether it failed or was skipped. Two engines that run a scenario the
+// same way have the same CheckTrace; rustdut's tests compare an engine run in-process with the
+// same engine behind the frame protocol this way.
+type CheckTrace struct {
+	Checks   []CheckRecord
+	Failures []string
+	Failed   bool
+	Skipped  bool
+	// Lines are the lines the scenario logged, in order: the segments sent and seen, the waits,
+	// the check and MEASURE lines and the recorded failures. On a ClockedDUT each starts with the
+	// DUT's time since it was built, so two runs that drive the DUT the same way at the same times
+	// give the same lines.
+	Lines []string
+}
+
+// RecordChecks runs one scenario against a fresh DUT of e without failing t, as Record does, and
+// returns its CheckTrace.
+func RecordChecks(t testing.TB, e Engine, s Scenario, seed uint64) CheckTrace {
+	a := attempt(t, e, s, seed)
+	return CheckTrace{Checks: a.checks, Failures: a.msgs, Failed: a.failed, Skipped: a.skipped, Lines: a.lines}
+}
+
 // stallLimit and scenarioAttempts are Run's rule for running a failed scenario again. 10 ms is
 // below the margin every timed check leaves a correct DUT, and above the few milliseconds an idle
 // machine's scheduler takes.
@@ -229,6 +260,8 @@ const scenarioAttempts = 3
 // attemptResult is one run of a scenario.
 type attemptResult struct {
 	outcome map[string][]string // nil when the scenario did not start
+	checks  []CheckRecord       // the checks and measurements, in order
+	lines   []string            // the logged lines, in order
 	msgs    []string            // the failures, in order
 	failed  bool
 	skipped bool
@@ -242,6 +275,7 @@ func attempt(t testing.TB, e Engine, s Scenario, seed uint64) attemptResult {
 	rec := &recorder{TB: t}
 	var a attemptResult
 	var w *stallWatch
+	var h *H
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -253,8 +287,12 @@ func attempt(t testing.TB, e Engine, s Scenario, seed uint64) attemptResult {
 			build = e.NewPerformance
 		}
 		d := build(rec, seed)
-		_, a.clocked = d.(ClockedDUT)
-		h := newH(rec, e, s.Name, d, seed)
+		var c ClockedDUT
+		c, a.clocked = d.(ClockedDUT)
+		if a.clocked {
+			rec.stamp(clockOf(c))
+		}
+		h = newH(rec, e, s.Name, d, seed)
 		a.outcome = h.outcome
 		if !a.clocked {
 			w = watchStalls()
@@ -266,6 +304,10 @@ func attempt(t testing.TB, e Engine, s Scenario, seed uint64) attemptResult {
 		a.stall = w.end()
 	}
 	rec.cleanup()
+	a.lines = rec.keptLines()
+	if h != nil {
+		a.checks = h.checks
+	}
 	a.msgs, a.failed, a.skipped = rec.msgs, rec.failed, rec.skipped
 	return a
 }
@@ -293,6 +335,10 @@ func (a attemptResult) report(t testing.TB) {
 // where the real one would stop the test, and keeps the cleanups for attempt to run.
 type recorder struct {
 	testing.TB
+	mu       sync.Mutex
+	lines    []string
+	clock    func() time.Time // the DUT's clock, on a ClockedDUT
+	start    time.Time
 	msgs     []string
 	failed   bool
 	skipped  bool
@@ -304,7 +350,52 @@ func (r *recorder) Errorf(format string, args ...any) {
 	m := fmt.Sprintf(format, args...)
 	r.msgs = append(r.msgs, m)
 	r.failed = true
-	r.TB.Logf("recorded: %s", m)
+	r.Logf("recorded: %s", m)
+}
+
+// Logf logs through the real TB. The recorder's own lines, such as recorded failures, go
+// through it as well.
+func (r *recorder) Logf(format string, args ...any) {
+	r.TB.Helper()
+	r.TB.Logf(format, args...)
+	line := fmt.Sprintf(format, args...)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.clock != nil {
+		line = fmt.Sprintf("%v %s", r.clock().Sub(r.start), line)
+	}
+	r.lines = append(r.lines, line)
+}
+
+// CachedClock is a ClockedDUT whose clock can be read without asking the engine, such as one
+// in another process. The recorder stamps its lines with it, from any goroutine.
+type CachedClock interface {
+	CachedNow() time.Time
+}
+
+func clockOf(c ClockedDUT) func() time.Time {
+	if cc, ok := c.(CachedClock); ok {
+		return cc.CachedNow
+	}
+	return c.Now
+}
+
+// stamp makes the kept lines start with the time on clock since now.
+func (r *recorder) stamp(clock func() time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.clock, r.start = clock, clock()
+}
+
+func (r *recorder) keptLines() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lines
+}
+func (r *recorder) Log(args ...any) {
+	r.TB.Helper()
+	m := fmt.Sprintln(args...)
+	r.Logf("%s", m[:len(m)-1])
 }
 func (r *recorder) Error(args ...any) { r.TB.Helper(); r.Errorf("%s", fmt.Sprint(args...)) }
 func (r *recorder) Fatalf(format string, args ...any) {
@@ -320,10 +411,10 @@ func (r *recorder) SkipNow()          { r.skipped = true; runtime.Goexit() }
 func (r *recorder) Skipped() bool     { return r.skipped }
 func (r *recorder) Skipf(format string, args ...any) {
 	r.TB.Helper()
-	r.TB.Logf(format, args...)
+	r.Logf(format, args...)
 	r.SkipNow()
 }
-func (r *recorder) Skip(args ...any) { r.TB.Helper(); r.TB.Log(args...); r.SkipNow() }
+func (r *recorder) Skip(args ...any) { r.TB.Helper(); r.Log(args...); r.SkipNow() }
 func (r *recorder) Cleanup(f func()) { r.cleanups = append(r.cleanups, f) }
 func (r *recorder) cleanup() {
 	for i := len(r.cleanups) - 1; i >= 0; i-- {
@@ -374,6 +465,7 @@ type H struct {
 	engine   Engine
 	scenario string
 	outcome  map[string][]string
+	checks   []CheckRecord
 	rng      *rand.Rand
 	nextPort uint16
 	// closed is set once a real-time DUT's Emitted channel has been closed: nothing more can come
@@ -395,6 +487,10 @@ func newH(t testing.TB, e Engine, scenario string, d DUT, seed uint64) *H {
 func (h *H) Check(id string, ok bool, what, got string) bool {
 	h.T.Helper()
 	key := h.scenario + "/" + id
+	defer func() {
+		o := h.outcome[key]
+		h.checks = append(h.checks, CheckRecord{Key: key, Outcome: o[len(o)-1], Got: got})
+	}()
 	k, known := h.engine.Known[key]
 	switch {
 	case ok && !known:
@@ -444,6 +540,7 @@ func (h *H) clocked() bool {
 // Measure reports a value for the comparison tables. It asserts nothing.
 func (h *H) Measure(name string, v any) {
 	h.T.Helper()
+	h.checks = append(h.checks, CheckRecord{Key: h.scenario + "/" + name, Outcome: "measure", Got: fmt.Sprint(v)})
 	h.T.Logf("MEASURE engine=%s %s/%s=%v", h.engine.Name, h.scenario, name, v)
 }
 
@@ -614,6 +711,12 @@ func (h *H) next(d time.Duration) ([]byte, bool) {
 // A packet larger than the MTU fails the scenario: the harness compares segments as TCP alone
 // cut them, with no offload in between.
 func (p *Peer) Next(d time.Duration) (Segment, bool) {
+	p.h.T.Logf("wait up to %v for a segment", d)
+	return p.next(d)
+}
+
+// next is Next without the log line of the wait, for the waits that log their own.
+func (p *Peer) next(d time.Duration) (Segment, bool) {
 	deadline := p.h.Now().Add(d)
 	for {
 		pkt, ok := p.h.next(max(deadline.Sub(p.h.Now()), 0))
@@ -667,9 +770,10 @@ func (h *H) Collect(d time.Duration) []Segment {
 // Await returns the first segment of this flow within d that match accepts, logging the
 // segments it passes over.
 func (p *Peer) Await(d time.Duration, match func(Segment) bool) (Segment, bool) {
+	p.h.T.Logf("wait up to %v for a matching segment", d)
 	deadline := p.h.Now().Add(d)
 	for {
-		s, ok := p.Next(max(deadline.Sub(p.h.Now()), 0))
+		s, ok := p.next(max(deadline.Sub(p.h.Now()), 0))
 		if !ok {
 			return Segment{}, false
 		}
@@ -723,6 +827,7 @@ func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time, 
 	if dl, ok := c.(Deliverer); ok && !clocked {
 		delivered = dl.Delivered
 	}
+	p.h.T.Logf("expect quiet for %v after the ACK", d)
 	settleBy := p.h.Now().Add(settleBudget)
 	var deadline time.Time // zero until the DUT has the ACK
 	for {
@@ -737,7 +842,7 @@ func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time, 
 		if !deadline.IsZero() {
 			wait = max(deadline.Sub(p.h.Now()), 0)
 		}
-		s, ok := p.Next(wait)
+		s, ok := p.next(wait)
 		if !ok {
 			// past the deadline, or the DUT closed its output and nothing more can come
 			if !deadline.IsZero() || p.h.closed {
@@ -778,7 +883,8 @@ const probeWindow = 250 * time.Millisecond
 
 // Quiet reports whether the DUT emits nothing on this flow for d.
 func (p *Peer) Quiet(d time.Duration) (Segment, bool) {
-	s, ok := p.Next(d)
+	p.h.T.Logf("expect quiet for %v", d)
+	s, ok := p.next(d)
 	return s, !ok
 }
 

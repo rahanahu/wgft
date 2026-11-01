@@ -1,0 +1,39 @@
+# One if block deeper than the limit.
+scenario if-depth
+refs: parser fixture
+
+if true
+  if true
+    if true
+      if true
+        if true
+          if true
+            if true
+              if true
+                if true
+                  if true
+                    if true
+                      if true
+                        if true
+                          if true
+                            if true
+                              if true
+                                if true
+                                  stop
+                                end
+                              end
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end

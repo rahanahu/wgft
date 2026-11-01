@@ -177,37 +177,6 @@ func ownScale(h *H, p *Peer, c Conn) {
 		fmt.Sprintf("%d of %d bytes, equal %v", len(got), len(want), bytes.Equal(got, want)))
 }
 
-// paws sends a data segment whose timestamp is older than the last one the DUT accepted. RFC
-// 7323 5.3 drops it and answers with an ACK; the bytes must not reach the application.
-func paws(h *H) {
-	const port = 8010
-	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
-	h.Require("timestamps", p.TS, "timestamps negotiated", yesNo(p.TS, "timestamps", "none"))
-	p.SendData([]byte("fresh1"))
-	got, err := readFull(c, 6, time.Second)
-	h.Require("fresh.delivered", err == nil && string(got) == "fresh1", "a current segment is delivered", fmt.Sprintf("%d bytes, error %s", len(got), errKind(err)))
-	a, ok := p.Await(time.Second, acks(p.SndNxt))
-	h.Require("fresh.acked", ok, "the current segment is acknowledged", segDesc(a, ok))
-
-	old := p.Segment(FlagACK|FlagPSH, p.SndNxt, []byte("OLD!"))
-	old.Opts.TS.Val = p.TSVal() - 100000 // 100 s older than the clock
-	p.Send(old)
-	a, ok = p.Await(h.Prompt(), func(s Segment) bool { return s.Has(FlagACK) })
-	h.Check("old.dupack", ok && a.Ack == p.SndNxt, "the old segment draws at once an ACK that does not cover it", ackDesc(a, ok, p.SndNxt))
-	got, err = readFull(c, 4, 300*time.Millisecond)
-	dropped := len(got) == 0 && errKind(err) == "timeout"
-	h.Check("old.not-delivered", dropped, "the old segment's bytes are not delivered", fmt.Sprintf("%d bytes, error %s", len(got), errKind(err)))
-	if !dropped {
-		h.T.Logf("the old bytes were delivered, so the same bytes with a current timestamp would be a duplicate; retry.delivered not reached")
-		return
-	}
-	p.SendData([]byte("NEW!"))
-	got, err = readFull(c, 4, time.Second)
-	h.Check("retry.delivered", err == nil && string(got) == "NEW!", "the same bytes with a current timestamp are delivered",
-		fmt.Sprintf("%q, error %s", got, errKind(err)))
-}
-
 // resend retransmits the unacknowledged bytes from the DUT's latest ACK up to SndNxt, at most
 // the DUT's window, and returns the number of segments sent.
 func resend(p *Peer, data []byte, start uint32) int {

@@ -1,0 +1,56 @@
+# The relay's pattern: CloseWrite sends a FIN, the application keeps reading what the testbench
+# still sends, and the testbench's FIN moves the DUT to TIME-WAIT, where a retransmitted FIN is
+# acknowledged again.
+scenario half-close
+refs: RFC 9293 3.6, 3.8.1 and 3.10.7.4 FIN-WAIT-1, FIN-WAIT-2 and TIME-WAIT; packetimpact tcp_fin_retransmission
+
+listen l 8012
+connect p l 8012 syn=opts_standard()
+close_write p.conn
+await p 1s match=is_fin(s) -> f
+require fin-wait-1.fin f.ok && f.seq == p.rcv_nxt
+  what: CloseWrite sends a FIN at once
+  got: {seg_desc(f)}
+await p 3s match=(is_fin(s) && s.seq == f.seq) -> f2
+check fin-retransmitted f2.ok
+  what: an unacknowledged FIN is retransmitted
+  got: {seg_desc(f2)}
+if f2.ok
+  measure fin-retransmit_ms ms(f2.at - f.at)
+end
+set p.rcv_nxt = f.seq + 1
+send_ack p
+
+send_data p "more"
+read p.conn 4 1s -> r
+check fin-wait-2.receives r.err == none && r.data == "more"
+  what: the application reads data after its own FIN
+  got: {quote(r.data)}, error {err_kind(r.err)}
+await p 1s match=acks(s, p.snd_nxt) -> a
+check fin-wait-2.acks-data a.ok
+  what: the DUT acknowledges data in FIN-WAIT-2
+  got: {seg_desc(a)}
+
+send_fin p
+await p 1s match=acks(s, p.snd_nxt) -> a
+check time-wait.acks-fin a.ok
+  what: the DUT acknowledges the testbench's FIN
+  got: {seg_desc(a)}
+read p.conn 1 1s -> r
+check eof err_kind(r.err) == "EOF"
+  what: the application's read returns EOF
+  got: error {err_kind(r.err)}
+
+# the testbench's FIN once more
+send p segment(p, FIN|ACK, p.snd_nxt - 1)
+await p prompt match=acks(s, p.snd_nxt) -> a
+check time-wait.reacks-fin a.ok
+  what: a retransmitted FIN in TIME-WAIT is acknowledged again at once
+  got: {seg_desc(a)}
+
+close p.conn
+quiet p 300ms -> q
+check closed.quiet q.quiet
+  what: Close in TIME-WAIT sends nothing
+  got: {seg_desc(q.seg)}
+delivered delivered p.conn

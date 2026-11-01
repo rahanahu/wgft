@@ -21,11 +21,13 @@ type rxCfg struct {
 	readSmall bool
 	boostFlip bool
 	halfClose bool
+	rec       recSpec
 }
 
 func runRx(t *testing.T, cfg rxCfg) {
 	rng := rand.New(rand.NewPCG(cfg.seed, cfg.seed^0x9e37))
 	n := newTestNet(t, smallLimits())
+	n.record(cfg.rec)
 	l := listen(t, n, 80)
 	stream := make([]byte, cfg.length)
 	for i := range stream {
@@ -55,9 +57,9 @@ func runRx(t *testing.T, cfg rxCfg) {
 		return s
 	}
 	n.inject(mk(0, 0, false))
-	c := acceptOne(t, l)
+	c := n.accept(l)
 	if cfg.halfClose {
-		c.CloseWrite()
+		n.closeWrite(c)
 	}
 
 	var got []byte
@@ -101,7 +103,7 @@ func runRx(t *testing.T, cfg rxCfg) {
 			if cfg.readSmall {
 				b = rbuf[:1+rng.IntN(3000)]
 			}
-			k, err := c.Read(b)
+			k, err := n.read(c, b)
 			got = append(got, b[:k]...)
 			if !bytes.Equal(got, stream[:len(got)]) {
 				for i := range got {
@@ -168,6 +170,7 @@ func runRx(t *testing.T, cfg rxCfg) {
 		case r < 95:
 			read()
 		case r < 97 && cfg.boostFlip:
+			n.internal("an internal boost flip")
 			if rng.IntN(2) == 0 {
 				n.d.s.tryBoost(c.c, c.gen, boostRecv)
 			} else {
@@ -203,7 +206,7 @@ func runRx(t *testing.T, cfg rxCfg) {
 		t.Logf("demotes %d seed %d len %d ooodrop %d trimmed %d boost %d chal %d", demotes, cfg.seed, cfg.length, st.OOODropped, st.RecvTrimmed, st.BoostGranted, st.ChallengeLimited)
 	}
 	if cfg.halfClose && eof {
-		c.Close()
+		n.closeConn(c)
 		if st := n.d.Stats(); st.Conns != 0 || st.TWRows != 1 {
 			t.Fatalf("seed %d: after Close of a half-closed conn %+v", cfg.seed, st)
 		}
@@ -218,19 +221,21 @@ func TestReceiveStreamIntegrity(t *testing.T) {
 	if streamSeedsFull() {
 		seeds = 2000
 	}
-	forSeeds(t, 1, seeds, func(t *testing.T, seed uint64) {
-		cfg := rxCfg{
-			seed:      seed,
-			ts:        seed%2 == 0,
-			sack:      seed%3 != 0,
-			ws:        seed%5 != 0,
-			iss:       uint32(0xffffffff - seed*3000),
-			length:    20000 + int(seed*7919)%600000,
-			earlyFin:  seed%4 == 0,
-			readSmall: seed%3 == 1,
-			boostFlip: seed%2 == 1,
-			halfClose: seed%7 < 3,
-		}
-		runRx(t, cfg)
-	})
+	forSeeds(t, 1, seeds, func(t *testing.T, seed uint64) { runRx(t, rxStreamCfg(seed)) })
+}
+
+// rxStreamCfg は TestReceiveStreamIntegrity の種の選択。記録 (recordings_test.go) も使う。
+func rxStreamCfg(seed uint64) rxCfg {
+	return rxCfg{
+		seed:      seed,
+		ts:        seed%2 == 0,
+		sack:      seed%3 != 0,
+		ws:        seed%5 != 0,
+		iss:       uint32(0xffffffff - seed*3000),
+		length:    20000 + int(seed*7919)%600000,
+		earlyFin:  seed%4 == 0,
+		readSmall: seed%3 == 1,
+		boostFlip: seed%2 == 1,
+		halfClose: seed%7 < 3,
+	}
 }

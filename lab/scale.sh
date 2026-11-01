@@ -292,7 +292,7 @@ for ((i = 0; i < N_AGENTS; i++)); do
   adir="$W/wgft-scale-agent$i"
   mkdir -p "$adir"
   join=$(vps wgft agent join-string --name "home$i" --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" WGFT_NAME="home$i" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$adir" \
+  WGFT_JOIN="$join" WGFT_NAME="home$i" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$adir" \
     > "$W/wgft-scale-agent$i.log" 2>&1 < /dev/null &
   disown
   sleep "$AGENT_START_STAGGER"

@@ -1,0 +1,155 @@
+{
+  "description": "Values of WGFT_AGENT_ALLOW_TARGETS. normalized is the list as the agent logs it at start, or null when the value means no restriction. An error case gives the parser's error; at the door of agent run it becomes the reason of \"refusing to start [config WGFT_AGENT_ALLOW_TARGETS]: ERROR\" with exit code 3.",
+  "ok": [
+    {
+      "input": "",
+      "normalized": null
+    },
+    {
+      "input": "   ",
+      "normalized": null
+    },
+    {
+      "input": "192.168.1.20",
+      "normalized": "192.168.1.20/32"
+    },
+    {
+      "input": "192.168.1.20:25565",
+      "normalized": "192.168.1.20/32:25565"
+    },
+    {
+      "input": "10.0.0.1/8",
+      "normalized": "10.0.0.0/8"
+    },
+    {
+      "input": "192.168.1.21:2456-2458",
+      "normalized": "192.168.1.21/32:2456-2458"
+    },
+    {
+      "input": "10.0.0.0/8:80-80",
+      "normalized": "10.0.0.0/8:80"
+    },
+    {
+      "input": " 10.0.0.1 , ,192.168.0.0/16 ",
+      "normalized": "10.0.0.1/32,192.168.0.0/16"
+    },
+    {
+      "input": "10.0.0.1,10.0.0.1",
+      "normalized": "10.0.0.1/32,10.0.0.1/32"
+    },
+    {
+      "input": "0.0.0.0/0",
+      "normalized": "0.0.0.0/0"
+    },
+    {
+      "input": "10.0.0.1:080",
+      "normalized": "10.0.0.1/32:80"
+    },
+    {
+      "input": "2001:db8::1",
+      "normalized": "2001:db8::1/128"
+    },
+    {
+      "input": "2001:DB8::1",
+      "normalized": "2001:db8::1/128"
+    },
+    {
+      "input": "[2001:db8::/32]:8080",
+      "normalized": "[2001:db8::/32]:8080"
+    },
+    {
+      "input": "[2001:db8::1]:8000-8010",
+      "normalized": "[2001:db8::1/128]:8000-8010"
+    },
+    {
+      "input": "[2001:db8::1]",
+      "normalized": "2001:db8::1/128"
+    },
+    {
+      "input": "[2001:db8::1]:",
+      "normalized": "2001:db8::1/128"
+    },
+    {
+      "input": "10.0.0.1:",
+      "normalized": "10.0.0.1/32"
+    },
+    {
+      "input": "[10.0.0.1]:80",
+      "normalized": "10.0.0.1/32:80"
+    },
+    {
+      "input": "2001:db8::1:80",
+      "normalized": "2001:db8::1:80/128"
+    }
+  ],
+  "error": [
+    {
+      "input": ",",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: \",\" has no entries; leave it unset to allow every target"
+    },
+    {
+      "input": " , ",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: \" , \" has no entries; leave it unset to allow every target"
+    },
+    {
+      "input": "192.168.1.0/33",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"192.168.1.0/33\" is not a CIDR, CIDR:port or CIDR:lo-hi"
+    },
+    {
+      "input": "host.example",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"host.example\" is not a CIDR, CIDR:port or CIDR:lo-hi"
+    },
+    {
+      "input": "010.0.0.1",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"010.0.0.1\" is not a CIDR, CIDR:port or CIDR:lo-hi"
+    },
+    {
+      "input": "10.0.0.1 /8",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"10.0.0.1 /8\" is not a CIDR, CIDR:port or CIDR:lo-hi"
+    },
+    {
+      "input": "10.0.0.1,bad,also-bad",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"bad\" is not a CIDR, CIDR:port or CIDR:lo-hi"
+    },
+    {
+      "input": "10.0.0.1:0",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"10.0.0.1:0\" port is not an integer in 1-65535"
+    },
+    {
+      "input": "10.0.0.1:65536",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"10.0.0.1:65536\" port is not an integer in 1-65535"
+    },
+    {
+      "input": "10.0.0.1:+80",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"10.0.0.1:+80\" port is not an integer in 1-65535"
+    },
+    {
+      "input": "10.0.0.1:80-",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"10.0.0.1:80-\" port is not an integer in 1-65535"
+    },
+    {
+      "input": "10.0.0.1:80-70",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"10.0.0.1:80-70\" port range is not in lo-hi order"
+    },
+    {
+      "input": "[2001:db8::1",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"[2001:db8::1\" has no closing bracket"
+    },
+    {
+      "input": "[2001:db8::1]x",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"[2001:db8::1]x\" has trailing text after the brackets"
+    },
+    {
+      "input": "fe80::1%eth0",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"fe80::1%eth0\" must not carry an IPv6 zone"
+    },
+    {
+      "input": "::ffff:10.0.0.1",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"::ffff:10.0.0.1\" is an IPv4-mapped IPv6 address; write it as IPv4"
+    },
+    {
+      "input": "::ffff:10.0.0.0/104",
+      "error": "WGFT_AGENT_ALLOW_TARGETS: entry \"::ffff:10.0.0.0/104\" is an IPv4-mapped IPv6 address; write it as IPv4"
+    }
+  ]
+}

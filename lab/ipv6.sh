@@ -110,7 +110,7 @@ vps setsid nohup $run_server --mode "$mode" --data-dir "$DATA" --wg-endpoint 203
 disown
 if ! wait_until 30 admin_up; then echo "FAIL  setup: admin api did not come up"; fail=1; fi
 join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-ipv6-agent.log 2>&1 < /dev/null &
+WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > $W/wgft-ipv6-agent.log 2>&1 < /dev/null &
 disown
 ip netns exec "$LAN_NS" setsid nohup echo -tcp 25566 -udp 19140 > $W/wgft-ipv6-echo.log 2>&1 < /dev/null &
 disown

@@ -1,0 +1,49 @@
+# More SYNs to a handshake in SYN-RECEIVED. The same SYN again draws the SYN-ACK again. A SYN with
+# another ISN inside the window is reset and the row dropped, the choice wgstack.md made from
+# Linux's tcp_check_req; one outside the window draws an ACK and the handshake can still finish.
+scenario synrcvd-syn
+refs: RFC 9293 3.10.7.4 SYN-RECEIVED, RFC 5961 4; packetimpact tcp_synrcvd_reset
+
+listen l 8019
+
+peer p 8019
+let first = syn(p, with(opts_standard(), ts=ts(ts_val(p), seq(0))))
+send p first
+await p 1s match=is_synack(s) -> sa
+require synack sa.ok && sa.ack == p.iss + 1
+  what: the SYN is answered
+  got: {synack_desc(p, sa)}
+# 300 ms: well before a SYN-ACK retransmission timer of 1 s could answer instead
+send p first
+await p 300ms -> r
+measure same-syn.reply seg_desc(r)
+let ok = r.ok && has(r, SYN|ACK)
+check same-syn.synack-again ok && r.seq == sa.seq
+  what: the same SYN again draws the same SYN-ACK
+  got: {synack_desc(p, r, ok)}
+send p with(first, seq=p.iss+1000)
+await p 300ms -> r
+measure other-syn-in-window.reply seg_desc(r)
+check other-syn-in-window.rst r.ok && is_rst(r)
+  what: a SYN with another ISN inside the window is reset
+  got: {seg_desc(r)}
+
+peer q 8019
+let o = with(opts_standard(), ts=ts(ts_val(q), seq(0)))
+set q.ws = o.ws
+send q syn(q, o)
+await q 1s match=is_synack(s) -> sa
+require second.synack sa.ok && sa.ack == q.iss + 1
+  what: the second peer's SYN is answered
+  got: {synack_desc(q, sa)}
+# 0x40000000 is 1 << 30, far outside the window
+send q with(syn(q, o), seq=q.iss+0x40000000)
+await q 300ms -> r
+measure other-syn-out-of-window.reply seg_desc(r)
+check other-syn-out-of-window.ack r.ok && is_pure_ack(r) && r.ack == q.iss + 1
+  what: a SYN far outside the window draws an ACK
+  got: {seg_desc(r)}
+adopt q o sa
+send_ack q
+accept c l
+alive out-of-window.row-kept q c

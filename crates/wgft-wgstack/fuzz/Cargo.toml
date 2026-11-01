@@ -1,0 +1,56 @@
+# cargo-fuzz の target (docs/design/v2/test-tooling.md の 6 節)。nightly で `cargo fuzz run <target>` が使います。
+# 自分の [workspace] を持ち、リポジトリのワークスペースの member に入りません。
+[package]
+name = "wgft-wgstack-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+wgft-wgstack = { path = ".." }
+# core、adversarial_sender、replay の本体は試験の道具の crate が持ちます (試験の担当)。stable の試験
+# (crates/wgft-wgstack-dut/tests/fuzz_corpus.rs) が同じ本体で corpus と見つけた入力を流すためです。
+wgft-wgstack-dut = { path = "../../wgft-wgstack-dut" }
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "core"
+path = "fuzz_targets/core.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "adversarial_sender"
+path = "fuzz_targets/adversarial_sender.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replay"
+path = "fuzz_targets/replay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raw_adversary"
+path = "fuzz_targets/raw_adversary.rs"
+test = false
+doc = false
+bench = false

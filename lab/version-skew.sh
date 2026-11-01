@@ -47,6 +47,9 @@
 #                                         so a failure here says the script is wrong rather than
 #                                         the version combinations.
 #
+# "The current agent build" is $AGENT_WGFT (lab/sandbox.sh): the Go wgft, or with
+# WGFT_LAB_AGENT_IMPL=rust the Rust build, which then meets the old Go servers.
+#
 # OLD_VERSION is the immediately-previous release, which is what docs/testing.md B7 names. It
 # defaults to the constant below and can be overridden with WGFT_SKEW_OLD_VERSION (the same way
 # lab/upgrade.sh takes WGFT_UPGRADE_OLD_VERSION), for example on a release-candidate run made
@@ -337,6 +340,9 @@ binary_is() {
   fi
 }
 CURRENT_VERSION=$(wgft version 2>/dev/null | head -1)
+# the current build's agent is $AGENT_WGFT (lab/sandbox.sh), which with WGFT_LAB_AGENT_IMPL=rust is the
+# Rust build and reports its own version
+CURRENT_AGENT_VERSION=$("$AGENT_WGFT" version 2>/dev/null | head -1)
 
 # run_combo <name> <server-bin> <agent-bin> <expect-protocol-label> <agent-has-protocol-log 0/1>
 #           <check-disable>
@@ -345,7 +351,7 @@ CURRENT_VERSION=$(wgft version 2>/dev/null | head -1)
 run_combo() {
   local name=$1 server_bin=$2 agent_bin=$3 want_label=$4 agent_logs_protocol=$5 check_disable=${6:-0}
   echo "== combination: $name (server=$(basename "$server_bin"), agent=$(basename "$agent_bin"))"
-  local want_server=$CURRENT_VERSION want_agent=$CURRENT_VERSION
+  local want_server=$CURRENT_VERSION want_agent=$CURRENT_AGENT_VERSION
   case "$name" in
     legacy) want_agent=v$LEGACY_VERSION ;;
     old-agent) want_agent=v$OLD_VERSION ;;
@@ -609,7 +615,7 @@ for c in $COMBOS; do
       ;;
     old-server)
       fetch_release "$OLD_VERSION" "$CACHE/wgft-v$OLD_VERSION" || { echo "FAIL  old-server: could not obtain v$OLD_VERSION (see this script's header comment)"; fail=1; continue; }
-      run_combo old-server "$CACHE/wgft-v$OLD_VERSION" wgft "v1" 1 "$(disable_check "$OLD_VERSION")"
+      run_combo old-server "$CACHE/wgft-v$OLD_VERSION" "$AGENT_WGFT" "v1" 1 "$(disable_check "$OLD_VERSION")"
       ;;
     predisable-agent)
       fetch_release "$PREDISABLE_VERSION" "$CACHE/wgft-v$PREDISABLE_VERSION" || { echo "FAIL  predisable-agent: could not obtain v$PREDISABLE_VERSION (see this script's header comment)"; fail=1; continue; }
@@ -617,10 +623,10 @@ for c in $COMBOS; do
       ;;
     predisable-server)
       fetch_release "$PREDISABLE_VERSION" "$CACHE/wgft-v$PREDISABLE_VERSION" || { echo "FAIL  predisable-server: could not obtain v$PREDISABLE_VERSION (see this script's header comment)"; fail=1; continue; }
-      run_combo predisable-server "$CACHE/wgft-v$PREDISABLE_VERSION" wgft "v1" 1 "$(disable_check "$PREDISABLE_VERSION")"
+      run_combo predisable-server "$CACHE/wgft-v$PREDISABLE_VERSION" "$AGENT_WGFT" "v1" 1 "$(disable_check "$PREDISABLE_VERSION")"
       ;;
     baseline)
-      run_combo baseline wgft wgft "v1" 1
+      run_combo baseline wgft "$AGENT_WGFT" "v1" 1
       ;;
   esac
 done

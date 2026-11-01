@@ -1,0 +1,4 @@
+{
+  "expect": "reject",
+  "reason": "a packet list longer than the body"
+}

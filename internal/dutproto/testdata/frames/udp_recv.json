@@ -1,0 +1,9 @@
+{
+  "kind": "UDP_RECV",
+  "kind_byte": 18,
+  "msg": {
+    "h": 3,
+    "max": 65507
+  },
+  "display": "UDP_RECV h=3 max=65507"
+}

@@ -1,0 +1,8 @@
+{
+  "landed": ["4b", "5", "6"],
+  "stages": {
+    "4b": ["ws", "newreno", "boost-never"],
+    "5": ["sack", "ts", "cubic", "boost-on-demand", "boost-at-accept", "boost-hook"],
+    "6": ["udp", "icmp", "frag", "ping"]
+  }
+}

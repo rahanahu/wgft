@@ -42,7 +42,20 @@ v1.0 はリリース済みですが、その事実だけで新設項目の実装
 ## マージの前に流すテスト
 
 コードを変える PR は、マージの前にラボの一式 (A9) を両モードで流します。
-ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、現在は L1 から L20 です。
+v2 への移行の間、次のものだけを変える PR は、ラボの一式の `go` の組を流しません。
+`crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、文書、ラボが使わない CI 専用の検査スクリプト (`scripts/check-*`)、`.github/workflows/ci.yml` の Rust のジョブ (`rust-*`) と `harness-rust-go` (B16)、`changes` の `rust` と `harness` の振り分け、ラボがビルドも実行もしない package の Go の試験のファイルとその testdata (`internal/tcpharness/rustdut/*_test.go` など) です。
+`go` の組はこれらをビルドも実行もしないためです。
+B16 は Go の試験を流しますが、B16 が流す Go のコードのうちラボも使うもの (`internal/tcpharness` の試験でないファイル、`internal/wgstack`、`internal/dutproto`) は、ここに挙げたものに入りません。
+`lab/`、ラボが流すテスト、`deploy/`、ラボが使うスクリプトと、ここに挙げたもの以外の Go のコード (Go の試験のファイルを含む) を変える PR は、これまでどおり流します。
+
+`go` の組は、ラボの台本が起動するユーザー空間モードのエージェントを Go の agent にした既定の一式です。
+Rust の agent のビルドに入るものを変える PR は、ラボの一式の `rust` の組 (`lab/lab suite --agent-impl rust`) を流します。
+対象は後述の契機の表の `rust-agent` です。
+積んだ PR では、積みの先頭で 1 回流し、下の PR はその結果で足ります。
+`rust` の組は、ユーザー空間モードのエージェントを Rust の agent に替えて一式を流し、カーネルモードのエージェントの確認の結果は `go` の組から取ります ([ラボの切り替え](../design/v2/agent-parity.md#ラボの切り替え))。
+`rust` の組で[完成の条件に入る確認](../design/v2/agent-parity.md#確認の分け方)がすべて PASS であることをマージの関門にし、`lab/lab suite` の終了コードにも `rust` の組を入れます。
+
+ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、現在は L1 から L21 です。
 1 台の Lab Host VM の中で `labhost run -parallel 8 all` を実行して流します。
 この 1 コマンドが、両モードの確認と、分類に従った並列と単独の振り分けを含みます。
 `lab/lab suite --vms N` は同じ仕事を N 台の一時的な VM に分けて流し、1 つの判定にまとめます。
@@ -89,12 +102,15 @@ B 類の契機は、次のテストを選ぶために使います。
 | `resource` | `internal/resource/**`、`internal/lograte/**`、`internal/dataplane/userspace/**`、`internal/netpipe/**`、`internal/nettun/**`、`cmd/wgft/limits.go` | B11 (C5 と C6 は次の段階の完了時に流し直す) | L8、L19 (両モード) |
 | `reconcile` | `internal/reconcile/**`、`internal/planner/**`、`internal/model/**`、`internal/dataplane/*.go`、`internal/vpsd/apply.go`、`internal/vpsd/watch.go`、`internal/vpsd/dataplane*.go` | 無し (C2 は次の段階の完了時に流し直す) | L4、L5、L6、L9、L10、L15 (両モード) |
 | `relay` | `internal/vpsd/proxyrelay/**` | B3 | L1、L3、L6、L9、L13 |
-| `userspace` | `internal/dataplane/userspace/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` | B11 | L1、L3、L4、L8、L18、L19、L20 (userspace モード) |
+| `userspace` | `internal/dataplane/userspace/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` | B11 | L1、L3、L4、L8、L18、L19、L20、L21 (userspace モード) |
 | `rule-ops` | `internal/vpsd/admin/**`、`internal/vpsd/agent_disable.go`、`proto/rule.go`、`proto/splitmerge.go`、`proto/importdiff.go`、`cmd/wgft/rule.go` | 無し | L5、L11、L12、L14、L15 (両モード) |
 | `protocol` | `proto/stream.go`、`proto/state.go`、`proto/version.go`、`internal/vpsd/stream/**`、`internal/vpsd/agentapi/**`、`internal/agent/**` | B7 | L1、L4、L14、L15 |
 | `agent-platform` | `internal/agent/**`、`internal/flock/**`、`internal/dataplane/userspace/relay/**`、`internal/dataplane/userspace/tunnel/**`、`cmd/wgft/**`、`*_windows.go`、`*_darwin.go` | B4、B8 | L1、L14、L16、L17、L18 |
 | `deploy` | `deploy/*.service`、`deploy/*.conf`、`deploy/*.plist`、`deploy/server.env.example`、`cmd/wgft/config.go`、`cmd/wgft/server.go`、`cmd/wgft/agent.go` (設定の読み込みと終了コード) | B2、B9 | L7 |
 | `build` | `.goreleaser.yaml`、`scripts/build-release.sh`、`scripts/goreleaser-checksum.sh`、`scripts/third-party-licenses.sh`、`scripts/check-release-assets.sh`、`scripts/docker-smoke.sh`、`deploy/Dockerfile.*`、`deploy/*.compose.yaml`、`go.mod`、`go.sum`、`.github/workflows/**` | B5、B6、B10 | 無し |
+| `rust` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、`internal/tcpharness/scripts/**`、`testdata/wgstack-rec/**`、`internal/tcpharness/rustdut/known-wgstack-rs.json` | B13、B14、B15 | 無し |
+| `harness` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`internal/tcpharness/**`、`internal/dutproto/**`、`internal/wgstack/**`、`internal/ipv4frag/**`、`go.mod`、`go.sum` | B16 | 無し |
+| `rust-agent` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` | 無し | ラボの一式の `rust` の組を積みの先頭で 1 回。マージの関門 ([マージの前に流すテスト](#マージの前に流すテスト)) |
 | `dataplane-net` | `internal/dataplane/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` の転送の経路 | 無し (C1 と C5 は次の段階の完了時に流し直す) | L1 |
 | `phase` | 関係する実装の段階の完了 | C 類 | すべて |
 | `rc` | リリースの候補の版 | 「リリース候補ごと」の項目 | すべて |
@@ -115,7 +131,7 @@ CI (`.github/workflows/ci.yml`) は、ホストで完結する A1 から A8 と�
 開発の途中でラボの確認を流し直すときは、`lab/lifecycle.sh` に確認の番号を指定して、その確認だけを流せます (`lab/lab exec vm bash /wgft/lab/lifecycle.sh kernel 3 3b`)。
 `lab/exhaustion.sh` も確認の名前で同じように選べます (`lab/lab exec vm bash /wgft/lab/exhaustion.sh userspace postclose`)。
 
-CI は、`build-test` (A1 から A7)、B4 (`windows-test`)、B5 (`release-snapshot`)、B6 (`govulncheck`)、B8 (`macos-test`) を、変更の内容に応じてだけ流します。
+CI は、`build-test` (A1 から A7)、B4 (`windows-test`)、B5 (`release-snapshot`)、B6 (`govulncheck`)、B8 (`macos-test`)、B13 (`rust-check`)、B14 (`rust-windows` と `rust-macos`)、B15 (`rust-deny`)、B16 (`harness-rust-go`) を、変更の内容に応じてだけ流します。
 振り分けは `.github/workflows/ci.yml` の `changes` という 1 つのジョブが担い、`dorny/paths-filter` で変更されたパスを調べます。
 振り分けはワークフロー全体の `paths:` ではなく、ジョブごとの `if:` で行います。
 ワークフローの `paths:` で絞ると、当たらない PR ではジョブそのものが実行されず、GitHub の checks の一覧に現れません。
@@ -173,9 +189,24 @@ B6 は `build` の契機に加えて、Go のソースファイルの変更で�
 `govulncheck` は既知の脆弱性への到達可能性をコード全体の呼び出しグラフから判定するため、`go.mod` や `go.sum` を変えない Go のソースの変更だけでも、既存の脆弱な依存関係への呼び出しの経路が新しく生まれることがあります。
 これは前節の表の `build` だけに絞った記述より広い判定です。
 
+Rust のワークスペース (`crates/` 以下) の B13 から B15 は、前節の表の `rust` の契機どおりに絞ります。
+B13 から B15 と Go のジョブが共有する入力は、適合の台本と構文の fixture (`internal/tcpharness/scripts/**`)、凍結した Go の wgstack の記録 (`testdata/wgstack-rec/**`)、Rust の wgstack の期待した差の一覧 (`internal/tcpharness/rustdut/known-wgstack-rs.json`) です。
+Go と Rust の構文解析器が同じ fixture と照らし、Rust の試験が記録を Rust の wgstack で照らして一覧で台本の結果を確かめるので、これらの変更は `rust` の契機にも当たります。
+Go だけの変更では B13 から B15 を流しません。
+Rust だけの変更では B4、B5、B6、B8 を流しません。
+ツールチェーンは `rust-toolchain.toml` の固定に従い、CI とホストで同じコンパイラを使います。
+B15 は `cargo deny check` で、ライセンスの許可リスト、RustSec の advisory、重複した版、crates.io 以外の依存元を検査します。
+advisory の検査が `cargo audit` を兼ねるため、`cargo audit` は別に流しません。
+移行の間は Rust の成果物を配布しないため、リリースのワークフローは変えません。
+
+B16 は、Go の runner と Rust の runner が同じ台本で DUT への同じ要求を送ることを確かめます ([v2 の試験の道具](../design/v2/test-tooling.md)の 2 節の「2 つの runner の一致の確かめ」)。
+Go の凍結した wgstack の `dutserve` を作り、Go の試験 `TestWriteTranscripts` と Rust の試験 `crates/wgft-tcpharness/tests/scripts.rs` が、すべての台本を種 1 から 5 で流して、要求と応答の列と確かめの結果を byte の単位で比べます。
+Go と cargo の両方が要るので、前節の表の `harness` の契機で、Rust の変更、試験の道具、DUT の口、凍結した Go の wgstack とその build に入るものの変更に流します。
+B16 は `tests/scripts.rs` だけでなく `wgft-tcpharness` の試験をすべて流し、Go の側のデータ (frame の例、`vectors.json`) を読む Rust の試験も含めます。
+
 パスによる判定ができない、または信用できないときは、契機を問わずすべてを流します。
-`changes` ジョブの `paths-filter` の実行が失敗したとき、比較対象の直前のコミットが無いとき (ブランチの最初の push、force push)、`workflow_dispatch` による手動実行のとき、`.github/workflows/**` 自身を変更したとき (振り分けの仕組み自身の変更を、その仕組みに判定させないため) は、`build-test`、B4、B5、B6、B8 のすべてを流します。
-B6 はこれに加えて、週に 1 回の定期実行と `workflow_dispatch` でも流します。
+`changes` ジョブの `paths-filter` の実行が失敗したとき、比較対象の直前のコミットが無いとき (ブランチの最初の push、force push)、`workflow_dispatch` による手動実行のとき、`.github/workflows/**` 自身を変更したとき (振り分けの仕組み自身の変更を、その仕組みに判定させないため) は、`build-test`、B4、B5、B6、B8、B13、B14、B15、B16 のすべてを流します。
+B6 と B15 は、これに加えて週に 1 回の定期実行と `workflow_dispatch` でも流します。
 定期実行はコードを変えていない PR にも起きるため、この場合の失敗は外部の脆弱性の情報の変化によるものであり、コードの不具合とは限りません。
 定期実行が失敗すると、GitHub はリポジトリの所有者に既定でメールを送ります。
 追加の通知の仕組みや issue を起票する bot は用意していません。
@@ -246,7 +277,7 @@ VM の間で守るのは、`rates.sh` がレートを測る区間だけです。
 | A6 | `staticcheck` | 静的解析で分かる誤り | CI (Linux) | コードを変える PR | PR の更新ごと | 自動 |
 | A7 | Windows と macOS へのクロスビルドと `go vet` | 共有のパッケージの変更で Windows、macOS のビルドが壊れること | CI (Linux) | コードを変える PR | PR の更新ごと | 自動 |
 | A8 | 出力と公開ファイルの検査 (`scripts/check-japanese`、`scripts/check-ascii-punct.sh`、`scripts/check-log-tokens.sh`、`scripts/check-docs.py` とその fixture) | ツールの出力への日本語の混入、全角記号、ログへのトークンの値の出力、リンク切れ、日英の対の欠け、旧参照先の喪失 | CI (Linux) | すべての PR | PR の更新ごと | 自動 |
-| A9 | ラボの一式 (L 番号のうち実装済みの確認。現在は L1 から L20。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。関係する実装の段階の共通の完了条件 | ラボ (1 台の Lab Host VM の中で Sandbox を並列に。使い捨て VM で 1 確認 1 台の並列、1 台で順に、も残ります) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | 自動 (開発者が起動) |
+| A9 | ラボの一式 (L 番号のうち実装済みの確認。現在は L1 から L21。モードを持つ確認は両モードで) | 領域をまたぐ変更の見落としを含む、結合したときの退行全般。関係する実装の段階の共通の完了条件 | ラボ (1 台の Lab Host VM の中で Sandbox を並列に。使い捨て VM で 1 確認 1 台の並列、1 台で順に、も残ります) | コードを変える PR、`phase`、`rc` | マージの前に 1 回 | 自動 (開発者が起動) |
 
 ### ラボの一式の内訳
 
@@ -268,10 +299,11 @@ VM の間で守るのは、`rates.sh` がレートを測る区間だけです。
 | L14 | `lab/lifecycle.sh` check 10 (kernel と userspace) | エージェントの停止後も、`agent ls` と Web UI の一覧が最後のハートビートを生きた状態のまま示すこと ([設計文書の 5.2 節](../design/overview.md#52-全体状態の配信とハートビート)) | ラボ | `rule-ops`、`protocol`、`agent-platform` | A9 として | 自動 |
 | L15 | `lab/lifecycle.sh` check 11 (kernel と userspace) | エージェントの無効化がそのエージェントのルールの転送を止めないこと、他のエージェントのルールまで止めること、有効化で各ルールが自分の `enabled` に戻らないこと、有効化が bind 中のポートを拒まないこと、公開に失敗した無効化がエージェントに届かないこと ([設計文書の 5.1 節](../design/overview.md#51-登録))、無効なエージェントのルールで `server doctor` と `status` が失敗を報告すること、削除したエージェントに残ったルールの `server doctor` と `status` の結果が変わること (設計文書の [10.2a 節](../design/server-doctor.md)と[10.2b 節](../design/status.md)) | ラボ | `reconcile`、`rule-ops`、`protocol` | A9 として | 自動 |
 | L16 | `lab/agentkernel.sh` check 16、17、18、19、22、24、25、loopback、resolve、failover、drift、notify、session、route、pin、reconnect、stale、teardown (kernel と userspace) | カーネルモードのエージェントの基本の転送とルール状態の到達、停止と再起動をまたぐ成立済みフローの継続、無関係な変更や再対象化や削除でのフローの扱い、許可一覧と、許可一覧が名指さないループバックの拒否、許可一覧が名指すループバックの宛先への TCP と UDP の転送とトンネルや LAN からのループバックの閉鎖、自ホストと他のテーブルからの隔離、MSS clamp、無効化による DNAT の撤去、名前解決の失敗時の直前アドレスへの転送継続、名前の最小のアドレスが応答しないときの別のアドレスへの切り替え、外部からの変更への収束と変更の通知による早期の収束、ポリシールーティングの変化の検出、サーバの乗っ取りに対する帯とアドレスの拒否、サーバの再起動をまたぐ再接続とトンネルの陳腐化への対応、`wgft agent teardown` の挙動 (設計文書の [7b 節](../design/agent-kernel.md)、[9 節](../design/state.md#9-状態の保存と再起動)、[10.3 節](../design/interface.md#103-運用の流れ)) | ラボ | `agent-platform` | A9 として | 自動 |
-| L17 | `lab/agentdoctor.sh` (kernel と userspace) | `wgft agent doctor` の判定が、稼働中と停止中の切り分け、テーブルの行の欠けや変更や差し替えの見分け、`ip_forward` と wgft0 の状態、経路、無効化、呼び出し元の権限の有無による結果の違いで、カーネルモードのエージェントの実際の状態と食い違うこと ([設計文書の 10.2c 節](../design/agent-doctor.md#102c-エージェント側の診断-wgft-agent-doctor)) | ラボ | `agent-platform` | A9 として | 自動 |
+| L17 | `lab/agentdoctor.sh` (kernel と userspace の server のそれぞれで、カーネルモードのエージェントの節とユーザー空間モードのエージェントの節) | `wgft agent doctor` の判定が、稼働中と停止中の切り分け、テーブルの行の欠けや変更や差し替えの見分け、`ip_forward` と wgft0 の状態、経路、無効化、呼び出し元の権限の有無による結果の違いで、カーネルモードのエージェントの実際の状態と食い違うこと、ユーザー空間モードのエージェントでカーネルモードの項目を検査しないこと ([設計文書の 10.2c 節](../design/agent-doctor.md#102c-エージェント側の診断-wgft-agent-doctor)) | ラボ | `agent-platform` | A9 として | 自動 |
 | L18 | `lab/lifecycle.sh` check 12 (kernel と userspace) | ユーザー空間モードの WireGuard のソケットのバッファの条件 ([設計文書の 7 節](../design/agent-dataplane.md#7-データプレーン自宅側)) を、`agent doctor` とログが実際のソケットの値で示さないこと、条件に届かないときに `agent doctor` の終了コードが 0 でなくなること、セットアップの文書の `/etc/sysctl.d` の手順で条件を満たせないこと、`rotate-key` で開き直したソケットを測らないこと | ラボ (VM 全体の sysctl を変えるので単独で) | `userspace`、`agent-platform` | A9 として | 自動 |
 | L19 | `lab/exhaustion.sh` の postclose (userspace)、mss (kernel と userspace)、acceptq と ackflood (kernel)、wgstall (userspace)。postclose の kernel モードは一式の外で、名前を指定して流します | 外からの入力で[閉じた後の接続の表](../design/userspace/tcp-retention.md#閉じた後の接続の表)の行が M を超えて生きているヒープを増やし続けること、追い出しが数えられずログに出ないこと、負荷が止まった後に作り直し無しで表が空かないこと、その負荷の間に別のフローが止まること、[MSS が 536 未満](../design/userspace/packet-validation.md#tcp-の-mss-の下限)のハンドシェイクで接続ができること、MTU 576 の経路で通常の TCP が通らないこと、カーネルモードの server の後ろの accept の待ち行列、中身の無い ACK の洪水、[WireGuard の受信の待ち](../design/userspace/flow-limits.md)の後に転送が戻らないこと。accept の待ち行列の長さと、洪水と受信の待ちの間のヒープと別のフローの遅れは測って示すだけで、判定に使いません | ラボ (CPU を占有できる VM) | `resource`、`userspace`、`phase`、`rc` | A9 として。kernel モードの postclose は、`internal/nettun` の閉じた後の接続の表 (`postclose.go` とその呼び出し) を変える PR ごとと、段階の完了時とリリース候補ごとに 1 回 | 自動 (kernel モードの postclose は開発者が起動) |
 | L20 | `lab/usage.sh` (kernel と userspace) | 通常の利用の形 (HTTP の並列の取得、SSH のような 1 文字ずつの往復、ゲームのような一定の間隔の UDP、大きな送受信) のどれかが欠けるか壊れること | ラボ | `userspace` | A9 として | 自動 |
+| L21 | `lab/lifecycle.sh` check 13 (kernel と userspace) | ユーザー空間モードのエージェントの WireGuard の鍵の更新 (`REKEY_AFTER_TIME` の 120 秒) が、server の Linux の WireGuard (kernel) か wireguard-go (userspace) との間で起きないこと、鍵の更新の前後で TCP の接続か UDP の往復が途切れること | ラボ | `userspace`、`rust-agent` | A9 として | 自動 |
 
 L15 は server の 30 秒ごとの再試行を待つ場合に、確認の待ち時間として 40 秒を許します。
 通知による早期の公開は、必ず起きる条件として扱いません。
@@ -292,6 +324,10 @@ L15 は server の 30 秒ごとの再試行を待つ場合に、確認の待ち�
 | B10 | Docker のイメージの疎通 (`scripts/docker-smoke.sh`) | `deploy/Dockerfile.*` から作ったイメージで server と agent が動かないこと | Docker か Podman のある Linux (ホスト、CI の runner、ラボの VM のどれでも可) | `build`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | 自動 (開発者が起動) |
 | B11 | `lab/rcvwin.sh` | ユーザー空間モードの中継で、`vpsd` の公開側のカーネルの TCP ソケットが、穴の後ろの順序外のデータとして floor を超える受信のメモリを持ったまま boost の枠を返すこと。穴が埋まった後に、その枠が別の接続へ戻らないこと ([設計文書の 7 節](../design/agent-dataplane.md#7-データプレーン自宅側)) | ラボ | `resource`、`userspace` | 契機に当たる PR ごとに 1 回 | 自動 (開発者が起動) |
 | B12 | `lab/lab test internal/nettun vps -test.run='^(TestRelayHold|TestSetupFailure)OutOfOrderKernelData$'` | 中継終了時と中継開始前の通常の失敗で、カーネル TCP ソケットの順序外の受信メモリが、フローと送信元ごとの枠を返した後にも残ること | 使い捨て VM の隔離した network namespace | `resource`、`userspace` | 契機に当たる PR ごとに 1 回 | 自動 (開発者が起動) |
+| B13 | CI の `rust-check` (`cargo fmt --check`、`cargo clippy -D warnings`、`cargo nextest run`、`cargo test --doc`) | Rust のワークスペースの書式、lint、テストの退行 | CI (Linux) | `rust` | 契機に当たる PR の更新ごと | 自動 |
+| B14 | CI の `rust-windows` と `rust-macos` (`cargo clippy -D warnings` と `cargo nextest run`) | Windows と macOS でだけ通らない Rust のコード | CI (Windows と macOS の runner) | `rust` | 契機に当たる PR の更新ごと | 自動 |
+| B15 | CI の `rust-deny` (`cargo deny check`) | 許可リスト外のライセンス (MPL-2.0 と GPL 系を含む)、RustSec の advisory、crates.io 以外の依存元 | CI (Linux) | `rust`、週に 1 回の定期実行 | 契機に当たる PR の更新ごと。定期実行は週に 1 回 | 自動 |
+| B16 | CI の `harness-rust-go` (Go の runner と Rust の runner の transcript の一致) | 2 つの runner の台本の意味のずれ、Rust の口の符号と DUT の口の食い違い | CI (Linux) | `harness` | 契機に当たる PR の更新ごと | 自動 |
 
 B9 は、リリース候補ごとに Debian 12、Ubuntu 24.04、Fedora 44 の 3 つで実行します。
 環境変数 `WGFT_DIST_VM_SLOT` に実行ごとに違う値を指定すると、複数のディストリビューションを並行して流せます。

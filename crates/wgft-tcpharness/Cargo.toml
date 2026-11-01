@@ -1,0 +1,21 @@
+# 試験の道具 (docs/design/v2/test-tooling.md)。製品のバイナリに入らず、配布しない。
+[package]
+name = "wgft-tcpharness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# 台本ごとに 1 つの試験を見せる試験の入口 (tests/scripts.rs) のため
+libtest-mimic.workspace = true
+
+[[test]]
+name = "scripts"
+harness = false

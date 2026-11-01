@@ -1,0 +1,43 @@
+# RST and SYN segments on an established connection, RFC 5961. Each part uses its own
+# connection, so a per-connection challenge-ACK rate limit, such as Linux's
+# tcp_invalid_ratelimit of 500 ms, cannot suppress the next part's ACK.
+scenario rfc5961
+refs: RFC 5961 3.2 and 4.2, RFC 9293 3.10.7.4; packetimpact tcp_outside_the_window, tcp_unacc_seq_ack
+
+listen l 8007
+
+connect p l 8007 syn=opts_standard()
+send p segment(p, RST, p.snd_nxt + 1)
+await p 1s -> a
+check rst-in-window.challenge-ack a.ok && is_pure_ack(a) && a.ack == p.snd_nxt && a.seq == p.rcv_nxt
+  what: an in-window RST that is not at RCV.NXT draws a challenge ACK
+  got: {seg_desc(a)}
+alive rst-in-window p p.conn
+
+connect p l 8007 syn=opts_standard()
+send p with(segment(p, SYN, p.snd_nxt), mss=MTU-40)
+await p 1s -> a
+check syn-in-window.challenge-ack a.ok && is_pure_ack(a) && a.ack == p.snd_nxt && a.seq == p.rcv_nxt
+  what: a SYN on an established connection draws a challenge ACK
+  got: {seg_desc(a)}
+alive syn-in-window p p.conn
+
+connect p l 8007 syn=opts_standard()
+# 0x40000000 is 1 << 30, far outside any window
+send p segment(p, RST, p.snd_nxt + 0x40000000)
+quiet p 500ms -> q
+check rst-out-of-window.ignored q.quiet
+  what: an RST far outside the window is dropped without a reply
+  got: {seg_desc(q.seg)}
+alive rst-out-of-window p p.conn
+
+connect p l 8007 syn=opts_standard()
+send p segment(p, RST, p.snd_nxt)
+read p.conn 1 1s -> r
+check rst-exact.resets err_kind(r.err) == "reset"
+  what: an RST at RCV.NXT resets the connection and the application's read fails
+  got: read error {err_kind(r.err)}
+quiet p 300ms -> q
+check rst-exact.no-reply q.quiet
+  what: nothing answers the RST
+  got: {seg_desc(q.seg)}

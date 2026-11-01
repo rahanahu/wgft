@@ -82,7 +82,10 @@ func usage() {
   run -shard K/N [-durations FILE] all  run only shard K of N of that plan; every exclusive job
                                        stays alone within its shard's VM; exclusive jobs of other
                                        shards are planned around the rate=measure jobs
-  merge [-out DIR] SUMMARY...          merge the summary.json of all N shards into one verdict
+  merge [-out DIR] [-go-summary FILE] SUMMARY...
+                                       merge the summary.json of all N shards into one verdict;
+                                       a rust run's agent=go jobs take their results from the go
+                                       configuration's merged summary given by -go-summary
   gc [flags]                           remove leftovers of dead runs: namespaces, processes, workdirs
   list                                 list the sandboxes that exist now
   create [-id ID]                      create one sandbox and print its environment
@@ -98,6 +101,8 @@ once if another run holds it; -wait DUR queues instead. create and destroy act o
 you name and do not take the lock, so do not point them at a sandbox a run owns.
 A run exits non-zero if any job failed, if it was interrupted, or if anything, a namespace, process,
 workdir or link, was left behind: cleaning up is the harness's own job.
+WGFT_LAB_AGENT_IMPL, go by default or rust, names the userspace-mode agent the scenarios run;
+with rust, run all leaves out the manifest's agent=go jobs, which run the Go agent in any case.
 `)
 }
 
@@ -131,18 +136,32 @@ type scenarioVerdict struct {
 	SkipLines int    `json:"skip_lines"`
 }
 
+// fromGoVerdict は rust の組が流さなかった agent=go の仕事について、go の組の結果をまとめたもの。
+// Runs が 0 なら、渡された go の組の summary にその仕事が無かった。
+type fromGoVerdict struct {
+	Scenario  string `json:"scenario"`
+	Runs      int    `json:"runs"`
+	Failed    int    `json:"failed"`
+	PassLines int    `json:"pass_lines"`
+	FailLines int    `json:"fail_lines"`
+	SkipLines int    `json:"skip_lines"`
+}
+
 // summary は 1 回の run 全体の記録。
 type summary struct {
 	Scenarios        []string          `json:"scenarios"`
-	Shard            string            `json:"shard,omitempty"`           // "K/N" of run -shard, "merged/N" after merge
-	PlanJobs         int               `json:"plan_jobs,omitempty"`       // jobs in the whole plan before -shard cut it
-	PlanDigest       string            `json:"plan_digest,omitempty"`     // hash of the cut plan; every shard of one run has the same
-	PlanScenarios    []string          `json:"plan_scenarios,omitempty"`  // the whole plan's scenarios by job index, to name a missing job
-	Netstack         string            `json:"netstack"`                  // WGFT_AGENT_NETSTACK the scenarios ran with; "default" when unset
-	MissingJobs      int               `json:"missing_jobs,omitempty"`    // merge: jobs of the plan that ran in no shard
-	MergeProblems    []string          `json:"merge_problems,omitempty"`  // merge: missing, duplicated or mismatched shards
-	RateMarginSec    float64           `json:"rate_margin_sec,omitempty"` // -rate-margin of the shards
-	RateWindow       string            `json:"rate_window,omitempty"`     // merge: what the real start times say about the rate window
+	Shard            string            `json:"shard,omitempty"`            // "K/N" of run -shard, "merged/N" after merge
+	PlanJobs         int               `json:"plan_jobs,omitempty"`        // jobs in the whole plan before -shard cut it
+	PlanDigest       string            `json:"plan_digest,omitempty"`      // hash of the cut plan; every shard of one run has the same
+	PlanScenarios    []string          `json:"plan_scenarios,omitempty"`   // the whole plan's scenarios by job index, to name a missing job
+	Netstack         string            `json:"netstack"`                   // WGFT_AGENT_NETSTACK the scenarios ran with; "default" when unset
+	AgentImpl        string            `json:"agent_impl"`                 // WGFT_LAB_AGENT_IMPL the scenarios ran with: go or rust
+	FromGo           []string          `json:"from_go,omitempty"`          // agent=go jobs a rust run left out; their results come from the go configuration
+	FromGoVerdicts   []fromGoVerdict   `json:"from_go_verdicts,omitempty"` // merge -go-summary: the go configuration's results for FromGo
+	MissingJobs      int               `json:"missing_jobs,omitempty"`     // merge: jobs of the plan that ran in no shard
+	MergeProblems    []string          `json:"merge_problems,omitempty"`   // merge: missing, duplicated or mismatched shards
+	RateMarginSec    float64           `json:"rate_margin_sec,omitempty"`  // -rate-margin of the shards
+	RateWindow       string            `json:"rate_window,omitempty"`      // merge: what the real start times say about the rate window
 	Manifest         string            `json:"manifest,omitempty"`
 	ParallelJobs     int               `json:"parallel_jobs"`
 	ExclusiveJobs    int               `json:"exclusive_jobs"`
@@ -204,6 +223,16 @@ func cmdRun(args []string) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("must run as root")
 	}
+	impl, err := agentImplName()
+	if err != nil {
+		return err
+	}
+	// rust の run は Rust の wgft が入っていなければ、どの確認も Rust の agent を起動できずに失敗するだけなので、流す前に止める
+	if impl == agentImplRust {
+		if fi, err := os.Stat(rustWgft); err != nil || fi.Mode()&0o111 == 0 {
+			return fmt.Errorf("WGFT_LAB_AGENT_IMPL=rust, but %s is not an installed executable; build with WGFT_LAB_AGENT_IMPL=rust lab/lab build", rustWgft)
+		}
+	}
 	// "all" は lab/suite.txt の全体。分類は manifest が持ち、それ以外の指定は parallel として扱う
 	runAll := len(scenarios) == 1 && scenarios[0] == "all"
 	manifestFile := *manifest
@@ -211,6 +240,7 @@ func cmdRun(args []string) error {
 		manifestFile = filepath.Join(*repo, manifestPath)
 	}
 	var plan []jobResult // Index, Class, Scenario だけを先に決める
+	var fromGo []string  // rust の run が計画から外した agent=go の仕事
 	manifestJobs := map[string]job{}
 	if runAll {
 		jobs, err := loadManifest(manifestFile)
@@ -224,6 +254,13 @@ func cmdRun(args []string) error {
 		for r := 0; r < *repeat; r++ {
 			for _, j := range jobs {
 				if !j.Default && !*withOptional {
+					continue
+				}
+				// agent=go の仕事はどの組でも Go の agent を動かすので、rust の組では流さず go の組から取る
+				if j.GoAgent && impl == agentImplRust {
+					if r == 0 {
+						fromGo = append(fromGo, j.Scenario)
+					}
 					continue
 				}
 				plan = append(plan, jobResult{Index: n, Class: j.Class, Scenario: j.Scenario, Rate: j.Rate})
@@ -335,7 +372,7 @@ func cmdRun(args []string) error {
 		margin = rateMargin.Seconds()
 	}
 	sum := summary{Shard: shardName, PlanJobs: planJobs, RateMarginSec: margin, PlanDigest: digest, PlanScenarios: planScenarios, Netstack: netstackName(),
-		Scenarios: scenarios, Parallel: *parallel, Repeat: *repeat, StartedAt: time.Now(), Warnings: shardWarnings}
+		AgentImpl: impl, FromGo: fromGo, Scenarios: scenarios, Parallel: *parallel, Repeat: *repeat, StartedAt: time.Now(), Warnings: shardWarnings}
 	sum.VCPUs = numCPU()
 	sum.MemTotalKB = meminfoKB("MemTotal")
 
@@ -822,7 +859,9 @@ func printSummary(s *summary, outDir string) {
 	}
 	fmt.Printf("\n== labhost %s: %d jobs, parallel=%d, pass=%d fail=%d%s, wall=%.1fs\n", verb, s.Jobs, s.Parallel, s.Pass, s.Fail, missing, s.WallSec)
 	if s.Shard != "" {
-		fmt.Printf("   shard: %s of a plan of %d jobs, digest %s, netstack %s\n", s.Shard, s.PlanJobs, s.PlanDigest, s.Netstack)
+		fmt.Printf("   shard: %s of a plan of %d jobs, digest %s, netstack %s, agent %s\n", s.Shard, s.PlanJobs, s.PlanDigest, s.Netstack, implOrGo(s.AgentImpl))
+	} else {
+		fmt.Printf("   agent %s, netstack %s\n", implOrGo(s.AgentImpl), s.Netstack)
 	}
 	fmt.Printf("   vm: vcpus=%d cpu_seconds=%.1f mem_total=%dMiB peak_mem_used=%dMiB peak_load1=%.2f\n",
 		s.VCPUs, s.VMCPUSeconds, s.MemTotalKB/1024, s.PeakMemUsedKB/1024, s.PeakLoad1)
@@ -846,6 +885,31 @@ func printSummary(s *summary, outDir string) {
 		s.SlowestJobSec, s.TotalPassLines, s.TotalFailLines, s.TotalSkipLines)
 	for _, v := range s.Verdicts {
 		fmt.Printf("   %-30s runs=%d PASS=%d FAIL=%d SKIP=%d\n", v.Scenario, v.Runs, v.PassLines, v.FailLines, v.SkipLines)
+	}
+	// shard 1 台の run は go の組の結果を受け取らないので、外した数だけを示し、行は統合と 1 台の run で出す
+	if len(s.FromGo) > 0 && s.Shard != "" && !strings.HasPrefix(s.Shard, "merged/") {
+		fmt.Printf("   %d agent=go jobs are left to the go configuration; the merge shows their results\n", len(s.FromGo))
+	} else if len(s.FromGo) > 0 {
+		fmt.Printf("   %d agent=go jobs are not run with the %s agent; their results come from the go configuration and do not count here:\n", len(s.FromGo), implOrGo(s.AgentImpl))
+		got := map[string]fromGoVerdict{}
+		for _, v := range s.FromGoVerdicts {
+			got[v.Scenario] = v
+		}
+		for _, sc := range s.FromGo {
+			v, ok := got[sc]
+			switch {
+			case !ok:
+				fmt.Printf("   from go: %-30s not given; run the go configuration as well\n", sc)
+			case v.Runs == 0:
+				fmt.Printf("   from go: %-30s not in the go configuration's summary\n", sc)
+			default:
+				verdict := "PASS"
+				if v.Failed > 0 {
+					verdict = "FAIL"
+				}
+				fmt.Printf("   from go: %-30s %s runs=%d PASS=%d FAIL=%d SKIP=%d\n", sc, verdict, v.Runs, v.PassLines, v.FailLines, v.SkipLines)
+			}
+		}
 	}
 	fmt.Printf("   leftovers: namespaces=%v workdirs=%v processes=%v links=%v\n", s.LeftoverNS, s.LeftoverWorkdirs, s.LeftoverProcs, s.LeftoverLinks)
 	for _, w := range s.Warnings {
@@ -944,6 +1008,26 @@ func countSandboxNS(prefix string) int {
 	return len(ids)
 }
 
+const (
+	agentImplGo   = "go"
+	agentImplRust = "rust"
+	// rustWgft は lab/lab build が Rust の wgft を入れる場所。lab/sandbox.sh の RUST_WGFT と同じ
+	rustWgft = "/usr/local/lib/wgft-rust/wgft"
+)
+
+// agentImplName は確認が動かすユーザー空間モードの agent の実装。lab/lab は WGFT_LAB_AGENT_IMPL を
+// そのまま渡し、lab/sandbox.sh が同じ値で AGENT_WGFT を決める。未設定は go。
+func agentImplName() (string, error) {
+	switch v := os.Getenv("WGFT_LAB_AGENT_IMPL"); v {
+	case "", agentImplGo:
+		return agentImplGo, nil
+	case agentImplRust:
+		return agentImplRust, nil
+	default:
+		return "", fmt.Errorf("WGFT_LAB_AGENT_IMPL=%s: want go or rust", v)
+	}
+}
+
 // netstackName は確認が動かすエージェントの netstack。lab/lab は WGFT_LAB_AGENT_NETSTACK を
 // WGFT_AGENT_NETSTACK として渡し、未設定ならエージェントの既定で動く。
 func netstackName() string {
@@ -966,11 +1050,12 @@ func fmtFloats(v []float64) string {
 func cmdMerge(args []string) error {
 	fs := flag.NewFlagSet("merge", flag.ExitOnError)
 	out := fs.String("out", "", "directory for the merged summary.json; default: only print")
+	goSummary := fs.String("go-summary", "", "the go configuration's merged summary.json; a rust merge takes the agent=go jobs' results from it")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return fmt.Errorf("usage: labhost merge [-out DIR] SUMMARY_JSON [SUMMARY_JSON ...]")
+		return fmt.Errorf("usage: labhost merge [-out DIR] [-go-summary FILE] SUMMARY_JSON [SUMMARY_JSON ...]")
 	}
 	var parts []*summary
 	for _, p := range fs.Args() {
@@ -985,6 +1070,16 @@ func cmdMerge(args []string) error {
 		parts = append(parts, &s)
 	}
 	m := mergeSummaries(parts)
+	if *goSummary != "" && len(m.FromGo) > 0 {
+		// 取れない go の組の結果は警告にとどめ、rust の組の統合は書いて示す。取った結果は件数に入らないので、
+		// 欠けても判定は変わらない
+		g, err := loadGoSummary(*goSummary)
+		if err != nil {
+			m.Warnings = append(m.Warnings, "the go configuration's results are not shown: "+err.Error())
+		} else {
+			m.FromGoVerdicts = fromGoVerdicts(m.FromGo, g)
+		}
+	}
 	dir := *out
 	if dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -1000,4 +1095,50 @@ func cmdMerge(args []string) error {
 		os.Exit(1)
 	}
 	return nil
+}
+
+// loadGoSummary は merge -go-summary のファイルを読み、Go の agent で流れた summary であることを確かめる。
+func loadGoSummary(path string) (*summary, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var g summary
+	if err := json.Unmarshal(b, &g); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if implOrGo(g.AgentImpl) != agentImplGo {
+		return nil, fmt.Errorf("%s ran with agent %s, not go", path, g.AgentImpl)
+	}
+	return &g, nil
+}
+
+// implOrGo は summary の agent_impl。この項目より前の summary は空で、Go の agent で流れた。
+func implOrGo(v string) string {
+	if v == "" {
+		return agentImplGo
+	}
+	return v
+}
+
+// fromGoVerdicts は go の組の summary から、scenarios の仕事ごとの結果をまとめる。
+func fromGoVerdicts(scenarios []string, g *summary) []fromGoVerdict {
+	out := make([]fromGoVerdict, 0, len(scenarios))
+	for _, sc := range scenarios {
+		v := fromGoVerdict{Scenario: sc}
+		for _, r := range g.Results {
+			if r.Scenario != sc {
+				continue
+			}
+			v.Runs++
+			if r.Exit != 0 || r.SetupErr != "" {
+				v.Failed++
+			}
+			v.PassLines += r.PassLines
+			v.FailLines += r.FailLines
+			v.SkipLines += r.SkipLines
+		}
+		out = append(out, v)
+	}
+	return out
 }

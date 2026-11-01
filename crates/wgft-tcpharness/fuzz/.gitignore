@@ -1,0 +1,5 @@
+target
+artifacts
+coverage
+# 種は台本の directory から読み、増えた入力は手元に残すだけで git に入れない
+corpus

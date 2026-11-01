@@ -46,6 +46,9 @@ wgstack の選択で一式を流して確かめたのは、ユーザー空間モ
 WGFT_LAB_AGENT_NETSTACK=wgstack lab/lab exec vm labhost run -parallel 8 all
 ```
 
+ユーザー空間モードのエージェントを Rust の agent に替えるときは、ホストで `WGFT_LAB_AGENT_IMPL=rust` を付けます。
+扱いは[Rust の agent で流す](#rust-の-agent-で流す)にあります。
+
 ```sh
 lab/lab test internal/dataplane/linuxkernel/nft
 lab/lab exec client ping 198.51.100.1
@@ -75,7 +78,14 @@ lab/lab suite
 lab/lab suite --vms 2
 lab/lab suite --vms 2 --netstack both
 lab/lab suite --vms 3 --netstack wgstack --durations earlier/summary.json
+lab/lab suite --vms 2 --agent-impl rust
+lab/lab suite --vms 2 --netstack both --agent-impl both
 ```
+
+`--agent-impl` はユーザー空間モードのエージェントの実装を `go`、`rust`、`both` から選び、既定は `go` です。
+一式は組 (エージェントの実装と netstack) ごとに流します。
+Rust の agent は netstack を 1 つしか持たないので、`rust` の組は `--netstack` によらず 1 回だけ流します。
+`--netstack both --agent-impl both` の組は、`go` と既定の netstack、`go` と `wgstack`、`rust` の 3 つです。
 
 ### 単独の確認の扱い
 
@@ -117,6 +127,7 @@ CPU の固定は[VM の CPU の固定](#vm-の-cpu-の固定)に従います。
 各 VM の用意がそろってから、すべての shard が同時に `labhost run` を始めます。
 用意に 900 秒を超える VM があれば、その VM を待たずに始めます。
 `--netstack both` は既定の netstack と `wgstack` を同時に流すので、VM の台数は `--vms` の 2 倍です。
+VM の台数は一般に `--vms` と組の数の積です。
 ホストの空きに合わせて、同時に立てる VM は 4 台までを目安にし、`--netstack both` には `--vms 2` を付けます。
 
 ### VM の CPU の固定
@@ -155,18 +166,27 @@ shard の割り当ては `labhost run -shard K/N all` が決めます。
 
 ### 結果と終了コード
 
-各 shard の結果は `--out` の下の `<netstack>/shard-K/` に残り、`summary.json`、`logs/`、`shard.log`、VM のカーネルの版を書いた `kernel` があります。
+各 shard の結果は `--out` の下の `<エージェントの実装>/<netstack>/shard-K/` に残り、`summary.json`、`logs/`、`shard.log`、VM のカーネルの版を書いた `kernel` があります。
+組ごとの見出しは `==== lab suite: agent=<実装>, netstack=<netstack>, N VMs` です。
 統合の前の shard ごとの行にも、カーネルの版が出ます。
 `--out` の既定は `/tmp/wgft-lab-suite-<日時>` です。
-統合した判定は `<netstack>/summary.json` です。
-各 shard の `summary.json` は、割り当ての要約の `plan_digest` と、確認が使った `netstack` を記録します。
-統合は、どの shard でも流れなかった仕事、2 つの shard で流れた仕事、足りない shard、`plan_digest` の違い、`netstack` の混在を失敗にします。
+統合した判定は `<エージェントの実装>/<netstack>/summary.json` です。
+各 shard の `summary.json` は、割り当ての要約の `plan_digest` と、確認が使った `netstack` と `agent_impl` を記録します。
+統合は、どの shard でも流れなかった仕事、2 つの shard で流れた仕事、足りない shard、`plan_digest` の違い、`netstack` の混在、`agent_impl` の混在を失敗にします。
 これらは `MERGE FAILURE` として、仕事の名前とともに出ます。
+`rust` の組の統合は、`agent=go` の仕事の結果を最初の `go` の組の統合から取り、`from go:` の行で示します。
+この行は `rust` の組の件数と終了コードに入りません。
+`go` の組を流さなかった場合は、その旨を出します。
+`go` の組の `summary.json` が読めない場合は警告にし、`rust` の組の統合はそのまま書きます。
 1 つの shard の `labhost run` は `--shard-timeout` の秒数で止め、その shard は `summary.json` の無い失敗になります。
 `summary.json` の無い shard があっても、ある分を統合し、どの shard でも流れなかった仕事を名前で出します。
 秒数の既定は 3600 で、環境変数 `WGFT_LAB_SHARD_TIMEOUT` でも指定できます。
 結果の回収は 1 回 300 秒で打ち切ります。
-終了コードは、どれかの shard の失敗、VM の中の後片付けの漏れ、中断、統合の不整合で非 0 です。
+終了コードは、組ごとの結果を合わせたものです。
+組の結果は、どれかの shard の失敗、VM の中の後片付けの漏れ、中断、統合の不整合で失敗になります。
+`go` の組も流したときも、`rust` の組の失敗を終了コードに入れます (`lab/lab` の `SUITE_RUST_GATES`)。
+「UDP の中継」の段までは報告だけでした。
+`rust` の組だけを流したときは、その結果が終了コードです。
 VM の削除の失敗は、終了コードに入れません。
 最後に統合までの所要時間を出し、VM を消した後に削除までを含めた所要時間を出します。
 
@@ -181,6 +201,60 @@ SIGKILL で残った VM は、作った `lab/lab` のプロセスがもう無け
 lab/lab exec vm labhost run -shard 1/3 -durations /tmp/earlier.json -parallel 8 all
 labhost merge -out merged shard-1/summary.json shard-2/summary.json shard-3/summary.json
 ```
+
+## Rust の agent で流す
+
+ホストの変数 `WGFT_LAB_AGENT_IMPL` は、ラボの確認が起動するユーザー空間モードのエージェントの実装を選びます。
+値は `go` と `rust` で、未設定は `go` です。
+`lab/lab` はこの値を VM の中のすべての実行にそのまま渡します。
+`lab suite` の `--agent-impl` は、組ごとにこの値を決めます。
+完成の条件と確認の分け方は[Rust の agent の置き換えの設計](../docs/design/v2/agent-parity.md#ラボの切り替え)にあります。
+
+```sh
+WGFT_LAB_AGENT_IMPL=rust lab/lab build
+WGFT_LAB_AGENT_IMPL=rust lab/lab exec vm labhost run -parallel 8 all
+WGFT_LAB_AGENT_IMPL=rust lab/lab exec vm bash /wgft/lab/e2e.sh kernel
+```
+
+`rust` のとき、`lab/lab build` は Go のバイナリに加えて Rust の `wgft` を `cargo zigbuild --release --locked --target x86_64-unknown-linux-musl -p wgft` で musl の静的バイナリにし、`bin/rust/wgft` に置きます。
+ホストに cargo-zigbuild と zig が要ります。
+VM の中では `/usr/local/lib/wgft-rust/wgft` に置きます。
+ファイル名を `wgft` に保つのは、確認がプロセスを comm の `wgft` と cmdline の ` agent run` で探すためです。
+`lab-eph.sh` で流す場合も、同じ値を環境に付けます。
+
+確認の台本は、ユーザー空間モードのエージェントの `agent run` と、それに向けた `agent doctor`、`agent rotate-key`、`agent pubkey` を `"$AGENT_WGFT"` で呼びます。
+[lab/sandbox.sh](sandbox.sh) が `AGENT_WGFT` を決め、`rust` なら `/usr/local/lib/wgft-rust/wgft`、それ以外は `wgft` です。
+カーネルモードのエージェントの起動と、それに向けた `agent doctor`、`agent rotate-key`、`agent teardown` は Go の `wgft` のままで、行末に `# lab: go agent` を付けます。
+server と VPS の側のコマンドも `wgft` のままです。
+`tools/labhost` の試験 `TestScenariosCallTheAgentThroughAgentWgft` は、`lab/*.sh` の中で agent のホストのコマンドを `wgft` の名前のまま呼び、印の無い行を見つけます。
+変数を通した呼び出しは、この試験には見えません。
+
+[suite.txt](suite.txt) の `agent=go` の確認は、どの組でも Go の agent を動かします。
+`agentkernel.sh`、`agentdoctor.sh` のカーネルモードの節、`exhaustion.sh userspace mss`、`exhaustion.sh kernel postclose` です。
+`rust` の組の `labhost run all` はこれらを流さず、`lab suite` が `go` の組の結果を示します。
+
+Go の実行環境に依る読み取りは、Rust の agent では次のように読み替えます。
+
+- `lifecycle.sh` の check 5 と 5b:エージェントの `memory soft limit:` の行の代わりに `memory bound:` の行を読み、RSS がその値と 32 MiB の和を超えないことを確かめます。
+  あわせて、洪水の前 (トンネルと待ち受けを開いた後) に RSS を測り、洪水の間の育ちが `memory bound terms:` の行のうち洪水が満たせる項 (`core fixed`、`tables`、`driver`、`device`、`tcp relay`、`udp relay`) の和に 32 MiB を足した値を超えないことを確かめます。
+  洪水はデータを運ばないので、`tcp bulk` と `core flows` は入れません。
+  項の分け方は [agent-parity.md](../docs/design/v2/agent-parity.md#メモリの上界の行) にあります
+- `exhaustion.sh` の acceptq と ackflood:エージェントの GC の記録が無いので、ヒープの値を示さず RSS だけを示します
+- `agentmem.sh`:Go の agent のメモリの probe に依るので、`SKIP` を 1 行出して何もしません
+- `agentdoctor.sh` の userspace の節:`AGENTDOCTOR_BASELINE` の既定を Go の `wgft` にし、Go の CLI が Rust の agent の制御ソケットから読む ID と状態と理由が、Rust の CLI と同じことを確かめます
+
+`lab/agent-handover.sh` は、Go の agent と Rust の agent が互いの `agent.json` を引き継ぐことを、変更していない Go の v1 の server に対して確かめます。
+Rust の agent が自分で登録した `agent.json` から Go の agent が動くことと、その逆を、TCP の転送の SHA-256 の比較まで確かめます。
+両方のバイナリが要るので、suite.txt では `default=no` です。
+
+```sh
+WGFT_LAB_AGENT_IMPL=rust lab/lab build
+lab/lab exec vm bash /wgft/lab/agent-handover.sh kernel
+lab/lab exec vm bash /wgft/lab/agent-handover.sh userspace
+```
+
+今の Rust の agent は Rust の wgstack の上で動き、root も TUN も要りません。
+`rust` の組の扱いは [テストの規範](../docs/development/testing.md#マージの前に流すテスト) にあります。
 
 ## 対応する VPS の環境
 
@@ -338,8 +412,10 @@ namespace を先に削除すると、名前の無い namespace にプロセス�
 | `WGFT_LAB_LAN_NS` | lan namespace です | `lan` |
 | `WGFT_LAB_WORKDIR` | データ、ログ、scratch ファイルの置き場です | `/tmp` |
 | `WGFT_LAB_SANDBOX` | 後片付けの範囲を限定する ID です | 空です |
+| `WGFT_LAB_AGENT_IMPL` | ユーザー空間モードのエージェントの実装です。`AGENT_WGFT` を決めます | `go` です |
 
 新しいシナリオは `sandbox.sh` を読み込み、ファイルを `$W/` の下に置き、namespace を `$VPS_NS` などの変数から取得します。
+ユーザー空間モードのエージェントは `"$AGENT_WGFT"` で起動し、Go の agent を意図して呼ぶ行には行末に `# lab: go agent` を付けます。
 プロセスの操作は `sandbox_kill_named`、`sandbox_pids_named`、`sandbox_any_named`、`sandbox_kill_cmdline` を使います。
 VM 全体を見る `pkill`、`pgrep`、`pidof` は使いません。
 `version-skew.sh` のキャッシュは VM で共有し、別の一時ファイルから `mv` で置き換えます。

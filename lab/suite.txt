@@ -3,9 +3,10 @@
 #
 # Format, one job per line:  <class> <default> [key=value...] <scenario> [args...]
 #
-#   The keys before the scenario only matter to `labhost run -shard K/N all`, which `lab/lab suite`
+#   The keys weight and rate only matter to `labhost run -shard K/N all`, which `lab/lab suite`
 #   uses to spread the suite over several VMs. They never change what runs, and inside one VM they
-#   never change the order beyond what is said under rate.
+#   never change the order beyond what is said under rate. The key agent decides whether a job runs
+#   with the Rust agent.
 #
 #   weight   the job's estimated seconds, the longest of earlier lab runs. -shard balances the
 #            shards with it when no -durations summary.json of an earlier run is given; a job
@@ -30,6 +31,16 @@
 #            longer than its estimate can still overlap; `labhost merge` reads the real start
 #            times afterwards and warns when it did. Parallel jobs without rate=flood are not held
 #            back.
+#   agent    go: the job runs the Go agent in every configuration. The scenarios start the
+#            userspace-mode agent as "$AGENT_WGFT", which WGFT_LAB_AGENT_IMPL=rust makes the Rust
+#            build (lab/sandbox.sh); a job marked agent=go starts a kernel-mode agent, or reads what
+#            only the Go agent has, so `labhost run all` leaves it out of a rust run and `lab/lab
+#            suite` shows the go configuration's result for it instead
+#            (docs/design/v2/agent-parity.md, the lab switch). The marked jobs are the agentkernel.sh
+#            groups, agentdoctor.sh's kernel-mode section, exhaustion.sh userspace mss, which starts a
+#            kernel-mode agent so that the server's netstack sees the target's SYN-ACK as sent, and
+#            exhaustion.sh kernel postclose, which reads the Go agent's post-close table through its
+#            GC trace.
 #            rates.sh is the rate-measuring check. lifecycle.sh's exclusive checks include floods
 #            of thousands of connections and datagrams, and join its VM. exhaustion.sh userspace
 #            postclose is the one job allowed to overlap the window, as in earlier multi-VM gate
@@ -105,8 +116,10 @@
 # both modes, the same as this file already does for lifecycle.sh's mode-specific checks. Every
 # group runs well inside labhost's per-job timeout. See docs/development/testing.md for L16.
 #
-# agentdoctor.sh runs `wgft agent doctor` against a kernel-mode agent (design section 10.2c), with
-# the server in the given mode, one job per mode, the same granularity as e2e.sh and ipv6.sh.
+# agentdoctor.sh runs `wgft agent doctor` (design section 10.2c) with the server in the first
+# argument's mode, against a kernel-mode agent or a userspace-mode one as the second argument says.
+# The two sections are separate jobs so that the userspace one runs with the Rust agent while the
+# kernel one stays with the Go agent; each job starts its own server.
 #
 # lifecycle.sh's check 9c asserts that nothing is applied during a 35 s window with nothing
 # changed. It used to wait only for forwarding to come back after the preceding flush/delete, not
@@ -158,25 +171,31 @@
 # host without outbound IPv4 cannot fetch them (GitHub has no IPv6), so they have to be staged
 # into the VM first, and the check is opt-in for that reason, exactly as it is in the per-VM suite
 # today.
+#
+# agent-handover.sh checks that the Go agent and the Rust agent take over each other's agent.json. It
+# needs the Rust build beside the Go one (`WGFT_LAB_AGENT_IMPL=rust lab/lab build`, or a suite run with
+# --agent-impl rust or both), so it is opt-in.
 
-parallel         yes  weight=245 agentkernel.sh kernel resolve
-parallel         yes  weight=245 agentkernel.sh userspace route session
-parallel         yes  weight=238 agentkernel.sh kernel notify pin reconnect
-parallel         yes  weight=222 agentkernel.sh kernel route session
-parallel         yes  weight=245 agentkernel.sh userspace resolve
-parallel         yes  weight=150 agentkernel.sh kernel failover
-parallel         yes  weight=150 agentkernel.sh userspace failover
-parallel         yes  weight=132 agentkernel.sh kernel drift 22 25 16 teardown
-parallel         yes  weight=105 agentkernel.sh userspace drift 22 25 16 teardown
-parallel         yes  weight=97 agentkernel.sh kernel 24 17 18 19 loopback
-parallel         yes  weight=73 agentdoctor.sh kernel
+parallel         yes  agent=go weight=245 agentkernel.sh kernel resolve
+parallel         yes  agent=go weight=245 agentkernel.sh userspace route session
+parallel         yes  agent=go weight=238 agentkernel.sh kernel notify pin reconnect
+parallel         yes  agent=go weight=222 agentkernel.sh kernel route session
+parallel         yes  agent=go weight=245 agentkernel.sh userspace resolve
+parallel         yes  weight=160 lifecycle.sh kernel 13
+parallel         yes  weight=160 lifecycle.sh userspace 13
+parallel         yes  agent=go weight=150 agentkernel.sh kernel failover
+parallel         yes  agent=go weight=150 agentkernel.sh userspace failover
+parallel         yes  agent=go weight=132 agentkernel.sh kernel drift 22 25 16 teardown
+parallel         yes  agent=go weight=105 agentkernel.sh userspace drift 22 25 16 teardown
+parallel         yes  agent=go weight=97 agentkernel.sh kernel 24 17 18 19 loopback
+parallel         yes  agent=go weight=65 agentdoctor.sh kernel kernel
 parallel         yes  weight=63 lifecycle.sh kernel 2
 parallel         yes  weight=63 lifecycle.sh kernel 8
 parallel         yes  weight=63 lifecycle.sh userspace 2
 parallel         yes  weight=62 lifecycle.sh userspace 8
-parallel         yes  weight=50 agentkernel.sh userspace 24 17 18 19 loopback
+parallel         yes  agent=go weight=50 agentkernel.sh userspace 24 17 18 19 loopback
 parallel         yes  weight=48 split-merge.sh kernel
-parallel         yes  weight=45 agentkernel.sh userspace notify pin reconnect
+parallel         yes  agent=go weight=45 agentkernel.sh userspace notify pin reconnect
 parallel         yes  weight=43 lifecycle.sh userspace 11
 parallel         yes  weight=38 lifecycle.sh kernel 9
 parallel         yes  weight=37 e2e.sh kernel
@@ -184,8 +203,8 @@ parallel         yes  weight=37 e2e.sh userspace
 parallel         yes  weight=15 rate=flood usage.sh kernel
 parallel         yes  weight=60 rate=flood usage.sh userspace
 parallel         yes  weight=16 exhaustion.sh kernel mss
-parallel         yes  weight=25 exhaustion.sh userspace mss
-parallel         yes  weight=34 agentkernel.sh kernel stale
+parallel         yes  agent=go weight=25 exhaustion.sh userspace mss
+parallel         yes  agent=go weight=34 agentkernel.sh kernel stale
 parallel         yes  weight=32 lifecycle.sh kernel 6
 parallel         yes  weight=31 rate=flood connlimit.sh
 parallel         yes  weight=30 lifecycle.sh userspace 1
@@ -193,10 +212,12 @@ parallel         yes  weight=29 rate=flood lifecycle.sh userspace 5c
 parallel         yes  weight=29 rate=flood lifecycle.sh userspace 5d
 parallel         yes  weight=26 ipv6.sh kernel
 parallel         yes  weight=25 ipv6.sh userspace
-parallel         yes  weight=23 agentdoctor.sh userspace
+parallel         yes  agent=go weight=18 agentdoctor.sh userspace kernel
 parallel         yes  weight=23 import-export.sh kernel
 parallel         yes  weight=21 lifecycle.sh kernel 1
-parallel         yes  weight=16 agentkernel.sh userspace stale
+parallel         yes  agent=go weight=16 agentkernel.sh userspace stale
+parallel         yes  weight=15 agentdoctor.sh kernel userspace
+parallel         yes  weight=12 agentdoctor.sh userspace userspace
 parallel         yes  weight=7 lifecycle.sh kernel 7
 parallel         yes  weight=8 lifecycle.sh kernel 11
 parallel         yes  weight=4 lifecycle.sh kernel 3
@@ -233,6 +254,8 @@ exclusive-heavy  yes  weight=28 exhaustion.sh kernel ackflood
 exclusive-heavy  yes  weight=38 exhaustion.sh userspace wgstall
 
 parallel         no   version-skew.sh
-exclusive-heavy  no   exhaustion.sh kernel postclose
+parallel         no   agent-handover.sh kernel
+parallel         no   agent-handover.sh userspace
+exclusive-heavy  no   agent=go exhaustion.sh kernel postclose
 exclusive-heavy  no   agentmem.sh gvisor
 exclusive-heavy  no   agentmem.sh wgstack

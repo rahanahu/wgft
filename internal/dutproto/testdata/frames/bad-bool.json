@@ -1,0 +1,4 @@
+{
+  "expect": "reject",
+  "reason": "a bool byte of 2"
+}

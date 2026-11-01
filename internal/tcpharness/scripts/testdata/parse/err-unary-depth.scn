@@ -1,0 +1,5 @@
+# Unary operators one level deeper than the limit, in a template.
+scenario unary-depth
+refs: parser fixture
+
+log {--------------------------------1}

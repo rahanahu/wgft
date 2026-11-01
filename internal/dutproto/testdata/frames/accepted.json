@@ -1,0 +1,9 @@
+{
+  "kind": "ACCEPTED",
+  "kind_byte": 135,
+  "msg": {
+    "h": 2,
+    "remote": "10.200.0.1:40001"
+  },
+  "display": "ACCEPTED h=2 remote=10.200.0.1:40001"
+}

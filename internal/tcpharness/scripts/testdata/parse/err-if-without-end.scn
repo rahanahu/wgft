@@ -1,0 +1,6 @@
+scenario x
+refs: parser fixture
+
+let x = true
+if x
+  let y = 1

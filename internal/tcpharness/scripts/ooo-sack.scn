@@ -1,0 +1,45 @@
+# Out-of-order segments are acknowledged at once with SACK blocks, and filling the hole
+# acknowledges everything at once.
+scenario ooo-sack
+refs: RFC 9293 3.10.7.4, RFC 2018 3 and 4, RFC 5681 4.2; gVisor e2e tcp_sack_test.go
+
+listen l 8005
+connect p l 8005 syn=opts_standard()
+require sack-negotiated p.sack
+  what: SACK negotiated
+  got: {yes_no(p.sack, "SACK", "no SACK")}
+let base = p.snd_nxt
+let data = pattern(3000, 0x33)
+# RFC 5681 4.2 and RFC 9293 3.10.7.4: an out-of-order segment and a segment that fills a hole are
+# acknowledged at once, so each answer must come within prompt, not a delayed-ACK timer.
+send p segment(p, ACK|PSH, base + 1000, data[1000:2000])
+await p prompt match=is_pure_ack(s) -> a1
+check dupack1 a1.ok && a1.ack == base
+  what: an out-of-order segment is acknowledged at once with ack=RCV.NXT
+  got: {ack_desc(a1, base)}
+check sack1 a1.ok && len(a1.sack) > 0 && a1.sack[0] == block(base + 1000, base + 2000)
+  what: the first SACK block covers the received segment
+  got: {sack_desc(a1, base)}
+send p segment(p, ACK|PSH, base + 2000, data[2000:3000])
+await p prompt match=is_pure_ack(s) -> a2
+check dupack2 a2.ok && a2.ack == base
+  what: the second out-of-order segment is acknowledged at once
+  got: {ack_desc(a2, base)}
+check sack2 a2.ok && len(a2.sack) > 0 && a2.sack[0] == block(base + 1000, base + 3000)
+  what: the first SACK block merges both segments
+  got: {sack_desc(a2, base)}
+let start = now
+send p segment(p, ACK|PSH, base, data[:1000])
+set p.snd_nxt = base + 3000
+await p prompt match=(has(s, ACK) && s.ack == base + 3000) -> a3
+check hole-filled a3.ok
+  what: filling the hole acknowledges all 3000 bytes at once
+  got: {ack_desc(a3, base)}
+measure hole-ack_ms ms(now - start)
+check hole-filled.no-sack a3.ok && len(a3.sack) == 0
+  what: no SACK block once nothing is out of order
+  got: {sack_desc(a3, base)}
+read p.conn 3000 2s -> r
+check reassembled r.err == none && r.data == data
+  what: the application reads the 3000 bytes in order
+  got: {len(r.data)} bytes, equal {r.data == data}, error {err_kind(r.err)}

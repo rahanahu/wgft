@@ -63,35 +63,7 @@ var Known = map[string]tcpharness.Known{
 //	lab/lab test internal/tcpharness/linuxdut
 //	lab/lab test internal/tcpharness/linuxdut vps -test.run=TestConformance/paws
 func TestConformance(t *testing.T) {
-	if os.Getenv("WGFT_TEST_IN_NETNS") != "1" {
-		release := KernelRelease()
-		t.Logf("kernel %s; the expected differences are recorded for the reference kernel %s", release, ReferenceRelease)
-		run := "^TestConformance$"
-		if f := flag.Lookup("test.run"); f != nil && f.Value.String() != "" {
-			run = f.Value.String() // the scenario filter passes through
-		}
-		cmd := exec.Command(os.Args[0], "-test.run="+run, "-test.v", "-test.count=1")
-		cmd.Env = append(os.Environ(), "WGFT_TEST_IN_NETNS=1")
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET,
-			UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
-			GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
-		}
-		out, err := cmd.CombinedOutput()
-		t.Logf("in a new user and network namespace:\n%s", out)
-		var pe *os.PathError
-		if errors.As(err, &pe) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EINVAL) {
-			t.Fatalf("undetermined: cannot create a user and network namespace here: %v", err)
-		}
-		if err != nil && release != ReferenceRelease {
-			t.Fatalf("the scenarios failed in the namespace: %v; this kernel %s is not the reference %s, "+
-				"and the expected differences are recorded for the reference kernel, so a failure here may "+
-				"be a difference of this kernel rather than of the scenarios; run it on the lab's reference VM",
-				err, release, ReferenceRelease)
-		}
-		if err != nil {
-			t.Fatalf("the scenarios failed in the namespace: %v", err)
-		}
+	if !inNetns(t, "^TestConformance$") {
 		return
 	}
 	if err := PinReference(); err != nil {
@@ -101,4 +73,42 @@ func TestConformance(t *testing.T) {
 		t.Logf("sysctl %s = %s", kv[0], kv[1])
 	}
 	tcpharness.Run(t, Engine(Known), tcpharness.Scenarios)
+}
+
+// inNetns reports whether the test runs inside its own user and network namespace. Outside, it
+// runs the test binary again inside one, with the -test.run filter, or run when there is none,
+// logs the output, fails t when the run failed, and reports false.
+func inNetns(t *testing.T, run string) bool {
+	t.Helper()
+	if os.Getenv("WGFT_TEST_IN_NETNS") == "1" {
+		return true
+	}
+	release := KernelRelease()
+	t.Logf("kernel %s; the expected differences are recorded for the reference kernel %s", release, ReferenceRelease)
+	if f := flag.Lookup("test.run"); f != nil && f.Value.String() != "" {
+		run = f.Value.String() // the scenario filter passes through
+	}
+	cmd := exec.Command(os.Args[0], "-test.run="+run, "-test.v", "-test.count=1")
+	cmd.Env = append(os.Environ(), "WGFT_TEST_IN_NETNS=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags:  syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET,
+		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
+		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
+	}
+	out, err := cmd.CombinedOutput()
+	t.Logf("in a new user and network namespace:\n%s", out)
+	var pe *os.PathError
+	if errors.As(err, &pe) || errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("undetermined: cannot create a user and network namespace here: %v", err)
+	}
+	if err != nil && release != ReferenceRelease {
+		t.Fatalf("the scenarios failed in the namespace: %v; this kernel %s is not the reference %s, "+
+			"and the expected differences are recorded for the reference kernel, so a failure here may "+
+			"be a difference of this kernel rather than of the scenarios; run it on the lab's reference VM",
+			err, release, ReferenceRelease)
+	}
+	if err != nil {
+		t.Fatalf("the scenarios failed in the namespace: %v", err)
+	}
+	return false
 }

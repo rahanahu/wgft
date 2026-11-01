@@ -230,7 +230,7 @@ for mode in $MODES; do
   wait_until 30 vps wgft agent ls --admin "$ADMIN" || { echo "FAIL  the server did not come up"; fail=1; continue; }
   join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
   env "${agent_env[@]}" WGFT_JOIN="$join" "WGFT_AGENT_ALLOW_TARGETS=$TARGET" \
-    ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > "$W/wgft-tq-agent-$mode.log" 2>&1 < /dev/null &
+    ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > "$W/wgft-tq-agent-$mode.log" 2>&1 < /dev/null &  # lab: go agent
   disown
   wait_until 30 handshaken || { echo "FAIL  the agent did not register"; fail=1; continue; }
   : > "$W/wgft-tq-serve-$mode.log"

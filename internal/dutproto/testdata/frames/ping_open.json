@@ -1,0 +1,8 @@
+{
+  "kind": "PING_OPEN",
+  "kind_byte": 20,
+  "msg": {
+    "to": "10.200.0.1"
+  },
+  "display": "PING_OPEN to=10.200.0.1"
+}

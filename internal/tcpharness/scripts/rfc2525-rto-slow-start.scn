@@ -1,0 +1,25 @@
+# Lose a whole flight. RFC 2525 2.2, no slow start after a retransmission timeout, and 2.14, a
+# retransmission of several packets: the RTO resends one segment and nothing more until it is
+# acknowledged, and the acknowledgment lets out at most two, as a window of one segment growing
+# in slow start does.
+scenario rfc2525-rto-slow-start
+refs: RFC 2525 2.2 and 2.14, RFC 5681 3.1
+
+listen l 8302
+connect p l 8302 syn=opts_nosack()
+flight p p.conn 6 0xd2 -> f
+await p 2s match=is_data(s) -> rto
+require rto rto.ok && rto.seq == f.segs[0].seq
+  what: the RTO resends the first segment
+  got: {seg_desc(rto)}
+burst p -> more
+let extra = count(filter(more.segs, s.seq != rto.seq))
+check one-segment extra == 0
+  what: RFC 2525 2.2 and 2.14: the RTO sends one segment and waits for its ACK
+  got: {extra} more segments
+set p.rcv_nxt = rto.seq + rto.len
+send_ack p
+burst p -> next
+check slow-start len(next.segs) >= 1 && len(next.segs) <= 2
+  what: the ACK of the resend lets out one or two segments, a window of one in slow start
+  got: {len(next.segs)} segments

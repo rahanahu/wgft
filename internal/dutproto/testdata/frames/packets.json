@@ -1,0 +1,10 @@
+{
+  "kind": "PACKETS",
+  "kind_byte": 132,
+  "msg": {
+    "packets": [
+      "4500002800014000400600000ac800010ac800029c41005000000064000000005002ffff00000000"
+    ]
+  },
+  "display": "PACKETS packets=[ipv4 id=1 DF tcp 10.200.0.1:40001\u003e10.200.0.2:80 S seq=100 ack=0 win=65535 len=0]"
+}

@@ -1,0 +1,17 @@
+{
+  "kind": "EVENT_LIST",
+  "kind_byte": 139,
+  "msg": {
+    "events": [
+      {
+        "h": 2,
+        "boosted": true
+      },
+      {
+        "h": 5,
+        "boosted": false
+      }
+    ]
+  },
+  "display": "EVENT_LIST events=[{2 true} {5 false}]"
+}

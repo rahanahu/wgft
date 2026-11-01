@@ -1,0 +1,10 @@
+{
+  "comment": "Timing values of the userspace agent's relay toward LAN targets. target_dial_timeout_ms bounds a real connection to a target; target_probe_timeout_ms bounds one TCP target check, and at most target_probe_concurrency checks run at once. target_lookup_timeout_ms and target_fallback_delay_ms apply when an allow list is set. A UDP session closes after udp_idle_seconds without traffic in either direction; default_udp_idle_seconds applies when no positive value is given, and idle sessions are swept every idle / udp_sweep_divisor.",
+  "target_dial_timeout_ms": 10000,
+  "target_probe_timeout_ms": 2000,
+  "target_probe_concurrency": 32,
+  "target_lookup_timeout_ms": 5000,
+  "target_fallback_delay_ms": 300,
+  "default_udp_idle_seconds": 120,
+  "udp_sweep_divisor": 4
+}

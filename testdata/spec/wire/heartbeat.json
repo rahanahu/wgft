@@ -1,0 +1,1 @@
+{"type":"heartbeat","heartbeat":{"generation":42,"tunnel":{"state":"ok","endpoint":"203.0.113.10:51820","last_handshake":"2026-11-01T12:00:00.123456789Z"},"rules":[{"id":"01JBX80A1B2C3D4E5F6G7H8J9K","state":"error","reason":"udp/9000: dial udp: lookup nas.lan on 192.168.1.1:53: no such host"},{"id":"r_01JBX7Z8Q4N6M2K5T9V3W1Y0AB","state":"ok"}]}}

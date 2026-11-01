@@ -1,0 +1,41 @@
+# Two datagrams left incomplete: one has its first fragment, the other only its second. RFC 792
+# and RFC 1122 3.3.2: the timeout sends Time Exceeded, code 1, for the first only.
+scenario udp-reassembly-timeout
+refs: RFC 792, RFC 1122 3.3.2; packet-validation.md, ICMP for fragments
+
+listen_udp u 5304
+let dst = addrport(DUT_ADDR, 5304)
+let src = addrport(PEER_ADDR, 41004)
+let a = fragments(udp(src, dst, 401, pattern(3000, 0x81)), 1000, 2000)
+let b = fragments(udp(src, dst, 402, pattern(3000, 0x82)), 1000, 2000)
+inject_ip a[0]
+inject_ip b[1]
+let start = now
+# Time Exceeded is ICMP type 11
+await_ip 35s match=(to_peer(s) && s.proto == 1 && icmp_type(s) == 11) -> p
+let waited = now - start
+let m = parse_icmp(p)
+let q = parse_quote(m.body)
+check time-exceeded p.ok && m.code == 1 && q.ok && q.id == 401 && q.src == PEER_ADDR && q.dst == DUT_ADDR && q.proto == 17
+  what: within 35 s, Time Exceeded code 1 quotes the datagram that has its first fragment
+  got: {yes_no(p.ok, "code " + text(m.code) + " quoting ID " + text(q.id), "no Time Exceeded")}
+if p.ok
+  measure time-exceeded-after-ms ms(waited)
+  check time-exceeded.not-early waited >= 25s
+    what: the incomplete datagram is kept about 30 s, the lifetime of packet-validation.md and Linux's ipfrag_time, before Time Exceeded
+    got: after {seconds_text(waited, 0)} s
+  measure time-exceeded-quote-bytes q.bytes
+  check time-exceeded.quote q.ok && q.offset == 0 && len(q.payload) >= 8
+    what: the quote is the first fragment's header and at least 8 bytes of it
+    got: offset {q.offset}, {len(q.payload)} payload bytes
+end
+await_ip 3s match=(to_peer(s) && s.proto == 1 && icmp_type(s) == 11) -> p
+let m = parse_icmp(p)
+let q = parse_quote(m.body)
+check no-first-no-icmp !p.ok
+  what: nothing is sent for the datagram without its first fragment
+  got: {yes_no(p.ok, "Time Exceeded quoting ID " + text(q.id), "nothing")}
+udp_read u 100ms -> r
+check not-delivered r.err != none
+  what: neither datagram reaches the application
+  got: {err_kind(r.err)}

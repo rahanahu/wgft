@@ -1,9 +1,9 @@
 name: CI
 
 # Trigger names in the comments below are the ones docs/testing.md's "変更の契機と対象のパス"
-# table defines, except go_code (see below). Two of that table's triggers gate a job that
-# actually runs on GitHub's runners; the rest gate lab-only B-class tests (B1, B2, B3, B7, B9,
-# B10) that need Incus and never run here.
+# table defines, except go_code (see below). Some of that table's triggers gate a job that
+# actually runs on GitHub's runners (go_code, build, rust); the rest gate lab-only B-class
+# tests (B1, B2, B3, B7, B9, B10) that need Incus and never run here.
 #
 #   go_code -> **/*.go, go.mod, go.sum, scripts/portable-test-packages.sh
 #               -> gates windows-test (B4), macos-test (B8)
@@ -42,6 +42,30 @@ name: CI
 #               This second part widens the table's own build-only mapping for B6, for the
 #               same reachability reason as go_code above.
 #
+#   rust    -> crates/**, Cargo.toml, Cargo.lock, rust-toolchain.toml, deny.toml,
+#               internal/tcpharness/scripts/**, testdata/wgstack-rec/**,
+#               internal/tcpharness/rustdut/known-wgstack-rs.json
+#               -> gates rust-check, rust-windows, rust-macos (B13, B14) and rust-deny
+#               (B15). The Rust workspace is the v2 migration's build
+#               (docs/development/architecture.md); it shares nothing with the Go jobs
+#               above except the scenario scripts and their fixtures, which the Go and the
+#               Rust parsers both read, the Go wgstack's recordings, which the Rust wgstack
+#               replays, and the Rust wgstack's expected-difference list, which its scenario
+#               run reads, so a Go-only or document-only change leaves these
+#               jobs skipped and a Rust-only change leaves the Go jobs to build-test's own
+#               rule. rust-deny additionally runs on the weekly schedule, because new
+#               RustSec advisories affect code nobody touched.
+#
+#   harness -> crates/**, Cargo.toml, Cargo.lock, rust-toolchain.toml,
+#               internal/tcpharness/**, internal/dutproto/**, internal/wgstack/**,
+#               internal/ipv4frag/**, go.mod, go.sum
+#               -> gates harness-rust-go (B16). It runs the Go and the Rust scenario runners
+#               against the frozen Go wgstack behind the DUT frame protocol and compares their
+#               transcripts (docs/design/v2/test-tooling.md section 2), so it needs both
+#               toolchains and runs Go tests: it is not one of the Rust-only rust-* jobs.
+#               The lab runs neither the job nor the Go test files only it runs, so
+#               docs/development/testing.md lets a PR that changes only those skip the lab suite.
+#
 # A change to .github/workflows/** (the `workflows` filter below) additionally forces every
 # gated job to run, on top of what `build` and `go_code` already cover: a ci.yml change can
 # change how the other jobs behave, so path filtering must not be trusted to judge its own
@@ -78,13 +102,15 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    # Weekly govulncheck (B6), independent of any PR: new advisories affect code nobody
-    # touched. 03:17 UTC Tuesday is away from the UTC-midnight rush GitHub's scheduling
-    # documentation warns can delay jobs, and away from any release-day activity.
+    # Weekly govulncheck (B6) and cargo-deny (B15), independent of any PR: new advisories
+    # affect code nobody touched. 03:17 UTC Tuesday is away from the UTC-midnight rush
+    # GitHub's scheduling documentation warns can delay jobs, and away from any
+    # release-day activity.
     - cron: "17 3 * * 2"
   workflow_dispatch:
-    # Lets a human re-run govulncheck on demand (a new advisory doesn't wait for the
-    # weekly schedule or a qualifying code change), or force a full run of every job.
+    # Lets a human re-run govulncheck and cargo-deny on demand (a new advisory doesn't
+    # wait for the weekly schedule or a qualifying code change), or force a full run of
+    # every job.
 
 permissions:
   contents: read
@@ -101,6 +127,8 @@ jobs:
       run_all: ${{ steps.decide.outputs.run_all }}
       docs_only: ${{ steps.decide.outputs.docs_only }}
       go_code: ${{ steps.filter.outputs.go_code }}
+      rust: ${{ steps.filter.outputs.rust }}
+      harness: ${{ steps.filter.outputs.harness }}
       build: ${{ steps.filter.outputs.build }}
     steps:
       - uses: actions/checkout@v7
@@ -114,8 +142,10 @@ jobs:
         # major-version tag. This is not a full commit SHA: every action already in this
         # file and in release.yml (actions/checkout@v7, goreleaser/goreleaser-action@v7,
         # docker/setup-buildx-action@v4, docker/login-action@v4, anchore/sbom-action@v0,
-        # actions/attest-build-provenance@v4, actions/attest-sbom@v4) is pinned the same
-        # way, so a lone SHA pin here would be an inconsistency rather than an improvement.
+        # actions/attest-build-provenance@v4, actions/attest-sbom@v4,
+        # Swatinem/rust-cache@v2, taiki-e/install-action@v2,
+        # EmbarkStudios/cargo-deny-action@v2) is pinned the same way, so a lone SHA pin
+        # here would be an inconsistency rather than an improvement.
         uses: dorny/paths-filter@v4
         continue-on-error: true
         with:
@@ -136,6 +166,30 @@ jobs:
               # The script that decides which packages windows-test and macos-test run. A
               # change to it changes what those two jobs test, so it has to run them.
               - 'scripts/portable-test-packages.sh'
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'deny.toml'
+              # The scenario scripts and parser fixtures, which the Rust tests read as well.
+              - 'internal/tcpharness/scripts/**'
+              # The Go wgstack's recordings and the Rust wgstack's expected-difference list,
+              # which crates/wgft-wgstack-dut replays and runs the scripts against.
+              - 'testdata/wgstack-rec/**'
+              - 'internal/tcpharness/rustdut/known-wgstack-rs.json'
+            harness:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'internal/tcpharness/**'
+              - 'internal/dutproto/**'
+              - 'internal/wgstack/**'
+              # what the frozen Go wgstack builds from
+              - 'internal/ipv4frag/**'
+              - 'go.mod'
+              - 'go.sum'
             build:
               - '.goreleaser.yaml'
               - 'scripts/build-release.sh'
@@ -155,7 +209,8 @@ jobs:
         # no base to diff against either, and by nature asks for a full run. A change to
         # the workflow files themselves (the `workflows` filter) also sets run_all, for the
         # reason in the header comment. A schedule event never sets run_all: its only
-        # purpose is the govulncheck run below, which checks github.event_name directly.
+        # purpose is the govulncheck and rust-deny runs below, which check github.event_name
+        # directly.
         #
         # docs_only follows the same fail-open rule from the other side: it stays false
         # unless the file list is present and every entry in it is a document, so every
@@ -204,7 +259,7 @@ jobs:
     # go.sum or a file the Go tests load, so a change that touches nothing but documents and
     # images cannot alter its result. Skipped in exactly that case and run otherwise,
     # including whenever the changes job could not decide; see the header comment. Not run on
-    # the weekly schedule (that event exists only to drive govulncheck below).
+    # the weekly schedule (that event exists only to drive govulncheck and rust-deny below).
     needs: changes
     if: >-
       !cancelled() && github.event_name != 'schedule' && (
@@ -229,6 +284,9 @@ jobs:
           git diff --exit-code go.mod go.sum
       - name: go vet
         run: go vet ./...
+      # qbench builds only with its tag, which `go vet ./...` leaves out
+      - name: go vet qbench
+        run: go vet -tags qbench ./internal/tcpharness/qbench
       - name: build
         run: go build ./...
       - name: test
@@ -346,6 +404,167 @@ jobs:
           pkgs=$(bash scripts/portable-test-packages.sh)
           go test $pkgs
 
+  rust-check:
+    # B13 (see docs/testing.md). Formatting, lints as errors and the tests of the Rust
+    # workspace on Linux. The toolchain, its components and its targets come from
+    # rust-toolchain.toml, which rustup on the runner reads, so CI and a developer's host
+    # use the same compiler. Gated by rust; see the header comment.
+    needs: changes
+    if: >-
+      !cancelled() && github.event_name != 'schedule' && (
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.run_all == 'true' ||
+        needs.changes.outputs.rust == 'true'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: fmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: nextest
+        run: cargo nextest run --workspace --locked
+      # nextest does not run doctests.
+      - name: doctests
+        run: cargo test --workspace --doc --locked
+      # The test tooling crates, and flate2 that only the recording reader uses, never reach the
+      # product binary's dependency tree
+      # (docs/design/v2/wgstack-rs.md, the dependency and isolation checks). Every target and
+      # every feature, so a target-specific or optional dependency cannot hide one.
+      - name: product tree
+        run: |
+          tree=$(cargo tree -p wgft -e normal,build --target all --all-features --prefix none --locked)
+          if printf '%s\n' "$tree" | grep -E '^(wgft-(tcpharness|wgstack-dut)|flate2|miniz_oxide) '; then
+            echo "the wgft binary depends on a test tooling crate" >&2
+            exit 1
+          fi
+      # The fuzz targets build these crates with code that the normal build leaves out:
+      # wgft-wgstack under --cfg fuzzing, wgft-wireguard with its fuzzing and deterministic
+      # features. The fuzz crates need nightly, so check that code here on the pinned stable.
+      # A separate target directory keeps the RUSTFLAGS build from invalidating the cache.
+      - name: fuzz-only code
+        env:
+          RUSTFLAGS: --cfg fuzzing -D warnings
+          CARGO_TARGET_DIR: target/fuzz-check
+        run: |
+          cargo check -p wgft-wgstack --locked
+          cargo check -p wgft-wireguard --features fuzzing,deterministic --locked
+
+  rust-deny:
+    # B15. cargo-deny: licence allowlist, RustSec advisories, duplicate versions, and
+    # sources restricted to crates.io, all from deny.toml. The advisories part is the audit,
+    # so cargo-audit is not run separately. Also runs weekly and on workflow_dispatch, since
+    # a new advisory does not wait for a change to the Rust code.
+    needs: changes
+    if: >-
+      !cancelled() && (
+        github.event_name == 'schedule' ||
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.run_all == 'true' ||
+        needs.changes.outputs.rust == 'true'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --locked
+
+  rust-windows:
+    # B14. Lints and tests the Rust workspace on native Windows. Gated by rust.
+    needs: changes
+    if: >-
+      !cancelled() && github.event_name != 'schedule' && (
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.run_all == 'true' ||
+        needs.changes.outputs.rust == 'true'
+      )
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: toolchain from rust-toolchain.toml
+        shell: bash
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: nextest
+        run: cargo nextest run --workspace --locked
+
+  rust-macos:
+    # B14. The same as rust-windows, on GitHub's Apple silicon runner.
+    needs: changes
+    if: >-
+      !cancelled() && github.event_name != 'schedule' && (
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.run_all == 'true' ||
+        needs.changes.outputs.rust == 'true'
+      )
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: nextest
+        run: cargo nextest run --workspace --locked
+
+  harness-rust-go:
+    # B16 (see docs/testing.md). The runner comparison of docs/design/v2/test-tooling.md
+    # section 2: the Go runner through rustdut and the Rust runner through its ProcessDut
+    # both run every scenario script, run seeds 1 to 5, against the frozen Go wgstack's
+    # dutserve, and their request and response transcripts and check traces must be equal
+    # byte for byte. Gated by harness; see the header comment.
+    needs: changes
+    if: >-
+      !cancelled() && github.event_name != 'schedule' && (
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.run_all == 'true' ||
+        needs.changes.outputs.harness == 'true'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+      - name: toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: dutserve
+        run: go test -c -o bin/wgstack-dutserve.test ./internal/wgstack
+      - name: Go runner transcripts
+        env:
+          WGFT_TEST_WGSTACK_DUT: ${{ github.workspace }}/bin/wgstack-dutserve.test
+          WGFT_TEST_TCPHARNESS_TRANSCRIPTS: ${{ runner.temp }}/transcripts
+        run: go test ./internal/tcpharness/rustdut -run 'TestWriteTranscripts|TestRustVectors' -count=1
+      # The whole crate, not only tests/scripts.rs: a change that only touches the Go test data
+      # the other tests read (frames, vectors) reaches this job and not rust-check.
+      - name: Rust runner against the same transcripts
+        env:
+          WGFT_TEST_WGSTACK_DUT: ${{ github.workspace }}/bin/wgstack-dutserve.test
+          WGFT_TEST_TCPHARNESS_TRANSCRIPTS: ${{ runner.temp }}/transcripts
+        run: cargo nextest run -p wgft-tcpharness --locked
+
   release-snapshot:
     # .github/workflows/release.yml only runs `goreleaser release --clean` on a `v*` tag push,
     # so nothing else in CI exercises .goreleaser.yaml, its hooks (scripts/third-party-licenses.sh,
@@ -419,7 +638,7 @@ jobs:
     # Not gated: A8 runs on every PR regardless of what changed, including a
     # documentation-only change, since this is what catches full-width punctuation
     # creeping into README.md, docs/*.md and similar public files. Not run on the
-    # weekly schedule, which exists only to drive govulncheck above.
+    # weekly schedule, which exists only to drive govulncheck and rust-deny.
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:

@@ -76,7 +76,7 @@ join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | hea
 # list: a rule to it would forward if the allowlist were absent, so the refusal check has teeth.
 ALLOW=192.168.50.3:25565,192.168.50.3:19132,192.168.50.3:8444
 WGFT_JOIN="$join" WGFT_AGENT_ALLOW_TARGETS="$ALLOW" \
-  ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > "$ALOG" 2>&1 < /dev/null &
+  ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > "$ALOG" 2>&1 < /dev/null &
 disown
 ip netns exec "$LAN_NS" setsid nohup echo -tcp 25565,25567 -udp 19132 > "$ELOG" 2>&1 < /dev/null &
 disown

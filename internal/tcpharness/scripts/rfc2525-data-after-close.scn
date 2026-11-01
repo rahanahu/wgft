@@ -1,0 +1,26 @@
+# Close the application's side fully, let the testbench acknowledge the FIN without closing its
+# own, then send data. RFC 2525 2.16, failure to send a RST after a half-duplex close: no
+# application can read the data any more, so the DUT resets the connection.
+scenario rfc2525-data-after-close
+refs: RFC 2525 2.16, RFC 9293 3.6
+
+listen l 8307
+connect p l 8307 syn=opts_standard()
+close p.conn
+await p 1s match=is_fin(s) -> f
+require fin f.ok
+  what: Close sends a FIN
+  got: {seg_desc(f)}
+set p.rcv_nxt = f.seq + f.seq_len
+send_ack p
+send_data p "late"
+# await looks only at this connection's four-tuple, the FIN_WAIT_2 one
+await p 1s match=is_rst(s) -> r
+check rst r.ok
+  what: RFC 2525 2.16: data for a closed application draws a RST
+  got: {seg_desc(r)}
+if r.ok
+  check rst.seq r.seq == p.rcv_nxt
+    what: the RST carries SND.NXT, past the FIN, as RFC 9293 3.10.7.4 asks for a segment that acknowledges it
+    got: {yes_no(r.seq == p.rcv_nxt, "SND.NXT", "another number")}
+end

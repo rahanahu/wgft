@@ -1,5 +1,5 @@
 // check-japanese は、ツールの出力(ログ・エラー・標準出力・CLI ヘルプ)から日本語を
-// 締め出すための検査。Go の文字列リテラルだけを走査し、ひらがな・
+// 締め出すための検査。Go と Rust の文字列リテラルだけを走査し、ひらがな・
 // カタカナ・漢字が残っていれば場所を出して非 0 で終わる。コメントは対象外(日本語コメントは
 // 残す方針)。テストと Web UI の i18n(JA/EN 切替を持つ)は除外する。
 package main
@@ -44,9 +44,20 @@ func main() {
 		}
 		if info.IsDir() {
 			base := info.Name()
-			if base == "experiments" || base == "notes" || base == ".git" || base == "vendor" || base == "scripts" {
+			if base == "experiments" || base == "notes" || base == ".git" || base == "vendor" || base == "scripts" || base == "target" {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".rs") {
+			if rustExempt(path) {
+				return nil
+			}
+			src, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
+			}
+			hits = append(hits, rustJapaneseLiterals(path, string(src))...)
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {

@@ -1,0 +1,9 @@
+{
+  "kind": "WRITE",
+  "kind_byte": 10,
+  "msg": {
+    "h": 2,
+    "data": "6166746572"
+  },
+  "display": "WRITE h=2 data=5:6166746572"
+}

@@ -1,0 +1,25 @@
+# 台本の構文解析器の cargo-fuzz の target。nightly で `cargo fuzz run parse_script` が使います。
+# 自分の [workspace] を持ち、リポジトリのワークスペースの member に入りません。
+[package]
+name = "wgft-tcpharness-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+wgft-tcpharness = { path = ".." }
+
+[[bin]]
+name = "parse_script"
+path = "fuzz_targets/parse_script.rs"
+test = false
+doc = false
+bench = false

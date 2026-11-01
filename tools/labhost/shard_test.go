@@ -278,6 +278,11 @@ func TestMergeProblems(t *testing.T) {
 			p.Netstack = "wgstack"
 			return []*summary{mkPart("1/2", 0, 2), p}
 		}, "shard 2/2 ran with netstack wgstack, not default"},
+		{"mixed agent implementations", func() []*summary {
+			p := mkPart("2/2", 1)
+			p.AgentImpl = "rust"
+			return []*summary{mkPart("1/2", 0, 2), p}
+		}, "shard 2/2 ran with agent rust, not go"},
 		{"not a shard", func() []*summary {
 			p := mkPart("2/2", 1)
 			p.PlanDigest = ""
@@ -312,10 +317,11 @@ func TestManifestKeys(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("parallel yes weight=12.5 a.sh kernel 1\nparallel yes rate=flood b.sh\nexclusive-heavy yes rate=measure weight=3 c.sh\n")
+	write("parallel yes weight=12.5 a.sh kernel 1\nparallel yes rate=flood b.sh\nexclusive-heavy yes rate=measure weight=3 c.sh\nparallel yes agent=go weight=4 d.sh kernel\n")
 	jobs, err := loadManifest(p)
 	if err != nil || jobs[0].Weight != 12.5 || jobs[0].Scenario != "a.sh kernel 1" || jobs[1].Weight != 0 || jobs[1].Rate != rateFlood ||
-		jobs[2].Rate != rateMeasure || jobs[2].Weight != 3 || jobs[2].Scenario != "c.sh" {
+		jobs[2].Rate != rateMeasure || jobs[2].Weight != 3 || jobs[2].Scenario != "c.sh" ||
+		jobs[0].GoAgent || !jobs[3].GoAgent || jobs[3].Weight != 4 || jobs[3].Scenario != "d.sh kernel" {
 		t.Fatalf("%+v %v", jobs, err)
 	}
 	for _, bad := range []string{
@@ -327,6 +333,7 @@ func TestManifestKeys(t *testing.T) {
 		"exclusive-heavy yes speed=1 a.sh\n",
 		"exclusive-heavy yes rate=flood a.sh\n",
 		"parallel yes rate=overlap a.sh\n",
+		"parallel yes agent=rust a.sh\n",
 	} {
 		write(bad)
 		if _, err := loadManifest(p); err == nil {
@@ -380,4 +387,66 @@ func TestRateWindowGuardPicksTheShortestLayout(t *testing.T) {
 		t.Errorf("f should run after shard 3's pool: %+v", l)
 	}
 	checkWindow(t, in, l)
+}
+
+// merge -go-summary: each agent=go job a rust run left out gets the go configuration's result, and a
+// job the go summary does not hold says so with zero runs.
+func TestFromGoVerdicts(t *testing.T) {
+	g := &summary{AgentImpl: "go", Results: []jobResult{
+		{Scenario: "agentkernel.sh kernel resolve", PassLines: 9},
+		{Scenario: "agentdoctor.sh kernel kernel", PassLines: 3, FailLines: 1, Exit: 1},
+		{Scenario: "e2e.sh kernel", PassLines: 5},
+	}}
+	got := fromGoVerdicts([]string{"agentkernel.sh kernel resolve", "agentdoctor.sh kernel kernel", "agentkernel.sh kernel stale"}, g)
+	want := []fromGoVerdict{
+		{Scenario: "agentkernel.sh kernel resolve", Runs: 1, PassLines: 9},
+		{Scenario: "agentdoctor.sh kernel kernel", Runs: 1, Failed: 1, PassLines: 3, FailLines: 1},
+		{Scenario: "agentkernel.sh kernel stale"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %+v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("verdict %d: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	// the left-out list survives the merge of a rust run's shards
+	a, b := mkPart("1/2", 0, 2), mkPart("2/2", 1)
+	a.AgentImpl, b.AgentImpl = "rust", "rust"
+	a.FromGo, b.FromGo = []string{"agentkernel.sh kernel resolve"}, []string{"agentkernel.sh kernel resolve"}
+	m := mergeSummaries([]*summary{a, b})
+	if len(m.MergeProblems) != 0 || m.AgentImpl != "rust" || len(m.FromGo) != 1 {
+		t.Errorf("rust merge: %+v", m)
+	}
+	// a summary from before agent_impl existed ran the Go agent
+	if m := mergeSummaries([]*summary{mkPart("1/2", 0, 2), mkPart("2/2", 1)}); m.AgentImpl != "go" {
+		t.Errorf("an empty agent_impl merged as %q, want go", m.AgentImpl)
+	}
+}
+
+// merge -go-summary: a file that cannot be read, is not a summary, or ran another agent is refused
+// with a reason, which cmdMerge turns into a warning, so the rust merge is still written.
+func TestLoadGoSummary(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if _, err := loadGoSummary(filepath.Join(dir, "missing.json")); err == nil {
+		t.Error("a missing file was accepted")
+	}
+	if _, err := loadGoSummary(write("bad.json", "{")); err == nil {
+		t.Error("a broken file was accepted")
+	}
+	if _, err := loadGoSummary(write("rust.json", `{"agent_impl":"rust"}`)); err == nil || !strings.Contains(err.Error(), "not go") {
+		t.Errorf("a rust summary: %v", err)
+	}
+	if g, err := loadGoSummary(write("old.json", `{"netstack":"default"}`)); err != nil || g == nil {
+		t.Errorf("a summary from before agent_impl: %v", err)
+	}
 }

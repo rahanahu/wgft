@@ -1,0 +1,5 @@
+scenario err-after-stop
+refs: parser fixture
+
+stop
+let x = 1

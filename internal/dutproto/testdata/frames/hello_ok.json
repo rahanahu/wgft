@@ -1,0 +1,9 @@
+{
+  "kind": "HELLO_OK",
+  "kind_byte": 128,
+  "msg": {
+    "engine": "wgstack",
+    "version": 1
+  },
+  "display": "HELLO_OK engine=\"wgstack\" version=1"
+}

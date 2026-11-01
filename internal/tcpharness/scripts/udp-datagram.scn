@@ -1,0 +1,48 @@
+# Delivery, the source address, checksums and the reply of a UDP datagram.
+scenario udp-datagram
+refs: RFC 768, RFC 1122 4.1.3; wgstack.md, the DF of sent UDP
+
+listen_udp u 5301
+let dst = addrport(DUT_ADDR, 5301)
+let src = addrport(PEER_ADDR, 41001)
+
+let msg = pattern(100, 0x11)
+inject_ip udp(src, dst, 101, msg)
+udp_read u 1s -> r
+check delivered r.err == none && r.data == msg
+  what: the application reads the 100-byte datagram
+  got: {len(r.data)} bytes, equal {r.data == msg}, error {err_kind(r.err)}
+check source r.from == src
+  what: ReadFrom names the testbench's address and port
+  got: {yes_no(r.from == src, "the sender", "another address")}
+
+# A datagram with a wrong checksum is dropped; the next good one is the next read.
+inject_ip corrupt(udp(src,dst,102,pattern(100,0x22)),8,0xff)
+let good = pattern(100, 0x33)
+inject_ip udp(src, dst, 103, good)
+udp_read u 1s -> r
+check bad-checksum-dropped r.err == none && r.data == good
+  what: a datagram with a wrong checksum is dropped
+  got: {yes_no(r.err == none && r.data == good, "only the good datagram", text(len(r.data)) + " bytes, error " + err_kind(r.err))}
+
+# RFC 768: a zero checksum means the sender computed none.
+let nosum = set_bytes(udp(src, dst, 104, pattern(100, 0x44)), 6, "\x00\x00")
+inject_ip nosum
+udp_read u 1s -> r
+check no-checksum r.err == none && r.data == nosum.payload[8:]
+  what: a datagram without a checksum is delivered
+  got: {len(r.data)} bytes, error {err_kind(r.err)}
+
+let reply = pattern(200, 0x55)
+udp_write u reply to=src
+await_ip 1s match=(to_peer(s) && s.proto == 17) -> p
+let pu = parse_udp(p)
+check reply p.ok && pu.err == none && pu.checksum != 0 && pu.src == dst && pu.dst == src && pu.payload == reply
+  what: the reply leaves from the socket's port to the sender with a valid, nonzero checksum, as Linux and gVisor send
+  got: {reply_desc(p.ok, pu, reply)}
+if p.ok
+  check reply.df-clear !p.df
+    what: wgstack.md, UDP is sent without DF
+    got: {yes_no(p.df, "DF set", "DF clear")}
+  measure reply-ttl p.ttl
+end

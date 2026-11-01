@@ -1,0 +1,9 @@
+{
+  "kind": "ERROR",
+  "kind_byte": 130,
+  "msg": {
+    "err": 4,
+    "msg": "read tcp 10.200.0.2:8011-\u003e10.200.0.1:40001: connection reset by peer"
+  },
+  "display": "ERROR err=reset msg=\"read tcp 10.200.0.2:8011-\u003e10.200.0.1:40001: connection reset by peer\""
+}

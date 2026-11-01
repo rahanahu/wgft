@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -34,21 +35,22 @@ func TestRepoManifestIsValid(t *testing.T) {
 			heavy++
 		}
 	}
-	// 既定の一式は、両モードの e2e と ipv6 と rates と lifecycle の 19 個の確認、
+	// 既定の一式は、両モードの e2e と ipv6 と rates と lifecycle の確認、
 	// それに split-merge、import-export、connlimit、両モードの agentkernel の組と agentdoctor と usage、
 	// exhaustion の確認のうち、そのモードに当てはまるもの
 	want := []string{
 		"e2e.sh kernel", "e2e.sh userspace", "ipv6.sh kernel", "ipv6.sh userspace",
 		"split-merge.sh kernel", "import-export.sh kernel", "connlimit.sh",
 		"rates.sh kernel", "rates.sh userspace",
-		"agentdoctor.sh kernel", "agentdoctor.sh userspace",
+		"agentdoctor.sh kernel kernel", "agentdoctor.sh kernel userspace",
+		"agentdoctor.sh userspace kernel", "agentdoctor.sh userspace userspace",
 		"usage.sh kernel", "usage.sh userspace",
 		"exhaustion.sh userspace postclose",
 		"exhaustion.sh kernel mss", "exhaustion.sh userspace mss",
 		"exhaustion.sh kernel acceptq", "exhaustion.sh kernel ackflood", "exhaustion.sh userspace wgstall",
 	}
 	for _, mode := range []string{"kernel", "userspace"} {
-		for _, c := range []string{"1", "2", "3", "3b", "4", "5", "5b", "5c", "5d", "5e", "5f", "5g", "6", "7", "8", "9", "10", "11", "12"} {
+		for _, c := range []string{"1", "2", "3", "3b", "4", "5", "5b", "5c", "5d", "5e", "5f", "5g", "6", "7", "8", "9", "10", "11", "12", "13"} {
 			want = append(want, "lifecycle.sh "+mode+" "+c)
 		}
 	}
@@ -84,6 +86,16 @@ func TestRepoManifestIsValid(t *testing.T) {
 	}
 	if optional == 0 {
 		t.Error("no optional job: version-skew.sh needs staged binaries and stays opt-in")
+	}
+	// agent=go は Go の agent を動かす仕事だけに付く。Rust の agent の組が流す確認から、カーネルモードの
+	// agent の確認が漏れても、ユーザー空間モードの確認が外れても、完成の条件の判定が変わる
+	goAgent := map[string]bool{"agentdoctor.sh kernel kernel": true, "agentdoctor.sh userspace kernel": true,
+		"exhaustion.sh userspace mss": true, "exhaustion.sh kernel postclose": true}
+	for _, j := range jobs {
+		want := goAgent[j.Scenario] || strings.HasPrefix(j.Scenario, "agentkernel.sh ")
+		if j.GoAgent != want {
+			t.Errorf("%q: agent=go is %v, want %v", j.Scenario, j.GoAgent, want)
+		}
 	}
 }
 

@@ -1,0 +1,46 @@
+[package]
+name = "wgft-agent"
+description = "The wgft agent: control plane, data plane and relays"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+futures-util = { workspace = true, features = ["sink", "std"] }
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+ring.workspace = true
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
+socket2 = { workspace = true, features = ["all"] }
+time = { workspace = true, features = ["formatting", "local-offset", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "net", "time", "sync", "signal", "io-util", "fs"] }
+tokio-rustls = { workspace = true, features = ["ring", "tls12"] }
+tokio-tungstenite = { workspace = true, features = ["handshake"] }
+unicode-general-category.workspace = true
+wgft-proto.workspace = true
+wgft-wireguard.workspace = true
+wgft-netstack.workspace = true
+wgft-wgstack.workspace = true
+zeroize = { workspace = true, features = ["serde", "zeroize_derive"] }
+
+[lints]
+workspace = true
+
+[target."cfg(unix)".dependencies]
+libc.workspace = true
+
+[target."cfg(windows)".dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tempfile.workspace = true
+wgft-alloc-count.workspace = true

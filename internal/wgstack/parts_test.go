@@ -51,8 +51,10 @@ func TestParseOptionsMalformed(t *testing.T) {
 }
 
 func FuzzParse(f *testing.F) {
-	f.Add(buildPeer(tseg{sport: 1, dport: 2, flags: flagSYN, mss: 1380, ws: 7, sackOK: true, ts: true}))
-	f.Add(buildPeer(tseg{sport: 1, dport: 2, flags: flagACK, ws: -1, sack: []sackBlock{{1, 2}, {3, 4}}}))
+	// 種は Rust の parse の fuzz の target の corpus にも書き出す(rustgolden_test.go)
+	for _, seed := range fuzzParseSeeds() {
+		f.Add(seed)
+	}
 	f.Fuzz(func(t *testing.T, b []byte) {
 		// 8 byte ずつの和は、どの長さでも 2 byte ずつの定義どおりの和と一致する(checksum_test.go)。初めの値は 4 つで、
 		// 0xffff の倍数(0xffff や 0xffffffff)は 1 の補数の和で 0 とほぼ同じなので、0 のほかは倍数でない値にする

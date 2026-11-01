@@ -21,7 +21,7 @@ func guardedDrain(t *testing.T, n *testNet, buf []byte, seed uint64, step int) [
 	go func() {
 		var r []out
 		for i := 0; i < 200000; i++ {
-			k := n.d.Poll(buf)
+			k := n.poll(buf)
 			if k == 0 {
 				ch <- res{o: r}
 				return
@@ -85,17 +85,19 @@ type auditCfg struct {
 	icmp, zeroWnd  bool
 	peerData, boos bool
 	nr             bool
+	rec            recSpec
 }
 
 func runAudit(t *testing.T, cfg auditCfg) {
 	rng := rand.New(rand.NewPCG(cfg.seed, cfg.seed*7+1))
 	n := newTestNet(t, smallLimits())
+	n.record(cfg.rec)
 	if cfg.nr {
 		n.d.s.ccPolicy = CongestionNewReno
 	}
 	l := listen(t, n, 80)
 	p := n.handshake(40000, 80, cfg.ts, cfg.sack, cfg.ws)
-	c := acceptOne(t, l)
+	c := n.accept(l)
 	cs := c.c
 	gen := c.gen
 	base := p.rcv
@@ -195,7 +197,7 @@ func runAudit(t *testing.T, cfg auditCfg) {
 					if rng.IntN(4) == 0 {
 						k = min(k, 1+rng.IntN(40))
 					}
-					m, err := c.Write(stream[written : written+k])
+					m, err := n.writeConn(c, stream[written:written+k])
 					if err != nil {
 						t.Fatalf("seed %d: write %v", cfg.seed, err)
 					}
@@ -204,9 +206,9 @@ func runAudit(t *testing.T, cfg auditCfg) {
 			} else if !closed && (honest || rng.IntN(20) == 0) {
 				closed = true
 				if cfg.closeWrite {
-					c.CloseWrite()
+					n.closeWrite(c)
 				} else {
-					c.Close()
+					n.closeConn(c)
 				}
 			}
 		case r < 35:
@@ -292,9 +294,10 @@ func runAudit(t *testing.T, cfg auditCfg) {
 		case r < 80 && cfg.peerData:
 			buf := make([]byte, 8192)
 			if readable(c) {
-				c.Read(buf)
+				n.read(c, buf)
 			}
 		case r < 82 && cfg.boos:
+			n.internal("an internal boost flip")
 			n.d.s.tryBoost(cs, gen, boostSend)
 			cs.mu.Lock()
 			if cs.gen == gen {
@@ -358,7 +361,8 @@ func FuzzAdversarialSender(f *testing.F) {
 	f.Fuzz(func(t *testing.T, seed uint64) { runAudit(t, adversaryCfg(seed)) })
 }
 
-// adversaryCfg は種から相手の振る舞いの組み合わせを決める。
+// adversaryCfg は種から相手の振る舞いの組み合わせを決める。stream の長さの剰余は符号なしで取る。int にして
+// から取ると、積が 2^63 以上の種で長さが負になり make が落ちる。
 func adversaryCfg(seed uint64) auditCfg {
 	return auditCfg{
 		seed:       seed,
@@ -366,7 +370,7 @@ func adversaryCfg(seed uint64) auditCfg {
 		sack:       seed%3 != 0,
 		ws:         seed%5 != 0,
 		closeWrite: seed%2 == 1 || seed%3 == 2 || seed%5 == 1,
-		length:     2000 + int(seed*7919)%200000,
+		length:     2000 + int(seed*7919%200000),
 		advSteps:   2000 + int(seed%5)*1000,
 		lieTS:      seed%4 == 0,
 		lieDSK:     seed%3 == 1,

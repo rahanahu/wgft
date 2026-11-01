@@ -1,0 +1,94 @@
+{
+  "description": "How a failure becomes the error message and the exit code. kind refusal is a startup refusal with a category, a subject, a reason and an optional hint; one_shot marks a refusal from a command that starts no long-running process; wrap is text placed before the whole message by an outer error. kind unavailable is a failure to produce the requested report, used by agent doctor. kind error is any other failure. wgft prints \"Error: \" followed by message on stderr.",
+  "cases": [
+    {
+      "name": "config refusal of agent run",
+      "kind": "refusal",
+      "category": "config",
+      "subject": "WGFT_MODE",
+      "reason": "must be kernel or userspace, not \"x\"",
+      "message": "refusing to start [config WGFT_MODE]: must be kernel or userspace, not \"x\"",
+      "exit": 3
+    },
+    {
+      "name": "the same refusal from a command that starts nothing",
+      "kind": "refusal",
+      "category": "config",
+      "subject": "WGFT_MODE",
+      "reason": "must be kernel or userspace, not \"x\"",
+      "one_shot": true,
+      "message": "cannot continue [config WGFT_MODE]: must be kernel or userspace, not \"x\"",
+      "exit": 3
+    },
+    {
+      "name": "prerequisite",
+      "kind": "refusal",
+      "category": "prerequisite",
+      "subject": "CAP_NET_ADMIN",
+      "reason": "kernel mode needs CAP_NET_ADMIN",
+      "message": "refusing to start [prerequisite CAP_NET_ADMIN]: kernel mode needs CAP_NET_ADMIN",
+      "exit": 3
+    },
+    {
+      "name": "conflict",
+      "kind": "refusal",
+      "category": "conflict",
+      "subject": "WGFT_JOIN",
+      "reason": "this join string is already used; issue a new join string",
+      "message": "refusing to start [conflict WGFT_JOIN]: this join string is already used; issue a new join string",
+      "exit": 3
+    },
+    {
+      "name": "mode gate",
+      "kind": "refusal",
+      "category": "mode-gate",
+      "subject": "WGFT_MODE",
+      "reason": "run wgft agent teardown first",
+      "message": "refusing to start [mode-gate WGFT_MODE]: run wgft agent teardown first",
+      "exit": 3
+    },
+    {
+      "name": "no subject",
+      "kind": "refusal",
+      "category": "prerequisite",
+      "subject": "",
+      "reason": "this build has no server",
+      "message": "refusing to start [prerequisite]: this build has no server",
+      "exit": 3
+    },
+    {
+      "name": "hint is a separate sentence",
+      "kind": "refusal",
+      "category": "config",
+      "subject": "/etc/wgft/agent.env",
+      "reason": "open /etc/wgft/agent.env: permission denied; this process runs as uid 998, gid 998, and the file is mode 0600 with owner uid 0 and group gid 0",
+      "hint": "It may hold WGFT_JOIN, so let the agent's group read it",
+      "message": "refusing to start [config /etc/wgft/agent.env]: open /etc/wgft/agent.env: permission denied; this process runs as uid 998, gid 998, and the file is mode 0600 with owner uid 0 and group gid 0. It may hold WGFT_JOIN, so let the agent's group read it",
+      "exit": 3
+    },
+    {
+      "name": "refusal wrapped in another error keeps exit code 3",
+      "kind": "refusal",
+      "category": "conflict",
+      "subject": "WGFT_JOIN",
+      "reason": "registration rejected",
+      "wrap": "re-register failed: ",
+      "message": "re-register failed: refusing to start [conflict WGFT_JOIN]: registration rejected",
+      "exit": 3
+    },
+    {
+      "name": "report could not be produced",
+      "kind": "unavailable",
+      "reason": "unknown flag: --bogus",
+      "message": "unknown flag: --bogus",
+      "exit": 2
+    },
+    {
+      "name": "any other failure",
+      "kind": "error",
+      "reason": "credentials file is in use by another process",
+      "message": "credentials file is in use by another process",
+      "exit": 1
+    }
+  ]
+}
