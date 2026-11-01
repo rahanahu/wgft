@@ -9,6 +9,7 @@ pub mod credentials;
 pub mod dataplane;
 pub mod enroll;
 pub mod error;
+pub mod flowpool;
 pub mod hostaddr;
 pub mod inbound;
 pub mod logging;
@@ -16,6 +17,7 @@ pub mod platform;
 pub mod relay;
 mod run;
 mod stream;
+pub mod targets;
 pub mod tunnel;
 
 pub use error::{AgentError, Refusal};

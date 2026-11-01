@@ -467,21 +467,22 @@ fn pick(host: &str, port: u16, mut v4: Vec<Ipv4Addr>) -> Result<SocketAddrV4, St
         .ok_or_else(|| format!("no A record for {host}"))
 }
 
-/// `host:port` を IPv4 の `SocketAddrV4` にする。ホスト名は A レコードを 5 秒の期限で引く。
+/// `host:port` を IPv4 の `SocketAddrV4` にする。ホスト名は A レコードを 5 秒の期限で引く。宛先の名前とは
+/// 別の許可で引くので、宛先の名前の解決が詰まってもエンドポイントの引き直しは止まらない。
 async fn resolve(endpoint: &str) -> Result<SocketAddrV4, String> {
     let (host, port) = match parse_endpoint(endpoint)? {
         Endpoint::Addr(a) => return Ok(a),
         Endpoint::Name(h, p) => (h, p),
     };
-    let fut = tokio::net::lookup_host((host.as_str(), port));
-    let addrs = tokio::time::timeout(Duration::from_secs(5), fut)
-        .await
-        .map_err(|_| format!("lookup {host}: timed out"))?
-        .map_err(|e| format!("lookup {host}: {e}"))?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let addrs = crate::targets::resolve::Resolver::shared()
+        .lookup_endpoint(&host, deadline)
+        .await?;
     let v4 = addrs
+        .into_iter()
         .filter_map(|a| match a {
-            SocketAddr::V4(a) => Some(*a.ip()),
-            SocketAddr::V6(_) => None,
+            std::net::IpAddr::V4(a) => Some(a),
+            std::net::IpAddr::V6(_) => None,
         })
         .collect();
     pick(&host, port, v4)

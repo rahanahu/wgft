@@ -161,17 +161,23 @@ fn the_effective_config_block_matches_the_spec() {
             "{}",
             c.name
         );
-        // 続く行は、まだ効かせていない上限の知らせと、許可一覧の行で終わる
+        // 続く行は許可一覧の行で終わる
         let tail: Vec<&LogLine> = lines[11..].iter().collect();
+        let has_allow = c.args.iter().any(|a| a == "--agent-allow-targets");
+        let want = if has_allow {
+            "target allowlist WGFT_AGENT_ALLOW_TARGETS="
+        } else {
+            "no target allowlist"
+        };
         assert!(
-            matches!(tail[0], LogLine::Stamped(l) if l.starts_with("WGFT_MAX_UDP_FLOWS and WGFT_MAX_TCP_FLOWS: not enforced yet")),
+            matches!(tail.last(), Some(LogLine::Stamped(l)) if l.starts_with(want)),
             "{}: {tail:?}",
             c.name
         );
-        let has_allow = c.args.iter().any(|a| a == "--agent-allow-targets");
-        assert_eq!(
-            matches!(tail.last(), Some(LogLine::Stamped(l)) if l.starts_with("no target allowlist")),
-            !has_allow,
+        assert!(
+            !tail
+                .iter()
+                .any(|l| matches!(l, LogLine::Stamped(l) if l.contains("not enforced"))),
             "{}: {tail:?}",
             c.name
         );
@@ -269,14 +275,12 @@ fn a_set_allowlist_and_kernel_mode_are_refused_after_the_door() {
         "refusing to start [prerequisite WGFT_MODE]: this build does not include the agent's kernel mode yet, so it cannot start in kernel mode; use a build that includes it"
     );
     assert_eq!(e.exit_code(), 3);
-    let e = try_prepare(&base(&[("WGFT_AGENT_ALLOW_TARGETS", "10.0.0.1:80")])).unwrap_err();
-    assert!(
-        e.to_string().starts_with(
-            "refusing to start [prerequisite WGFT_AGENT_ALLOW_TARGETS]: is set to 10.0.0.1/32:80, and this build does not enforce"
-        ),
-        "{e}"
+    // 宛先の許可一覧は効かせるので拒まない
+    let p = try_prepare(&base(&[("WGFT_AGENT_ALLOW_TARGETS", "10.0.0.1:80")])).unwrap();
+    assert_eq!(
+        p.options.allow_targets.map(|l| l.to_string()).as_deref(),
+        Some("10.0.0.1/32:80")
     );
-    assert_eq!(e.exit_code(), 3);
     // 値の誤りは、この版が持たない機能の拒否より先に出る
     let e = try_prepare(&base(&[
         ("WGFT_MODE", "kernel"),

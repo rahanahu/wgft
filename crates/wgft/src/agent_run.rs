@@ -1,7 +1,7 @@
 //! `wgft agent run` の入口。設定を読んで入口の検査を通し、`wgft_agent::run` に渡す値を作る。
 //!
-//! 順序は仕様の起動ログの節に従う。この版が持たない機能を要る設定 (カーネルモード、宛先の許可一覧) は、
-//! 認証情報とトンネルに触れる前に拒む。
+//! 順序は仕様の起動ログの節に従う。この版が持たない機能を要る設定 (カーネルモード) は、認証情報と
+//! トンネルに触れる前に拒む。
 
 use wgft_agent::config::agent::{self, Settings};
 use wgft_agent::config::{self, Config, Defaults, Env, LogLine};
@@ -103,6 +103,11 @@ pub fn prepare_door(
         name: settings.name.clone(),
         version: crate::version(),
         tun_name: settings.wg_interface.clone(),
+        allow_targets: settings.allow_targets.clone(),
+        limits: wgft_agent::flowpool::Limits {
+            udp: settings.max_udp_flows as usize,
+            tcp: settings.max_tcp_flows as usize,
+        },
     };
     Ok(Prepared {
         options,
@@ -115,7 +120,7 @@ pub fn prepare_door(
 ///
 /// # Errors
 ///
-/// 入口の検査の拒否と、カーネルモードと宛先の許可一覧の拒否を返す。
+/// 入口の検査の拒否と、カーネルモードの拒否を返す。
 pub fn prepare(
     global: &AgentGlobal,
     run: &RunArgs,

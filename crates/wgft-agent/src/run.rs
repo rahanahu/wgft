@@ -10,11 +10,14 @@ use tokio::sync::{Mutex, Notify, watch};
 use wgft_proto::{GoTime, Heartbeat, Join, STATUS_ERROR, STATUS_OK, State, TunnelStatus, WgConfig};
 use zeroize::Zeroizing;
 
+use crate::config::allow_targets::AllowList;
 use crate::credentials::{self, Credentials};
 use crate::enroll::{register, token_hash};
 use crate::error::{AgentError, Refusal};
+use crate::flowpool::Limits;
 use crate::relay::{Manager, OpenPorts};
 use crate::stream;
+use crate::targets::Targets;
 use crate::tunnel::{self, Tunnel};
 
 /// トンネルはあるがハンドシェイクがまだ済んでいないときの理由 (Go の `controlapi`)。
@@ -45,6 +48,10 @@ pub struct Options {
     pub version: String,
     /// トンネルの TUN の名前。試作は `WGFT_WG_INTERFACE` から取る。
     pub tun_name: String,
+    /// 宛先の許可一覧 (`WGFT_AGENT_ALLOW_TARGETS`)。`None` は制限しない。
+    pub allow_targets: Option<AllowList>,
+    /// フロー数の上限 (`WGFT_MAX_UDP_FLOWS` と `WGFT_MAX_TCP_FLOWS`)。
+    pub limits: Limits,
 }
 
 // 接続文字列は秘密なので Debug に出さない
@@ -63,6 +70,8 @@ impl std::fmt::Debug for Options {
             .field("name", &self.name)
             .field("version", &self.version)
             .field("tun_name", &self.tun_name)
+            .field("allow_targets", &self.allow_targets)
+            .field("limits", &self.limits)
             .finish()
     }
 }
@@ -85,6 +94,8 @@ pub(crate) struct Agent {
     pub(crate) private_key: Zeroizing<String>,
     tunnel: Option<Tunnel>,
     relay: Option<Manager>,
+    /// 宛先の規則。トンネルの世代をまたいで分け合う。
+    targets: Arc<Targets>,
     wg: Option<WgConfig>,
     pub(crate) generation: u64,
     /// トンネルの作成に失敗した全体状態と、次に立て直す時刻と、失敗の回数。
@@ -163,6 +174,8 @@ impl Agent {
                         server,
                         Some(self.opts.tun_name.clone()),
                         open,
+                        Arc::clone(&self.targets),
+                        self.opts.limits,
                     ));
                     self.tunnel = Some(t);
                     self.wg = Some(st.wg.clone());
@@ -302,7 +315,7 @@ impl Agent {
             }
         }
         if let Some(r) = self.relay.as_mut() {
-            r.retry();
+            r.retry().await;
         }
     }
 }
@@ -396,12 +409,14 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
     let _lock = credentials::acquire(&path).map_err(|e| AgentError::Other(e.to_string()))?;
     credentials::remove_leftover_temps(&path);
     let (creds, private_key) = prepare(&opts).await?;
+    let targets = Arc::new(Targets::new(opts.allow_targets.clone()));
     let agent = Arc::new(Mutex::new(Agent {
         opts,
         creds,
         private_key,
         tunnel: None,
         relay: None,
+        targets,
         wg: None,
         generation: 0,
         retry: None,
@@ -689,6 +704,7 @@ mod tests {
             private_key: Zeroizing::new(String::new()),
             tunnel: None,
             relay: None,
+            targets: Arc::new(Targets::new(None)),
             wg: None,
             generation: 0,
             retry: None,
