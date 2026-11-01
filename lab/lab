@@ -310,10 +310,24 @@ host_build() {
   [[ -f $REPO/go.mod ]] || die "go.mod がまだない"
   # WGFT_LAB_BUILD_TAGS は go build の -tags に渡す。lab/agentmem.sh は labmemprobe を付けた build を要る
   (cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ${WGFT_LAB_BUILD_TAGS:+-tags "$WGFT_LAB_BUILD_TAGS"} -o bin/ ./cmd/... ./tools/...)
+  # WGFT_LAB_RUST=1 は v2 の Rust の試作の道具も bin/rust/ に作る (lab/wg-interop.sh が使う)。既定の bin/ と
+  # その install は変えない。Rust の TUN の殻は cargo-zigbuild で musl の静的バイナリにし、VM の Debian の
+  # glibc に依らない。wireguard-go は go.mod が既に要る版の upstream のコマンドをそのまま build する
+  if [[ ${WGFT_LAB_RUST:-} == 1 ]]; then
+    command -v cargo-zigbuild >/dev/null || die "WGFT_LAB_RUST=1 needs cargo-zigbuild and zig on the host"
+    mkdir -p "$REPO/bin/rust"
+    (cd "$REPO" && cargo zigbuild --release --locked --target x86_64-unknown-linux-musl -p wgft-wireguard-tun) || die "cargo zigbuild failed"
+    install -m 0755 "$REPO/target/x86_64-unknown-linux-musl/release/wgft-wireguard-tun" "$REPO/bin/rust/"
+    (cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/rust/wireguard-go golang.zx2c4.com/wireguard) || die "wireguard-go build failed"
+    info "built the Rust lab tools and wireguard-go into $REPO/bin/rust/"
+  fi
   info "built into $REPO/bin/"
 }
 vm_install() {
   in_vm sh -c 'for b in /wgft/bin/*; do [ -f "$b" ] && [ -x "$b" ] && case "$b" in *.test) ;; *) install -m 0755 "$b" /usr/local/bin/;; esac; done; ls /usr/local/bin/'
+  if [[ ${WGFT_LAB_RUST:-} == 1 ]]; then
+    in_vm sh -c 'for b in /wgft/bin/rust/*; do [ -f "$b" ] && [ -x "$b" ] && install -m 0755 "$b" /usr/local/bin/; done'
+  fi
   info "installed into VM $VM /usr/local/bin (use plain command names in the VM)"
 }
 cmd_build() {
