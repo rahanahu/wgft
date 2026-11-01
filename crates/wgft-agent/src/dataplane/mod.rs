@@ -1,5 +1,5 @@
 //! データプレーン。トンネルの世代ごとに 1 つの OS のスレッドを立て、tokio の current-thread の実行環境で
-//! WireGuard の device の層 (`wgft_wireguard::Device`)、上の層 ([`Upper`]、後で Rust の wgstack の核)、
+//! WireGuard の device の層 (`wgft_wireguard::Device`)、上の層 ([`Upper`]、Rust の wgstack の核)、
 //! WireGuard の UDP のソケットを動かす。TUN は使わない。
 //!
 //! 規則の正本は `docs/design/v2/wgstack-rs.md` の「データプレーンの駆動」で、この module はそれを実装する。
