@@ -7,12 +7,13 @@
 #![no_main]
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use libfuzzer_sys::fuzz_target;
 use wgft_wireguard::{
-    Device, DeviceConfig, Ipv4Prefix, Limits, PeerConfig, PrivateKey, ProtocolTimers, Roaming,
-    Zeroizing,
+    Device, DeviceConfig, Ipv4Prefix, Limits, PeerConfig, PrivateKey, ProtocolTimers, PublicKey,
+    Roaming, Zeroizing,
 };
 
 const AGENT_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 2);
@@ -48,6 +49,28 @@ impl Input<'_> {
     }
 }
 
+/// 固定の鍵と公開鍵。入力に依らず、Device も変えないので、1 回だけ作る (X25519 の計算が高い)
+struct Keys {
+    a_key: PrivateKey,
+    b_key: PrivateKey,
+    a_pub: PublicKey,
+    b_pub: PublicKey,
+}
+
+fn keys() -> &'static Keys {
+    static KEYS: OnceLock<Keys> = OnceLock::new();
+    KEYS.get_or_init(|| {
+        let a_key = PrivateKey::generate([0xa1; 32]);
+        let b_key = PrivateKey::generate([0xb2; 32]);
+        Keys {
+            a_pub: a_key.public_key(),
+            b_pub: b_key.public_key(),
+            a_key,
+            b_key,
+        }
+    })
+}
+
 fn check(device: &Device) {
     let held = device.held();
     let limits = device.limits();
@@ -64,15 +87,14 @@ fuzz_target!(|data: &[u8]| {
     let mut input = Input(data);
     let base = Instant::now();
     let unix = Duration::from_hours(500_000);
-    let a_key = PrivateKey::generate([0xa1; 32]);
-    let b_key = PrivateKey::generate([0xb2; 32]);
+    let k = keys();
     let a_addr: SocketAddr = "198.51.100.2:40000".parse().unwrap();
     let other: SocketAddr = "192.0.2.66:9999".parse().unwrap();
     let b_addr: SocketAddr = "203.0.113.1:51820".parse().unwrap();
 
     let mut ca = DeviceConfig::agent(
-        a_key.clone(),
-        b_key.public_key(),
+        k.a_key.clone(),
+        k.b_pub,
         Some(b_addr),
         SERVER_IP,
         Duration::from_secs(25),
@@ -87,10 +109,10 @@ fuzz_target!(|data: &[u8]| {
         events: 4,
     };
     let cb = DeviceConfig {
-        private_key: b_key,
+        private_key: k.b_key.clone(),
         mtu: 1420,
         peers: vec![PeerConfig {
-            public_key: a_key.public_key(),
+            public_key: k.a_pub,
             endpoint: None,
             allowed_ips: vec![Ipv4Prefix::host(AGENT_IP)],
             persistent_keepalive: None,
@@ -99,7 +121,7 @@ fuzz_target!(|data: &[u8]| {
         limits: Limits::default(),
         timers: ProtocolTimers::default(),
     };
-    let a_pub = a_key.public_key();
+    let a_pub = k.a_pub;
     let mut a = Device::with_seed(ca, Zeroizing::new([1; 32]), base, unix).unwrap();
     let mut b = Device::with_seed(cb, Zeroizing::new([2; 32]), base, unix).unwrap();
     let mut t = Duration::ZERO;
