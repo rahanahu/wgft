@@ -708,6 +708,7 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
   TCP の中継の項は、接続ごとの task と登録の部分 (`tcp relay`) と大きいバッファの部分 (`tcp bulk`) に分けます。
   形は保証の外で、ラボの check 5 と 5b が読みます
 - 使った枠の行:agent は核を作ってから使ったことのある接続の枠 (floor の配列を持つ枠) の数を 1 秒ごとに読み、64 の倍数に切り上げた値が増えたときだけ、`memory: connection slots used so far: at most <N> of <N_c>; their floor arrays hold <K> KiB` を書きます。
+  核は枠が初めて配列を確保する時に数えて持つので (`Stack::slots_used`)、読むのは定数の手間で、データプレーンのスレッドで枠をたどりません。
   枠は配列を持ち続けるので数は減らず、行の値は読んだ時の数の上界です。
   行の数は N_c を 64 で割った数までです。
   ラボの check 5 と 5b は、RSS を測った後に最後のこの行を読みます。
@@ -726,7 +727,8 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
 - ラボの check 5 と 5b:Rust の agent では、洪水の前 (トンネルと待ち受けを開いた後) の RSS を測り、洪水の間の RSS の育ちが、洪水が満たせる項と余裕の 32 MiB の和を超えないことも確かめます。
   洪水は黙った TCP の接続と 1 byte の datagram なので、満たせる項は核の固定の部分 (触れていなかった表)、洪水が使った接続の枠の配列、表、駆動、device、TCP の中継の接続ごとの部分、UDP の中継です。
   黙った接続も、枠を初めて使う時に floor の記録の輪と区間の表を確保して 0 で埋めるので、使った枠の配列は満たせる項に入ります。
-  使った枠の数は `core arrays` の項の N_c ではなく、前述の使った枠の行から読みます
+  使った枠の数は `core arrays` の項の N_c ではなく、前述の使った枠の行から読みます。
+  その行が無いときは、`core arrays` の項の全体を満たせる項に入れます
   データが流れないので、TCP の中継の大きいバッファと核の接続ごとの送受信のバッファは入れません。
   行の全体との比較は核の項で緩いので、中継の漏れはこの比較で先に見えます
 
@@ -1167,6 +1169,8 @@ macOS では hard の値が無制限でも `kern.maxfilesperproc` を超える�
 | `listener tcp/<port> -> <宛先> opened; rule <ID>` | `lifecycle.sh` の check 2 と 11。上の行が無いことの確認と組にし、開き直した後の行があることを確かめる |
 | `<待ち受け>: <理由>; refusing new connections` | フロー数の拒否。`lifecycle.sh` の check 5e が `rule <ID> holds ... for a rule added later` を照らす。`<理由>` は Go の `internal/resource/pool.go` の拒否の文 (`flow budget full: ...`、`rule <ID> holds ... for a rule added later`、`... below its minimum ...` など) をそのまま写します |
 | `memory bound: <N> MiB, ...` | `lifecycle.sh` の check 5 と 5b ([メモリの上界の行](#メモリの上界の行)) |
+| `memory bound terms: ...` | `lifecycle.sh` の check 5 と 5b。洪水が満たせる項を読みます |
+| `memory: connection slots used so far: ...` | `lifecycle.sh` の check 5 と 5b。洪水が使った接続の枠の配列の KiB を読みます |
 | `dropped TCP handshakes that advertise an MSS below 536` | `exhaustion.sh` の kernel の `mss`。wgstack の捨てた数の口が要る |
 
 行が無いことを確かめる `absent` の確認は、Rust の agent が別の文面を書いても通ってしまいます。

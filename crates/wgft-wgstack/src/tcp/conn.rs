@@ -382,6 +382,9 @@ pub(crate) struct ConnSlots {
     hot: FixedVec<Tcb>,
     cold: FixedVec<ConnCold>,
     bufs: FixedVec<ConnBufs>,
+    /// floor の配列を持つ枠の数です。枠は初めて使う時に配列を確保して持ち続けるので、作ってから使ったことのある
+    /// 枠の数で、[`ConnSlots::free_all`] で 0 に戻ります。
+    with_arrays: usize,
 }
 
 /// 空きの枠の list を作ります。小さい番号から使います。
@@ -405,6 +408,7 @@ impl ConnSlots {
             hot: FixedVec::try_filled(n, |_| Tcb::default())?,
             cold: FixedVec::try_filled(n, |_| ConnCold::default())?,
             bufs: FixedVec::try_filled(n, |_| ConnBufs::new())?,
+            with_arrays: 0,
         })
     }
 
@@ -456,6 +460,7 @@ impl ConnSlots {
                 return Err(AllocError);
             };
             s.recs = RecordRing::new(recs);
+            self.with_arrays += 1;
             if let Err(e) = s.rcv.set_intervals(iv) {
                 debug_assert!(e.is_empty(), "an unused slot holds no intervals");
             }
@@ -528,6 +533,12 @@ impl ConnSlots {
             t.state = State::Free;
             t.in_index = false;
         }
+        self.with_arrays = 0;
+    }
+
+    /// floor の配列を持つ枠の数です。核を作ってから使ったことのある枠の数です。
+    pub(crate) fn with_arrays(&self) -> usize {
+        self.with_arrays
     }
 
     /// 空きの list `free` と使っている印が一致し、輪と段が合うことを確かめます。
@@ -559,6 +570,9 @@ impl ConnSlots {
         let used = self.hot.iter().filter(|t| t.state != State::Free).count();
         if free.len() + used != self.hot.len() {
             return Err("the free slots and the used slots do not add up");
+        }
+        if self.bufs.iter().filter(|b| b.has_floor_arrays()).count() != self.with_arrays {
+            return Err("the count of slots with floor arrays disagrees with the slots");
         }
         for (_, t, b) in self.iter_bufs() {
             b.snd.check()?;
@@ -692,6 +706,7 @@ mod tests {
         assert!(!t.bufs(0).has_floor_arrays());
         t.alloc(&mut free).unwrap();
         assert!(t.bufs(0).has_floor_arrays());
+        assert_eq!(t.with_arrays(), 1);
         let bytes = t.bufs(0).array_bytes();
         assert_eq!(
             bytes,
@@ -708,8 +723,12 @@ mod tests {
             "a released slot keeps its arrays"
         );
         assert_eq!((t.bufs(0).held_chunks(), p.held()), (0, 0));
+        t.alloc(&mut free).unwrap();
+        assert_eq!(t.with_arrays(), 1, "a reused slot is counted once");
+        t.release(0, &mut free, &mut p);
         t.free_all(&mut p);
         assert_eq!(t.bufs(0).array_bytes(), (0, 0));
+        assert_eq!(t.with_arrays(), 0);
         assert!(!free.is_empty() && t.len() == 1);
         assert!(t.heap_bytes() >= size_of::<Tcb>() + size_of::<ConnBufs>());
     }
