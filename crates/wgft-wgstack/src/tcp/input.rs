@@ -135,7 +135,11 @@ impl Conn<'_> {
             return false;
         }
         if seg.has(FLAG_SYN) {
-            if !seg.has(FLAG_ACK) && rfc6191(seg, self.t.ts_ok, self.t.ts_recent, self.t.rcv_nxt) {
+            // SYN と FIN の組は待ち受けが捨てるので、TIME_WAIT を外しません。
+            if !seg.has(FLAG_ACK)
+                && !seg.has(FLAG_FIN)
+                && rfc6191(seg, self.t.ts_ok, self.t.ts_recent, self.t.rcv_nxt)
+            {
                 match self.s.reuse_verdict(seg) {
                     Reuse::NoListener => {
                         self.challenge_ack(now); // Linux と同じく TIME_WAIT の ACK を返します

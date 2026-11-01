@@ -173,7 +173,8 @@ impl Conn<'_> {
             && let Some((ts_val, ts_ecr)) = seg.opt.ts
         {
             (self.t.ts_recent, self.t.ts_recent_at) = (ts_val, now);
-            if ts_ecr != 0 {
+            // cookie の TSval は下位の bit に option を入れたので、RTT の標本にしません。
+            if ts_ecr != 0 && !r.cookie {
                 self.ts_rtt_sample(ts_ecr, now);
             }
         } else if !r.rtx && r.sent_at.as_nanos() != 0 {

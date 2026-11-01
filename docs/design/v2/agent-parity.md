@@ -681,7 +681,10 @@ musl の割り当て器は解放したメモリを早く OS に返しますが�
   Windows では開いた直後に [credentials.md の DACL](../spec/credentials.md#windows-の-dacl) を付け、付けられなければソケットを閉じて使わずに動きます
 - 期限:要求の 1 行を読む期限と応答を書く期限は、それぞれ 2 秒です。
   応答を実行時の側から待つ長さは下の「応答を待つ長さ」にあります。
-  どの接続も受け付けてから 30 秒以内に終わり、仕様の期限を満たします
+  どの接続も受け付けてから 30 秒以内に終わり、仕様の期限を満たします。
+  期限は読みと書きの前ごとに、残りの時間を socket の送受信の timeout に設定して守ります。
+  macOS の kernel は、相手が閉じた AF_UNIX の stream に timeout を設定する呼び出しを EINVAL で拒みます。
+  この socket の読みと書きは止まらずにすぐ戻るので、macOS ではこの EINVAL を無視し、受け取り済みの応答を読みます
 - 要求:前後の空白を除いて `rotate-key`、`doctor` と照らし、それ以外には `error: unknown command` を返します
 - 実行時への受け渡し:スレッドは要求を容量の決まった tokio の channel へ待たずに入れ (`try_send`)、応答を std の channel で待ちます。
   channel が埋まっていれば、その旨の誤りの 1 行を返します。
