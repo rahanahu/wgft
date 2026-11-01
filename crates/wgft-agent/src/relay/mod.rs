@@ -124,6 +124,24 @@ struct ProbeEntry {
     shared: Arc<Shared>,
 }
 
+/// 試し接続の 1 周の宛先を順に写して渡す。閉包の `map` にしないのは、借用を持つ閉包を含む future の
+/// `Send` の判定が寿命について一般化できず、spawn する呼び手が通らないためである。
+struct EntryTargets<'a>(std::slice::Iter<'a, ProbeEntry>);
+
+impl Iterator for EntryTargets<'_> {
+    type Item = (Arc<str>, u16);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|e| e.target.clone())
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl ExactSizeIterator for EntryTargets<'_> {}
+
 /// 試し接続の 1 周の結果。
 #[derive(Debug)]
 pub struct ProbeResults {
@@ -145,10 +163,10 @@ impl ProbeRound {
         self
     }
 
-    /// 試し接続を走らせる。同時に 32 件まで、1 件 2 秒。
+    /// 試し接続を走らせる。同時に 32 件まで、1 件 2 秒。宛先の列は写さず、走らせる分だけを読む。
     pub async fn run(self) -> ProbeResults {
-        let list = self.entries.iter().map(|e| e.target.clone()).collect();
-        let results = self.targets.probe_all(list).await;
+        let list = EntryTargets(self.entries.iter());
+        let results = Arc::clone(&self.targets).probe_all(list).await;
         ProbeResults {
             entries: self.entries,
             results,
@@ -273,7 +291,7 @@ struct Listener {
     task: Option<Running>,
     /// 待ち受けを開けなかった理由。bind の失敗か、IP リテラルの宛先の拒否。[`Manager::retry`] が
     /// 開き直す。
-    bind_err: Option<String>,
+    bind_err: Option<Arc<str>>,
     /// フロー数の予算の枠。bind できるまで受け付けない。
     budget: Arc<flowpool::Listener>,
     shared: Arc<Shared>,
@@ -288,8 +306,9 @@ impl Listener {
         Some(task)
     }
 
-    /// 報告する誤り。待ち受けが無いので bind の失敗が先。
-    fn err(&self) -> Option<String> {
+    /// 報告する誤り。待ち受けが無いので bind の失敗が先。状態の読みが待ち受けの数だけ文を写さないよう、
+    /// 持っている値を分け合って返す。
+    fn err(&self) -> Option<Arc<str>> {
         self.bind_err
             .clone()
             .or_else(|| self.shared.target_err().map(|e| e.text))
@@ -315,7 +334,7 @@ pub struct ListenerStat {
     /// 拒否) で、真で `err` があれば待ち受けは開いていて宛先に届かない。
     pub listening: bool,
     /// 開けなかった理由か、開いている待ち受けの宛先の誤り。開けなかった理由が先。
-    pub err: Option<String>,
+    pub err: Option<Arc<str>>,
     /// 中継が持っている接続の数。TCP はトンネルの側と宛先の側の両方を数えるので、フロー数の上限の対象
     /// とは一致しない。UDP はセッションの数である。
     pub sessions: usize,
@@ -643,7 +662,7 @@ impl Manager {
                 }
                 Err(e) => {
                     logf!("listener {}: {e}", l.key);
-                    l.bind_err = Some(e);
+                    l.bind_err = Some(e.into());
                 }
             }
         }
