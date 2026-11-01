@@ -15,10 +15,11 @@
 //!
 //! accept の待ち行列の節は、別の接続の処理が書き換えるので、核の共有の状態 (`Shared::qlinks`) に置きます。
 
+use crate::budget::BoostArrays;
 use crate::buf::chunk::ChunkPool;
 use crate::buf::records::{Record, RecordRing};
 use crate::buf::recv::{Interval, RecvBuf};
-use crate::buf::ring::Ring;
+use crate::buf::ring::{BOOST_RING_SLOTS, ChunkTable, Ring};
 use crate::buf::{
     BOOST_INTERVALS, BOOST_RECORDS, BOOST_SIZE, FLOOR_INTERVALS, FLOOR_RECORDS, RECV_FLOOR,
     SEND_FLOOR,
@@ -271,8 +272,9 @@ pub(crate) struct ConnCold {
     pub(crate) wdem: crate::tcp::boost::Demand,
 }
 
-/// 接続の送受信の輪と記録の輪です。`repr(C)` で小さな管理の欄を前に、輪の chunk の pointer の配列を後ろに
-/// 置きます。受信の経路は受信のバッファの管理の行と、使う chunk の pointer の行だけを触ります。
+/// 接続の送受信の輪と記録の輪です。`repr(C)` で小さな管理の欄を前に、輪の floor の段の chunk の pointer の
+/// 配列を後ろに置きます。受信の経路は受信のバッファの管理の行と、使う chunk の pointer の行だけを触ります。
+/// boost の段の chunk の pointer の表は `Budget` から借り、輪が持ちます。
 #[derive(Debug)]
 #[repr(C)]
 pub(crate) struct ConnBufs {
@@ -281,6 +283,8 @@ pub(crate) struct ConnBufs {
     /// 区間の表 (移った後は floor の区間の表) を置きます。
     pub(crate) spare_recs: FixedVec<Record>,
     pub(crate) spare_iv: FixedVec<Interval>,
+    /// 受信が boost の段に移るまでの、受信の輪の boost の段の chunk の表の控えです。
+    pub(crate) spare_tbl: ChunkTable,
     /// 借りている boost の枠の番号です。
     pub(crate) boost: Option<usize>,
     pub(crate) rcv: RecvBuf,
@@ -293,6 +297,7 @@ impl ConnBufs {
             recs: RecordRing::default(),
             spare_recs: FixedVec::new(),
             spare_iv: FixedVec::new(),
+            spare_tbl: FixedVec::new(),
             boost: None,
             rcv: RecvBuf::new(RECV_FLOOR, FixedVec::new(), 0),
             snd: Ring::new(SEND_FLOOR),
@@ -326,17 +331,24 @@ impl ConnBufs {
         self.recs.heap_bytes() + iv
     }
 
-    /// boost の配列を取り出し、boost の印を外します。受信が boost の段に移っていれば、使っている区間の表が boost
-    /// のもので、移っていなければ控えが boost のものです。輪の中身は移さないので、呼び手は続けて枠を返します。
-    pub(crate) fn take_boost_arrays(&mut self) -> (FixedVec<Record>, FixedVec<Interval>) {
+    /// boost の配列を取り出し、boost の印を外します。受信が boost の段に移っていれば、使っている区間の表と輪の
+    /// chunk の表が boost のもので、移っていなければ控えが boost のものです。輪の chunk は置き場に返し、中身は
+    /// 移さないので、呼び手は続けて枠を返します。
+    pub(crate) fn take_boost_arrays(&mut self, pool: &mut ChunkPool) -> BoostArrays {
         self.boost = None;
+        self.snd.release(pool);
+        self.rcv.r.release(pool);
         let recs = self.recs.take();
-        let iv = if self.rcv.intervals_capacity() == BOOST_INTERVALS {
-            self.rcv.take_intervals()
+        let snd = self.snd.take_table();
+        let (iv, rcv) = if self.rcv.intervals_capacity() == BOOST_INTERVALS {
+            (self.rcv.take_intervals(), self.rcv.r.take_table())
         } else {
-            core::mem::take(&mut self.spare_iv)
+            (
+                core::mem::take(&mut self.spare_iv),
+                core::mem::take(&mut self.spare_tbl),
+            )
         };
-        (recs, iv)
+        BoostArrays { recs, iv, snd, rcv }
     }
 
     /// 送受信の輪が持つ chunk の数です。
@@ -598,14 +610,15 @@ fn check_stage(t: &Tcb, s: &ConnBufs) -> Result<(), &'static str> {
             || !(fresh || arrays == (FLOOR_RECORDS, FLOOR_INTERVALS))
             || s.spare_recs.capacity() != 0
             || s.spare_iv.capacity() != 0
+            || s.spare_tbl.capacity() != 0
         {
             return Err("a slot without boost is not at the floor stage");
         }
         return Ok(());
     }
-    let recv_ok = match (ivs, s.spare_iv.len()) {
-        (FLOOR_INTERVALS, BOOST_INTERVALS) => s.rcv.r.cap() == RECV_FLOOR,
-        (BOOST_INTERVALS, FLOOR_INTERVALS) => s.rcv.r.cap() == BOOST_SIZE,
+    let recv_ok = match (ivs, s.spare_iv.len(), s.spare_tbl.len()) {
+        (FLOOR_INTERVALS, BOOST_INTERVALS, BOOST_RING_SLOTS) => s.rcv.r.cap() == RECV_FLOOR,
+        (BOOST_INTERVALS, FLOOR_INTERVALS, 0) => s.rcv.r.cap() == BOOST_SIZE,
         _ => false,
     };
     if s.snd.cap() != BOOST_SIZE
@@ -669,7 +682,7 @@ mod tests {
         free[0] = 2;
         t.check(&free, &[]).unwrap();
         // 使っている枠が floor でない段を持つ。
-        t.bufs_mut(i).snd = Ring::new(BOOST_SIZE);
+        t.bufs_mut(i).snd = Ring::owning(BOOST_SIZE);
         assert_eq!(
             t.check(&free, &[]),
             Err("a slot without boost is not at the floor stage")

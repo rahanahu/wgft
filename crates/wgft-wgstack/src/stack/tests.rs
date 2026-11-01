@@ -14,6 +14,7 @@
 use super::*;
 use crate::buf::BOOST_SIZE;
 use crate::buf::chunk::CHUNK_SIZE;
+use crate::buf::ring::Ring;
 use crate::config::Limits;
 use crate::tcp::listen::enqueue;
 use crate::tcp::syn::SynRow;
@@ -90,27 +91,36 @@ fn close_returns_everything() {
         enqueue(l, 80, &mut s.s.qlinks, i);
     }
     let first = s.conns.id(0);
-    let (b, recs, iv) = s.s.budget.acquire(first).unwrap();
+    let (b, a) = s.s.budget.acquire(first).unwrap();
     // 送信と受信の両方を boost の段に移します。
     let (t, _, c) = s.conns.parts_mut(0);
     c.boost = Some(b);
+    let end = 3 * CHUNK_SIZE as u64;
     c.snd
-        .resize(BOOST_SIZE, &mut s.s.chunks, |f| f(0, 3 * CHUNK_SIZE as u64))
+        .move_to(Ring::with_table(BOOST_SIZE, a.snd), 0, end, &mut s.s.chunks);
+    c.spare_recs = c.recs.resize(a.recs);
+    let next = c
+        .rcv
+        .copied_ring(Ring::with_table(BOOST_SIZE, a.rcv), &mut s.s.chunks)
         .unwrap();
-    c.spare_recs = c.recs.resize(recs);
-    c.rcv.resize_ring(BOOST_SIZE, &mut s.s.chunks).unwrap();
-    c.spare_iv = c.rcv.set_intervals(iv).unwrap();
+    c.rcv.r.release(&mut s.s.chunks);
+    c.rcv.r = next;
+    c.spare_iv = c.rcv.set_intervals(a.iv).unwrap();
     (t.snd_cap, t.rcv_cap) = (BOOST_SIZE, BOOST_SIZE);
-    // 2 本目は送信だけを boost の段に移し、boost の区間の表を控えに持ちます。
+    // 2 本目は送信だけを boost の段に移し、boost の区間の表と受信の輪の表を控えに持ちます。
     let second = s.conns.id(1);
-    let (b2, recs2, iv2) = s.s.budget.acquire(second).unwrap();
+    let (b2, a2) = s.s.budget.acquire(second).unwrap();
     let (t, _, c) = s.conns.parts_mut(1);
     c.boost = Some(b2);
-    c.snd
-        .resize(BOOST_SIZE, &mut s.s.chunks, |f| f(0, 3 * CHUNK_SIZE as u64))
-        .unwrap();
-    c.spare_recs = c.recs.resize(recs2);
-    c.spare_iv = iv2;
+    c.snd.move_to(
+        Ring::with_table(BOOST_SIZE, a2.snd),
+        0,
+        end,
+        &mut s.s.chunks,
+    );
+    c.spare_recs = c.recs.resize(a2.recs);
+    c.spare_iv = a2.iv;
+    c.spare_tbl = a2.rcv;
     t.snd_cap = BOOST_SIZE;
     s.s.syn
         .insert(SynRow {
@@ -214,24 +224,30 @@ fn demote_holds_within_the_connection_s_reservation() {
     let mut s = Stack::new(small(), Budget::new().unwrap(), &[7; 64], NoHook).unwrap();
     let i = s.conns.alloc(&mut s.s.conn_free).unwrap().unwrap();
     let id = s.conns.id(i);
-    let (b, recs, iv) = s.s.budget.acquire(id).unwrap();
+    let (b, a) = s.s.budget.acquire(id).unwrap();
     let pool = &mut s.s.chunks;
     let (t, k, c) = s.conns.parts_mut(i);
     c.boost = Some(b);
     // 送信:boost の段の輪に、境目のそろわない floor の分の送り残しを持ちます。
     let una = 100;
-    c.snd.resize(BOOST_SIZE, pool, |_| Ok(())).unwrap();
+    c.snd
+        .move_to(Ring::with_table(BOOST_SIZE, a.snd), una, una, pool);
     c.snd
         .write(una, &vec![5u8; usize::try_from(SEND_FLOOR).unwrap()], pool)
         .unwrap();
-    c.spare_recs = c.recs.resize(recs);
+    c.spare_recs = c.recs.resize(a.recs);
     (t.una_off, t.tail_off) = (una, una + SEND_FLOOR);
     t.snd_cap = BOOST_SIZE;
     t.cwnd = 1;
     // 受信:順序どおりの未読は floor の内で、小さな穴の先の boost の段の輪の残りを順序外のデータで満たします。
     // 順序外のデータのうち floor の内の分は取り消しの後も残るので、新しい floor の輪も満ちます。
-    c.rcv.resize_ring(BOOST_SIZE, pool).unwrap();
-    c.spare_iv = c.rcv.set_intervals(iv).unwrap();
+    let next = c
+        .rcv
+        .copied_ring(Ring::with_table(BOOST_SIZE, a.rcv), pool)
+        .unwrap();
+    c.rcv.r.release(pool);
+    c.rcv.r = next;
+    c.spare_iv = c.rcv.set_intervals(a.iv).unwrap();
     k.rcv_boost = true;
     t.rcv_cap = BOOST_SIZE;
     assert_eq!(c.rcv.insert(0, &[1; 1000], BOOST_SIZE, pool).accepted, 1000);

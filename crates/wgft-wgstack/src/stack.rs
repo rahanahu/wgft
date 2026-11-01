@@ -420,8 +420,11 @@ impl<H: Hook> Stack<H> {
         // 借りている boost の配列を枠に返します。
         for i in 0..s.budget.slots() {
             if let Some(id) = s.budget.holder(i) {
-                let (recs, iv) = self.conns.bufs_mut(id.slot).take_boost_arrays();
-                s.budget.release(i, recs, iv);
+                let arrays = self
+                    .conns
+                    .bufs_mut(id.slot)
+                    .take_boost_arrays(&mut s.chunks);
+                s.budget.release(i, arrays);
             }
         }
         s.syn.clear();

@@ -191,6 +191,7 @@ fn bound_does_not_depend_on_use() {
     let _ = s.close(Time::ZERO);
 }
 
+use crate::buf::ring::Ring;
 use crate::time::Time;
 
 /// すべての枠を使い、boost の枠をすべて貸し、どの輪も満たした核の保持を、上界の項ごとに比べます。
@@ -222,12 +223,12 @@ fn a_full_stack_meets_each_term() {
         let id = s.conns.id(i);
         let boosted = s.s.budget.acquire(id);
         let (t, _, c) = s.conns.parts_mut(i);
-        if let Some((b, recs, iv)) = boosted {
+        if let Some((b, a)) = boosted {
             c.boost = Some(b);
-            c.snd = crate::buf::ring::Ring::new(BOOST_SIZE);
-            c.spare_recs = c.recs.resize(recs);
-            c.rcv.r = crate::buf::ring::Ring::new(BOOST_SIZE);
-            c.spare_iv = c.rcv.set_intervals(iv).unwrap();
+            c.snd = Ring::with_table(BOOST_SIZE, a.snd);
+            c.spare_recs = c.recs.resize(a.recs);
+            c.rcv.r = Ring::with_table(BOOST_SIZE, a.rcv);
+            c.spare_iv = c.rcv.set_intervals(a.iv).unwrap();
         }
         let (snd_cap, rcv_cap) = (c.snd.cap(), c.rcv.r.cap());
         (t.snd_cap, t.rcv_cap) = (snd_cap, rcv_cap);
@@ -264,8 +265,10 @@ fn a_full_stack_meets_each_term() {
     assert_eq!(b(h.chunk_bytes), chunk_terms, "chunk bytes");
     assert_eq!(b(h.record_bytes), record_terms, "record bytes");
     assert_eq!(b(h.interval_bytes), interval_terms, "interval bytes");
+    // boost の段の輪の chunk の表は会計の外で、Budget の作成の時に確保したものです。
+    let table_terms = slots * b(2 * BOOST_RING_SLOTS * size_of::<Option<Chunk>>());
     assert_eq!(
-        chunk_terms + record_terms + interval_terms,
+        chunk_terms + record_terms + interval_terms + table_terms,
         bound.floor_conn + bound.boost - b(Budget::slot_bytes()),
         "the filled stack reaches exactly the floor and boost terms"
     );

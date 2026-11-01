@@ -10,7 +10,7 @@
 //! 節の取り方と優先度の作り方は Go と同じで、SACK の block の選び方を通して出力に効きます。
 
 use super::chunk::ChunkPool;
-use super::ring::Ring;
+use super::ring::{ChunkTable, Ring};
 use crate::fixed_vec::{AllocError, FixedVec};
 use crate::wire::SackBlock;
 
@@ -104,8 +104,18 @@ fn low32(x: u64) -> u32 {
 impl RecvBuf {
     /// 容量 `cap` の輪と区間の表 `iv` の空の受信のバッファです。`seed` は接続ごとの優先度の種です。
     pub(crate) fn new(cap: u64, iv: FixedVec<Interval>, seed: u64) -> Self {
+        Self::with_ring(Ring::new(cap), iv, seed)
+    }
+
+    /// 試験だけが使う、floor より大きい容量も受け付ける [`RecvBuf::new`] です。
+    #[cfg(test)]
+    pub(crate) fn owning(cap: u64, iv: FixedVec<Interval>, seed: u64) -> Self {
+        Self::with_ring(Ring::owning(cap), iv, seed)
+    }
+
+    fn with_ring(r: Ring, iv: FixedVec<Interval>, seed: u64) -> Self {
         Self {
-            r: Ring::new(cap),
+            r,
             read_off: 0,
             nxt_off: 0,
             iv,
@@ -469,9 +479,9 @@ impl RecvBuf {
         res
     }
 
-    /// 容量 `cap` の新しい輪に書いた範囲を写して返します。この輪は変えません (`Ring::resized`)。
-    pub(crate) fn resized_ring(&self, cap: u64, pool: &mut ChunkPool) -> Result<Ring, AllocError> {
-        self.r.resized(cap, pool, |f| self.for_each_written(f))
+    /// 空の輪 `next` に書いた範囲を写して返します。この輪は変えません (`Ring::copy_into`)。
+    pub(crate) fn copied_ring(&self, next: Ring, pool: &mut ChunkPool) -> Result<Ring, ChunkTable> {
+        self.r.copy_into(next, pool, |f| self.for_each_written(f))
     }
 
     /// 区間を同じ表の中で入れ直します。Go が同じ表で `setIntervals` を呼ぶ時と同じく、区間を始まりの順に入れ直し、
@@ -496,8 +506,7 @@ impl RecvBuf {
     /// 輪を容量 `cap` に移し、書いた範囲を写します。確保に失敗したら輪を変えずに誤りを返します。
     #[cfg(test)]
     pub(crate) fn resize_ring(&mut self, cap: u64, pool: &mut ChunkPool) -> Result<(), AllocError> {
-        let cur = self.r.cap();
-        let mut ring = core::mem::replace(&mut self.r, Ring::new(cur));
+        let mut ring = core::mem::replace(&mut self.r, Ring::new(super::SEND_FLOOR));
         let res = ring.resize(cap, pool, |f| self.for_each_written(f));
         self.r = ring;
         res

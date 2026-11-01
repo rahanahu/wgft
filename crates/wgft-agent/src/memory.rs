@@ -20,10 +20,10 @@ use wgft_proto::{STATE_HELD_FACTOR, STREAM_READ_LIMIT};
 
 /// The fixed base: the executable's pages, the tokio runtimes and their threads, the control
 /// socket's threads, the stream and TLS state. It is the RSS measured in the lab right after start
-/// with the tunnel and two listeners open (32 MiB at the caps UDP 4096 and TCP 1024, 37 MiB at the
+/// with the tunnel and two listeners open (26 MiB at the caps UDP 4096 and TCP 1024, 27 to 29 MiB at the
 /// default caps), rounded up. That RSS also holds the touched part of the core's and the netstack's
 /// tables, which their own terms count again, so the base overcounts.
-pub const BASE: usize = 40 << 20;
+pub const BASE: usize = 32 << 20;
 
 /// One tokio task's own allocation beyond its future: the header, the scheduler's handle and the
 /// trailer, aligned to a cache line pair. Tests check the future sizes; this covers tokio's part.
