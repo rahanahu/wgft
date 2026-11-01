@@ -510,20 +510,18 @@ impl ConnSlots {
 
     /// 空きの list `free` と使っている印が一致し、輪と段が合うことを確かめます。
     pub(crate) fn check(&self, free: &[u32], links: &[QLink]) -> Result<(), &'static str> {
-        let mut seen = FixedVec::try_filled(self.hot.len(), |_| false)
+        // 印は 1 枠 1 bit で、検査の間だけ確保します (wgstack-rs.md の「不変条件の検査の手間」)。
+        let mut seen = crate::output::BitSet::new(self.hot.len())
             .map_err(|_| "allocation failed while checking")?;
         for &i in free {
             let t = self
                 .hot
                 .get(i as usize)
                 .ok_or("a free slot number is out of range")?;
-            let mark = seen
-                .get_mut(i as usize)
-                .ok_or("a free slot number is out of range")?;
-            if *mark {
+            if seen.get(i) {
                 return Err("a slot is twice in the free list");
             }
-            *mark = true;
+            seen.set(i);
             let b = &self.bufs[i as usize];
             if t.state != State::Free
                 || t.in_index

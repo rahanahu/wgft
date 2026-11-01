@@ -674,6 +674,7 @@ impl Udp {
 
     /// 会計の不変条件を確かめます。
     pub(crate) fn check(&self) -> Result<(), &'static str> {
+        self.eps.check()?;
         let mut held_chunks = 0usize;
         let mut live = 0u64;
         for r in self.ck.iter() {

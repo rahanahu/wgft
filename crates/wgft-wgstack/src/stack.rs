@@ -311,6 +311,7 @@ impl<H: Hook> Stack<H> {
         s.budget.check()?;
         s.udp.check()?;
         s.pings.check()?;
+        s.listeners.check()?;
         if s.udp.held(crate::udp::TX).1 != s.out.udp_queued {
             return Err("the UDP output count disagrees with the send FIFO".into());
         }

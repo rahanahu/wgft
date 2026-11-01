@@ -16,10 +16,11 @@ use crate::config::Limits;
 use crate::frag;
 use crate::icmp::{PING_ENDPOINTS, Pings};
 use crate::index;
+use crate::output::Dlist;
 use crate::stack::{EventTargets, NoHook, Stack};
 use crate::tcp::NUM_TIMERS;
 use crate::tcp::conn;
-use crate::tcp::listen::{Listener, PORTS, PortRow};
+use crate::tcp::listen::{Listener, PortTable};
 use crate::tcp::syn::SynRow;
 use crate::tcp::timewait::TwRow;
 use crate::udp::{self, Udp, UdpEp};
@@ -105,7 +106,7 @@ pub(crate) fn fix_parts(l: &Limits, mtu: usize, stack_size: usize) -> FixParts {
     let n = l.conns();
     let ent = size_of::<index::IndexEnt>();
     let nodes = n * NUM_TIMERS;
-    let dlist = |k: usize| b(k * (2 * size_of::<u32>() + size_of::<bool>()));
+    let dlist = |k: usize| b(Dlist::bytes_for(k));
     FixParts {
         stack: b(stack_size),
         conn_slots: b(n * conn::slot_bytes()),
@@ -115,8 +116,8 @@ pub(crate) fn fix_parts(l: &Limits, mtu: usize, stack_size: usize) -> FixParts {
         tw: b(l.tw_rows * (size_of::<TwRow>() + 3 * size_of::<u32>())
             + index::capacity_for(l.tw_rows) * ent
             + n * size_of::<u32>()),
-        listeners: b(PORTS * size_of::<PortRow<Listener>>()),
-        udp_endpoints: b(PORTS * size_of::<PortRow<UdpEp>>()),
+        listeners: b(PortTable::<Listener>::bytes()),
+        udp_endpoints: b(PortTable::<UdpEp>::bytes()),
         wheel: b(
             nodes * (size_of::<u64>() + 2 * size_of::<u32>() + size_of::<u16>())
                 + nodes * size_of::<u32>(),

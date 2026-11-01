@@ -10,15 +10,73 @@ use crate::fixed_vec::{AllocError, FixedVec};
 /// list の節が無いことを表す番号です。
 pub(crate) const NIL: u32 = u32::MAX;
 
-/// 固定の配列の上の両方向の list です。節 i の印 `in_list[i]` が list に入っているかを示します。
+/// 固定の配列の上の両方向の list です。印の bit の集合 `in_list` の bit i が、節 i が list に入っているかを
+/// 示します。印を bit で持つのは、検査が節の数の bool をたどらずに 64 個ずつ数えられるようにするためです。
 #[derive(Debug)]
 pub(crate) struct Dlist {
     head: u32,
     tail: u32,
     next: FixedVec<u32>,
     prev: FixedVec<u32>,
-    in_list: FixedVec<bool>,
+    in_list: BitSet,
     n: usize,
+}
+
+/// 節ごとに 1 bit の印の集合です。
+#[derive(Debug)]
+pub(crate) struct BitSet {
+    words: FixedVec<u64>,
+}
+
+impl BitSet {
+    /// `n` 個の印を外した状態で確保します。
+    pub(crate) fn new(n: usize) -> Result<Self, AllocError> {
+        Ok(Self {
+            words: FixedVec::try_filled(n.div_ceil(64), |_| 0)?,
+        })
+    }
+
+    /// 印 `n` 個の配列の byte です。上界の式が使います。
+    pub(crate) const fn bytes_for(n: usize) -> usize {
+        n.div_ceil(64) * size_of::<u64>()
+    }
+
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.words.heap_bytes()
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, i: u32) -> bool {
+        self.words[(i >> 6) as usize] >> (i & 63) & 1 != 0
+    }
+
+    #[inline]
+    pub(crate) fn set(&mut self, i: u32) {
+        self.words[(i >> 6) as usize] |= 1 << (i & 63);
+    }
+
+    #[inline]
+    pub(crate) fn unset(&mut self, i: u32) {
+        self.words[(i >> 6) as usize] &= !(1 << (i & 63));
+    }
+
+    /// 印の付いた数です。
+    pub(crate) fn count(&self) -> usize {
+        self.words.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    /// 印の付いた番号を小さい順に渡します。
+    pub(crate) fn for_each(&self, mut f: impl FnMut(u32)) {
+        let mut base = 0u32;
+        for &w in self.words.iter() {
+            let mut w = w;
+            while w != 0 {
+                f(base | w.trailing_zeros());
+                w &= w - 1;
+            }
+            base = base.wrapping_add(64);
+        }
+    }
 }
 
 impl Dlist {
@@ -28,13 +86,30 @@ impl Dlist {
             tail: NIL,
             next: FixedVec::try_filled(nodes, |_| NIL)?,
             prev: FixedVec::try_filled(nodes, |_| NIL)?,
-            in_list: FixedVec::try_filled(nodes, |_| false)?,
+            in_list: BitSet::new(nodes)?,
             n: 0,
         })
     }
 
+    /// 節 `nodes` 個の list の配列の byte です。上界の式が使います。
+    pub(crate) const fn bytes_for(nodes: usize) -> usize {
+        nodes * 2 * size_of::<u32>() + BitSet::bytes_for(nodes)
+    }
+
     pub(crate) fn heap_bytes(&self) -> usize {
         self.next.heap_bytes() + self.prev.heap_bytes() + self.in_list.heap_bytes()
+    }
+
+    /// list の節を先頭から渡します。呼ぶ前に [`Dlist::check`] で list が壊れていないことを確かめます。
+    pub(crate) fn for_each(&self, mut f: impl FnMut(u32)) {
+        let mut i = self.head;
+        for _ in 0..self.n {
+            if i == NIL {
+                return;
+            }
+            f(i);
+            i = self.next[i as usize];
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -46,7 +121,7 @@ impl Dlist {
     }
 
     pub(crate) fn contains(&self, i: u32) -> bool {
-        self.in_list[i as usize]
+        self.in_list.get(i)
     }
 
     pub(crate) fn front(&self) -> Option<u32> {
@@ -55,10 +130,10 @@ impl Dlist {
 
     /// 節 `i` を末尾に入れます。既に入っていれば何もせず、偽を返します。
     pub(crate) fn push_back(&mut self, i: u32) -> bool {
-        if self.in_list[i as usize] {
+        if self.in_list.get(i) {
             return false;
         }
-        self.in_list[i as usize] = true;
+        self.in_list.set(i);
         self.next[i as usize] = NIL;
         self.prev[i as usize] = self.tail;
         if self.tail == NIL {
@@ -73,10 +148,10 @@ impl Dlist {
 
     /// 節 `i` を外します。入っていなければ何もしません。
     pub(crate) fn remove(&mut self, i: u32) {
-        if !self.in_list[i as usize] {
+        if !self.in_list.get(i) {
             return;
         }
-        self.in_list[i as usize] = false;
+        self.in_list.unset(i);
         let (p, x) = (self.prev[i as usize], self.next[i as usize]);
         if p == NIL {
             self.head = x;
@@ -97,31 +172,28 @@ impl Dlist {
         Some(i)
     }
 
-    /// list の向きと印と数が一致することを確かめます。
+    /// list の向きと印と数が一致することを確かめます。たどった節はどれも印を持ち、前の節を指すので、同じ節を
+    /// 2 度通りません。このため、たどった数と印の数が等しければ、印を持つ節はすべて list にあります。手間は
+    /// list の長さと、印の配列の語 (節 64 個で 1 語) の数に比例します。
     pub(crate) fn check(&self) -> Result<(), &'static str> {
         let mut count = 0;
         let mut prev = NIL;
         let mut i = self.head;
         while i != NIL {
-            let (Some(&marked), Some(&p)) =
-                (self.in_list.get(i as usize), self.prev.get(i as usize))
-            else {
+            let Some(&p) = self.prev.get(i as usize) else {
                 return Err("a list link is out of range");
             };
-            if !marked || p != prev {
+            if !self.in_list.get(i) || p != prev {
                 return Err("a list node is linked but not marked");
             }
             count += 1;
-            if count > self.in_list.len() {
+            if count > self.next.len() {
                 return Err("a list loops");
             }
             prev = i;
             i = self.next[i as usize];
         }
-        if prev != self.tail
-            || count != self.n
-            || self.in_list.iter().filter(|&&x| x).count() != self.n
-        {
+        if prev != self.tail || count != self.n || self.in_list.count() != self.n {
             return Err("a list count disagrees with its nodes");
         }
         Ok(())
@@ -219,13 +291,33 @@ mod tests {
         assert!(l.is_empty());
         l.check().unwrap();
         // 印だけが残った節と、範囲の外の link の検出。
-        l.in_list[2] = true;
+        l.in_list.set(2);
         assert_eq!(l.check(), Err("a list count disagrees with its nodes"));
-        l.in_list[2] = false;
+        l.in_list.unset(2);
         l.push_back(1);
         l.next[1] = 42;
         l.tail = 42;
         assert_eq!(l.check(), Err("a list link is out of range"));
+    }
+
+    #[test]
+    fn bit_set_marks_counts_and_walks_in_order() {
+        let mut b = BitSet::new(130).unwrap();
+        assert_eq!(b.heap_bytes(), BitSet::bytes_for(130));
+        for i in [129, 0, 64, 63] {
+            b.set(i);
+        }
+        b.set(64);
+        b.unset(0);
+        assert!(b.get(129) && b.get(63) && !b.get(0) && !b.get(1));
+        assert_eq!(b.count(), 3);
+        let mut seen = [0u32; 3];
+        let mut n = 0;
+        b.for_each(|i| {
+            seen[n] = i;
+            n += 1;
+        });
+        assert_eq!(seen, [63, 64, 129]);
     }
 
     #[test]
