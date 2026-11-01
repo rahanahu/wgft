@@ -778,6 +778,9 @@ fn recv_window_step_per_segment() {
             );
         }
         read_n(&mut n, c, RW_MSS);
+        // この試験は segment ごとの歩みを見ます。1 ms に 1 segment の相手には、遅れの目標の窓の上限 (別の試験) が
+        // 窓を floor に留めるので、上限を外します
+        n.s.conn(c.slot).t.lat_cap = 0;
         let read = n.drain(); // 読み終えた時の ACK
         p.absorb(&read);
         outs.extend(read);

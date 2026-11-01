@@ -151,6 +151,16 @@ pub(crate) struct Tcb {
     pub(crate) rs_time: i64,
     pub(crate) rs_seq: u64,
     pub(crate) rs_space: u64,
+    /// 遅れの目標の窓の上限 (byte) です。0 は「無し」で、ほかは floor 以上です (rcv_window.rs)。
+    pub(crate) lat_cap: u64,
+    /// 往復の時間を測っている ACK の送った時刻です。0 は測っていないことです。
+    pub(crate) lat_sent: i64,
+    /// 測っている ACK の TSval です。
+    pub(crate) lat_tsval: u32,
+    /// 最後に送った segment の TSval です。
+    pub(crate) ts_sent: u32,
+    /// 往復の時間の最小を測り直すため、右端を止めて待ち行列を空にしています。
+    pub(crate) lat_drain: bool,
 
     // 送り手:RTT、輻輳の窓、再送のタイマー
     pub(crate) snd_cap: u64,
@@ -270,6 +280,17 @@ pub(crate) struct ConnCold {
     pub(crate) last_demand: i64,
     pub(crate) rdem: crate::tcp::boost::Demand,
     pub(crate) wdem: crate::tcp::boost::Demand,
+    // 遅れの目標の窓 (rcv_window.rs)。往復の時間の標本ごとに触ります。
+    /// 往復の時間の最小 (ns) です。0 は「無し」です。
+    pub(crate) lat_min: i64,
+    /// 最後の往復の時間の標本 (ns) です。
+    pub(crate) lat_rtt: i64,
+    /// 窓が上限の内にあるのに待ちが目標の 2 倍を超えた、続いた区間の数です。
+    pub(crate) lat_high: u8,
+    /// 最小を測り始めた時刻です。
+    pub(crate) lat_min_at: i64,
+    /// 右端を止め始めた時刻です。
+    pub(crate) lat_drain_at: i64,
 }
 
 /// 接続の送受信の輪と記録の輪です。`repr(C)` で小さな管理の欄を前に、輪の floor の段の chunk の pointer の

@@ -1026,6 +1026,9 @@ fn check_conn(t: &Tcb, b: &ConnBufs) -> Result<(), InvariantError> {
     if b.boost.is_none() && t.rcv_cap != crate::buf::RECV_FLOOR {
         return Err("a connection without boost has a boost reservation".into());
     }
+    if !t.ts_ok && (t.lat_cap != 0 || t.lat_sent != 0 || t.lat_drain) {
+        return Err("a connection without timestamps measures its round trip".into());
+    }
     Ok(())
 }
 
