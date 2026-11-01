@@ -14,11 +14,11 @@
 //! 生の packet の敵 (`raw_adversary`) は corpus を持たず、決まった種から作った入力を流します。種の数は
 //! `WGFT_WGSTACK_RAW_SEEDS` (既定は 8) で変えられます。
 //!
-//! `core`、`adversarial_sender`、`raw_adversary` の入力は 2 回流します (wgstack-rs.md の「書き換えた所だけの
+//! `core`、`adversarial_sender`、`raw_adversary`、`replay` の入力は 2 回流します (wgstack-rs.md の「書き換えた所だけの
 //! 確かめ」と「核の使い回し」)。どちらも各段で、書き換えた枠だけの確かめとすべての枠の確かめを並べ、答えが
 //! 同じことを確かめます。1 回目は新しく作った核で、2 回目はほかのポートを開いて閉じた核の表を使い回した核で
 //! 流し、外から見える出力の hash が同じことと、閉じた後に戻した表が新しい表と同じ値であることを確かめます。
-//! `replay` は fuzz の `Net` を使わないので 1 回だけ流します。
+//! `replay` の出力の hash は要求ごとの応答と保持です。
 //!
 //! 環境変数 `WGFT_WGSTACK_CORPUS_DIRS` に `<target>=<directory>` を `,` で区切って渡すと、その directory の
 //! ファイルも同じく流します (`raw_adversary` も渡せます)。cargo-fuzz が育てた corpus の被覆を `cargo llvm-cov` で
@@ -35,7 +35,7 @@ use wgft_wgstack_dut::fuzz::{self, Check, DUT, Net, Options, PEER};
 /// fuzz の target の本体です。
 type Body = fn(&[u8]);
 
-/// `Net` を使う target の表の大きさです。`replay` は `Net` を使わないので持ちません。
+/// target の表の大きさです。
 type Sizes = Option<fn() -> Limits>;
 
 /// fuzz の target と本体と、表の大きさです。
@@ -46,7 +46,7 @@ const TARGETS: [(&str, Body, Sizes); 3] = [
         fuzz::adversarial_sender,
         Some(adversary_limits),
     ),
-    ("replay", fuzz::replay, None),
+    ("replay", fuzz::replay, Some(fuzz::fuzz_limits)),
 ];
 
 fn adversary_limits() -> Limits {
@@ -195,7 +195,6 @@ fn main() {
             "replay" => (fuzz::replay, fuzz::fuzz_limits),
             _ => panic!("WGFT_WGSTACK_CORPUS_DIRS names an unknown target {target:?}"),
         };
-        let replay = target == "replay";
         for p in files(Path::new(dir)) {
             let name = format!(
                 "{target}/extra/{}",
@@ -203,10 +202,6 @@ fn main() {
             );
             trials.push(Trial::test(name, move || {
                 let data = fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-                if replay {
-                    body(&data);
-                    return Ok(());
-                }
                 fresh_and_reused(body, &data, limits())
             }));
         }

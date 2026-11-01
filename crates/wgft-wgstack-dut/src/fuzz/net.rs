@@ -104,6 +104,16 @@ pub fn last_digest() -> u64 {
     DIGEST.get()
 }
 
+/// このスレッドの核の作り方と確かめの形です。
+pub(crate) fn options() -> Options {
+    OPTIONS.get()
+}
+
+/// このスレッドで最後に閉じた核の出力の hash を置きます。
+pub(crate) fn set_digest(d: u64) {
+    DIGEST.set(d);
+}
+
 /// このスレッドが次の核に渡す表を取り出します。試験が、閉じた核の表が作成の時の値に戻ったかを確かめます。
 pub fn take_spare() -> Option<Spare> {
     SPARE.with_borrow_mut(Option::take)
