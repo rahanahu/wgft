@@ -464,13 +464,18 @@ async fn drive(ns: Ns, sock: UnixDatagram, mut stop: oneshot::Receiver<()>) -> i
             return Ok(());
         }
         let blocked = pending.is_some();
+        if more {
+            // 上限で止めたので、同じスレッドの task に順を譲ってから続けます。select の中の yield_now では、
+            // socket が読める間は読める枝がすぐに選ばれて譲りません。
+            tokio::task::yield_now().await;
+        }
         tokio::select! {
             _ = &mut stop => return Ok(()),
             r = sock.readable() => r?,
             r = sock.writable(), if blocked => r?,
             () = sleep_until(deadline) => {}
             () = ns.driver_woken() => {}
-            () = tokio::task::yield_now(), if more => {}
+            () = std::future::ready(()), if more => {}
         }
     }
 }
