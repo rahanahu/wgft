@@ -53,7 +53,7 @@ Rust の agent のビルドに入るものを変える PR は、ラボの一式�
 対象は後述の契機の表の `rust-agent` です。
 積んだ PR では、積みの先頭で 1 回流し、下の PR はその結果で足ります。
 `rust` の組は、ユーザー空間モードのエージェントを Rust の agent に替えて一式を流し、カーネルモードのエージェントの確認の結果は `go` の組から取ります ([ラボの切り替え](../design/v2/agent-parity.md#ラボの切り替え))。
-「wgstack の上の agent」の段 ([段の計画](../design/v2/agent-parity.md#段の計画)) が入るまでは、Rust の agent は TUN の試作だったので、`rust` の組の結果は PR の本文に報告するだけで、マージの関門にしませんでした。
+「wgstack の上の agent」の段が入るまでは、Rust の agent は TUN の試作だったので、`rust` の組の結果は PR の本文に報告するだけで、マージの関門にしませんでした。
 「wgstack の上の agent」の段から「UDP の中継」の段までは、UDP のルールを使う確認が落ちたので、前の積みの `rust` の組と比べる手の確認を関門にしていました。
 「UDP の中継」の段からは、`rust` の組で[完成の条件に入る確認](../design/v2/agent-parity.md#確認の分け方)がすべて PASS であることをマージの関門にし、`lab/lab suite` の終了コードにも `rust` の組を入れます。
 

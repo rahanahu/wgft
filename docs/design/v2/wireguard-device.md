@@ -312,5 +312,5 @@ server のカーネルモードは Linux の WireGuard を、ユーザー空間�
   `Instant::now()` をそのまま渡すと、Linux の `CLOCK_MONOTONIC` と macOS の時計は停止の間に進まず、device は壁時計では 180 秒より古いセッションをまだ新しいとみなし、相手はそれを捨てます。
   この場合は、返事の無いデータの 15 秒後に始まるハンドシェイクで回復すると見込みますが、確かめていません。
   停止の間も数えるには、呼び手が起動の時の `Instant` に、停止の間も進む時計 (Linux の `CLOCK_BOOTTIME`) の経過を足した値を渡します。
-  agent のデータプレーンは、v1 と同じく Linux と macOS では停止の間に止まる `Instant` を、Windows ではスリープの間も進む時計を渡すと決めました ([agent の置き換えの時計](agent-parity.md#時計))。
+  agent のデータプレーンは、v1 と同じく Linux と macOS では停止の間に止まる `Instant` を、Windows ではスリープの間も進む時計を渡します ([agent の置き換えの時計](agent-parity.md#時計))。
   Linux と macOS の上の回復の見込みは確かめていません。

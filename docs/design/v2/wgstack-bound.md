@@ -7,7 +7,7 @@
 
 値は byte で、括弧の中は MiB です。
 MTU は 1420 で、K のほかの表の大きさは既定の値です。
-型の大きさは rustc の版で変わりうるので、toolchain を上げる PR は表を作り直し、差分を PR に書きます。
+型の大きさは rustc の版で変わりうるので、toolchain を上げるときは同じ変更で表を作り直し、差分を PR に書きます。
 
 行の名前は `crates/wgft-wgstack/src/bound.rs` の欄の名前で、中身は次のとおりです。
 

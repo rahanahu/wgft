@@ -4,10 +4,9 @@
 wgstack は wgft 自身の TCP/IP の stack です。
 agent のユーザー空間モードは、トンネルの中の TCP、UDP、ICMP をこの stack で終えます。
 このため Rust の agent は root の権限も TUN も要りません。
-段を踏んで実装しています。
-PR 6 の範囲 (受動の open、閉じる手順と TIME_WAIT、アプリケーションの操作と知らせ、データの送受信、RTO、窓の probe、SACK による回復と D-SACK、RACK-TLP、不要な再送の取り消し、CUBIC と NewReno、boost の取得と回収、UDP の endpoint と予算、echo と ping、ICMP の誤りと PMTU、断片の入口) まで実装しました。
-核の上の非同期の handle の層 (`wgft-netstack`) は PR 7 で実装しました。
-構造、境目、メモリ、作業の順をここで決め、値と細部は[実装の時に決めること](#実装の時に決めること)に残します。
+実装は、受動の open、閉じる手順と TIME_WAIT、アプリケーションの操作と知らせ、データの送受信、RTO、窓の probe、SACK による回復と D-SACK、RACK-TLP、不要な再送の取り消し、CUBIC と NewReno、boost の取得と回収、UDP の endpoint と予算、echo と ping、ICMP の誤りと PMTU、断片の入口を持つ核と、核の上の非同期の handle の層 (`wgft-netstack`) です。
+dial の側は未実装です。
+構造、境目、メモリをここで決め、まだ決めていない値と細部は[実装の時に決めること](#実装の時に決めること)に残します。
 
 ## この文書の読み方
 
@@ -24,16 +23,16 @@ Go の文書の規則をここに写しません。
 Go の文書と食い違う点は、この文書が理由と共に挙げたものだけです。
 
 関わる設計は次のとおりです。
-agent の置き換えの設計はまだ `feat/v2-rust` に入っていないので、道で示します。
 
 - [試験の道具の設計](test-tooling.md):台本の言語、2 つの runner、DUT の口、記録の照合、qbench、fuzz、関門の細部を持ちます。
   この文書の[検証](#検証)は、その設計の決定を前提にして要点だけを書きます
-- agent の置き換え (#680、`docs/design/v2/agent-parity.md`):device の殻、データプレーンの駆動の実装、中継、UDP の中継、制御ソケットを持ちます。
-  データプレーンの駆動の規則の正本はこの文書の[データプレーンの駆動](#データプレーンの駆動)で、#680 はそれを実装します
+- [agent の置き換えの設計](agent-parity.md):device の殻、データプレーンの駆動の実装、中継、UDP の中継、制御ソケットを持ちます。
+  データプレーンの駆動の規則の正本はこの文書の[データプレーンの駆動](#データプレーンの駆動)で、agent の置き換えの設計はそれを実装する規則を足します
 
-各項目には、所有者が決めた「決定」と、この文書が勧める「提案」の印を付けます。
-所有者の確認を待つものは「仮の決定」と書きます。
-提案は実装の PR で確かめてから採り、採らなかった提案と変えた提案はその PR でこの文書を直します。
+所有者が決めた項目には「決定」の印を付け、所有者の確認を待つものは「仮の決定」と書きます。
+印の無い項目は実装した設計です。
+「提案」の印は、まだ実装していない勧めに付けます。
+提案を採るか変えるときは、同じ変更でこの文書を直します。
 
 ### 前提となる所有者の決定
 
@@ -91,7 +90,7 @@ Go の `internal/ipv4frag` は gVisor の経路と共有する葉の package で
   Rust の核の操作は待たずに戻り、できなければ「今はできない」を返します。
   待つことと期限は、外側の handle の層が持ちます ([アプリケーションの操作](#アプリケーションの操作))
 - 中継が型アサーションで探すメソッド:`Abort`、`CloseWrite`、`Delivered`、`CloseForDelivery`、`OnBoost` は、核の操作と handle の層のメソッドになります
-- boost の枠の集まり:提案として、プロセスで 1 つの集まりを `Budget` という値にし、トンネルを作り直すときに古い核から新しい核へ渡します ([予算の持ち主](#予算の持ち主))
+- boost の枠の集まり:プロセスで 1 つの集まりを `Budget` という値にし、トンネルを作り直すときに古い核から新しい核へ渡します ([予算の持ち主](#予算の持ち主))
 - 出力:Go の `Read` は wireguard-go の buffer に packet を書き、末尾に送信のバッチの印を書きます。
   Rust の核の `poll_transmit` は呼び手の buffer に packet を 1 つ書くだけです
 - 上界の数え方:Go の `Bound` は、Go のヒープの確保の丸めを `append` の容量で測ります。
@@ -99,7 +98,7 @@ Go の `internal/ipv4frag` は gVisor の経路と共有する葉の package で
 
 ### 移さないもの
 
-- 送信の向きのバッチの台帳 (`batch.go`):提案として移しません。
+- 送信の向きのバッチの台帳 (`batch.go`):移しません。
   台帳は wireguard-go の staged のキューと送信のキューに滞留する buffer を数えるための仕組みです ([送信の向きの予算](../userspace/wgstack-batching.md#送信の向きの予算))。
   Rust の agent では device の層を wgft が持ち、核の出力を device の層に渡す規則 ([データプレーンの駆動](#データプレーンの駆動)) が滞留を device の層の上限の内に保つので、台帳も印も鍵も要りません。
   核が乱数を直接読む例外もこれで無くなります
@@ -110,7 +109,7 @@ Go の `internal/ipv4frag` は gVisor の経路と共有する葉の package で
 
 ### crate の分け方
 
-提案:次の crate に分けます。
+次の crate に分けます。
 
 | crate | 中身 | 依存 | 書き手 |
 | --- | --- | --- | --- |
@@ -121,11 +120,11 @@ Go の `internal/ipv4frag` は gVisor の経路と共有する葉の package で
 | `crates/wgft-tcpharness`、`crates/wgft-wgstack-dut` | 試験の道具と DUT のバイナリ。配布せず、`wgft` のバイナリにも入りません | `wgft-wgstack` | 試験の担当 |
 
 handle の層を `wgft-agent` から分けるのは、後で Rust の server が dial の側で同じ層を使うためです。
-device の層と核を組み、UDP のソケットとタイマーを回す駆動の実装は `wgft-agent` に置き、#680 が持ちます。
+device の層と核を組み、UDP のソケットとタイマーを回す駆動の実装は `wgft-agent` に置きます。
 
 ### 依存と隔離の検査
 
-提案:Go の `internal/dataplane/deps_test.go` の `TestWgstackImports` に当たる検査を次の形で持ちます。
+Go の `internal/dataplane/deps_test.go` の `TestWgstackImports` に当たる検査を次の形で持ちます。
 
 - 依存:`wgft-wgstack` の `[dependencies]` は空にします。
   `[dev-dependencies]` にも試験の道具の crate を入れません。
@@ -135,7 +134,7 @@ device の層と核を組み、UDP のソケットとタイマーを回す駆動
 - sans-IO と伸びる collection:`wgft-wgstack` の clippy の設定の `disallowed-methods`、`disallowed-types`、`disallowed-macros` で、`Instant::now`、`SystemTime::now`、スレッドの作成、`std::net` のソケット、ファイル (`std::fs`)、環境変数 (`std::env`)、プロセス (`std::process`)、標準入出力、OS の乱数の読み取りと、容量を自動で伸ばす操作 (`Box`、`Rc`、`Arc` の型と文字列を作る操作を含みます) ([確保の規則](#確保の規則)) を禁じます。
   設定は `crates/wgft-wgstack/clippy.toml` に置きます。
   clippy は crate の manifest の directory から上へ設定を探すので、この一覧はこの crate だけに効きます。
-  PR 2 で、禁じた呼び出しを置いた build が警告になり、ほかの crate は警告にならないことを確かめました
+  禁じた呼び出しを置いた build が警告になり、ほかの crate は警告にならないことを確かめました
 - source の走査:clippy の一覧に加えて、同じ禁止の語で source を走査する試験を置きます。
   clippy が見ない cfg (`fuzzing` と故障の注入) の中のコードを確かめ、clippy の一覧から項目が消えていないことも確かめます。
   文字列の照合なので、注釈と試験の module は見ません
@@ -143,7 +142,7 @@ device の層と核を組み、UDP のソケットとタイマーを回す駆動
   checksum も `as_chunks` と `u64::from_be_bytes` の安全なコードで書きます
 - 製品の木:CI の `cargo tree` の検査が、`wgft` のバイナリの依存の木に `wgft-tcpharness` と `wgft-wgstack-dut` が無いこと、測定用の feature が有効でないことを確かめます。
   今の `rust-check` は crate の検査を、すべての target と feature を有効にした依存の木で行います。
-  feature の検査は、測定用の feature を足す段で足します
+  feature の検査は、測定用の feature を足すときに足します
 - I7 の隔離:後で作る agent のカーネルモードの crate が、推移的にも `wgft-wgstack` に依らないことを、製品の木と同じ `cargo tree` の検査で確かめます。
   カーネルモードの agent は wgstack を作りません
 
@@ -152,7 +151,6 @@ device の層と核を組み、UDP のソケットとタイマーを回す駆動
 
 ## sans-IO の API
 
-この節の型と関数の名前は提案です。
 形 (入力、出力、待たない操作、知らせ) は決定に従います。
 
 ### 作成と終わり
@@ -160,13 +158,13 @@ device の層と核を組み、UDP のソケットとタイマーを回す駆動
 - 作成:`Stack::new(config, budget, seed, hook)` が、作成の時の設定 (受け付ける宛先の集合、MTU、K、試験だけが小さくする上限の組、試験の選択) から表をすべて確保します
 - MTU:576 から 9216 を受け付け、外の値は設定の誤りにします。
   server が送る範囲に合わせた範囲です。
-  範囲の外の値を 1420 に替えるのは agent の側 (#680) です
+  範囲の外の値を 1420 に替えるのは agent の側です
 - 受け付ける宛先の集合:agent ではトンネルのアドレスの /32 の 1 つだけです。
-  提案 (PR 3 で採用):`Config` はこの 1 つのアドレスだけを持ちます。
-  プレフィックスの集合は dial の側を足す段で `Config` に足します
-- 作成の失敗 (提案、PR 3 で採用):`Stack::new` は設定の誤りと確保の失敗を `NewError` で返し、渡した `Budget` を `NewError::into_budget` で取り戻せます。
+  `Config` はこの 1 つのアドレスだけを持ちます。
+  プレフィックスの集合は dial の側を足すときに `Config` に足します
+- 作成の失敗:`Stack::new` は設定の誤りと確保の失敗を `NewError` で返し、渡した `Budget` を `NewError::into_budget` で取り戻せます。
   作り直しが失敗しても `Budget` を失わないためです
-- 表の大きさ (提案、PR 3 で採用):Go の package の中の `limits` に当たる値を公開の `Limits` にします。
+- 表の大きさ:Go の package の中の `limits` に当たる値を公開の `Limits` にします。
   試験の担当が `FuzzCore` の小さな上限を外の crate から渡すためです。
   握手の途中の表と accept の待ち行列は 0 を受け付けます。
   待ち受け 1 つの accept の待ち行列と握手の途中の行は全体の半分までで、16 bit で数えるので、全体はその 2 倍を超えられません
@@ -215,8 +213,7 @@ IPv4 でない packet は device の層が捨てます。
 - TCP の接続:`read(now, ConnId, &mut [u8])`、`write(now, ConnId, &[u8])`、`close_write`、`close_conn`、`abort`、`delivered`、`local_addr`、`peer_addr`。
   読み取りは、相手の FIN の後に `Eof` を、RST と会計の不整合の後に誤りを返します。
   `close_for_delivery` は Go と同じく `close_conn` と同じ動作です。
-  PR 4a で、接続を閉じる操作の名前を `close` から `close_conn` に変えました。
-  核を消費する `close(self, now)` と同じ名前を持てないためです。
+  接続を閉じる操作の名前が `close` でなく `close_conn` なのは、核を消費する `close(self, now)` と同じ名前を持てないためです。
   `read` は、`dst` が空でないときの 0 を EOF とします (std の `Read` と同じ約束です)。
   古い handle の `local_addr` と `peer_addr` は `None` を返します
 - 写さずに読み書きする口:提案として、受信の輪の生きている範囲を 2 つの slice で見せる `read_slices` と `consume`、送信の輪の空きに直接書く `write_slices` と `commit` を足します。
@@ -234,7 +231,7 @@ IPv4 でない packet は device の層が捨てます。
   確かめるのは、表ごとの空きの list (範囲、重なり、使っている行を指さないこと) と使っている印と数の一致、hash の表の項目が探索で届くこと、list の向きと範囲、タイマーの輪の桶と印、区間の treap の順序と数、chunk の数と輪の一致、接続の枠の段と配列の一致、boost の枠の保有者と接続の一致と貸した枠が配列を持たないこと、accept の待ち行列の長さ、予約の和と上界です。
   範囲の外の番号は panic せずに違反として返します。
   検出の 1 つずつに、壊した状態を渡す試験があります。
-  核の段が状態を足すたびに確かめを足します。
+  核に状態を足すときは、確かめも足します。
   呼んだ時だけ手間がかかり、製品は呼びません
 
 ### handle と古い handle
@@ -253,7 +250,7 @@ handle は `Copy` の小さな値で、核への参照を持ちません。
 
 ### 準備の知らせ
 
-提案:`Event` は次の種類を持ちます。
+`Event` は次の種類を持ちます。
 
 - `Readable(ConnId)`、`Writable(ConnId)`、`Closed(ConnId)`
 - `Acceptable(ListenerId)`
@@ -266,11 +263,11 @@ handle は `Copy` の小さな値で、核への参照を持ちません。
 枠や表の行を別の対象に使い直すときは、印の bit を消し、list から節を外します。
 このため、知らせの保持は枠と表の数で決まり、呼び手が取り出さなくても増えず、古い対象の知らせが新しい対象に届くこともありません。
 知らせはきっかけで、状態の正本ではありません。
-提案 (PR 3 で採用):対象の番号は、接続の枠、待ち受けのポートの順に並べた 1 つの list にします。
-UDP と ping の対象は、その表を作る段が足します。
+対象の番号は、接続の枠、待ち受けのポート、ping の endpoint の順に並べた 1 つの list にします。
+UDP の endpoint は同じポートの待ち受けと対象を分け合います ([UDP と ICMP と断片で決めたこと](#udp-と-icmp-と断片で決めたこと))。
 呼び手は知らせを受けたら操作を試し、`WouldBlock` なら次の知らせを待ちます。
 
-PR 4a で次のように決めました。
+知らせを付ける所と handle は次のとおりです。
 
 - `Readable` と `Writable` は、Go が読み取りと書き込みの通知の channel に知らせる所で付けます。
   `close_conn` は両方を、`close_write` は `Writable` を付けます。
@@ -294,13 +291,11 @@ boost の変化は知らせに入れず、hook だけで伝えます ([boost の
 
 ### 時刻と乱数
 
-提案:
-
 - 時刻:核の時刻は `Time` で、任意の起点からの単調な ns の符号なしの整数です。
   Go の核の時刻 (起点からの int64 の ns) と同じ値を持てるので、記録の時刻をそのまま渡せます。
   `Time` と `Duration` の足し算と、`Time` どうしの引き算は飽和します。核の中で panic を起こさないためです。
   駆動の層は、作成の時の `Instant` からの経過を ns にして渡します。
-  PR 4a で、核は受けた時刻を `i64::MAX / 4` ns (約 73 年) で止めることにしました。
+  核は受けた時刻を `i64::MAX / 4` ns (約 73 年) で止めます。
   核は時刻に期限の長さ (最も長いのは PAWS の 24 日) を足すので、止めないと上限の近くの時刻で足し算が溢れます。
   止めた後の時刻ではタイマーが進まなくなりますが、73 年を超える時刻を渡す呼び手は製品にありません
   時刻が前の値より戻ったときは、前の値を使います
@@ -319,7 +314,7 @@ boost の変化は知らせに入れず、hook だけで伝えます ([boost の
 Go の `OnBoost(f)` は、接続の錠の中で f を呼び、`f(false)` が偽を返したら floor への戻りを取り消します。
 `internal/netpipe` の `FollowBoost` は、LAN 側のカーネルのソケットが floor を超える受信のデータを持つ間、偽を返します。
 
-提案:核は作成の時に呼び手の hook を受け取り、型の引数で持ちます (`Stack<H: Hook>`)。
+核は作成の時に呼び手の hook を受け取り、型の引数で持ちます (`Stack<H: Hook>`)。
 
 - `boost_granted(conn)`:boost を得た時に呼びます
 - `may_return(conn) -> bool`:需要の無い保有者を floor に戻す前に呼び、偽なら戻りを取り消します
@@ -354,16 +349,16 @@ hook は核への参照を受け取らないので、核を呼び返せません
 - 知らせ:`Event` に `Connected` と `ConnectFailed` を後で足します。
   呼び手は知らない種類の知らせを無視できる形で受けます
 
-dial の操作 (`connect`) と SYN-SENT の規則は、agent の置き換えが終わった後の段で実装します。
+dial の操作 (`connect`) と SYN-SENT の規則は、agent の置き換えが終わった後に実装します。
 
 ## データプレーンの駆動
 
 この節は、agent が device の層と核を動かす規則の正本です。
-#680 が `wgft-agent` に実装し、この節と食い違う実装はこの節を先に直します。
+`wgft-agent` がこの節を実装し、この節と食い違う実装はこの節を先に直します。
 
 ### スレッドと所有
 
-提案:データプレーンは、トンネルの世代ごとに 1 つの OS のスレッドで動かします。
+データプレーンは、トンネルの世代ごとに 1 つの OS のスレッドで動かします。
 そのスレッドは tokio の current-thread の実行環境を持ち、次のものを `Rc<RefCell<Dataplane>>` の 1 つの値として持ちます。
 
 - WireGuard の device の層 (`wgft_wireguard::Device`)
@@ -375,8 +370,7 @@ UDP のソケットは駆動の task が持ちます。
 制御プレーン (stream、ハートビート、制御ソケット) は別の多スレッドの実行環境に置き、データプレーンには容量の決まった channel で命令を送ります。
 命令は待ち受けの開閉、状態の読み出し、ping のように頻度が低いものだけです。
 
-agent の device の殻の段は、核と waker の表を 1 つの trait (`dataplane::Upper`) の背後に置いて、この形を実装しました。
-核の段は、核と waker の表をこの trait で包んで繋ぎます。
+`wgft-agent` は、核と waker の表を 1 つの trait (`dataplane::Upper`) の背後に置いて、この形を実装します。
 継ぎ目の形と決めた値は [データプレーンのスレッドと送る経路](agent-parity.md#データプレーンのスレッドと送る経路)にあります。
 
 `RefCell` には次の規則を置きます。
@@ -418,7 +412,7 @@ agent のデータプレーンの知らせは錠を持たない `Cell` の印と
 対象の操作は `write`、`close_write`、`close`、`abort`、`read` (窓の更新を生むため)、`close_listener`、`send_to`、ping の送信です。
 `accept` は出力を生まないので起こしません。
 boost を accept の時に与える方針で受信のバッファが広がっても、窓の更新は最初の `read` が送ります。
-PR 7 の作業で、窓を満たした接続を accept しても segment が出ないことを使い捨ての試験で確かめました。
+窓を満たした接続を accept しても segment が出ないことは、使い捨ての試験で確かめました。
 `WouldBlock` を返した操作は核の状態を変えないので、起こしません。
 駆動の task は起きたら 1 回の起床の処理を行います。
 
@@ -465,7 +459,7 @@ tick ごとにたどるものは配列と番号で持ち、pointer をたどり�
 輪は連続した領域に置き、ほかのスレッドが読む数を segment ごとの欄の行に置きません。
 配置は意味を変えないので、Go の wgstack の記録との bit の一致の条件はそのまま守ります。
 
-PR 4a で次の形にしました。
+接続の枠は次の形にします。
 
 - 接続の枠は、同じ番号で引く 3 つの配列に分けます。
   `Tcb` は segment ごとの経路が触る欄 (番号、窓、タイマーの期限、輻輳の窓、送信の記録の scoreboard、印) で、
@@ -473,16 +467,14 @@ PR 4a で次の形にしました。
   `ConnCold` は不要な再送の取り消しと boost の需要のような、まれにしか触らない欄です。
   `ConnBufs` は送受信の輪と記録の輪の管理で、`repr(C)` で小さな管理の欄を前に、輪の chunk への pointer の配列
   (1 つの輪で 2 KiB) を後ろに置きます
-- 前の段の `ConnSlot` は、2 つの輪の pointer の配列 (合わせて約 4 KiB) を接続の欄と同じ値に持っていました。
-  segment ごとの欄はその間に散らばっていました。
-  配列を `ConnBufs` に移したので、`Tcb` の行は配列に押し広げられません
+- 2 つの輪の pointer の配列 (合わせて約 4 KiB) は `ConnBufs` にあるので、`Tcb` の行は配列に押し広げられず、segment ごとの欄が配列の間に散らばりません
 - accept の待ち行列の節は、別の接続の処理が書き換えるので、接続の枠から出して番号で引く配列 (`QLink`) にし、
   核の共有の状態に置きます。
   接続の処理が自分の枠と共有の状態を同時に `&mut` で借りられるようにするためでもあります
-- タイマーの輪、出力の list、知らせの list は前の段から番号の表です
+- タイマーの輪、出力の list、知らせの list は番号の表です
 - 数えと 1 分に 1 回の門は核の共有の状態にあり、`Tcb` の行にありません。
   核は 1 つのスレッドの値で、ほかのスレッドは読みません
-- 上界の `conn_slots` の項は 3 つの配列と空きの list と待ち行列の節の型の大きさで数え、表を生成し直しました
+- 上界の `conn_slots` の項は 3 つの配列と空きの list と待ち行列の節の型の大きさで数えます
 
 #### 測り方と測った値
 
@@ -519,58 +511,11 @@ perf stat -e cache-misses,L1-dcache-load-misses,instructions,cycles \
 E コアは `L1-dcache-load-misses` を数えないので、E コアの車線では代わりに `mem_load_uops_retired.l1_miss` を
 数えます。
 
-2026-11-01 に、E コアの車線 (Core Ultra 7 270K Plus、rustc 1.99.1、release の build) で、3 つの配列に分けた配置と、
-同じコードで 3 つの部分を 1 つの値に並べた配置 (前の段の `ConnSlot` と同じく、輪の pointer の配列が接続の欄と
-同じ値にある形。64 byte の揃えも無し) を比べました。
-後者は比べるためだけの一時の変更で、repo に入れていません。
-値は criterion の中央の推定です。
-`rig_overhead` はどちらも約 100 ns でした。
-
-| ベンチ | 分けた配置 | 1 つの値の配置 |
-| --- | ---: | ---: |
-| `recv_segment/1` | 648.3 ns | 655.1 ns |
-| `recv_segment/64` | 723.7 ns | 727.7 ns |
-| `recv_segment/1024` | 718.2 ns | 728.0 ns |
-| `send_segment/1` | 631.9 ns | 608.6 ns |
-| `send_segment/64` | 653.8 ns | 615.2 ns |
-| `send_segment/1024` | 636.1 ns | 636.9 ns |
-
-受信は分けた配置が 1% から 2% 速く、送信の 1 本と 64 本は 1 つの値の配置が 4% と 6% 速く、送信の 1024 本は同じでした。
-同じ配置を 2 回流した値の揺れ (分けた配置の `recv_segment/1024` で 688 ns と 718 ns) が差と同じ大きさなので、
-このベンチでは配置による一貫した差は見えません。
-`handle_timeout` を呼ばない前の版の道具では、送信の 64 本で逆に分けた配置が約 11% 速く出ていました。
-perf stat の数 (1,000 命令あたり) は、どちらの配置でも LLC の miss が 0.2 未満で、1024 本でも作業の集合が
-キャッシュに収まっていました。
-L1 の miss も配置によって増える場合と減る場合がありました。
+2026-11-01 に、3 つの配列に分けた配置と、3 つの部分を 1 つの値に並べた配置 (輪の pointer の配列が接続の欄と同じ値にある形) をこのベンチで比べました。
+差は同じ配置を流し直した値の揺れと同じ大きさで、配置による一貫した差は見えませんでした。
+perf stat の数では、どちらの配置でも LLC の miss が 1,000 命令あたり 0.2 未満で、1024 本でも作業の集合がキャッシュに収まっていました。
 分けた配置を選んだ理由は、測った速さではなく、`Tcb` の行が輪の配列と boost の段の大きさに左右されないことです。
 接続の数が L2 を超える負荷 (数千本の接続と大きな受信の窓) での差は測っていません。
-
-PR 5 の後に、同じ車線で PR 4b の頭 (NewReno と boost を求めない既定) と PR 5 の頭 (CUBIC と需要による boost の既定) を比べました。
-値は criterion の中央の推定です。
-PR 5 の値は、記録の輪の添字の変更の前に、#705 のレビューで測り方 (時刻を進めて `handle_timeout` を呼ぶこと) を変える前のベンチで測りました。
-このため上の表の値とは比べられません。
-
-| ベンチ | PR 4b | PR 5 | PR 5 の SACK の組 |
-| --- | ---: | ---: | ---: |
-| `recv_segment/1` | 676.7 ns | 652.9 ns | 647.1 ns |
-| `recv_segment/64` | 676.6 ns | 683.0 ns | 691.1 ns |
-| `recv_segment/1024` | 679.4 ns | 697.5 ns | 729.0 ns |
-| `send_segment/1` | 595.5 ns | 611.4 ns | 613.3 ns |
-| `send_segment/64` | 616.7 ns | 629.8 ns | 633.0 ns |
-| `send_segment/1024` | 662.4 ns | 678.8 ns | 670.4 ns |
-
-SACK の無い接続の差は 3% 以内でした。
-SACK の組は 1024 本の受信で 5% ほど遅くなりました。
-`Tcb` が 2 行広がったことと ACK ごとの RACK の処理のどちらが効くかは、perf stat で分けていません。
-1 本の受信は、需要で boost を得るので、既定の違いを含みます。
-
-D-SACK の欄を受け手の行に移し、PRR の欄を `ConnCold` に移した後に、#705 のレビューの後のベンチで前後を比べました。
-criterion の中央の推定は、同じコードを流し直しても 5% ほど揺れ、前後の差はその揺れの内でした
-(`recv_segment_sack/1024` は 694 ns と 730 ns、`send_segment_sack/1024` は 652 ns と 680 ns、どちらも前、後の順)。
-perf stat の 1,000 命令あたりの L1 の miss は、`recv_segment_sack/1024` で 11.6 から 10.2 に減り、`send_segment_sack/1024` で 12.3 と 12.1、
-`recv_segment/1024` で 11.2 と 12.3 でした。
-LLC の miss は 1,000 命令あたり 0.2 未満で変わりませんでした。
-受け手だけの接続が ACK ごとに後ろの行を書かなくなったことは L1 の miss の減りに見えますが、時間の差は測れませんでした。
 
 ### 上界の式の写し方
 
@@ -581,15 +526,15 @@ I1 から I7 の不変条件もそのまま守ります ([不変条件](../users
 - 固定の表:接続の枠、hash の表、握手の途中の表、TIME_WAIT の表、タイマーの輪、出力の list、制御の輪、UDP の管理の配列、知らせの list、待ち受けの表、UDP の endpoint の表は、作成の時に確保します。
   大きさは確保した容量と `size_of::<T>()` の積で数え、後から大きくしません
 - 待ち受けと UDP の endpoint の上限:Go は待ち受けを map で持ち、数は信頼された設定で決まるとして式の外に置いていました。
-  提案として、Rust では TCP の待ち受けの表と UDP の endpoint の表を、受け付けるアドレス 1 つあたりポートの数 (65,536) の固定の行で持ち、`Bound` に項 N_lt × c_lt と N_ue × c_ue を加えます。
+  Rust では TCP の待ち受けの表と UDP の endpoint の表を、受け付けるアドレス 1 つあたりポートの数 (65,536) の固定の行で持ち、`Bound` に項 N_lt × c_lt と N_ue × c_ue を加えます。
   v1 はルールの範囲の幅に上限を置かないので、ポートの数が構造の上限です。
-  提案 (PR 3 で採用):待ち受けの行は 16 byte (世代、accept の待ち行列の先頭と末尾、待ち行列の長さ、握手の途中の行の数) です。
+  待ち受けの行は 16 byte (世代、accept の待ち行列の先頭と末尾、待ち行列の長さ、握手の途中の行の数) です。
   開いている印は行に持たず、ポートごとに 1 bit の集合 (8 KiB) に持ちます ([不変条件の検査の手間](#不変条件の検査の手間))。
   受け付けるアドレスは 1 つなので、表は 1 つです。
   `ListenerId` と `UdpId` の世代は 32 bit です。
   ポートを開き直す回数は接続の枠の使い直しよりずっと少なく、行を小さく保つためです。
   UDP の endpoint の表は同じポートごとの行の表を使います。
-  行の型と項 N_ue × c_ue は PR 6 で足しました ([PR 6 で決めたこと](#pr-6-で決めたこと))
+  UDP の endpoint の行は [UDP と ICMP と断片で決めたこと](#udp-と-icmp-と断片で決めたこと)にあります
 - 枠と共に持つ配列:floor の送信の記録の輪と区間の表は、Go と同じく枠を初めて使う時に確保し、枠と共に持ちます。
   上界は作成の時に数えるので、確保の時機は上界を変えません
 - accept の待ち行列の枠の送信の floor:floor の項は N_c = K + Q 本の枠のどれにも送信の floor f_s を数えます。
@@ -602,7 +547,7 @@ I1 から I7 の不変条件もそのまま守ります ([不変条件](../users
   中身の無い accept の前の接続は floor の記録の輪と区間の表の 21,712 byte を持ち、届いたデータの分は受信の floor (256 KiB) までの chunk を持ち、送信の chunk は 0 でした。
   K = 4、Q = 8 の核は 12 本を accept し、12 本の両方の輪を満たした会計は floor の項にちょうど届き、超えませんでした。
   待ち行列の枠を送信の floor から外すには、核が accept した接続の数を K で抑える変更 (accept の意味の変更) が要るので、採りません
-- boost の配列:提案として、B 本の枠の分の boost の記録の輪と区間の表を `Budget` の作成の時に確保し、`Budget` の中に置きます。
+- boost の配列:B 本の枠の分の boost の記録の輪と区間の表を `Budget` の作成の時に確保し、`Budget` の中に置きます。
   boost を得た接続はその 1 組を借り、floor に戻るか閉じるときに返します。
   boost の取得の時に確保が失敗する場合が無くなります
 - chunk:16 KiB の固定の配列で、予約の内側でだけ確保します。
@@ -617,11 +562,9 @@ I1 から I7 の不変条件もそのまま守ります ([不変条件](../users
 
 `Bound` の計算は、作成の時の設定と型の大きさだけから決めます。
 Go の測った値 (c_conn、記録 1 件、区間 1 つ) は Rust の型の大きさで置き換わり、どの target でも同じかを試験で確かめます。
-型の大きさは rustc の版で変わりうるので、toolchain を上げる PR は上界の表を生成し直し、差分を PR に書きます。
+型の大きさは rustc の版で変わりうるので、toolchain を上げるときは同じ変更で上界の表を生成し直し、差分を PR に書きます。
 
 ### 確保の規則
-
-提案:
 
 - 予約が先:保持する前に予算から予約し、予約の後に確保します (I2)
 - 確保の失敗:確保は `Vec::try_reserve_exact` で失敗を返す形で行い、失敗を予算が尽きたときと同じ動作にします。
@@ -648,13 +591,13 @@ Go の測った値 (c_conn、記録 1 件、区間 1 つ) は Rust の型の大�
 
 Go では boost の枠の集まりがプロセスで 1 つで、トンネルを作り直しても増えません。
 
-提案:Rust では枠の集まり (B 本の枠と、前節の boost の配列) を `Budget` という値にし、核がそれを所有します。
+Rust では枠の集まり (B 本の枠と、前節の boost の配列) を `Budget` という値にし、核がそれを所有します。
 トンネルを作り直すときの受け渡しは[世代と予算の受け渡し](#世代と予算の受け渡し)の順に従います。
 古い核の接続はその前にすべて閉じているので、受け渡す `Budget` の借りは 0 です。
 このため枠の集まりはプロセスで 1 つのままで、別の Device の接続を回収する処理も要りません。
 古い核の表と chunk は `close` で解放されるので、Go の上界が足していた「古い世代の M_fix」の項は要りません。
 
-提案 (PR 3 で採用):boost の配列の貸し借りは値の移動です。
+boost の配列の貸し借りは値の移動です。
 枠を得た接続は `Budget` から配列を受け取り、使っていない方の配列を枠の控えに置き、floor に戻るか閉じるときに配列を `Budget` に返します。
 控えには、boost の間の floor の記録の輪と、受信が boost の段に移るまでの boost の区間の表 (移った後は floor の区間の表) を置きます。
 枠の取り合いでは、floor に戻した保有者が `Budget::release` で枠を返し、新しい保有者が `Budget::hand_over` でその枠と配列を受け取ります。
@@ -685,59 +628,55 @@ Go では boost の枠の集まりがプロセスで 1 つで、トンネルを�
 
 決定に従い、上界の表は `Bound` から生成します。
 
-提案:`wgft-wgstack` の試験が、既定の設定と代表の K の値で `Bound` を計算し、項ごとの表を Markdown の断片として書き出します。
+`wgft-wgstack` の試験 `bound::tests::bound_table_is_up_to_date` が、既定の設定と代表の K の値で `Bound` を計算し、項ごとの表を [wgstack の Rust 版の上界の表](wgstack-bound.md) に書き出します。
 環境変数 `WGFT_UPDATE_GOLDEN=1` を付けたときだけファイルを書き直し、付けないときは差があれば失敗します。
 Go の `-update` の形に当たります。
-生成した表はこの文書から参照し、手で数を書きません。
-
-決定に従う形 (PR 3 で採用):表は [wgstack の Rust 版の上界の表](wgstack-bound.md) に生成し、試験は `bound::tests::bound_table_is_up_to_date` です。
 試験は文書の印の間だけを書き直し、行の説明は手で書いた部分が持ちます。
+この文書は生成した表を参照し、手で数を書きません。
 項は確保した配列の要求の大きさで数えます。
 別の試験が、作った核の表の `capacity()` から数えた byte が固定の項と一致することと、枠をすべて使い boost の枠をすべて貸してどの輪も満たした核の保持が、chunk、記録の輪、区間の表の項ごとに上界と一致することを確かめます。
 型の大きさは試験の build でも製品の build と同じに保ちます。
 試験だけの欄を型に足さないのはこのためで、確保の失敗の注入は型の外に置きます。
 Linux、Windows、macOS の CI で同じ表になることを確かめました。
 核の値の大きさは hook の無い核で数え、`Stack::bound` は使う hook の核の大きさで数えます。
-UDP と ping の項は PR 6 で足しました。
 
 ### 需要で育つバッファとの関係
 
 [需要で育つバッファ](../userspace/wgstack-buffers.md)は採用済みですが、凍結した Go の wgstack にはありません。
 
-提案:Rust の wgstack は、まず Go と同じ floor と boost の枠の模型で書き、Go の記録との bit の一致を確かめます。
-需要で育つバッファは、bit の一致を求める期間が終わった後の段で、Rust だけに入れます。
+Rust の wgstack は Go と同じ floor と boost の枠の模型で書き、Go の記録との bit の一致を確かめます。
+提案:需要で育つバッファは、bit の一致を求める期間が終わった後に、Rust だけに入れます。
 `Budget` の型は、boost の枠の集まりと、予算 G から段を借りる形の両方を表せるように作ります。
 段を移す手順の「chunk の位置を割り当て直す」規則は、Rust の輪でも同じに書けます。
 
-## agent の TUN を置き換える
+## agent での使い方
 
 ### packet の流れ
 
-試作の agent は、device の層が復号した packet を Linux の TUN に書き、ホストのカーネルの TCP/IP で終えています。
-試作の形は、device の層と制御プレーンの PR が加える `docs/design/v2/wireguard-device.md` と `docs/design/v2/agent-control.md` にあります。
-Rust の wgstack が入ると、packet は次のように流れます。
+agent では packet は次のように流れます。
 
 - 受信:UDP のソケット、`Device::handle_datagram`、`Device::poll_packet`、核の `handle_packet`
 - 送信:核の `poll_transmit`、`Device::handle_packet`、`Device::poll_transmit`、UDP のソケット
 - アプリケーション:中継の task が `wgft-netstack` の handle を読み書きし、LAN の宛先へは OS のソケットで接続します
 
-TUN も、トンネルのアドレスの経路も、専用の経路表と rule も要らなくなります。
-agent はどの OS でも利用者の権限で動き、Go の v1 のユーザー空間モードと同じ形に戻ります。
+TUN も、トンネルのアドレスの経路も、専用の経路表と rule も要りません。
+agent はどの OS でも利用者の権限で動き、Go の v1 のユーザー空間モードと同じ形です。
 核は OS に依らないので、Windows と macOS でも同じ形で動きます。
 CI はこの 2 つの OS で build と単体の試験を流しますが、実機での動作は未確認です。
 
-device の層の `poll_packet` は packet ごとに `Vec` を確保して返します。
-提案:最初はこの形のまま使い、CPU を測ってから、device の層に呼び手の buffer へ書く口を足すかを決めます。
+device の層の `poll_packet` は packet ごとに `Vec` を確保して返し、agent はこの形のまま使います。
+device の層に呼び手の buffer へ書く口を足すかは、CPU を測ってから決めます。
 送信の向きも同じです。
 
-### 入口の検査と試作の守りの移り先
+### 入口の検査
 
-試作の `inbound` の module は、TUN の先のカーネルがホストのサービスと LAN に packet を渡すのを防ぐための検査でした。
+TUN で packet をホストのカーネルに渡す形では、カーネルがホストのサービスと LAN に packet を渡さないよう、agent が入口で検査を要します。
 wgstack では packet が核の中で終わり、転送の経路も、中継が開いていないポートの待ち受けもありません。
-このため検査は核の規則に移り、`inbound` の module は消えます。
+このため入口の検査は核の規則が受け持ち、agent は別の検査の module を持ちません。
 規則の正本は[トンネルの入口の検査](../spec/tunnel.md#トンネルの入口の検査)です。
+TUN を使う形で要る守りと、wgstack での扱いの対応は次のとおりです。
 
-| 試作の検査と守り | wgstack での扱い |
+| TUN を使う形の検査と守り | wgstack での扱い |
 | --- | --- |
 | 宛先が agent のアドレスで、開いているルールのポートへの TCP を通す | 宛先の集合と待ち受けの表で決まります。待ち受けの無いポートへの SYN には RST を返します |
 | agent のアドレス以外への packet を捨てる | 同じです。受け付ける宛先の集合は agent のトンネルのアドレスの /32 だけで、外の packet を数えて捨てます |
@@ -751,8 +690,8 @@ wgstack では packet が核の中で終わり、転送の経路も、中継が�
 | IPv4 の断片を捨てる | 再組み立ての表で組み立てます。v1 の約束に戻ります |
 | 捨てた数を数え、1 分に 1 回までログに出す | 核の数えと門が持ちます |
 
-試作が UDP、echo request、断片を捨てていたのは、カーネルにホストの応答を作らせないためでした。
-wgstack はそれらを自分で扱うので、[トンネルの中の約束](../spec/tunnel.md)の v1 の挙動に戻します。
+TUN を使う形で UDP、echo request、断片を捨てるのは、カーネルにホストの応答を作らせないためです。
+wgstack はそれらを自分で扱うので、[トンネルの中の約束](../spec/tunnel.md)の v1 の挙動に従います。
 
 ### 設定の扱い
 
@@ -767,7 +706,7 @@ wgstack はそれらを自分で扱うので、[トンネルの中の約束](../
 
 仮の決定 (所有者の確認を待ちます):Rust の agent が Go の agent を置き換えられると判定する条件は、次の 2 つです。
 
-- ラボの一式の agent の確認が、Rust の agent で server の両方のモードを通ること (#680 の完成の条件)
+- ラボの一式の agent の確認が、Rust の agent で server の両方のモードを通ること ([agent の置き換えの設計の完成の条件](agent-parity.md#範囲と完成の条件))
 - qbench の cell が、凍結した Go の wgstack と同じく正しさの判定 (byte の列の一致と、接続が誤りなく終わること) を通ること
 
 [目標と制約](../userspace/wgstack-performance.md#目標と制約)の性能の目標 (byte あたりの CPU が gVisor の 0.6 倍以下、スループットが Linux の 0.9 倍以上など) は置き換えの条件に入れません。
@@ -806,6 +745,18 @@ Go の wgstack の記録がすべて一致することは、ラボの一式で�
 - 故障の注入:試験の担当が故障の一覧 (どの確かめを落とすはずか) を書き、実装の担当がその一覧から核の故障の点を書きます
 - 期待した差の一覧と意図した違いの一覧:行を足せるのは、今と同じく試験の担当と所有者だけです
 
+### 試験の担当の仕事
+
+試験の担当は、[試験の道具の設計](test-tooling.md)の道具に加えて、次のことを受け持ちます。
+
+- 故障の一覧を書き、実装の担当が書いた故障の点で台本の検出力を確かめます
+- 期待した差の一覧と意図した違いの一覧に行を足すときは、理由を書きます
+
+試験の担当は Rust の wgstack の実装のコードを読まず、公開の API の文書だけを読みます。
+実装の担当は試験の担当の台本と runner を直しません。
+台本が誤っていると考えたら、理由を書いて試験の担当に返します。
+Go の試験の道具を変えるときは、製品の Go のコードを変えず、規則どおり wgstack の関門を流します。
+
 ### Go の wgstack の記録との bit の一致
 
 決定に従い、移行の間は凍結した Go の wgstack の記録と照らします。
@@ -815,13 +766,13 @@ Go の wgstack の記録がすべて一致することは、ラボの一式で�
 - 比べる応答:引き取った packet の bytes と順序、アプリケーションの操作の結果、受け入れの結果、時刻です。
   `STATS`、`BOUND`、`HELD` の応答は byte の単位で比べません。
   Go と Rust で数の内訳と型の大きさが同じになる理由が無いためです
-- 段ごとの照合:PR 4b からは、相手が SACK も timestamp も示さず、輻輳の制御に NewReno を、boost の与え方に boost を求めない方針 (Go の `BoostNever`) を選んだ記録が、握手の後のデータの転送まで一致します。
-  受信の窓の自動調整と受け手の ACK の規則を PR 4b に入れるのはこのためです。
-  timestamp に頼る不要な再送の取り消しと boost の取得は PR 5 で入ったので、timestamp と boost を使う記録は PR 5 から照らします
-- 照らす範囲の広がり:PR 5 で SACK、timestamp、CUBIC、boost の印の記録、PR 6 で UDP と ICMP と断片と ping の印の記録が加わります
-- 段の表:核に入った段は `crates/wgft-wgstack-dut/stages.json` の `landed` が持ちます。
-  段を入れる PR は `landed` にその段を足し、その段の印の記録が一致することと、その段の台本が通ることを同じ PR で確かめます
-- 前の条件:すべての記録が一致することを、#680 の「wgstack の上の agent」の段と、agent の置き換えをラボの一式で判定することの前の条件にします
+- 段ごとの照合:核の機能を段に分け、段ごとの印の記録を照らします。
+  4b の段は、相手が SACK も timestamp も示さず、輻輳の制御に NewReno を、boost の与え方に boost を求めない方針 (Go の `BoostNever`) を選んだ記録を、握手の後のデータの転送まで照らします。
+  受信の窓の自動調整と受け手の ACK の規則が 4b の段に入るのはこのためです。
+  5 の段は SACK、timestamp、CUBIC、boost の印の記録を、6 の段は UDP と ICMP と断片と ping の印の記録を加えます
+- 段の表:核に入った段は `crates/wgft-wgstack-dut/stages.json` の `landed` が持ち、今はすべての段が入っています。
+  段を足すときは `landed` にその段を足し、その段の印の記録が一致することと、その段の台本が通ることを同じ変更で確かめます
+- 前の条件:すべての記録が一致することを、agent の置き換えをラボの一式で判定することの前の条件にします
 
 #### bit の一致の条件
 
@@ -839,7 +790,7 @@ Go の wgstack の記録がすべて一致することは、ラボの一式で�
   Rust は `mul_add` を使わず、コンパイラも積和をまとめません
 - 3 乗根:Go の `math.Cbrt` と同じ値を返す実装が要ります。
   Rust の `f64::cbrt` は OS の数学ライブラリを呼ぶので、値が最後の桁で違いうるためです。
-  PR 5 で Go の実装を写しました ([PR 5 で決めたこと](#pr-5-で決めたこと))
+  `tcp::cc::cbrt` が Go の実装を写します ([回復と輻輳の制御と boost で決めたこと](#回復と輻輳の制御と-boost-で決めたこと))
 - 再組み立ての表の追い出し:管理領域を Go の型の大きさで数えます ([上界の式の写し方](#上界の式の写し方))
 - 浮動小数点の比べと変換:Go の `min` と `max` の NaN と -0 の扱いと、浮動小数点から符号なしの整数への変換を、Rust の既定の挙動に頼らずに明示して写します。
   Rust の `as` は範囲の外の値を飽和させますが、Go の変換の結果は target に依るので、linux/amd64 の結果を写すか、範囲の外の値が来ないことを試験で示します
@@ -858,7 +809,7 @@ Rust の単体の試験がそのファイルと照らし、Go の試験はファ
 | Go | Rust の target | 書き手 | 種 |
 | --- | --- | --- | --- |
 | `FuzzParse` | `parse` | 実装の担当 | Go の `FuzzParse` が `f.Add` で渡す値。repo に corpus のファイルはありません |
-| `FuzzCore` | `core` | 試験の担当 | `internal/wgstack/testdata/fuzz/FuzzCore` の corpus の値。`go test fuzz v1` の形式から試験の道具の設計の `tools/fuzzseed` が取り出します |
+| `FuzzCore` | `core` | 試験の担当 | `internal/wgstack/testdata/fuzz/FuzzCore` の corpus の値。`go test fuzz v1` の形式から Go の試験 `TestRustFuzzSeeds` が取り出します |
 | `FuzzAdversarialSender` | `adversarial_sender` | 試験の担当 | 64 bit の種 |
 | (無し) | `replay` | 試験の担当 | 記録の要求の列 |
 
@@ -883,8 +834,7 @@ NCSA は寛容な license ですが `deny.toml` の許可の一覧に無く、fu
 [敵対的な保持の試験](../userspace/wgstack-verification.md#敵対的な保持の試験)の表の入力をすべて Rust に移します。
 確かめることは同じで、生きているヒープの代わりに確保の数えで測ります。
 
-T4 の最初の PR で、表の入力のうち PR 4b の核が持つものを `crates/wgft-wgstack-dut/tests/holding.rs` に移しました。
-偽の送信元からの SYN の洪水、`accept` されない接続、短い接続の入れ替わり、中身の無い segment の洪水 (重複した ACK と 1 byte ずつ進む ACK)、順序外の洪水、読まない相手、どの接続にも当たらない segment の洪水、遅い読み手への小さな書き込み、出力の詰まりです。
+表の入力のうち `crates/wgft-wgstack-dut/tests/holding.rs` が持つのは、偽の送信元からの SYN の洪水、`accept` されない接続、短い接続の入れ替わり、中身の無い segment の洪水 (重複した ACK と 1 byte ずつ進む ACK)、順序外の洪水、読まない相手、どの接続にも当たらない segment の洪水、遅い読み手への小さな書き込み、出力の詰まりです。
 保持は設定の上限でなく、実際に持つ量で確かめます。
 
 - 確保の数え:核を作った後に増えた生きている byte が、`Held` の chunk、送信の記録、区間の表、再組み立ての写しの和と、置き場に残した chunk の分に一致すること。
@@ -895,7 +845,7 @@ T4 の最初の PR で、表の入力のうち PR 4b の核が持つものを `c
 
 確かめの中で分かったこと:接続が終わった後も、核は空いた接続の枠の floor の送信の記録の輪と区間の表と、置き場の chunk を持ち続けます。
 どれも `Held` に出ていて上界の項の内にあり、核を閉じると元の値に戻ります。
-SACK の block を持つ ACK の洪水と boost の入力は PR 5 の段、断片と UDP の入力は PR 6 の段で足します。
+SACK の block を持つ ACK の洪水、boost、断片、UDP の入力はまだ移していません。
 stream の一致の試験はまだ移していません。
 stream の一致の試験 (受信と送信) も、種の数を含めて移します。
 Go の `-race` の競合の試験は、核が錠を持たないので移しません。
@@ -903,13 +853,13 @@ Go の `-race` の競合の試験は、核が錠を持たないので移しま�
 
 ### 故障の注入と目印の build
 
-提案:故障の注入と、置き場に返す chunk を目印の byte で埋める build は、cargo の feature ではなく `--cfg` で選びます。
+故障の注入と、置き場に返す chunk を目印の byte で埋める build は、cargo の feature ではなく `--cfg` で選びます。
 
 - 選び方:`RUSTFLAGS` で `--cfg wgstack_fault="<名前>"` と `--cfg wgstack_sentinel` を渡します。
   feature はワークスペースの中で合わさり、製品の build に漏れうるためです
 - 宣言:ワークスペースの `[workspace.lints.rust]` の `unexpected_cfgs` の `check-cfg` に 2 つの cfg を宣言し、source の中の `#[cfg(...)]` の名前と値の綴りの誤りを lint で捉えます。
   `RUSTFLAGS` で渡した `--cfg` の綴りの誤りは lint では捉えられないので、故障を入れた build の試験が、その故障を捉えるはずの確かめが落ちることで確かめます。
-  `wgstack_fault` の値の一覧は、故障の点を足す PR が足します。
+  `wgstack_fault` の値の一覧は、故障の点を足すときに足します。
   それまでは値を持たない宣言で、source の中で値を書くと lint が捉えます
   cargo は crate の `[lints]` に `workspace = true` とほかの項目を併せて書けないので、crate ごとには宣言しません。
   名前が `wgstack_` で始まるので、ほかの crate に宣言が効いても害はありません。
@@ -917,130 +867,56 @@ Go の `-race` の競合の試験は、核が錠を持たないので移しま�
 - 製品:リリースの build と B13 の通常の build はこの cfg を渡しません。
   `wgft` のバイナリの依存の木の検査 ([依存と隔離の検査](#依存と隔離の検査)) と合わせ、製品にどちらも入らないことを CI で確かめます
 - 目印の確かめ:目印の build で、目印が読み取り、送る segment、記録と区間の欄の値に現れないことを、stream の一致の試験、敵対的な送り手の試験、`core` の fuzz で確かめます
-- 故障の置き場と一覧:T4 で、核の故障は核の crate に置き、adapter の側には作らないと決めました。
+- 故障の置き場と一覧:核の故障は核の crate に置き、adapter の側には作りません。
   理由と故障の一覧 (どの確かめが落ちるはずか) は[試験の道具の設計の関門](test-tooling.md#pr-の関門)にあります
 
 ### 関門と CI
 
 [試験の道具の設計の関門と CI](test-tooling.md#7-関門と-ci)の選択を採ります。
 
-- PR の関門:今の `scripts/wgstack-gate.sh` に Rust の段 (台本と記録の照合、`rustdut` の適合の台本、fuzz の smoke) を足します。
-  別の script にはしません
-- CI:cargo と Go の両方を要する照合の段を、新しい job `harness-rust-go` にします。
-  この job は Go の試験を流すので、ラボの一式を省ける Rust だけの job には当たりません。
-  テストの規範は Rust の job を `rust-*` の名前で数えてラボの一式を省くので、`rust-` で始めない名前にしています
-- [テストの規範](../../development/testing.md)の変更:job を足す PR が、同じ PR で B 類の表と振り分けに `harness-rust-go` を足し、この job を変える PR がラボの一式を省けないことを書きます。
-  job は `crates/**`、`internal/tcpharness/**`、`internal/dutproto/**`、`internal/wgstack/**` を変えた PR で流します
+- PR の関門:`scripts/wgstack-gate.sh` が Rust の段 (台本と記録の照合、fuzz の smoke) を流します。
+  別の script にはしません。
+  `wgstack-dut` に対する `rustdut` の適合の台本はまだ関門にありません
+- CI:cargo と Go の両方を要する照合の段は job `harness-rust-go` (B16) です。
+  この job は Go の試験を流すので、Rust だけの job (`rust-*`) と分け、`rust-` で始めない名前にしています
+- [テストの規範](../../development/testing.md):B 類の表と振り分けの `harness` の契機が `harness-rust-go` を持ち、ラボの一式を省けるかを決めます
 
 ラボの一式は、所有者の規則どおり、ラボが動かすものを変えない Rust だけの変更では流しません。
 Rust の agent が製品の経路で wgstack を使い始めた後は、[置き換えの判定](#置き換えの判定)のとおり、server の両方のモードでラボの一式を流します。
 
-## 実装の計画
+## 実装で決めたこと
 
-### 積む PR
+実装の担当が決めた点を、理由と共に話題ごとに挙げます。
+変えるときは、この節を同じ変更で直します。
 
-この文書の計画は、核と handle の層までです。
-device の殻、駆動の実装、中継、UDP の中継は #680 の段が持ちます。
-サイズは試験を含む行数の目安で、Go の wgstack の大きさから見積もった推定です。
-担当の列の A は実装の担当、T は試験の担当です。
-T の段の中身と大きさは[試験の道具の設計の段階の計画](test-tooling.md#8-段階の計画)のとおりです。
+### TCP の接続とデータの経路で決めたこと
 
-| 順 | PR | 担当 | 中身 | サイズの目安 | 前提 |
-| --- | --- | --- | --- | --- | --- |
-| 1 | この文書 | | 設計 | | |
-| 2 | `feat(wgstack-rs): packets, checksums and reassembly` | A | crate の骨組み、依存と sans-IO の検査、`FixedVec`、`wire`、checksum、`frag`、`siphash`、ChaCha8、`Time`。fuzz の `parse` | 約 2,500 行 | 1 |
-| 3 | `feat(wgstack-rs): tables, buffers and the bound` | A | 接続の枠、hash の表、握手の途中の表、TIME_WAIT の表、待ち受けと UDP の endpoint の表、タイマーの輪、出力の list と制御の輪、知らせの list、chunk の置き場、送受信の輪、区間の treap、送信の記録、`Budget`、`Bound` と生成した表、`check_invariants`、確保の数えの試験の道具 | 約 3,000 行 | 2 |
-| 4a | `feat(wgstack-rs): passive open, close and the application API` | A | 受動の open と確立の入口、accept の待ち行列、FIN と TIME_WAIT、`close` と `abort`、古い handle、アプリケーションの操作と知らせ、出力の組 | 約 2,500 行 | 3 |
-| 4b | `feat(wgstack-rs): the data path to the completion level` | A | データの送受信、受け手の ACK と quickack の規則、受信の窓の自動調整、遅延 ACK、窓と persist、RTO、NewReno、RFC 5961 と RFC 7323、MSS | 約 3,000 行 | 4a |
-| 5 | `feat(wgstack-rs): SACK, RACK-TLP and CUBIC` | A | SACK の scoreboard と回復と PRR、受け手の SACK と D-SACK、RACK-TLP、CUBIC と HyStart++、不要な再送の取り消し、boost の取得と回収と取り消し | 約 4,500 行 | 4b |
-| 6 | `feat(wgstack-rs): UDP, ICMP and the ping endpoints` | A | UDP の endpoint と予算と会計の不整合、送信の断片化、echo と ping、ICMP の誤り、PMTU (ICMP の frag-needed による MSS の引き下げ)、断片の入口の結合 | 約 2,500 行 | 4a |
-| 7 | `feat(wgstack-rs): async handles over the core` | A | `wgft-netstack`:TCP、UDP、ping の非同期の handle、waker の表、操作の知らせ、hook の LAN 側のソケットの表 | 約 1,500 行 | 4b と 6 |
-| T1a、T1b | 台本の言語と Go の runner、残りの台本の移し替え | T | 段階の計画のとおり | 約 2,000 行、約 +900 と -1,300 行 | 1 |
-| T2a、T2b | DUT の frame と `dutserve` と `rustdut`、Go の wgstack の記録 | T | 段階の計画のとおり | 約 4,300 行、約 1,800 行と記録 (約 4.7 MB) | 1 |
-| T3a、T3b | `wgft-tcpharness` の crate と構文解析器、Rust の runner と `harness-rust-go` の job | T | 段階の計画のとおり | 約 2,400 行、約 3,000 行 | T1b、T2a |
-| T3c | `wgstack-dut` と記録の照合 | T | 段階の計画のとおり | 約 1,500 行 | T2b、T3b、4a |
-| T4 | fuzz の target と敵対的な保持の試験 | T | 段階の計画のとおり。故障の一覧を含みます | 約 3,000 行。段ごとに分けます | 3 から。4a から 6 に合わせて足します |
-| 8 | qbench の `wgstack-rs` の engine | T と A | `wgstack-dut` の実時間の形、socketpair の `tun.Device`、判定の切り替え | 約 1,000 行 | 5 と 7 |
-
-PR 4b と PR 5 が大きくなれば、実装の担当がレビューの単位に分けてよいとします。
-分けるときも、各 PR は Go の白箱の試験のうちその範囲のものを含めます。
-
-Go の変更 (T1、T2) は試験の道具だけで、製品の Go のコードを変えません。
-Go の試験を変える PR は、規則どおり wgstack の関門を流します。
-ラボの一式を Go の agent の代わりに Rust の agent で流す変更は、#680 の「ラボの切り替え」の段です。
-
-### 並べられる仕事
-
-- 試験の担当の T1 と T2 は、この文書の後すぐに、実装と並べて進められます。
-  どちらも Go の側だけで完結するためです。
-  T3a と T3b も `dutserve` を相手にできるので、Rust の wgstack を待ちません
-- 実装の 2、3、4a は順に積みます。
-  核の型と表が後の段の土台になるためです
-- 4a の後は、4b と 6 を並べられます。
-  触る module が分かれるためです。
-  5 は 4b の後です
-- 7 は 4b と 6 の後で、5 と並べられます
-- T3c は 4a の API が固まった後で、T4 は 3 の後から段ごとに足します
-- 8 は 5 と 7 の後です
-- #680 の「wgstack の上の agent」は 7 の後に始められます
-
-### 試験の担当の仕事
-
-試験の道具の設計の段階の計画の段に加えて、次のことを受け持ちます。
-
-- 故障の一覧を書き、実装の担当が書いた故障の点で台本の検出力を確かめます
-- 期待した差の一覧と意図した違いの一覧に行を足すときは、理由を書きます
-
-試験の担当は Rust の wgstack の実装のコードを読まず、公開の API の文書だけを読みます。
-実装の担当は試験の担当の台本と runner を直しません。
-台本が誤っていると考えたら、理由を書いて試験の担当に返します。
-
-### PR 4a と 4b で決めたこと
-
-実装の担当が決めた点です。
-理由と共に挙げ、所有者か監督が変えるときはこの節を直します。
-
-- PR の分け方:受動の open と閉じる手順 (4a) と、データの経路 (4b) を 1 つの PR にしました。
-  Go のコードでは、FIN の状態の遷移を ACK の処理が進め、窓の probe を入力の後の処理が張るように、2 つが同じ関数を
-  通ります。
-  分けると 4a に使い捨ての代わりの規則 (再送の無い送信、固定の窓) が要るためです。
-  ベンチの crate は積んだ別の PR にしました
-- SACK の交渉:PR 4a と 4b の核は SACK を交渉しませんでした。
-  SACK の印付けと回復の無い核が SACK を交渉すると、Go と違う経路 (高速の再送の無い回復) を通るためです。
-  PR 5 から Go と同じく相手の SYN の SACK-permitted に応えます
 - HyStart++:Go の HyStart++ は輻輳の制御の種類によらず最初の slow start で働きます。
-  NewReno の記録と同じ出力を返すため、PR 5 でなく PR 4b に入れました
-- 輻輳の制御と boost の与え方:`Config` に `congestion` と `boost` を足しました。
-  PR 4a と 4b の核は NewReno と boost を求めない方針だけを受け付けました。
-  PR 5 で既定を Go と同じ CUBIC と需要による boost にし、`ConfigError::Unsupported` を消しました
+  Rust も NewReno のときを含めて働かせ、NewReno の記録と同じ出力を返します
+- 輻輳の制御と boost の与え方:`Config` の `congestion` と `boost` で選びます。
+  既定は Go と同じ CUBIC と需要による boost です
 - 時刻の算術:TCP の規則の中の時刻は Go と同じ符号つきの 64 bit の ns で持ち、0 を「無し」にします。
   Go は `now - curRTO()` のように負になりうる値を 0 と区別して使うので、飽和する `Time` の算術では同じ出力に
   なりません
 - 古い handle の abort:Go は古い接続の値が持つ 4 つ組で TIME_WAIT の行を引きます。
   Rust の `ConnId` は 4 つ組を持たないので、TIME_WAIT の表に元の接続の枠ごとの行の list を持ち、元の枠と世代で引きます。
   手間は、その枠から移して表に残る行の数です。
-  中継は規則を変えた時と閉じる時に、届けている途中の多くの接続を abort するので、表の全体をたどる形は採りませんでした。
+  中継は規則を変えた時と閉じる時に、届けている途中の多くの接続を abort するので、表の全体をたどる形は採りません。
   上界の `tw` の項は、行ごとの節と枠ごとの先頭を数えます
 - 接続の枠の確保の失敗:握手の最後の ACK で floor の記録の輪と区間の表を確保できなければ、accept の待ち行列が
   満杯の時と同じく ACK を捨てて行を残し、`accept_overflow` を数えます
-- 断片、UDP、ICMP:PR 6 までは捨てて理由ごとに数えました (`fragments_dropped`、`udp_dropped`、`icmp_dropped`)。
-  PR 6 で入口を足しました
 - chunk の確保の失敗:受信のバッファが chunk を確保できなければ、segment を状態を変えずに捨てて
   `recv_no_memory` を数えます。
   書き込みは `Error::NoMemory` を返します
 - 白箱の試験:Go の `tcp_test.go`、`ackpolicy_test.go`、`orphan_test.go`、`reuse_refused_test.go`、
-  `hystart_test.go` などのうち、この段の範囲の試験を移しました。
-  SACK、D-SACK、boost、受信の窓の boost の段を使う試験 (`rcvwin_test.go` の多く) は PR 5 が移しました
+  `hystart_test.go` などを移しました。
+  SACK、D-SACK、boost、受信の窓の boost の段を使う試験 (`rcvwin_test.go` の多く) は次の節の試験です
 
-### PR 5 で決めたこと
-
-実装の担当が決めた点です。
-理由と共に挙げ、所有者か監督が変えるときはこの節を直します。
+### 回復と輻輳の制御と boost で決めたこと
 
 - 欄の置き場所:RACK の状態、TLP の縮小の印、次の ACK に載せる D-SACK の block、CUBIC の状態は ACK ごとに触るので `Tcb` に置きました。
   D-SACK で倍率を上げた往復と倍率を保つ回復の数、D-SACK の累計、PRR、boost の需要と受信の段の印は、D-SACK と回復と boost の事象でだけ触るので `ConnCold` に置きました。
-  並べ替えの窓の倍率は上限が 255 なので `u8` で持ちます。
-  `Tcb` は 576 byte から 704 byte になり、上界の表を生成し直しました
+  並べ替えの窓の倍率は上限が 255 なので `u8` で持ちます
 - 試験だけの数え:Go の `scoreSteps` と `rackChanges` は欄に足しません。
   型の大きさを試験の build でも製品の build と同じに保つためです。
   `scoreSteps` は、試験の build だけにある thread の値 (`tcp::sack::steps`) で Go と同じ所で数え、ACK 1 つの手間の上界の試験に使います。
@@ -1071,8 +947,6 @@ Go の試験を変える PR は、規則どおり wgstack の関門を流しま�
 - 書き込みと boost:Go の `Write` は boost を得た後に、同じ呼び出しの中で広がった空きに書き続けます。
   Rust の `write` は 1 回で書けた量を返し、広がった空きは次の `write` が使います。
   待つことは handle の層が持つためです ([アプリケーションの操作](#アプリケーションの操作))
-- PMTU:Fragmentation Needed による PMTU の引き下げ (Go の `pmtuDrop` と `markLostLonger`) は、ICMP を入れる PR 6 で足しました。
-  Go の PMTU の試験もその段で移しました
 - 不変条件:`check_invariants` は、使っている接続ごとに scoreboard を記録から数え直して比べ (`tcp::sack::check_scoreboard`)、boost の無い接続が floor の受信の予約を持つことを確かめます。
   Go の試験は数え直しを `checkScoreboard` で行います。
   Rust は Go の試験が見逃した 2 つの変異 (最も右の SACK 済みの byte を更新しないことと、損失の境目を越えた記録を送った時刻の順の list に残すこと) も捉えるよう、SACK 済みの byte があれば最も右の SACK 済みの記録の端が `high_sack` と等しいこと、境目より手前の SACK 済みでない記録が list にあるなら今の世代で再送したものであることも確かめます。
@@ -1090,21 +964,15 @@ Go の試験を変える PR は、規則どおり wgstack の関門を流しま�
   RACK の期限の敵対的な ACK の試験は Go と同じ ACK の数で流します。
   SACK の洪水の試験は Go の 20000 の ACK では 18 秒かかるので 5000 にし、ACK 1 つの手間の上界も確かめます。
   上界の式は ACK の数に比例するので、確かめる比は同じです
-- 記録の照合:`crates/wgft-wgstack-dut/stages.json` の `landed` に 5 を足し、SACK、timestamp、CUBIC、boost の印の記録を照合に入れました。
-  4b と 5 の段の印の記録はすべて Go の応答と byte の単位で一致し、2 節の台本もすべて通ります。
-  意図した違いの一覧に足した行はありません
 
-### PR 6 で決めたこと
-
-実装の担当が決めた点です。
-理由と共に挙げ、所有者か監督が変えるときはこの節を直します。
+### UDP と ICMP と断片で決めたこと
 
 - UDP の endpoint の行:行は endpoint の 2 つの向きの予算、向きと大きさの区分ごとの今の chunk、受信の FIFO の先頭と末尾、送信の空きを待つ list の節を持ち、待ち受けと同じポートごとの行の表 (`PortTable`) に置きます。
   endpoint の byte の予算はいつも chunk の倍数なので chunk の数で持ち、datagram の番号は 16 bit にしました。
   このため `Limits` の UDP の datagram の数は 1 から 65,535 です。
   行はポートの表の世代を含めて 32 byte で、表は開いている印の bit の集合と合わせて 2.0 MiB です ([上界の表](wgstack-bound.md))。
-  受け付けるアドレス 1 つの agent の固定の項としては小さいので、密な表と番号の引き当ての 2 段にはしませんでした
-- `Limits` の UDP の数:Go の試験だけが小さくする `udpRxDgrams` と `udpTxDgrams` に当たる `udp_rx_datagrams` と `udp_tx_datagrams` を `Limits` に足しました。
+  受け付けるアドレス 1 つの agent の固定の項としては小さいので、密な表と番号の引き当ての 2 段にはしません
+- `Limits` の UDP の数:`Limits` は、Go の試験だけが小さくする `udpRxDgrams` と `udpTxDgrams` に当たる `udp_rx_datagrams` と `udp_tx_datagrams` を持ちます。
   試験の担当の `core` の fuzz と記録の `HELLO` の上限の組が使います。
   既定は Go の本番の値 (4096 と 1024) です。
   試験の `small_limits` は Go の `smallLimits` と同じく、再組み立ての表と UDP の予算を本番の値にしました
@@ -1134,12 +1002,14 @@ Go の試験を変える PR は、規則どおり wgstack の関門を流しま�
 - 断片の数:`fragments_dropped` は、Go の `FragmentsDropped` と同じく、datagram を完成させなかった断片 (保持した断片、重なった断片、捨てた断片) を数えます
 - 再組み立ての表の掃除の期限:`poll_timeout` は、表が項目を持つ間だけ次の掃除の時刻を返します (Go の `nextDeadline`)。
   呼び手の待ちのたびに表の全体をたどらないよう、表は使っている項目の数を持ちます
-- 誤り:`Error` に `InvalidAddress`、`MessageTooLong`、`UdpStopped`、`TableFull`、`InvalidMessage`、`NoBufferSpace` を足しました。
+- 誤り:`Error` は UDP と ICMP のために `InvalidAddress`、`MessageTooLong`、`UdpStopped`、`TableFull`、`InvalidMessage`、`NoBufferSpace` を持ちます。
   制御の輪が満杯の時の `send_ping` は、Go と同じく IP の ID を 1 つ使ってから `NoBufferSpace` を返します。
   Go と同じく、この拒否は `ctl_dropped` に数えません
 - まれにしか触らない状態の置き場:UDP の状態、ping の表、ICMP の誤りの速さの制限、再組み立ての表の掃除の時刻は、核の共有の状態 (`Shared`) の中に置きます。
-  `Shared` は 464 byte 大きくなり、segment ごとの経路が触る欄のキャッシュの行の中の位置がずれます。
-  これらを作成の時に確保する別の値に移す形も試しましたが、`send_segment/1024` の L1 の miss は減らずに増えたので採りませんでした ([PR 6 の測定](#pr-6-の測定))
+  このため segment ごとの経路が触る欄のキャッシュの行の中の位置がずれます。
+  これらを作成の時に確保する別の値に移す形は採りません。
+  2026-11-01 の `perf stat` の測りで、その形では `send_segment/1024` の 1,000 命令あたりの L1 の miss が減らずに増え、`Shared` に置く形との差は criterion の中央の推定の揺れの内だったためです。
+  増えた理由は調べていません
 - ping の表:応答の置き場は作成の時に確保する配列です。
   応答の置き場は Go と同じく MTU の大きさで、Go は最初に使う時に確保しますが、Rust は 16 個すべてを作成の時に確保します。
   上界はどちらも 16 個の分を数えます
@@ -1156,35 +1026,16 @@ Go の試験を変える PR は、規則どおり wgstack の関門を流しま�
 - 不変条件:`check_invariants` は、UDP の chunk と datagram の空きの list、核と endpoint の予算と保持する chunk と datagram の一致、区分の枠の使っている数、受信と送信の FIFO、待ちの list、ping の行を確かめます。
   核の chunk の置き場の数は、接続の輪と UDP の chunk の和と比べます
 
-#### PR 6 の測定
-
-2026-11-01 に、E コアの車線 (`wgft-heavy --class tool --timing`、release の build) で、PR 5 の頭、PR 6 (UDP の状態を `Shared` の中に置く形)、UDP の状態を作成の時に確保する別の値に移した形の 3 つを比べました。
-`perf stat` で `send_segment/1024` を 4 秒ずつ 4 回流し、1,000 命令あたりの L1 の miss (`mem_load_uops_retired.l1_miss`) と IPC を数えました。
-
-| build | 1,000 命令あたりの L1 の miss | IPC |
-| --- | --- | --- |
-| PR 5 の頭 | 12.81、11.21、11.20、11.31 | 2.163 から 2.171 |
-| PR 6 | 11.44、13.09、11.73、11.31 | 2.163 から 2.215 |
-| 別の値に移した形 | 14.61、13.36、14.61、12.90 | 2.183 から 2.214 |
-
-決まった時間に流した命令の数と IPC は 3 つで同じ程度でした。
-`send_segment/1024` の criterion の中央の推定は、同じ build でも 631 ns と 677 ns の間で回ごとに変わり、3 つの差はこの揺れの内でした。
-L1 の miss は別の値に移した形だけが多く、PR 6 の形と PR 5 の頭の差は回ごとの揺れの内でした。
-別の値に移した形で増えた理由は調べていません。
-
-### PR 7 で決めたこと
-
-実装の担当が決めた点です。
-理由と共に挙げ、所有者か監督が変えるときはこの節を直します。
+### handle の層で決めたこと
 
 - 核に届く道:handle は `Access` の trait (`with`、`wake_driver`、`is_poisoned`) を通して核を借用します。
   agent のデータプレーンは device の層と核を 1 つの `RefCell` に置くので、handle の層が別の `RefCell` を持つと持ち主が 2 つになるためです。
   核と waker の表は `Netstack` の 1 つの値にし、駆動の口 (`handle_packet`、`handle_timeout`、`poll_transmit`、`poll_timeout`、`poll_wakers`、`poll_log`、`close`) は `dataplane::Upper` と同じ形で時刻を `Instant` で受けます。
-  核の段 (#680 の「wgstack の上の agent」) は、`Local` に `Access` を、`Netstack` に `Upper` を実装して繋ぎます。
+  agent のデータプレーンは、`Local` に `Access` を、`Netstack` に `Upper` を実装して繋ぎます。
   `LocalNetstack` は核だけを持つ同じ形の実装で、試験とほかの駆動 (後の server) が使います
 - 作成の失敗:`Netstack::new` は、`Stack::new` の誤りと waker の表の確保の失敗を `NetstackError` で返し、`Budget` を取り戻せます。
   waker の表とポートの頁は `try_reserve_exact` で確保し、頁の確保の失敗は待ち受けと endpoint を開く操作の `NoMemory` の誤りにします。
-  核の段は、データプレーンの上の層の作成を失敗しうる形にし、失敗した作成が受けた予算を返す形で合わせました ([核との継ぎ目](agent-parity.md#核との継ぎ目))
+  agent のデータプレーンも上の層の作成を失敗しうる形にし、失敗した作成は受けた予算を返します ([核との継ぎ目](agent-parity.md#核との継ぎ目))
 - 時刻:`Netstack` は作成の時の `Instant` と時計の関数を持ち、handle の操作の時刻はその時計から取ります。
   駆動はデータプレーンの時計と同じ関数を渡します。
   agent はデータプレーンの時計 (`dataplane::clock::now`) を渡します。
@@ -1197,7 +1048,7 @@ L1 の miss は別の値に移した形だけが多く、PR 6 の形と PR 5 の
   上界は 64 bit の target で、接続の枠の数 × 32 byte、ポートの頁をすべて開いた 2 MiB、頁の表の 4 KiB、ping と UDP の送りの待ちの分の和で、K の既定で約 2.1 MiB です。
   `Netstack::waker_bound` が計算し、試験がすべての頁を開いた表の大きさと一致することを確かめます。
   waker の表と、駆動が借用の外で起こすために waker を移す list は、核の `Bound` の外です。
-  核の段が agent のメモリの上界の行に足します。
+  agent のメモリの上界の行がこれらを数えます ([メモリの上界の行](agent-parity.md#メモリの上界の行))。
   表は知らない種類の知らせを試験と debug の build で止めます。
   dial の側が `Connected` と `ConnectFailed` を足す時に、表が黙って捨てないためです
 - 待つ task の数:接続の読みと書き、待ち受け、UDP の受け取り、ping は、向きごとに 1 つの task だけが待ちます。
@@ -1210,9 +1061,9 @@ L1 の miss は別の値に移した形だけが多く、PR 6 の形と PR 5 の
   `Notify` は中に錠を持ち、`UdpWritable` は送信の予算が尽きた時だけ出ます。
   1 回の知らせで起きる送り手は、UDP の中継の応答のバッファの枠の数 (64) までです
 - 駆動を起こす道:handle は操作ごとに `wake_driver` を呼びます。
-  `LocalNetstack` と agent の `Local` はどちらも `tokio::sync::Notify` の `notify_one` で起こし、駆動の task が待っている時は `Notify` の錠を取ります。
+  `LocalNetstack` は `tokio::sync::Notify` の `notify_one` で起こし、駆動の task が待っている時は `Notify` の錠を取ります。
   packet ごとではなく操作ごとの費用です。
-  核の段は、これを 1 つのスレッドの `Cell` に置いた waker に替えてもよいとします
+  agent の `Local` は 1 つのスレッドの `Cell` に置いた印と waker で起こし、錠を取りません ([操作の知らせ](#操作の知らせ))
 - 取り消し:どの future も核の操作を 1 回の poll の中で終えます。
   進んだら `Ready` を返し、`WouldBlock` なら waker を登録して `Pending` を返します。
   核の `WouldBlock` は状態を変えないので、future をどこで落としても核は一貫します。
@@ -1240,7 +1091,7 @@ L1 の miss は別の値に移した形だけが多く、PR 6 の形と PR 5 の
   `poll_flush` は何もせず、`poll_shutdown` は `close_write` です
 - ログの文面:`poll_log` は Go の wgstack と同じ文面の行を返します。
   文面の正本は handle の層の 1 か所だけです。
-  核の `LogLine` の `Display` は消しました。
+  核の `LogLine` は `Display` を持ちません。
   核はログを書かず、駆動の層が英語の 1 行にする決まり ([誤りと捨てた数](#誤りと捨てた数)) に合わせ、UDP の内訳と会計の故障の中身を読める層に置くためです。
   MSS の下限の行は、Go が書く最後の相手のアドレス (the latest from) を書きません。
   `LogLine` がアドレスを運ばないためです。
@@ -1252,10 +1103,10 @@ L1 の miss は別の値に移した形だけが多く、PR 6 の形と PR 5 の
   表は核の `RefCell` の外の `Rc` で、hook と中継が分け合います。
   hook は核の借用の中で呼ばれるためです。
   boost を accept の時に与える方針では、boost の知らせが accept の中で登録より先に来ます。
-  hook は変化だけを伝えるので ([PR 5 で決めたこと](#pr-5-で決めたこと))、この方針では最初の知らせが LAN 側に届きません。
+  hook は変化だけを伝えるので ([回復と輻輳の制御と boost で決めたこと](#回復と輻輳の制御と-boost-で決めたこと))、この方針では最初の知らせが LAN 側に届きません。
   この方針は試験と測定だけが選ぶので、知らせを溜めて登録の時に渡す仕組みは作りません。
   製品の既定の需要による boost は読み書きの後に来るので、登録が先です
-- 核に足した口:`PingId::index`、`Stack::hook`、定数の `MAX_PINGS`、`MIN_MSS`、`UDP_RX_BYTES`、`UDP_ENDPOINT_SHARE` です。
+- handle の層が使う核の口:`PingId::index`、`Stack::hook`、定数の `MAX_PINGS`、`MIN_MSS`、`UDP_RX_BYTES`、`UDP_ENDPOINT_SHARE` です。
   waker の表とログの文面が核の値を写さずに使うためです
 - dial の側の余地:`TcpStream` は `ConnId` から作り、waker の表は接続の枠の番号で引くので、受動と能動の接続で同じ形です。
   dial の側は、`connect` の future と、`Connected` と `ConnectFailed` の知らせで書きの waker を起こす行を足します
@@ -1272,7 +1123,7 @@ L1 の miss は別の値に移した形だけが多く、PR 6 の形と PR 5 の
 `check_invariants` は使っている接続ごとに `check_sender` を呼び、Go の敵対的な送り手の試験 (`runAudit`) が各段の後に確かめることと `checkScoreboard` を写します。
 
 - SND.UNA ≤ SND.NXT ≤ SND.MAX と、輻輳の窓が 0 でないこと
-- scoreboard の数え直し (PR 5 の `check_scoreboard`):記録が SND.UNA から SND.MAX まで隙間なく並ぶこと、SACK 済みの byte と数、境目から先の byte と数、再送の byte (`rtx_bytes`)、境目から先の RACK の損失の byte、位置の欄 (`loss_idx`、`rxt_idx`) の範囲、2 つの list (`t_list`、`lost_q`) の節と印と数と順
+- scoreboard の数え直し (`check_scoreboard`):記録が SND.UNA から SND.MAX まで隙間なく並ぶこと、SACK 済みの byte と数、境目から先の byte と数、再送の byte (`rtx_bytes`)、境目から先の RACK の損失の byte、位置の欄 (`loss_idx`、`rxt_idx`) の範囲、2 つの list (`t_list`、`lost_q`) の節と印と数と順
 - pipe:増減で保つ欄から求めた値が、RFC 6675 の定義どおりに記録から求めた値と一致すること (Go の `checkScoreboard` と同じ)
 - 分けて送っている記録の中の位置:`q_mid` の間は損失の待ち行列が空でなく `q_off` がその先頭の記録の長さより小さいこと、`rxt_mid` の間は `rxt_off` が `rxt_idx` の記録の長さより小さいこと
 
@@ -1287,11 +1138,10 @@ Go の「pipe は送り残しの 2 倍と 1 以下」は別に確かめません
 ### 不変条件の検査の手間
 
 試験と fuzz は `check_invariants` を各段の後に呼ぶので、手間は表の大きさに比例しても、表の大きさによらない固定の部分を持たないようにします。
-PR 6 の頭では、試験の小さな表でも 1 回に約 100 µs かかり、ほとんどがポートの数 (65,536) に比例する部分でした。
-知らせの list の確かめが対象ごとに印と list の節を比べ、待ち受けと UDP の endpoint の表の確かめが開いている行を探して 65,536 行をたどっていたためです。
+知らせの list の確かめが対象ごとに印と list の節を比べ、待ち受けと UDP の endpoint の表の確かめが開いている行を探して 65,536 行をたどると、試験の小さな表でも 1 回に約 100 µs かかり、ほとんどがポートの数に比例する部分になります。
 k 回に 1 回だけ確かめる形は、壊れた段を後の段で見つけることになるので採りません。
 
-- list の節の印:`Dlist` の「list に入っている」印を、節ごとの `bool` から 1 節 1 bit の集合 (`BitSet`) にしました。
+- list の節の印:`Dlist` の「list に入っている」印は、1 節 1 bit の集合 (`BitSet`) で持ちます。
   確かめは list をたどり、たどった数と印の数 (64 節で 1 語の popcount) を比べます。
   たどった節はどれも印を持ち前の節を指すので、同じ節を 2 度通りません。
   このため数が等しければ印を持つ節はすべて list にあります
@@ -1300,7 +1150,7 @@ k 回に 1 回だけ確かめる形は、壊れた段を後の段で見つける
 - ポートの表:行が開いているかを行に持たず、ポートごとに 1 bit の集合だけに持ちます。
   開いている行をたどる処理と確かめは bit の集合の語をたどり、開いている数と popcount を比べます。
   印が 1 か所にしか無いので、行と印の食い違いは起きません。
-  待ち受けの行は 20 byte から 16 byte に、UDP の endpoint の行は 36 byte から 32 byte に縮み、2 つの表で 0.5 MiB 小さくなりました ([上界の表](wgstack-bound.md))
+  このため待ち受けの行は 16 byte、UDP の endpoint の行は 32 byte に収まります ([上界の表](wgstack-bound.md))
 - 空きの list の重なりの印:接続の枠と握手の途中の表と TIME_WAIT の表の空きの list の確かめは、印を 1 行 1 bit にし、確かめの間だけ確保します。
   1 つの印の配列を使い回す形は採りません。
   使い回す配列は `&self` の確かめの中で書くので内部の可変性 (`Cell` か atomic) を要し、製品の核に試験のためだけの常駐の配列 (既定の表で 8 KiB) が加わります。
@@ -1309,39 +1159,19 @@ k 回に 1 回だけ確かめる形は、壊れた段を後の段で見つける
   容量の外に chunk が無いことは、同じ検査の中で `Ring::check` が確かめます。
   製品の `held` も同じ関数を使うので、会計を読む手間も減ります
 
-segment ごとの経路は、`Dlist` の印の読み書きが byte の読み書きから bit の演算に変わります。
+segment ごとの経路では、`Dlist` の印の読み書きは bit の演算です。
 ポートの表の引き当ては、行に加えて bit の集合の語を読みます。
 TCP の確立した接続の segment はポートの表を引きませんが、UDP は datagram ごとに引きます。
 UDP の datagram ごとの手間は、UDP の bench が無いので測っていません。
 
-#### 不変条件の検査の測定
-
-2026-11-01 に、E コアの車線 (`wgft-heavy --class tool --timing`、release の build) で測りました。
-`check_invariants` と `stack_new` は `wgft-wgstack-bench` の criterion の組で、表の大きさは試験の `small_limits` (K = 16) と既定です。
-fuzz は試験の担当の `core` の target を、送り手の不変条件を足した段の核で、変える前と後の両方を `-runs=25000 -seed=1` で 3 回ずつ流しました。
-fuzz の値は、corpus に Go が生成した種 (`go-gen-*`) を足す前の corpus で、`Ring::held_chunks` を変える前に測りました。
-1 回の入力の手間は corpus で変わるので、この値は今の corpus の値と比べられません。
-
-| 測った値 | 変える前 | 変えた後 |
-| --- | --- | --- |
-| `check_invariants/small/1` | 102.7 µs | 8.9 µs |
-| `check_invariants/small/16` | 101.3 µs | 9.7 µs |
-| `check_invariants/default/1` | 2.04 ms | 1.69 ms |
-| `check_invariants/default/1024` | 2.13 ms | 1.89 ms |
-| `stack_new/default_limits` (作って閉じる) | 3.26 ms と 8.39 ms (回ごとに揺れました) | 2.58 ms |
-| `core` の fuzz の 25,000 回 | 61、60、60 秒 | 22、22、22 秒 |
-
-既定の表の `check_invariants` は、表の行の数 (TIME_WAIT の表の 65,536 行、接続の枠ごとの輪の chunk の位置) に比例する部分が大部分で、この変更の対象ではありません。
-`default/1024` の値は回ごとに約 30% 揺れました。
+2026-11-01 の測りでは、この形で試験の小さな表 (K = 16) の `check_invariants` は約 100 µs から約 9 µs に、`core` の fuzz の 25,000 回は約 60 秒から約 22 秒に縮みました。
+既定の表の `check_invariants` は、表の行の数 (TIME_WAIT の表の 65,536 行、接続の枠ごとの輪の chunk の位置) に比例する部分が大部分で、この形の対象ではありません。
 小さな表で残る約 9 µs は、接続の枠ごとの輪の容量の外の chunk の位置の確かめ、送り手と scoreboard の確かめ、UDP の datagram の管理の配列の確かめです。
-segment ごとの経路の criterion の組 (`recv_segment`、`send_segment` と `_sack` の組) は、変える前の値との差が -1% から +2% で、同じ時に流した道具だけの費用 (`rig_overhead`) の揺れ (-2.4% から +1.8%) の内でした。
-最も差の大きかった `send_segment_sack/1024` は、変える前の build と交互に流すと 659 ns と 661 ns で、差はありませんでした。
-核の作成の手間は既定の表の大きさの配列の確保と初期化が大部分で、ポートの表が小さくなった分だけ減りました。
-作成の手順は変えていません。
+segment ごとの経路の criterion の組の差は、道具だけの費用の揺れの内でした。
 
-### 後の段
+## 置き換えの後の作業
 
-agent の置き換えが終わった後に、次の段を順に決めます。
+agent の置き換えが終わった後に、次の作業を順に決めます。
 
 - 性能の目標の測定と、届かない点の作業 ([置き換えの判定](#置き換えの判定))
 - 需要で育つバッファ ([需要で育つバッファとの関係](#需要で育つバッファとの関係))
@@ -1354,10 +1184,9 @@ agent の置き換えが終わった後に、次の段を順に決めます。
 
 - 写さずに読み書きする口:`read_slices` と `write_slices` を足すか。CPU を測ってから決めます
 - device の層との受け渡し:`Device::poll_packet` と `Device::poll_transmit` が packet ごとに確保する形を、呼び手の buffer に書く形に替えるか
-- 受け付けるアドレスが増えたときの待ち受けと UDP の endpoint の表の持ち方 (dial の側の段で決めます)
+- 受け付けるアドレスが増えたときの待ち受けと UDP の endpoint の表の持ち方 (dial の側を足すときに決めます)
 - 1 回の起床の上限:1 回に作る packet の数と、`WGFT_AGENT_BATCH_MIB` から導く式
 - 割り当て器:OS の標準と mimalloc のどちらにするか (測ってから)。選んだ割り当て器の丸めの係数
-- TUN の殻:ラボの一式が Rust の agent で通った後に消すか
 
 ## 未確認の点
 
