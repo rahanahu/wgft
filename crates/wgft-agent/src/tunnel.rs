@@ -604,6 +604,11 @@ async fn resolve(endpoint: &str) -> Result<SocketAddrV4, String> {
 /// 値と壁時計の大きい方から印を作り、使った印の高い水位を返す。この module は、プロセスの中で見た
 /// 最も高い水位と、データディレクトリのファイルに残した水位の大きい方を下限として渡す。ファイルは
 /// agent.json と分ける。Go の agent が agent.json を書き直すと、知らないキーを捨てるためである。
+///
+/// ファイルは秒の値と、印が標準の TAI64N の基準 (2^62 + 10) によることを示す [`FORMAT`] の語を 1 行に
+/// 書く。語の無い行は、印が 27 秒進んでいた前の版 (sanstun の基準 2^62 + 37 をそのまま使った版) が
+/// 書いたものなので、27 秒を足して読む。相手は前の版の進んだ印を覚えているので、足さないと前の版の
+/// 終わりから 27 秒の間の開始が古いものの再送として捨てられる。
 mod stamp {
     use std::path::Path;
     use std::sync::Mutex;
@@ -616,12 +621,24 @@ mod stamp {
     /// device が受ける下限の上限。これ以上の値は壊れた記録として捨てる。
     const FLOOR_LIMIT: u64 = 1 << 40;
 
+    /// 秒の値の後に書く語。印が標準の TAI64N の基準によることを示す。
+    const FORMAT: &str = "standard-tai64n";
+
+    /// 語の無い前の版の記録の印が、標準より進んでいた秒。
+    const LEGACY_AHEAD: Duration = Duration::from_secs(27);
+
     /// プロセスの中で見た最も高い水位。
     static HIGH: Mutex<Duration> = Mutex::new(Duration::ZERO);
 
     fn read(file: Option<&Path>) -> Option<Duration> {
         let text = std::fs::read_to_string(file?).ok()?;
-        text.trim().parse::<u64>().ok().map(Duration::from_secs)
+        let mut words = text.split_whitespace();
+        let secs = Duration::from_secs(words.next()?.parse::<u64>().ok()?);
+        match (words.next(), words.next()) {
+            (Some(FORMAT), None) => Some(secs),
+            (None, _) => secs.checked_add(LEGACY_AHEAD),
+            _ => None,
+        }
     }
 
     /// 新しい device に渡す下限。残した値が読めないか大きすぎれば、1 行を出して捨て、壁時計から始める。
@@ -661,19 +678,25 @@ mod stamp {
         if margin {
             secs += SAVE_MARGIN.as_secs();
         }
-        if read(Some(file)).is_some_and(|saved| saved.as_secs() == secs) {
+        let text = encode(secs);
+        if std::fs::read_to_string(file).is_ok_and(|saved| saved == text) {
             return;
         }
         let mut tmp_name = file.as_os_str().to_owned();
         tmp_name.push(".tmp");
         let tmp = std::path::PathBuf::from(tmp_name);
-        let ok = write_synced(&tmp, file, &format!("{secs}\n"));
+        let ok = write_synced(&tmp, file, &text);
         if let Err(e) = ok {
             crate::logf!(
                 "cannot record the handshake clock in {}: {e}",
                 file.display()
             );
         }
+    }
+
+    /// ファイルの中身。
+    fn encode(secs: u64) -> String {
+        format!("{secs} {FORMAT}\n")
     }
 
     /// 一時ファイルに書いて fsync し、rename してからディレクトリも fsync する。
@@ -715,6 +738,24 @@ mod stamp {
             let fl = floor(Some(&f));
             assert!(fl < Duration::from_secs(1 << 40));
             assert!(!f.exists());
+            std::fs::write(&f, "100 other-format\n").unwrap();
+            assert_eq!(read(Some(&f)), None);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[test]
+        fn a_record_of_the_earlier_stamps_is_read_27_seconds_later() {
+            let dir = std::env::temp_dir().join(format!("wgft-stamp-old-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let f = dir.join("agent.json.clock");
+            // 前の版は印を 27 秒進めて付け、秒の値だけを書いた
+            std::fs::write(&f, "4100000000\n").unwrap();
+            let floor = read(Some(&f)).unwrap();
+            assert_eq!(floor, Duration::from_secs(4_100_000_027));
+            // 今の版の記録は語が付き、そのまま読む
+            assert_eq!(encode(4_100_000_027), "4100000027 standard-tai64n\n");
+            std::fs::write(&f, encode(4_100_000_027)).unwrap();
+            assert_eq!(read(Some(&f)), Some(floor));
             std::fs::remove_dir_all(dir).unwrap();
         }
     }

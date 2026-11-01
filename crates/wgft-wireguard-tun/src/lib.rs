@@ -43,7 +43,8 @@ pub struct TunSettings {
     /// The networks reached through the tunnel, for traffic from `address` only. The agent has
     /// one, the server's /32.
     pub routes: Vec<Ipv4Prefix>,
-    /// The link MTU. Use the device's MTU.
+    /// The link MTU. [`spawn`] lowers it to the device's MTU, the configured one rounded down to
+    /// a multiple of 16.
     pub mtu: u16,
     /// The routing table for `routes`, from 1 to 252 or above 255.
     pub table: u32,
@@ -276,6 +277,9 @@ pub async fn spawn(
     tun.validate()?;
     let device = wgft_wireguard::Device::new(config, Instant::now(), unix_floor)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+    // device は MTU を 16 の倍数に切り下げた長さまでしか送らないので、TUN もその長さにする
+    let mut tun = tun;
+    tun.mtu = tun.mtu.min(u16::try_from(device.mtu()).unwrap_or(u16::MAX));
     let (commands, command_rx) = mpsc::channel(16);
     let (event_tx, events) = mpsc::channel(256);
     let task = start(device, &tun, listen, command_rx, event_tx, filter).await?;

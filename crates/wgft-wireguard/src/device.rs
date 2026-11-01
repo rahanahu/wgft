@@ -25,7 +25,7 @@ use crate::config::{ConfigError, DeviceConfig, Limits, MAX_UNIX_TIME, MIN_MTU, R
 use crate::drops::{DropReason, Drops};
 use crate::ip::{IPV4_MIN_HEADER, parse_ipv4};
 use crate::keys::PublicKey;
-use crate::protocol::{DATA_OVERHEAD, Inbound, PADDING, PeerId, ProtoEvent, Protocol};
+use crate::protocol::{DATA_OVERHEAD, Inbound, PeerId, ProtoEvent, Protocol, inner_mtu};
 use crate::queue::{BoundedQueue, ByteLen};
 use zeroize::Zeroizing;
 
@@ -230,7 +230,8 @@ impl Device {
             .map(|p| (p.public_key, p.persistent_keepalive))
             .collect();
         let proto = Protocol::new(&config.private_key, &keys, config.timers, seed, now, unix)?;
-        let mtu = usize::from(config.mtu);
+        // sanstun の詰め物への手当て (sanstun_compat::inner_mtu)
+        let mtu = inner_mtu(config.mtu);
         let mut routes = AllowedIps::new();
         let mut by_key = HashMap::with_capacity(config.peers.len());
         let mut peers = Vec::with_capacity(config.peers.len());
@@ -284,11 +285,12 @@ impl Device {
         self.unix_at_start + self.now.saturating_duration_since(self.start)
     }
 
-    /// The longest datagram the device sends, for sizing receive buffers on the other side.
+    /// The longest datagram the device sends, for sizing receive buffers on the other side. It is
+    /// [`Device::mtu`] plus 32 bytes of header and tag, never more than the configured MTU plus 32.
     #[must_use]
     pub fn max_transmit_len(&self) -> usize {
-        // ハンドシェイクの開始 (148 バイト) より長い
-        self.mtu.next_multiple_of(PADDING) + DATA_OVERHEAD
+        // ハンドシェイクの開始 (148 バイト) より長い。mtu は 16 の倍数なので詰め物で伸びない (inner_mtu)
+        self.mtu + DATA_OVERHEAD
     }
 
     fn clock(&mut self, now: Instant) -> Instant {
@@ -478,6 +480,10 @@ impl Device {
         for peer in 0..self.peers.len() {
             self.proto.handle_timeout(peer, now);
             self.drain_proto_events(peer, now);
+            // sanstun の passive keepalive への手当て (sanstun_compat::PassiveKeepalive)
+            if self.proto.passive_keepalive(peer, now) {
+                self.drain_proto_events(peer, now);
+            }
             // sanstun は使えるセッションがある間、persistent keepalive を間隔ごとに送り、その送信が
             // この期限を延ばす。sanstun を先に進めた後でも期限が来ているのは、間隔の間なにも送って
             // いない、つまり使えるセッションが無いときだけである。応答の側のセッションが 180 秒で切れた
@@ -732,7 +738,9 @@ impl Device {
         self.limits
     }
 
-    /// The tunnel MTU.
+    /// The largest inner packet the device sends: the configured MTU rounded down to a multiple of
+    /// 16, so that padding never makes a data message carry more than the configured MTU. Give the
+    /// layer above this value.
     #[must_use]
     pub fn mtu(&self) -> usize {
         self.mtu

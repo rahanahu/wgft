@@ -65,9 +65,9 @@ Go の v1 の agent と仕様に対して、今の Rust の agent に無いも�
 | トンネルの入口の検査 | [tunnel.md のトンネルの入口の検査](../spec/tunnel.md#トンネルの入口の検査)。断片の再組み立て、MSS の下限、ICMP の誤りの送信元、UDP の受信の予算 | wgstack の核が持つ。`inbound` の module は消した | wgstack と「wgstack の上の agent」で済み |
 | 入口の検査が捨てた数 | [tunnel.md のトンネルの入口の検査](../spec/tunnel.md#トンネルの入口の検査)。捨てた数を数え、英語のログに 1 分に 1 回まで出す | 核が理由ごとの数と門を持ち、データプレーンが Go の wgstack と同じ文面で出す | 「wgstack の上の agent」で済み |
 | 待ち受けの無いポート | SYN に RST、UDP に Port Unreachable | 仕様のとおり (核) | wgstack で済み |
-| MSS | MTU から 40 を引いた値を示す | 仕様のとおり (核) | wgstack で済み |
+| MSS | netstack の MTU から 40 を引いた値を示す | 仕様のとおり (核)。netstack の MTU は下の行のとおり 16 の倍数に切り下げた値なので、1420 なら 1368 | wgstack で済み |
 | keepalive の ping | [tunnel.md の keepalive の ping](../spec/tunnel.md#keepalive-の-ping) | wgstack の ping の endpoint から送る | 「wgstack の上の agent」で済み |
-| MTU | server は 576 から 9216 を送る。v1 の agent は検査しない | 576 から 9216 は核にそのまま渡し、外なら 1420 を使う | 「wgstack の上の agent」で済み |
+| MTU | server は 576 から 9216 を送る。v1 の agent は検査しない | 576 から 9216 は device の層に渡し、外なら 1420 を使う。device の層は 16 の倍数に切り下げた値 (1420 なら 1408) を核に渡す ([MTU と詰め物](wireguard-device.md#mtu-と詰め物)) | 「wgstack の上の agent」で済み |
 | WireGuard のソケットのバッファ | [socket-buffers.md](../userspace/socket-buffers.md)。7 MiB を要求し、FORCE も試し、トンネルを立てるたびに測り、条件に届かなければ英語の 1 行を出す | 仕様のとおり。`agent doctor` の `tunnel.socket_buffers` も載せる | 「agent の device の殻」と「wgstack の上の agent」で済み |
 | 受信の誤りで止まらないこと | [tunnel.md の受信の goroutine の停止](../spec/tunnel.md#go-の性質受信の-goroutine-の停止)。Windows の `WSAECONNRESET` | データプレーンが Windows で `SIO_UDP_CONNRESET` を切り、受信の誤りを数えて読み続ける | 「agent の device の殻」と「wgstack の上の agent」で済み |
 | サスペンドの間の時計 | [tunnel.md のサスペンドの間の時計](../spec/tunnel.md#go-の性質サスペンドの間の時計)。Windows ではスリープの間も進む時計 | データプレーンの時計が持ち ([時計](#時計))、トンネルの監視も同じ時計で測る | 「wgstack の上の agent」で済み |

@@ -4,7 +4,9 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use crate::config::{DeviceConfig, Ipv4Prefix, Limits, PeerConfig, ProtocolTimers, Roaming};
+use crate::config::{
+    DeviceConfig, Ipv4Prefix, Limits, MIN_MTU, PeerConfig, ProtocolTimers, Roaming,
+};
 use crate::device::{Device, Event};
 use crate::drops::DropReason;
 use crate::ip::tests::ipv4_packet;
@@ -242,7 +244,7 @@ fn agent_contacts_the_server_at_start_and_both_ways_work() {
 fn delivered_packets_lose_their_padding() {
     let mut n = Net::new();
     n.connect();
-    for len in [0, 1, 15, 16, 17, 1400] {
+    for len in [0, 1, 15, 16, 17, 1388] {
         n.a_sends(&vec![0x5a; len]);
         let got = n.b_got.pop().unwrap();
         assert_eq!(got.len(), 20 + len, "payload of {len} bytes");
@@ -284,14 +286,16 @@ fn outbound_packets_need_a_route_an_ipv4_header_and_to_fit_the_mtu() {
     let mut v6 = ipv4_packet(AGENT_IP, SERVER_IP, b"x");
     v6[0] = 0x60;
     n.a.handle_packet(now, &v6);
-    n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, &[0; 1401]));
+    // MTU の 1420 を 16 の倍数に切り下げた 1408 バイトまで送る
+    assert_eq!(n.a.mtu(), 1408);
+    n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, &[0; 1389]));
     n.a.handle_packet(now, &[]);
     assert!(n.a.poll_transmit().is_none());
     assert_eq!(n.a.drops().get(DropReason::NoRoute), 1);
     assert_eq!(n.a.drops().get(DropReason::InvalidInnerPacket), 2);
     assert_eq!(n.a.drops().get(DropReason::TooBig), 1);
-    // ちょうど MTU の packet は通る
-    n.a_sends(&[0; 1400]);
+    // ちょうど 1408 バイトの packet は通る
+    n.a_sends(&[0; 1388]);
     assert_eq!(n.b_got.len(), 1);
 }
 
@@ -701,7 +705,7 @@ fn bad_configurations_are_refused() {
 fn max_transmit_len_covers_a_full_packet() {
     let mut n = Net::new();
     n.connect();
-    n.a.handle_packet(n.now(), &ipv4_packet(AGENT_IP, SERVER_IP, &[0; 1400]));
+    n.a.handle_packet(n.now(), &ipv4_packet(AGENT_IP, SERVER_IP, &[0; 1388]));
     let tx = n.a.poll_transmit().unwrap();
     assert_eq!(tx.payload.len(), n.a.max_transmit_len());
 }
@@ -1072,6 +1076,89 @@ fn start_handshake_sends_one_initiation_and_establishes_a_session() {
     assert!(!m.b.start_handshake(m.now(), &a));
     assert!(!m.a.start_handshake(m.now(), &a_key));
     assert_eq!(m.b.held().transmit_packets, 0);
+}
+
+#[test]
+fn padding_never_takes_a_data_message_past_the_mtu() {
+    for mtu in [MIN_MTU, 576, 1420, 1432, 1440, 1450, 9216] {
+        let mut n = Net::with(|a| a.mtu = mtu, |b| b.mtu = 9216);
+        n.connect();
+        let inner = n.a.mtu();
+        assert_eq!(inner % 16, 0, "MTU {mtu}");
+        assert!(inner <= usize::from(mtu) && inner + 16 > usize::from(mtu));
+        let now = n.now();
+        n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, &vec![1; inner - 20]));
+        let tx = n.a.poll_transmit().unwrap();
+        // 暗号の上乗せ (ヘッダと tag の 32 バイト) を除いた長さが設定の MTU を超えない
+        assert!(tx.payload.len() - 32 <= usize::from(mtu), "MTU {mtu}");
+        assert_eq!(tx.payload.len(), n.a.max_transmit_len());
+        n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, &vec![1; inner - 19]));
+        assert!(n.a.poll_transmit().is_none());
+        assert_eq!(n.a.drops().get(DropReason::TooBig), 1);
+    }
+}
+
+/// `n.a_sent_at` の `from` 以降の最も長い途切れ。
+fn widest_silence(n: &Net, from: Duration) -> Duration {
+    let mut last = from;
+    let mut widest = Duration::ZERO;
+    for &at in n
+        .a_sent_at
+        .iter()
+        .filter(|&&at| at >= from)
+        .chain([n.t].iter())
+    {
+        widest = widest.max(at.saturating_sub(last));
+        last = at;
+    }
+    widest
+}
+
+#[test]
+fn one_way_data_gets_a_passive_keepalive_within_the_keepalive_timeout() {
+    // server (B) から agent (A) へだけ 1 秒ごとにデータが流れる。WireGuard の規則では、A は返事をして
+    // いない最初の受信から 10 秒で keepalive を送る。送らないと B は返事の無いデータの 15 秒後に
+    // ハンドシェイクを始め直す
+    let mut n = Net::new();
+    n.connect();
+    let start = n.t;
+    n.a_sent_at.clear();
+    n.b_initiations.clear();
+    for _ in 0..60 {
+        n.t += Duration::from_secs(1);
+        n.tick();
+        n.b_sends(b"one way");
+    }
+    assert_eq!(n.a_got.len(), 60);
+    let widest = widest_silence(&n, start);
+    assert!(
+        widest <= Duration::from_secs(11),
+        "the agent was silent for {widest:?}"
+    );
+    assert!(n.b_initiations.is_empty(), "the server started a handshake");
+    // keepalive は 25 秒の persistent keepalive より密だが、受信ごとには送らない
+    assert!(n.a_sent_at.len() <= 10, "{} datagrams", n.a_sent_at.len());
+}
+
+#[test]
+fn a_passive_keepalive_waits_for_the_keepalive_timeout_and_answers_once() {
+    // 1 つだけ受けたデータには、10 秒後に keepalive を 1 つ返す
+    let mut n = Net::with(|a| a.peers[0].persistent_keepalive = None, |_| {});
+    let now = n.now();
+    assert!(n.a.start_handshake(now, &n.b_pub()));
+    n.pump();
+    let start = n.t;
+    n.a_sent_at.clear();
+    n.b_sends(b"once");
+    n.run(Duration::from_secs(9), Duration::from_millis(100));
+    assert!(n.a_sent_at.is_empty(), "{:?}", n.a_sent_at);
+    n.run(Duration::from_secs(20), Duration::from_millis(100));
+    assert_eq!(n.a_sent_at.len(), 1, "{:?}", n.a_sent_at);
+    let at = n.a_sent_at[0].saturating_sub(start);
+    assert!(
+        (Duration::from_secs(10)..=Duration::from_millis(10_100)).contains(&at),
+        "{at:?}"
+    );
 }
 
 #[test]
