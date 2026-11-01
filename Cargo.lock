@@ -1743,16 +1743,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wgft-wireguard-tun"
-version = "0.1.0"
-dependencies = [
- "clap",
- "libc",
- "tokio",
- "wgft-wireguard",
-]
-
-[[package]]
 name = "winapi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

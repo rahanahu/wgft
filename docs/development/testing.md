@@ -112,7 +112,7 @@ B 類の契機は、次のテストを選ぶために使います。
 | `build` | `.goreleaser.yaml`、`scripts/build-release.sh`、`scripts/goreleaser-checksum.sh`、`scripts/third-party-licenses.sh`、`scripts/check-release-assets.sh`、`scripts/docker-smoke.sh`、`deploy/Dockerfile.*`、`deploy/*.compose.yaml`、`go.mod`、`go.sum`、`.github/workflows/**` | B5、B6、B10 | 無し |
 | `rust` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、`internal/tcpharness/scripts/**`、`testdata/wgstack-rec/**`、`internal/tcpharness/rustdut/known-wgstack-rs.json` | B13、B14、B15 | 無し |
 | `harness` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`internal/tcpharness/**`、`internal/dutproto/**`、`internal/wgstack/**`、`internal/ipv4frag/**`、`go.mod`、`go.sum` | B16 | 無し |
-| `rust-agent` | `crates/**` のうち `crates/wgft-wireguard-tun/**` 以外、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` | 無し | ラボの一式の `rust` の組を積みの先頭で 1 回。マージの関門 ([マージの前に流すテスト](#マージの前に流すテスト)) |
+| `rust-agent` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` | 無し | ラボの一式の `rust` の組を積みの先頭で 1 回。マージの関門 ([マージの前に流すテスト](#マージの前に流すテスト)) |
 | `dataplane-net` | `internal/dataplane/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` の転送の経路 | 無し (C1 と C5 は次の段階の完了時に流し直す) | L1 |
 | `phase` | 関係する実装の段階の完了 | C 類 | すべて |
 | `rc` | リリースの候補の版 | 「リリース候補ごと」の項目 | すべて |

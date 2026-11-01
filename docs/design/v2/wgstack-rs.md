@@ -754,17 +754,6 @@ wgstack では packet が核の中で終わり、転送の経路も、中継が�
 試作が UDP、echo request、断片を捨てていたのは、カーネルにホストの応答を作らせないためでした。
 wgstack はそれらを自分で扱うので、[トンネルの中の約束](../spec/tunnel.md)の v1 の挙動に戻します。
 
-### TUN の殻の扱い
-
-`crates/wgft-wireguard-tun` は、agent の経路から外し、ラボの一式が Rust の agent で通るまで `lab/wg-interop.sh` のためのラボの道具として残します。
-#680 も同じ扱いです。
-
-- 残す理由:`lab/wg-interop.sh` は、TCP の stack と切り離して、device の層を Linux の WireGuard と wireguard-go に照らします。
-  wgstack に不具合があっても WireGuard の相互運用を確かめられるので、移行の間は原因を分けるのに使えます
-- 外すもの:agent は殻を使わずに device の層と核を直接動かします。
-  `WGFT_WG_INTERFACE` を TUN の名前に読み替える試作の扱いもやめます
-- 消す時機:ラボの一式が Rust の agent で server の両方のモードを通った後に、残すかを決め直します
-
 ### 設定の扱い
 
 - `WGFT_AGENT_NETSTACK`:決定どおり、`gvisor` と `wgstack` を受け付け、どちらでも Rust の wgstack で動かします。

@@ -43,7 +43,6 @@ event loop とスレッドの形は、#681 の `docs/design/v2/wgstack-rs.md` �
 | `wgft-proto` | wire の版 1 の型、接続文字列、登録の要求と応答、理由の整形、仕様の fixture との照合 |
 | `wgft-wireguard` | sanstun の上の sans-IO の WireGuard の device |
 | `wgft-wgstack` と `wgft-netstack` | Rust の wgstack の sans-IO の核と、その上の非同期の handle |
-| `wgft-wireguard-tun` | 試作の Linux の TUN の殻。agent は使わず、`lab/wg-interop.sh` の道具として残す |
 | `wgft-agent` | 登録、認証情報、stream、全体状態の適用、ハートビート、トンネルの監視と作り直し、データプレーンのスレッド、wgstack の上の TCP と UDP の中継、メモリの上界の行 (module `memory`)、制御ソケット、設定の層 (module `config`) |
 | `wgft` | `wgft agent` のコマンドと `wgft version`。clap への接続と、設定を読んで入口を通す手順 |
 
@@ -1091,12 +1090,7 @@ Rust の側は、agent のホストのコマンドのフラグが Go と同じ�
 - ビルド:`rust` のとき、`lab/lab build` は `cargo zigbuild --release --locked --target x86_64-unknown-linux-musl -p wgft` で静的なバイナリを作り、`bin/rust/wgft` に置きます
 - 置き場所:VM の中では `/usr/local/lib/wgft-rust/wgft` に置きます。
   ファイル名を `wgft` に保つのは、ラボの台本がプロセスを comm の `wgft` と cmdline の ` agent run` で探すためです
-- ビルドの契機:`WGFT_LAB_AGENT_IMPL=rust` の `lab/lab build`、`--agent-impl` に `rust` を含む `lab/lab suite`、試作の道具を作る `WGFT_LAB_RUST=1` です
-- 試作の物:試作の `wgft-rs` の名前は、ラボの切り替えの PR で置かなくなりました。
-  `wgft-rs` を使っていたのは `lab/rust-agent.sh` だけで、その後を継ぐ `lab/agent-handover.sh` は同じバイナリを `/usr/local/lib/wgft-rust/wgft` から呼ぶためです。
-  TUN の殻 (`wgft-wireguard-tun`) とラボのための wireguard-go は、device の層を Linux と wireguard-go と照らす `lab/wg-interop.sh` の道具として、ラボの一式が Rust の agent で通るまで残します。
-  「wgstack の上の agent」の段で、agent の経路からは殻を外しました
-  通った後は、ラボの一式が同じ相互運用を確かめるので、殻と `wg-interop.sh` を消します
+- ビルドの契機:`WGFT_LAB_AGENT_IMPL=rust` の `lab/lab build` と、`--agent-impl` に `rust` を含む `lab/lab suite` です
 
 ### 台本の継ぎ目
 
@@ -1206,8 +1200,7 @@ Rust の agent は試作のあいだ root で動きます。
 「wgstack の上の agent」の段から「UDP の中継」の段までは、UDP のルールを使う確認と `lifecycle.sh` の check 5 と 5b が `rust` の組で落ちたので、`rust` の組の結果を前の積みの結果と比べ、新しく落ちた確認が無いことを手で確かめました。
 「UDP の中継」の段から後は、`rust` の組の結果をマージの関門にします。
 ラボの切り替えの PR は、この扱いを[テストの規範](../../development/testing.md)の契機の表に `rust-agent` として書きました。
-対象は、`crates/**` のうち TUN の殻の `crates/wgft-wireguard-tun/**` を除くものと、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` です。
-TUN の殻は Rust の agent のビルドに入らないためです。
+対象は、`crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` です。
 ラボの切り替えの PR そのものは lab の変更なので、両方の netstack で `go` の一式を流します。
 
 ## Windows と macOS
@@ -1309,7 +1302,7 @@ base はすべて `feat/v2-rust` で、#679 の上に積みます。
 | --- | --- | --- | --- |
 | wgstack の上の agent (`feat(agent-rs): run the agent on the Rust wgstack instead of a TUN`) | データプレーンのスレッドに核を繋ぐ event loop、TCP の中継を #681 の中継の trait に移す、keepalive の ping、捨てた数のログ、`inbound` の module の削除、agent の経路から TUN の殻を外す、root を要らなくする | 1500 から 2000 | #681 の核と `netstack` の handle の層、agent の device の殻、宛先と予算 |
 | UDP の中継 (`feat(agent-rs): relay UDP rules over the wgstack`) | [UDP の中継](#udp-の中継) の全部、[メモリの上界の行](#メモリの上界の行)、`tunnel.udp_accounting` の値 | 1300 から 1800 | wgstack の上の agent |
-| 仕上げ | `rust` の組の一式を両方の server のモードで流し、落ちた確認を直す。通った後に TUN の殻と `lab/wg-interop.sh` を消す | 落ちた数による | UDP の中継、ラボの切り替え |
+| 仕上げ | `rust` の組の一式を両方の server のモードで流し、落ちた確認を直す。TUN の殻と `lab/wg-interop.sh` を消す | 落ちた数による | UDP の中継、ラボの切り替え |
 
 main へ入れる前に、所有者の規則のとおりリファクタリングと、sanstun の使い方を含む安全の点検を行います。
 
