@@ -514,6 +514,15 @@ Go の `internal/chacha8rand` の block の関数の写しで、台本の種か�
 観察の文字列に入る Go の書式のうち、`quote` の `strconv.Quote` と `seconds_text` の `strconv.FormatFloat` も写します。
 これらは Go の試験 `TestRustVectors` が書き出した値 (`internal/tcpharness/rustdut/testdata/vectors.json`) と照らします。
 
+`quote` がそのまま書く ASCII でない文字は、Go の `strconv.IsPrint` (`unicode.IsPrint` と同じ定義) の表で決めます。
+表は `TestRustVectors` が `-update` で `crates/wgft-tcpharness/src/runner/goprint.rs` に書き、git に入れます。
+crate の lib は標準ライブラリだけに依るので、Unicode の表の crate を使いません。
+Go の側は表が今の Go の `strconv.IsPrint` と同じことを、Rust の側は表の digest (範囲の列の FNV-1a 64) が `vectors.json` の値と同じことを確かめます。
+Go の Unicode の版が変わると Go の側の試験が落ち、`-update` で表と `vectors.json` を書き直します。
+
+`seconds_text` の精度が負の時は、Go の `strconv.FormatFloat` と同じく、同じ `f64` に読み戻せる最も短い形にします。
+2 つの runner で断る形にしないのは、Go の runner (`internal/tcpharness` の試験でないファイル) を変えずに済むためです。
+
 確かめの結果は Go と同じ形の行 (`PASS`、`FAIL`、`KNOWN DIFFERENCE`、`CHANGED DIFFERENCE`、`UNEXPECTED PASS`、`MEASURE`) で出します。
 log の行 (送った segment と見た segment、待ち、確かめの行) も Go と同じ文で、Go の recorder と同じく最後に知った DUT の時刻を頭に付けます。
 結果は `runner::Outcome` で、Go の `CheckTrace` と同じ中身 (確かめと測った値の列、失敗の文、失敗と skip の印、log の行) を持ちます。
@@ -555,6 +564,14 @@ Go の試験 `TestWriteTranscripts` (`internal/tcpharness/rustdut`) が、台本
 違えば、最初に違う frame とその前の frame を表示し、Rust の側の結果を同じ directory に `.rust.bin` と `.rust.trace.json` として残します。
 2 つの側の engine の名前は `go-wgstack` で、期待した差の一覧を持たせません。
 期待した差の確かめは両方の側で失敗になり、その失敗の文も比べます。
+`WGFT_TEST_TCPHARNESS_TRANSCRIPTS` を与えた時は、DUT が `dutserve` でなければ Rust の側の試験を失敗にします。
+照らすつもりの実行が、Go の transcript を照らさずに通るのを防ぐためです。
+
+期待した差の一覧の扱いは、2 回目の実行で照らします。
+Go の試験は小さな一覧を directory の `known.json` に書き、一覧が鍵を持つ台本を engine の名前 `go-wgstack-known` とその一覧で流して、`<種>.known.bin`、`<種>.known.trace.json` と、届かなかった項目の鍵の `<種>.known.unreached` を書きます。
+Rust の側は同じ一覧を `runner::parse_known` で読んで同じ台本を流し、3 つとも同じになることを求めます。
+一覧は、一致する観察の落ちた確かめ (`KNOWN DIFFERENCE`)、一致しない観察の落ちた確かめ (`CHANGED DIFFERENCE`)、通った確かめ (`UNEXPECTED PASS`)、`sometimes` の印を持つ通った確かめ、どの確かめも届かない鍵を持ちます。
+凍結した Go の wgstack で落ちる `require` は無いので、期待した差の `require` が skip で止まる道と、`sometimes` の印を持つ落ちた確かめの道は、Rust の単体の試験だけが確かめます。
 `dutserve` の標準エラーの行は Go の側だけが log に持つので、Go の側が書く前に除きます。
 
 実時間の待ちで呼び出しの数が変わらないように、`rustdut` は送り直さない規則を持ちます。
@@ -1132,7 +1149,6 @@ Rust の wgstack を相手にするのは T3c からで、実装の 4 の API �
 - 乱数の写し:Go の PCG と `IntN` の写しは、T3a で `rng.json` の値と一致しました。
   `IntN` の棄却の枝は、最初の値が棄却される状態と 2^63 に近い上限で Go の試験が書いた `rng-intn.json` の値と一致しました。
   Go の `strconv.Quote` と `strconv.FormatFloat` の写しは、T3b で Go の試験が書き出した値 (`vectors.json`) と一致しました
-- `quote` の ASCII でない文字:Rust の写しは Go の `unicode.IsPrint` の表を持たず、制御文字、空白、私用の領域などを `\u` で書き、ほかの文字をそのまま書きます。`vectors.json` の文字では Go と一致しますが、ほかの ASCII でない文字では違いうります。今の台本が `quote` に渡すのは DUT から読んだ ASCII のデータです
 - `wgft-tcpharness` の JSON:crate は標準ライブラリだけに依るため、Go の書いた例と一覧を読む小さな読み手 (`gojson::parse`) を持ちます。整数でない数は読みません
 - 実時間の Rust の DUT:`--clock real` の外側の層が製品の層と同じものになるかは、Rust の wgstack の外側の層の設計で決まります
 - qbench の Unix ソケットの 1 段:細い stream の遅れの p99 にどれだけ加わるかは未測定です

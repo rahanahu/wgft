@@ -62,8 +62,11 @@ fn format_float_matches_go() {
             Json::Uint(n) => i64::try_from(*n).expect("i64"),
             other => panic!("nanos {other:?}"),
         };
-        let prec =
-            usize::try_from(f.get("prec").and_then(Json::as_u64).expect("prec")).expect("usize");
+        let prec = match f.get("prec").expect("prec") {
+            Json::Int(n) => *n,
+            Json::Uint(n) => i64::try_from(*n).expect("i64"),
+            other => panic!("prec {other:?}"),
+        };
         let want = f.get("out").and_then(Json::as_str).expect("out");
         // Go の Duration.Seconds と同じ式
         #[expect(clippy::cast_precision_loss, reason = "Go's Duration.Seconds")]

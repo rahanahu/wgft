@@ -1,7 +1,9 @@
 //! 結果の行と観察の文字列が Go の harness と同じになるように、Go の書式を写した関数です。
 
+use std::cmp::Ordering;
 use std::fmt::Write as _;
 
+use super::goprint::PRINT;
 use crate::gojson::decode_rune;
 
 /// Go の `time.Duration.String` です (`1.5s`、`300ms`、`2m0s`、`0s`)。`ns` は nanosecond です。
@@ -60,9 +62,9 @@ fn frac_part(mut v: u64, prec: u32) -> (String, u64) {
     (format!(".{}", digits.into_iter().collect::<String>()), v)
 }
 
-/// Go の `strconv.Quote` です。ASCII と UTF-8 として読めない byte は Go と同じに書きます。
-/// ASCII でない文字は、制御文字、空白、私用の領域、U+00AD を `\u` で書き、ほかはそのまま書きます。Go の
-/// `unicode.IsPrint` の表の写しではないので、ASCII でない文字では Go と違いうります (設計の 9 節)。
+/// Go の `strconv.Quote` です。UTF-8 として読めない byte は `\x` で書き、ASCII でない文字は Go の
+/// `strconv.IsPrint` の表 (`goprint.rs`、Go の試験が書いたもの) に入る文字をそのまま、ほかを `\u` か `\U` で
+/// 書きます。
 pub fn quote(s: &[u8]) -> String {
     let mut out = String::from("\"");
     let mut i = 0;
@@ -100,22 +102,29 @@ pub fn quote(s: &[u8]) -> String {
     out
 }
 
+/// Go の `strconv.IsPrint` です。
 fn printable(c: char) -> bool {
     let u = u32::from(c);
-    !(c.is_control()
-        || c.is_whitespace()
-        || u == 0xad
-        || (0xe000..=0xf8ff).contains(&u)
-        || (0xfff9..=0xfffb).contains(&u)
-        || (0x200b..=0x200f).contains(&u)
-        || (0x2060..=0x2064).contains(&u)
-        || u == 0xfeff
-        || u >= 0xf0000)
+    PRINT
+        .binary_search_by(|&(lo, hi)| {
+            if hi < u {
+                Ordering::Less
+            } else if lo > u {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        })
+        .is_ok()
 }
 
-/// Go の `strconv.FormatFloat(v, 'f', prec, 64)` です。どちらも 2 進の値から正しく丸めます。
-pub fn float_f(v: f64, prec: usize) -> String {
-    format!("{v:.prec$}")
+/// Go の `strconv.FormatFloat(v, 'f', prec, 64)` です。どちらも 2 進の値から正しく丸めます。`prec` が負なら、
+/// Go と同じく同じ `f64` に読み戻せる最も短い形で、Rust の `Display` がその形を指数なしで書きます。
+pub fn float_f(v: f64, prec: i64) -> String {
+    match usize::try_from(prec) {
+        Ok(prec) => format!("{v:.prec$}"),
+        Err(_) => format!("{v}"),
+    }
 }
 
 /// Go の `% x` です。byte を空白で区切った 16 進で書きます。
@@ -150,5 +159,42 @@ mod tests {
             "\"a\\\"\\\\\\n\\x00\\x7f\\xff\""
         );
         assert_eq!(quote("\u{e9}\u{a0}".as_bytes()), "\"\u{e9}\\u00a0\"");
+    }
+
+    #[test]
+    fn print_table_is_sorted_and_disjoint() {
+        for w in PRINT.windows(2) {
+            assert!(w[0].0 <= w[0].1 && w[0].1 + 1 < w[1].0, "{w:x?}");
+        }
+    }
+
+    /// 表が Go の試験が書いたものと同じことを、`vectors.json` の digest (範囲を little endian の u32 の対に
+    /// した列の FNV-1a 64) で確かめます。Go の無い環境でも、表を手で直したことが分かります。
+    #[test]
+    fn print_table_matches_go() {
+        use crate::gojson::{self, Json};
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../internal/tcpharness/rustdut/testdata/vectors.json");
+        let v = gojson::parse(&std::fs::read(&p).expect("vectors.json")).expect("JSON");
+        let print = v.get("print").expect("print");
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for &(lo, hi) in PRINT {
+            for b in lo.to_le_bytes().into_iter().chain(hi.to_le_bytes()) {
+                h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+        assert_eq!(
+            print.get("unicode").and_then(Json::as_str),
+            Some(super::super::GO_UNICODE_VERSION)
+        );
+        assert_eq!(
+            print.get("ranges").and_then(Json::as_u64),
+            u64::try_from(PRINT.len()).ok()
+        );
+        assert_eq!(
+            print.get("fnv64a").and_then(Json::as_str),
+            Some(format!("{h:016x}").as_str()),
+            "goprint.rs is not the table vectors.json names; run the Go test TestRustVectors with -update"
+        );
     }
 }

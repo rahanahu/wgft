@@ -10,6 +10,7 @@
 //! runner は 1 つの流れで動き、待つ間に DUT の状態を変える者がいないためです。
 
 mod gofmt;
+mod goprint;
 mod harness;
 mod interp;
 mod value;
@@ -18,6 +19,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 
 pub use gofmt::{duration as go_duration, float_f as go_float_f, quote as go_quote};
+/// `go_quote` が持つ Go の `strconv.IsPrint` の表の Unicode の版です。
+pub use goprint::UNICODE_VERSION as GO_UNICODE_VERSION;
 
 use crate::dut::ClockedDut;
 use crate::gojson::{self, Json};
@@ -244,5 +247,142 @@ mod tests {
         assert_eq!(k["icmp-echo/oversized"].observed, "no reply");
         assert!(k["x/y"].sometimes);
         assert!(parse_known(br#"{"a/b": {"reason": "r"}}"#).is_err());
+    }
+
+    const KNOWN_SCRIPT: &str = "\
+scenario k
+refs: the known-list paths of H.Check and H.Require
+
+check pass true
+  what: w
+  got: fine
+check unexpected true
+  what: w
+  got: fine
+check known false
+  what: w
+  got: no reply
+check changed false
+  what: w
+  got: no reply
+check sometimes false
+  what: w
+  got: no reply
+check sometimes-pass true
+  what: w
+  got: fine
+check plain false
+  what: w
+  got: no reply
+require req false
+  what: w
+  got: gone
+check after true
+  what: w
+  got: never
+";
+
+    fn known(entries: &[(&str, &str, bool)]) -> KnownList {
+        entries
+            .iter()
+            .map(|&(k, observed, sometimes)| {
+                let v = Known {
+                    observed: observed.to_owned(),
+                    reason: format!("reason {k}"),
+                    sometimes,
+                };
+                (k.to_owned(), v)
+            })
+            .collect()
+    }
+
+    fn run(src: &str, known: &KnownList) -> Outcome {
+        let script = crate::script::parse_script("k.scn", src.as_bytes()).unwrap();
+        let mut dut = crate::dut::stub::Stub::new(crate::dut::stub::idle);
+        let cfg = RunConfig {
+            engine: "e",
+            known,
+            dut_addr: DUT_ADDR,
+            mtu: MTU,
+            seed: 1,
+        };
+        run_script(&mut dut, "k.scn", &script, &cfg)
+    }
+
+    /// Go の `H.Check` と `H.Require` の期待した差の扱いです。手で進める時計の DUT なので、`sometimes` の項目は
+    /// 落ちた確かめでも通った確かめでも誤りです。
+    #[test]
+    fn check_and_require_follow_the_known_list() {
+        let list = known(&[
+            ("k/unexpected", "x", false),
+            ("k/known", "no reply", false),
+            ("k/changed", "other", false),
+            ("k/sometimes", "no reply", true),
+            ("k/sometimes-pass", "no reply", true),
+            ("k/req", "gone", false),
+            ("k/never-reached", "n", false),
+            ("other/x", "n", false),
+        ]);
+        let out = run(KNOWN_SCRIPT, &list);
+        let got: Vec<(&str, &str)> = out
+            .checks
+            .iter()
+            .map(|c| (c.key.as_str(), c.outcome.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("k/pass", OUTCOME_PASS),
+                ("k/unexpected", OUTCOME_UNEXPECTED),
+                ("k/known", OUTCOME_KNOWN),
+                ("k/changed", OUTCOME_CHANGED),
+                ("k/sometimes", OUTCOME_CHANGED),
+                ("k/sometimes-pass", OUTCOME_UNEXPECTED),
+                ("k/plain", OUTCOME_FAIL),
+                ("k/req", OUTCOME_KNOWN),
+            ]
+        );
+        // 期待した差の require は skip で止まり、後の確かめは流れません。誤りは記録したまま失敗です
+        assert!(out.skipped);
+        assert!(out.failed);
+        assert_eq!(
+            out.failures,
+            [
+                "UNEXPECTED PASS  k/unexpected on e: w; got: fine; the list says: x; remove the entry",
+                "CHANGED DIFFERENCE  k/changed on e: w; got: no reply; the list says: other",
+                "CHANGED DIFFERENCE  k/sometimes on e: w; got: no reply; the list marks it as shown only on some runs, which a DUT on the harness's clock cannot be",
+                "UNEXPECTED PASS  k/sometimes-pass on e: w; got: fine; the list says: no reply; remove the entry",
+                "FAIL  k/plain on e: w; got: no reply",
+            ]
+        );
+        assert!(out.lines.iter().any(|l| l.ends_with(
+            "KNOWN DIFFERENCE  k/known on e: w; got: no reply; reason: reason k/known"
+        )));
+        assert!(
+            out.lines
+                .iter()
+                .any(|l| l.ends_with("PASS  k/pass: w; got: fine"))
+        );
+        assert_eq!(out.unreached(&list, "k"), ["k/never-reached"]);
+    }
+
+    #[test]
+    fn a_failed_require_off_the_list_fails() {
+        let src = "scenario k\nrefs: r\n\nrequire req false\n  what: w\n  got: gone\ncheck after true\n  what: w\n  got: never\n";
+        for list in [
+            KnownList::new(),
+            known(&[("k/req", "other", false)]),
+            known(&[("k/req", "gone", true)]),
+        ] {
+            let out = run(src, &list);
+            assert!(out.failed && !out.skipped, "{list:?}");
+            assert_eq!(out.checks.len(), 1, "{list:?}");
+        }
+        let out = run(src, &known(&[("k/req", "gone", false)]));
+        assert!(out.skipped && !out.failed);
+        assert_eq!(
+            out.unreached(&known(&[("k/after", "n", false)]), "k"),
+            ["k/after"]
+        );
     }
 }

@@ -2704,7 +2704,7 @@ impl Interp<'_, '_> {
                 let prec = self.int(&p)?;
                 #[expect(clippy::cast_precision_loss, reason = "Go's Duration.Seconds")]
                 let secs = (d / SECOND) as f64 + (d % SECOND) as f64 / 1e9;
-                V::Bytes(gofmt::float_f(secs, usize::try_from(prec).unwrap_or(0)).into_bytes())
+                V::Bytes(gofmt::float_f(secs, prec).into_bytes())
             }
             _ => return self.failf(format!("unknown function {name}")),
         })

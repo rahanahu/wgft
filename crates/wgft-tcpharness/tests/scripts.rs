@@ -5,7 +5,10 @@
 //!
 //! - DUT が凍結した Go の wgstack の `dutserve` (engine の名前 `wgstack`) なら、2 つの runner の一致を
 //!   確かめます。Go の試験 `TestWriteTranscripts` が `WGFT_TEST_TCPHARNESS_TRANSCRIPTS` の directory に
-//!   書いた transcript と確かめの trace を、種 1 から 5 で byte の単位で照らします
+//!   書いた transcript と確かめの trace を、種 1 から 5 で byte の単位で照らします。Go の試験が書いた期待した
+//!   差の小さな一覧 (`known.json`) に鍵を持つ台本は、その一覧を持たせた別の engine の名前で 2 回目も流し、
+//!   届かなかった項目も照らします。`WGFT_TEST_TCPHARNESS_TRANSCRIPTS` を与えたら、DUT は `dutserve` でなければ
+//!   なりません
 //! - DUT が Rust の wgstack (`wgstack-rs`) なら、期待した差の一覧
 //!   (`internal/tcpharness/rustdut/known-wgstack-rs.json`) と照らして台本の結果を確かめます
 
@@ -34,6 +37,8 @@ const TRANSCRIPTS_ENV: &str = "WGFT_TEST_TCPHARNESS_TRANSCRIPTS";
 const TRANSCRIPT_RUNS: [u64; 5] = [1, 2, 3, 4, 5];
 /// 照らす時の engine の名前です。Go の `TestWriteTranscripts` と同じです。
 const COMPARE_ENGINE: &str = "go-wgstack";
+/// 期待した差の一覧を持たせて照らす 2 回目の engine の名前です。Go の `transcriptKnownEngine` と同じです。
+const KNOWN_ENGINE: &str = "go-wgstack-known";
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -178,44 +183,94 @@ fn trace_diff(want: &[u8], got: &[u8]) -> String {
     )
 }
 
-/// 2 つの runner の一致の確かめです。
-fn compare(bin: &Path, dir: &Path, name: &str, s: &Script) -> Result<(), Failed> {
-    let mut errs = Vec::new();
-    let mut total = (0u64, std::time::Duration::ZERO);
-    for run in TRANSCRIPT_RUNS {
-        let base = dir.join(name).join(run.to_string());
-        let want_bin = fs::read(base.with_extension("bin")).map_err(|e| {
-            format!(
-                "{}: {e}; run the Go side first (TestWriteTranscripts)",
-                base.display()
-            )
-        })?;
-        let want_trace = fs::read(base.with_extension("trace.json"))
-            .map_err(|e| format!("{}: {e}", base.display()))?;
-        let start = Instant::now();
-        let (got_bin, out, frames) = run_once(
-            bin,
-            s,
-            scenario_seed(run, name),
-            Some(COMPARE_ENGINE),
-            &KnownList::new(),
-        )?;
-        total.0 += frames;
-        total.1 += start.elapsed();
-        let got_trace = out.trace_json();
-        let _ = fs::write(base.with_extension("rust.bin"), &got_bin);
-        let _ = fs::write(base.with_extension("rust.trace.json"), &got_trace);
-        if got_bin != want_bin {
+/// Go の側が書いたファイルを読みます。
+fn read_go(p: &Path) -> Result<Vec<u8>, Failed> {
+    fs::read(p).map_err(|e| {
+        format!(
+            "{}: {e}; run the Go side first (TestWriteTranscripts)",
+            p.display()
+        )
+        .into()
+    })
+}
+
+/// 1 回の実行を Go の側が `<base>.bin`、`<base>.trace.json` (と、一覧を持つ時は `<base>.unreached`) に
+/// 書いたものと照らし、違いを `errs` に足します。Rust の側の結果は `<base>.rust.*` に残します。frame の数を
+/// 返します。
+fn compare_run(
+    bin: &Path,
+    s: &Script,
+    seed: u64,
+    base: &str,
+    engine: &str,
+    known: &KnownList,
+    errs: &mut Vec<String>,
+) -> Result<u64, Failed> {
+    let file = |ext: &str| PathBuf::from(format!("{base}.{ext}"));
+    let want_bin = read_go(&file("bin"))?;
+    let want_trace = read_go(&file("trace.json"))?;
+    let (got_bin, out, frames) = run_once(bin, s, seed, Some(engine), known)?;
+    let got_trace = out.trace_json();
+    let _ = fs::write(file("rust.bin"), &got_bin);
+    let _ = fs::write(file("rust.trace.json"), &got_trace);
+    if got_bin != want_bin {
+        errs.push(format!(
+            "{base}: transcripts differ\n{}",
+            transcript_diff(&want_bin, &got_bin)
+        ));
+    }
+    if got_trace != want_trace {
+        errs.push(format!("{base}: {}", trace_diff(&want_trace, &got_trace)));
+    }
+    if !known.is_empty() {
+        let want = String::from_utf8_lossy(&read_go(&file("unreached"))?).into_owned();
+        let got: String = out
+            .unreached(known, &s.name)
+            .into_iter()
+            .map(|k| k + "\n")
+            .collect();
+        if got != want {
             errs.push(format!(
-                "run seed {run}: transcripts differ\n{}",
-                transcript_diff(&want_bin, &got_bin)
+                "{base}: unreached known differences differ\n  Go   {want:?}\n  Rust {got:?}"
             ));
         }
-        if got_trace != want_trace {
-            errs.push(format!(
-                "run seed {run}: {}",
-                trace_diff(&want_trace, &got_trace)
-            ));
+    }
+    Ok(frames)
+}
+
+/// 2 つの runner の一致の確かめです。
+fn compare(bin: &Path, dir: &Path, name: &str, s: &Script) -> Result<(), Failed> {
+    // 2 回目の期待した差の一覧は Go の側が書きます
+    let p = dir.join("known.json");
+    let known = parse_known(&read_go(&p)?).map_err(|e| format!("{}: {e}", p.display()))?;
+    let mut errs = Vec::new();
+    let mut total = (0u64, std::time::Duration::ZERO);
+    let listed = known.keys().any(|k| k.starts_with(&format!("{name}/")));
+    for run in TRANSCRIPT_RUNS {
+        let base = dir.join(name).join(run.to_string());
+        let base = base.to_string_lossy();
+        let seed = scenario_seed(run, name);
+        let start = Instant::now();
+        total.0 += compare_run(
+            bin,
+            s,
+            seed,
+            &base,
+            COMPARE_ENGINE,
+            &KnownList::new(),
+            &mut errs,
+        )?;
+        total.1 += start.elapsed();
+        if listed {
+            compare_run(
+                bin,
+                s,
+                seed,
+                &format!("{base}.known"),
+                KNOWN_ENGINE,
+                &known,
+                &mut errs,
+            )?;
         }
     }
     let rt = total.0 / 2;
@@ -301,16 +356,18 @@ fn main() {
                     }
                     e.clone().unwrap_or_default()
                 };
-                if e == "wgstack" {
-                    let Some(dir) = dir else {
-                        return Err(format!(
-                            "{BIN_ENV} names the Go wgstack's dutserve: set {TRANSCRIPTS_ENV} to the directory the Go test TestWriteTranscripts wrote"
-                        )
-                        .into());
-                    };
-                    compare(&bin, &dir, &name, &s)
-                } else {
-                    conform(&bin, &name, &s, &e)
+                match (e == "wgstack", dir) {
+                    (true, Some(dir)) => compare(&bin, &dir, &name, &s),
+                    (true, None) => Err(format!(
+                        "{BIN_ENV} names the Go wgstack's dutserve: set {TRANSCRIPTS_ENV} to the directory the Go test TestWriteTranscripts wrote"
+                    )
+                    .into()),
+                    // 照らすつもりで別の DUT を与えると、Go の transcript を照らさずに通ってしまうので断る
+                    (false, Some(_)) => Err(format!(
+                        "{TRANSCRIPTS_ENV} asks for the runner comparison, which needs the Go wgstack's dutserve, but {BIN_ENV} names the engine {e}"
+                    )
+                    .into()),
+                    (false, None) => conform(&bin, &name, &s, &e),
                 }
             })
             .with_ignored_flag(ignored)
