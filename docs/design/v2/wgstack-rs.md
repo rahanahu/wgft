@@ -115,6 +115,7 @@ Go の `internal/ipv4frag` は gVisor の経路と共有する葉の package で
 | --- | --- | --- | --- |
 | `crates/wgft-wgstack` | sans-IO の核 | 標準ライブラリだけ | 実装の担当 |
 | `crates/wgft-netstack` | 核を tokio の上で使う handle の層。TCP、UDP、ping の非同期の handle、waker の表、操作の知らせ | `wgft-wgstack`、tokio | 実装の担当 |
+| `crates/wgft-wgstack-bench` | 核の segment ごとの受信と送信の経路の criterion のベンチ。配布せず、`wgft` のバイナリにも入りません | `wgft-wgstack`、dev 依存の `criterion` | 実装の担当 |
 | `crates/wgft-wgstack/fuzz` | cargo-fuzz の target。ワークスペースの member に入りません | `wgft-wgstack`、`libfuzzer-sys` | target ごとに[fuzz](#fuzz)の表が決めます |
 | `crates/wgft-tcpharness`、`crates/wgft-wgstack-dut` | 試験の道具と DUT のバイナリ。配布せず、`wgft` のバイナリにも入りません | `wgft-wgstack` | 試験の担当 |
 
@@ -127,6 +128,7 @@ device の層と核を組み、UDP のソケットとタイマーを回す駆動
 
 - 依存:`wgft-wgstack` の `[dependencies]` は空にします。
   `[dev-dependencies]` にも試験の道具の crate を入れません。
+  criterion のベンチも別の crate `crates/wgft-wgstack-bench` に置き、核の crate の依存の表を空に保ちます。
   crate の試験 (`src/scan_tests.rs`) が manifest を読み、依存の表が空であることを確かめます。
   CI の job を足さずに `rust-check` の中で流れるためです
 - sans-IO と伸びる collection:`wgft-wgstack` の clippy の設定の `disallowed-methods`、`disallowed-types`、`disallowed-macros` で、`Instant::now`、`SystemTime::now`、スレッドの作成、`std::net` のソケット、ファイル (`std::fs`)、環境変数 (`std::env`)、プロセス (`std::process`)、標準入出力、OS の乱数の読み取りと、容量を自動で伸ばす操作 (`Box`、`Rc`、`Arc` の型と文字列を作る操作を含みます) ([確保の規則](#確保の規則)) を禁じます。
@@ -475,7 +477,64 @@ PR 4a で次の形にしました。
   核は 1 つのスレッドの値で、ほかのスレッドは読みません
 - 上界の `conn_slots` の項は 3 つの配列と空きの list と待ち行列の節の型の大きさで数え、表を生成し直しました
 
-測る道具と、分ける前と後の測った値は、ベンチの crate を足す積んだ PR がこの節に書きます。
+#### 測り方と測った値
+
+ベンチの crate `crates/wgft-wgstack-bench` は、公開の API だけで核と相手の接続を組み、segment ごとの経路を測ります。
+
+- `recv_segment/N`:N 本の接続を順に回し、相手から順序どおりの 1380 byte の segment を 1 つ届け、核の出力を
+  取り出し、アプリケーションが読みます
+- `send_segment/N`:N 本の接続を順に回し、1 segment 分を書き、核が送る segment を取り出し、相手が確認します
+- `rig_overhead/build_and_parse`:道具だけの費用です。同じ大きさの相手の packet を組み立てて checksum を計算し、
+  ACK の大きさの packet を解きますが、核は呼びません
+
+どの回も、駆動の層と同じく時刻を進めて `handle_timeout` を呼びます。
+`recv_segment` と `send_segment` は相手の packet の組み立てと checksum を含むので、核の費用の目安は
+`rig_overhead` を引いた値です。
+N は 1、64、1024 です。
+多数の接続を順に回すと、同じ接続の欄を触る間隔が長くなります。
+
+```sh
+cargo bench -p wgft-wgstack-bench --bench segment -- --warm-up-time 1 --measurement-time 3
+```
+
+キャッシュの事象は perf stat で数えます。
+criterion の `--profile-time` は統計の処理をせずに決めた時間だけ回すので、事象の数が測る経路だけになります。
+ホストの測定は `wgft-heavy --class tool --timing` で 1 つの車線に置きます。
+
+```sh
+cargo bench -p wgft-wgstack-bench --no-run
+perf stat -e cache-misses,L1-dcache-load-misses,instructions,cycles \
+  target/release/deps/segment-<hash> --bench --profile-time 5 'send_segment/64'
+```
+
+E コアは `L1-dcache-load-misses` を数えないので、E コアの車線では代わりに `mem_load_uops_retired.l1_miss` を
+数えます。
+
+2026-11-01 に、E コアの車線 (Core Ultra 7 270K Plus、rustc 1.99.1、release の build) で、3 つの配列に分けた配置と、
+同じコードで 3 つの部分を 1 つの値に並べた配置 (前の段の `ConnSlot` と同じく、輪の pointer の配列が接続の欄と
+同じ値にある形。64 byte の揃えも無し) を比べました。
+後者は比べるためだけの一時の変更で、repo に入れていません。
+値は criterion の中央の推定です。
+`rig_overhead` はどちらも約 100 ns でした。
+
+| ベンチ | 分けた配置 | 1 つの値の配置 |
+| --- | ---: | ---: |
+| `recv_segment/1` | 648.3 ns | 655.1 ns |
+| `recv_segment/64` | 723.7 ns | 727.7 ns |
+| `recv_segment/1024` | 718.2 ns | 728.0 ns |
+| `send_segment/1` | 631.9 ns | 608.6 ns |
+| `send_segment/64` | 653.8 ns | 615.2 ns |
+| `send_segment/1024` | 636.1 ns | 636.9 ns |
+
+受信は分けた配置が 1% から 2% 速く、送信の 1 本と 64 本は 1 つの値の配置が 4% と 6% 速く、送信の 1024 本は同じでした。
+同じ配置を 2 回流した値の揺れ (分けた配置の `recv_segment/1024` で 688 ns と 718 ns) が差と同じ大きさなので、
+このベンチでは配置による一貫した差は見えません。
+`handle_timeout` を呼ばない前の版の道具では、送信の 64 本で逆に分けた配置が約 11% 速く出ていました。
+perf stat の数 (1,000 命令あたり) は、どちらの配置でも LLC の miss が 0.2 未満で、1024 本でも作業の集合が
+キャッシュに収まっていました。
+L1 の miss も配置によって増える場合と減る場合がありました。
+分けた配置を選んだ理由は、測った速さではなく、`Tcb` の行が輪の配列と boost の段の大きさに左右されないことです。
+接続の数が L2 を超える負荷 (数千本の接続と大きな受信の窓) での差は測っていません。
 
 ### 上界の式の写し方
 
