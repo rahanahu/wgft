@@ -604,6 +604,11 @@ async fn resolve(endpoint: &str) -> Result<SocketAddrV4, String> {
 /// 値と壁時計の大きい方から印を作り、使った印の高い水位を返す。この module は、プロセスの中で見た
 /// 最も高い水位と、データディレクトリのファイルに残した水位の大きい方を下限として渡す。ファイルは
 /// agent.json と分ける。Go の agent が agent.json を書き直すと、知らないキーを捨てるためである。
+///
+/// ファイルは 1 行の秒の値を、前の版の単位で持つ。前の版は sanstun の基準 (2^62 + 37) のまま印を
+/// 付けたので、同じ値の下限でも印が今の版より 27 秒進む。今の版は [`FILE_BEHIND`] を引いて書き、足して
+/// 読む。こうすると、前の版と今の版のどちらが書いたファイルを、どちらが読んでも、次の印は相手が前に
+/// 受けた印を下回らない。前の版が読むと印は 27 秒進むだけで、戻らない。
 mod stamp {
     use std::path::Path;
     use std::sync::Mutex;
@@ -616,12 +621,17 @@ mod stamp {
     /// device が受ける下限の上限。これ以上の値は壊れた記録として捨てる。
     const FLOOR_LIMIT: u64 = 1 << 40;
 
+    /// ファイルの値と、今の版の下限 (本当の Unix 時刻) の差。前の版の印が標準の印より進んでいた秒で、
+    /// ファイルの値は今の版の下限よりこれだけ小さい。
+    const FILE_BEHIND: u64 = 27;
+
     /// プロセスの中で見た最も高い水位。
     static HIGH: Mutex<Duration> = Mutex::new(Duration::ZERO);
 
     fn read(file: Option<&Path>) -> Option<Duration> {
         let text = std::fs::read_to_string(file?).ok()?;
-        text.trim().parse::<u64>().ok().map(Duration::from_secs)
+        let secs = text.trim().parse::<u64>().ok()?;
+        secs.checked_add(FILE_BEHIND).map(Duration::from_secs)
     }
 
     /// 新しい device に渡す下限。残した値が読めないか大きすぎれば、1 行を出して捨て、壁時計から始める。
@@ -661,19 +671,25 @@ mod stamp {
         if margin {
             secs += SAVE_MARGIN.as_secs();
         }
-        if read(Some(file)).is_some_and(|saved| saved.as_secs() == secs) {
+        let text = encode(secs);
+        if std::fs::read_to_string(file).is_ok_and(|saved| saved == text) {
             return;
         }
         let mut tmp_name = file.as_os_str().to_owned();
         tmp_name.push(".tmp");
         let tmp = std::path::PathBuf::from(tmp_name);
-        let ok = write_synced(&tmp, file, &format!("{secs}\n"));
+        let ok = write_synced(&tmp, file, &text);
         if let Err(e) = ok {
             crate::logf!(
                 "cannot record the handshake clock in {}: {e}",
                 file.display()
             );
         }
+    }
+
+    /// ファイルの中身。`secs` は今の版の下限 (切り上げた秒)。
+    fn encode(secs: u64) -> String {
+        format!("{}\n", secs.saturating_sub(FILE_BEHIND))
     }
 
     /// 一時ファイルに書いて fsync し、rename してからディレクトリも fsync する。
@@ -715,6 +731,31 @@ mod stamp {
             let fl = floor(Some(&f));
             assert!(fl < Duration::from_secs(1 << 40));
             assert!(!f.exists());
+            std::fs::write(&f, "100 other-format\n").unwrap();
+            assert_eq!(read(Some(&f)), None);
+            // ファイルの値は前の版の単位
+            record(Some(&f), future + Duration::from_secs(5), false);
+            assert_eq!(
+                std::fs::read_to_string(&f).unwrap(),
+                format!("{}\n", future.as_secs() + 5 - 27)
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[test]
+        fn the_file_keeps_the_earlier_builds_units() {
+            // 前の版は値 N の下限から 2^62 + 37 + N + 1 秒以上の印を付けた。今の版は 27 秒足して読み、
+            // 2^62 + 10 + (N + 27) + 1 秒以上の印を付けるので、同じ値から同じ印の下限になる
+            let dir = std::env::temp_dir().join(format!("wgft-stamp-old-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let f = dir.join("agent.json.clock");
+            std::fs::write(&f, "4100000000\n").unwrap();
+            let floor = read(Some(&f)).unwrap();
+            assert_eq!(floor, Duration::from_secs(4_100_000_027));
+            // 今の版が書いた値を前の版が読めば、印は 27 秒進むだけで戻らない
+            assert_eq!(encode(4_100_000_027), "4100000000\n");
+            std::fs::write(&f, encode(4_100_000_027)).unwrap();
+            assert_eq!(read(Some(&f)), Some(floor));
             std::fs::remove_dir_all(dir).unwrap();
         }
     }

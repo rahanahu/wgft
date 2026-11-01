@@ -250,7 +250,9 @@ impl Default for Limits {
 pub struct DeviceConfig {
     /// This side's private key.
     pub private_key: PrivateKey,
-    /// The tunnel MTU. Outbound packets longer than this are dropped.
+    /// The tunnel MTU. The device sends inner packets up to this value rounded down to a multiple
+    /// of 16, [`crate::Device::mtu`], so that padding keeps every data message within the MTU, and
+    /// drops longer ones.
     pub mtu: u16,
     /// The peers. The agent has exactly one, the server.
     pub peers: Vec<PeerConfig>,
