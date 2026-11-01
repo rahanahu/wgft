@@ -29,8 +29,12 @@ pub(crate) type PeerId = usize;
 const DATA_HEADER_LEN: usize = 16;
 /// ヘッダと認証 tag を合わせた、データの message の上乗せ。
 pub(crate) const DATA_OVERHEAD: usize = DATA_HEADER_LEN + 16;
-/// データの message の平文は 16 バイトの倍数まで詰める。
-pub(crate) const PADDING: usize = 16;
+// sanstun 0.1.0 の振る舞いへの手当ては、この module の子の sanstun_compat に集める
+#[path = "sanstun_compat.rs"]
+mod sanstun_compat;
+
+use sanstun_compat::PassiveKeepalive;
+pub(crate) use sanstun_compat::{PADDING, inner_mtu};
 
 /// 秘密鍵を sanstun の型へ写す。写しは Zeroizing の中に直接作り、stack に裸の写しを残さない。
 fn static_secret(private: &PrivateKey) -> StaticSecret {
@@ -81,6 +85,8 @@ struct PeerProto {
     tunnel: Tunnel,
     /// このトンネルでハンドシェイクを始めたか受けたか。
     used: bool,
+    /// sanstun の passive keepalive への手当て。sanstun の送信の記録が進む呼び出しで `on_send` を呼ぶ。
+    passive: PassiveKeepalive,
 }
 
 pub(crate) struct Protocol {
@@ -132,7 +138,8 @@ impl Protocol {
         unix: Duration,
     ) -> Result<Self, ConfigError> {
         let secret = static_secret(private_key);
-        let mut interface = Interface::new(seed, now, unix).with_static_private(secret);
+        let mut interface =
+            Interface::new(seed, now, sanstun_compat::stamp_base(unix)).with_static_private(secret);
         let own = interface.static_public();
         let mut list = Vec::with_capacity(peers.len());
         let mut by_key = HashMap::with_capacity(peers.len());
@@ -153,6 +160,7 @@ impl Protocol {
                 keepalive,
                 tunnel,
                 used: false,
+                passive: PassiveKeepalive::default(),
             });
         }
         Ok(Self {
@@ -198,6 +206,7 @@ impl Protocol {
                     .handle_handshake_initiation(init, now)
                     .map_err(|e| map_error(&e))?;
                 self.peers[peer].used = true;
+                self.peers[peer].passive.on_send();
                 Ok(Inbound::InitiationAnswered {
                     peer,
                     response: response.to_vec(),
@@ -209,6 +218,7 @@ impl Protocol {
                     .tunnel
                     .handle_handshake_response(response, now)
                     .map_err(|e| map_error(&e))?;
+                self.peers[peer].passive.on_send();
                 Ok(Inbound::ResponseAccepted {
                     peer,
                     keepalive: keepalive.to_vec(),
@@ -237,6 +247,7 @@ impl Protocol {
                 {
                     Committed::Data { mut buffer, len } => {
                         buffer.truncate(len);
+                        self.peers[peer].passive.on_data(now);
                         Ok(Inbound::Data {
                             peer,
                             plaintext: buffer,
@@ -255,9 +266,12 @@ impl Protocol {
         now: Instant,
         packet: &[u8],
     ) -> Result<Option<Vec<u8>>, DropReason> {
-        let tunnel = &mut self.peers[peer].tunnel;
-        let pending = match tunnel.begin_encapsulate(now) {
-            Ok(pending) => pending,
+        let p = &mut self.peers[peer];
+        let pending = match p.tunnel.begin_encapsulate(now) {
+            Ok(pending) => {
+                p.passive.on_send();
+                pending
+            }
             Err(SanstunError::NoCurrentSession | SanstunError::ConnectionExpired) => {
                 return Ok(None);
             }
@@ -277,6 +291,7 @@ impl Protocol {
         let p = &mut self.peers[peer];
         let initiation = p.tunnel.initiate_handshake(now)?;
         p.used = true;
+        p.passive.on_send();
         Some(initiation.to_vec())
     }
 
@@ -284,8 +299,27 @@ impl Protocol {
         self.peers[peer].tunnel.handle_timeout(now);
     }
 
+    /// 次に [`Protocol::handle_timeout`] か [`Protocol::passive_keepalive`] を呼ぶ時刻。
     pub(crate) fn poll_timeout(&self, peer: PeerId) -> Option<Instant> {
-        self.peers[peer].tunnel.poll_timeout()
+        let p = &self.peers[peer];
+        let passive = p
+            .passive
+            .deadline(self.timers.effective_keepalive_timeout());
+        match (p.tunnel.poll_timeout(), passive) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    /// passive keepalive を WireGuard の規則の時刻に送らせる ([`PassiveKeepalive::force`])。呼び手は
+    /// 先に [`Protocol::handle_timeout`] を同じ `now` で呼び、出た event を取り出してから呼ぶ。`true` を
+    /// 返したら、呼び手は出た event を取り出す。
+    pub(crate) fn passive_keepalive(&mut self, peer: PeerId, now: Instant) -> bool {
+        let usable = self.has_session(peer, now);
+        let keepalive_timeout = self.timers.effective_keepalive_timeout();
+        let p = &mut self.peers[peer];
+        p.passive
+            .force(&mut p.tunnel, now, keepalive_timeout, usable)
     }
 
     /// ピアの次の仕事。期限切れはここで新しいトンネルに取り替える。
@@ -294,9 +328,13 @@ impl Protocol {
         Some(match event {
             SanstunEvent::SendHandshakeInitiation(d) => {
                 self.peers[peer].used = true;
+                self.peers[peer].passive.on_send();
                 ProtoEvent::SendInitiation(d.to_vec())
             }
-            SanstunEvent::SendKeepalive(d) => ProtoEvent::SendKeepalive(d.to_vec()),
+            SanstunEvent::SendKeepalive(d) => {
+                self.peers[peer].passive.on_send();
+                ProtoEvent::SendKeepalive(d.to_vec())
+            }
             SanstunEvent::Established {
                 started_at,
                 confirmed_at,
@@ -322,6 +360,7 @@ impl Protocol {
             self.by_tunnel.insert(tunnel.id(), peer);
             self.peers[peer].tunnel = tunnel;
             self.peers[peer].used = false;
+            self.peers[peer].passive.on_send();
         }
     }
 
@@ -378,4 +417,50 @@ fn new_tunnel(
         tunnel.set_rekey_attempt_time(t);
     }
     Ok(tunnel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 開始の message の TAI64N の印の秒。sanstun の相手として受け、認証した開始から読む。
+    fn stamped_seconds(unix: Duration) -> u64 {
+        let now = Instant::now();
+        let agent = PrivateKey::generate([0xa1; 32]);
+        let server = PrivateKey::generate([0xb2; 32]);
+        let mut proto = Protocol::new(
+            &agent,
+            &[(server.public_key(), None)],
+            ProtocolTimers::default(),
+            Zeroizing::new([1; 32]),
+            now,
+            unix,
+        )
+        .unwrap();
+        let initiation = proto.initiate(0, now).unwrap();
+        let mut responder = Interface::new(Zeroizing::new([2; 32]), now, unix)
+            .with_static_private(static_secret(&server));
+        let agent_public = sanstun::PublicKey::from(*agent.public_key().as_bytes());
+        let _tunnel = responder
+            .new_tunnel(agent_public, TunnelConfig::default(), now)
+            .unwrap();
+        let src = "192.0.2.2:40000".parse().unwrap();
+        match responder.receive(src, &initiation, now).unwrap() {
+            Received::Message(ReceivedMessage::HandshakeInitiation(init)) => {
+                u64::try_from(init.timestamp() >> 32).unwrap()
+            }
+            other => panic!("expected an initiation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn initiations_carry_the_standard_tai64n_label() {
+        // Linux の WireGuard と wireguard-go の印の秒は 2^62 + 10 + Unix 時刻 (秒)
+        for secs in [1_700_000_000, 1_800_000_123] {
+            assert_eq!(
+                stamped_seconds(Duration::from_secs(secs)),
+                (1 << 62) + 10 + secs
+            );
+        }
+    }
 }
