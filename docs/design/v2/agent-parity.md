@@ -4,7 +4,7 @@
 対象は、Rust の wgstack 自身を除くすべてです。
 契約は [agent と server の境目の仕様](../spec/README.md) です。
 この文書は、その契約を Rust の agent でどう満たすかと、どの順で作るかを書きます。
-この文書の内容はすべて未実装です。
+「設定の層」は実装済みです。ほかの内容は未実装です。
 
 ## 範囲と完成の条件
 
@@ -38,12 +38,12 @@ event loop とスレッドの形は、#681 の `docs/design/v2/wgstack-rs.md` �
 | `wgft-proto` | wire の版 1 の型、接続文字列、登録の要求と応答、理由の整形、仕様の fixture との照合 |
 | `wgft-wireguard` | sanstun の上の sans-IO の WireGuard の device |
 | `wgft-wireguard-tun` | 試作だけの Linux の TUN の殻 |
-| `wgft-agent` | 登録、認証情報、stream、全体状態の適用、ハートビート、トンネルの監視と作り直し、TUN の入口の検査、カーネルのソケットの上の TCP の中継 |
-| `wgft` | `wgft agent run` と `wgft version` |
+| `wgft-agent` | 登録、認証情報、stream、全体状態の適用、ハートビート、トンネルの監視と作り直し、TUN の入口の検査、カーネルのソケットの上の TCP の中継、設定の層 (module `config`) |
+| `wgft` | `wgft agent run`、`wgft version`、`--version`。clap への接続と、設定を読んで入口を通す手順 |
 
 試作の中継はカーネルの TCP/IP を TUN 越しに使うので、root か `CAP_NET_ADMIN` が要ります。
 試作の UDP のルールは `error` を報告するだけです。
-試作に無い設定 (`WGFT_CONFIG`、`WGFT_AGENT_ALLOW_TARGETS`、`WGFT_MAX_*_FLOWS`、`WGFT_AGENT_BATCH_MIB`) は終了コード 3 で拒みます。
+設定は[設定の層](#設定の層)が読みます。宛先の許可一覧とカーネルモードは、持たない機能なので終了コード 3 で拒みます。フロー数の上限とバッチの予算は、値を受けて、まだ効かせていない旨を 1 行出します。
 
 ## 差分の一覧
 
@@ -79,7 +79,7 @@ Go の v1 の agent と仕様に対して、今の Rust の agent に無いも�
 | 宛先への接続の試し方 | [tunnel.md の宛先への接続の試し方](../spec/tunnel.md#go-の性質宛先への接続の試し方)。同じ族を先に、300 ミリ秒後にもう一方、期限をアドレスで分ける | 名前のまま 10 秒で接続する | 「宛先と予算」 |
 | 宛先の名前の解決 | Go の性質:Go の resolver で引き、RFC 6724 の順に並べる。許可一覧があれば 5 秒の期限 | tokio の解決に任せる | 「宛先と予算」。設計は[名前の解決](#名前の解決) |
 | 宛先の試し接続 | [tunnel.md の宛先の試し接続](../spec/tunnel.md#宛先の試し接続)。待ち受けを開いたときと 30 秒ごと、2 秒、32 件 | 無い | 「宛先と予算」 |
-| 宛先の許可一覧 | [targets.md の宛先の許可一覧](../userspace/targets.md#宛先の許可一覧) | 設定を拒む | 「設定の層」が値を読み、「宛先と予算」が判定する |
+| 宛先の許可一覧 | [targets.md の宛先の許可一覧](../userspace/targets.md#宛先の許可一覧) | 値を読んで正規化する。判定は無いので、値があれば拒む | 「設定の層」が値を読み、済み。「宛先と予算」が判定して拒否を外す |
 | ブロードキャストとマルチキャスト | [targets.md](../userspace/targets.md#ブロードキャストとマルチキャストの宛先) | 無い | 「宛先と予算」 |
 | フロー数の上限 | [tunnel.md のフロー数の上限](../spec/tunnel.md#フロー数の上限) と [flow-limits.md](../userspace/flow-limits.md)。プロセス全体とルールごと、最低分と予備、拒否の理由 | 無い | 「宛先と予算」 |
 | UDP の中継 | [tunnel.md の UDP の中継](../spec/tunnel.md#udp-の中継) | ルールを `error` にする | 「UDP の中継」。設計は [UDP の中継](#udp-の中継) |
@@ -96,19 +96,19 @@ Go の v1 の agent と仕様に対して、今の Rust の agent に無いも�
 | 項目 | 仕様 | 今の Rust | 段 |
 | --- | --- | --- | --- |
 | コマンド | [cli-config.md のコマンド](../spec/cli-config.md#コマンド) | `agent run` と `version` | 「制御ソケット」と「agent doctor の骨組み」 |
-| `wgft version` | 2 行。版と `protocol range: v1-v1` | `wgft <crate の版>` の 1 行 | 「設定の層」 |
-| `--version` と `-v` | 版の 1 行 | 無い | 「設定の層」 |
-| 優先順位 | フラグ、環境変数、dotenv、既定。出所を覚える | clap の `env` で読み、dotenv を読まない | 「設定の層」 |
-| dotenv | [cli-config.md の dotenv の構文](../spec/cli-config.md#dotenv-の構文)。読み取りの誤りと権限の文面 | 読まずに拒む | 「設定の層」 |
-| 有効な設定の行 | [cli-config.md の有効な設定の行](../spec/cli-config.md#有効な設定の行) | 無い | 「設定の層」 |
-| 入口での検査の順 | [cli-config.md の入口での検査の順](../spec/cli-config.md#入口での検査の順) | 一部 | 「設定の層」 |
-| `WGFT_WG_INTERFACE` の検査 | `dev_valid_name` に合わせた判定と文面 | 1 から 15 byte で、`/`、`%`、空白を拒む独自の判定 | 「設定の層」 |
-| `WGFT_MODE=kernel` | Linux 以外は Linux の前提の拒否。Linux では「このビルドにカーネルモードが無い」拒否 | 値の誤りとして拒む | 「設定の層」 |
-| 整数のフラグ | Go の整数の書き方 (`0x`、先頭の 0 の 8 進、`_`) | 試作は値を受けない | 「設定の層」 |
-| 真偽値のフラグ | `--json` と `--json=false` の形だけ | 無い | 「設定の層」 |
-| フラグの誤りの出力と終了コード | `Error: <文>` の 1 行で使い方を書かない。終了コード 1、`agent doctor` は 2 | clap の既定。使い方を書き、終了コード 2 | 「設定の層」 |
-| 既定のパス | Linux、macOS、Windows の表。macOS は `$HOME`、Windows は `%ProgramData%` | 済み (`platform::paths`)。3 つの OS の表をどの OS の試験でも確かめる | 「platform の層」 |
-| 設定ファイルの権限の警告 | Unix で other が読める dotenv が `WGFT_JOIN` を持つとき | 無い | 「設定の層」 |
+| `wgft version` | 2 行。版と `protocol range: v1-v1` | 2 行。版はビルドの時の環境変数 `BUILD_RELEASE_VERSION` で埋め (実行時の設定ではない)、無ければ `dev-rust-<crate の版>` | 済み |
+| `--version` と `-v` | 版の 1 行 | 版の 1 行 | 済み |
+| 優先順位 | フラグ、環境変数、dotenv、既定。出所を覚える | 出所を覚えて解決する。clap の `env` は使わない | 済み |
+| dotenv | [cli-config.md の dotenv の構文](../spec/cli-config.md#dotenv-の構文)。読み取りの誤りと権限の文面 | 仕様と fixture のとおり | 済み |
+| 有効な設定の行 | [cli-config.md の有効な設定の行](../spec/cli-config.md#有効な設定の行) | fixture と同じ | 済み |
+| 入口での検査の順 | [cli-config.md の入口での検査の順](../spec/cli-config.md#入口での検査の順) | 仕様の順 | 済み |
+| `WGFT_WG_INTERFACE` の検査 | `dev_valid_name` に合わせた判定と文面 | 仕様のとおり | 済み |
+| `WGFT_MODE=kernel` | Linux 以外は Linux の前提の拒否。Linux では「このビルドにカーネルモードが無い」拒否 | 仕様のとおり | 済み |
+| 整数のフラグ | Go の整数の書き方 (`0x`、先頭の 0 の 8 進、`_`) | 仕様のとおり | 済み |
+| 真偽値のフラグ | `--json` と `--json=false` の形だけ | 値の解釈と clap の属性を持つ。使うコマンドは「制御ソケット」と「agent doctor の骨組み」が足す | 済み。コマンドは各段 |
+| フラグの誤りの出力と終了コード | `Error: <文>` の 1 行で使い方を書かない。終了コード 1、`agent doctor` は 2 | 仕様のとおり | 済み |
+| 既定のパス | Linux、macOS、Windows の表。macOS は `$HOME`、Windows は `%ProgramData%` | 済み (`platform::paths`)。3 つの OS の表をどの OS の試験でも確かめる。設定の層の `config::Defaults::for_host` はその薄い包みである | 済み |
+| 設定ファイルの権限の警告 | Unix で other が読める dotenv が `WGFT_JOIN` を持つとき | 仕様のとおり | 済み |
 | メモリの行 | `memory soft limit:` の行。Go 以外は書かなくてよい | 無い | 「UDP の中継」が `memory bound:` の行を書く。[メモリの上界の行](#メモリの上界の行) |
 | `docs/cli.md` | Go の `TestCLIDocUpToDate` | 無い | 「CLI の文書の照合」 |
 
@@ -455,6 +455,44 @@ clap の derive でコマンドの構成とフラグの名前を書き、値の�
 - 照合:`testdata/spec/config/` の `dotenv.json`、`values.json`、`allow-targets.json`、`refusals.json`、`effective-config.json` を Rust の試験で読み、Go と同じ結果になることを確かめます。
   `values.json` の `goos` は Rust の `target_os` に読み替えます
 
+作りは次のとおりです。
+
+- 置き場:`wgft-agent` の module `config` が優先順位、dotenv、値の検査、有効な設定の行、起動ログの行を持ちます。
+  `wgft` の crate は clap への接続 (`cli`)、設定を読んで入口を通す手順 (`agent_run`)、失敗と終了コード (`failure`) を持ちます。
+  入口の検査は環境変数の引き元と OS の名前を引数に取り、試験は fixture を実際の経路で通します
+- 出所:フラグは `Option` で受け、書かれたかどうかで出所を決めます。
+  値が既定と同じでも出所はフラグです。
+  整数のフラグは解釈した値を 10 進に書き直して渡すので、範囲の検査は環境変数と同じ `Atoi` の規則で行います。
+  `--max-udp-flows 016` が 14 になり、環境変数の `016` が 16 になる差は、この経路から自然に出ます
+- フラグの形:値を取るフラグは、次の語が `-` で始まっても値にし、同じフラグを繰り返せば最後の値が勝ちます。
+  `--config` と `--data-dir` は `wgft agent` の global の引数です
+- UTF-8 でない値:Go はバイト列のまま受けます。
+  Rust は値を `String` で持つので、環境変数の値と dotenv の値が UTF-8 でなければ、別の値に化かさず、その名前をコマンドが読むときだけ種別 `config` の拒否にします。
+  dotenv のコメントと空行と、読まない名前の値は UTF-8 でなくてかまいません。
+  データディレクトリのパスを黙って変えないためです
+- 引用:`%q` の引用は Go の `strconv.Quote` を写します。
+  印字できるかの判定は、一般カテゴリの表で行います。
+  表の Unicode の版は Go が新しいことがあり、新しい版で割り当てられた文字は Rust の文面では `\u` の形になります。
+  差は文面だけで、文面は保証の外です
+- 持たない機能の拒否:カーネルモードは仕様の文で拒みます。
+  宛先の許可一覧は、判定が入るまで、値があれば種別 `prerequisite` で拒みます。
+  黙って効かないと、防御の設定を利用者の意図より緩めるためです。
+  どちらも入口の検査の後に判定するので、値の誤りが先に出ます。
+  フロー数の上限は、値を受けて、ユーザー空間モードでは毎回、まだ効かせていない旨を 1 行出します。
+  送信の向きのバッチは、値があるときだけ同じ旨を 1 行出します。
+  どちらも対応する段が入るときに、この拒否と行を外します
+- 値を取るフラグ:`--config` と `--data-dir` は `OsString` で受けます。`--config` は空の値を許し、空のパスは存在しないファイルと同じです。
+  `--help` には、環境で決まる既定の値を `[default: ...]` で出します
+- 起動ログの順:許可一覧が無い旨の行は `agent starting` の行より前に書きます。
+  後者を `wgft_agent::run` が書くためです。
+  ログの順は保証の外です
+- データディレクトリ:作れなければ `data dir: <誤り>` で終了コード 1 です。
+  `wgft agent` の説明と、`wgft` だけの呼び出しは、説明を標準出力に書いて終了コード 0 です。
+  未知のサブコマンドは誤りで終了コード 1 です。
+  余分な引数と `--help` を一緒に書くと、Go は説明を書きますが、Rust は余分な引数の誤りを先に返します。保証の外なので合わせません
+  `agent doctor` の引数の誤りが終了コード 2 になる判定は、今は引数の語を走査します。`agent doctor` の段で、解釈したコマンドから決める形に置き換えます
+  `wgft agent foo` を Go は説明で 0 にしますが、保証の外なので合わせません
+
 ### 既定のパス
 
 | OS | `WGFT_DATA_DIR` の既定 | dotenv の既定 |
@@ -502,7 +540,7 @@ Go と変える行は次のとおりです。
 
 - メモリ:`memory soft limit:` の行を書かず、[メモリの上界の行](#メモリの上界の行)を書きます。
   `GOMEMLIMIT` は読まず、行も書きません
-- netstack:`WGFT_AGENT_NETSTACK` の出所が既定でなければ、`WGFT_AGENT_NETSTACK=<値>: unused, since this build has one network stack, wgft's own; the setting is kept so the same agent.env works` を書きます。
+- netstack:`WGFT_AGENT_NETSTACK` の出所が既定でなければ、`WGFT_AGENT_NETSTACK=<値>: unused, since this build has no choice of network stack; the setting is kept so the same agent.env works`。試作はカーネルの TCP/IP で中継するためで、wgstack が入ったら文面を「netstack は 1 つ」に直す を書きます。
   値は `gvisor` も `wgstack` も受け付けますが、どちらも実装を選ばず、使いません。
   実験的の警告の行は書きません
 - 送信の向きのバッチ:受け付ける値と誤りの文面は仕様のとおりです。
@@ -760,6 +798,8 @@ wgstack の口が前提と違えば、wgstack の上の agent と UDP の中継�
 - `GetAdaptersAddresses` が返す adapter の名前 (FriendlyName) が、TUN の名前と一致すること
 - musl と glibc の `getaddrinfo` の順と Go の resolver の順の違い。wgft が並べ直すので結果には効かない見込みです
 - ラボの台本が照らす agent のログの行の一覧は、調べた範囲のもので、ラボの切り替えの PR で数え直します
+- 設定の層の Windows と macOS の挙動:既定のパス、dotenv を権限で読めないときの文面、環境変数の名前の大文字と小文字の区別は、実機で確かめていません
+- 設定の層の Unicode の版の差:`%q` の引用は、Go が新しい版で割り当てた文字の扱いだけが Rust と違います
 - 大きさの目安は、Go の対応するコードと今の Rust の試作の大きさからの見積もりです
 
 [v2: Rust への移行](README.md)

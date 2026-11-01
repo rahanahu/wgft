@@ -292,21 +292,18 @@ server を乗っ取った者は、全体状態とトンネルの中の packet �
 
 ## コマンドと設定
 
-`wgft agent run` は v1 と同じく `WGFT_*` の環境変数を受け、フラグはその別名です。
-試作が持つのは `WGFT_DATA_DIR`、`WGFT_JOIN`、`WGFT_NAME` です。
-`WGFT_MODE` は空か `userspace` だけを受けます。
-`WGFT_AGENT_NETSTACK` は `gvisor` と `wgstack` を受けて使わない旨を 1 行出します。
-所有者の決定の「`gvisor` は受け付けて wgstack で動かし 1 行出す」の試作の形です。
+`wgft agent run` は v1 と同じく `WGFT_*` の環境変数を受け、dotenv はそのファイルでの書き方、フラグはその別名です。
+優先順位、dotenv の構文、値の検査、有効な設定の行、終了コードは、仕様 [agent の CLI と設定](../spec/cli-config.md) のとおりで、作りは [Rust の agent が Go の agent を置き換えるための設計](agent-parity.md#設定の層)にあります。
+`WGFT_AGENT_NETSTACK` は `gvisor` と `wgstack` を受けて、使わない旨を 1 行出します。試作は TUN 越しにカーネルの TCP/IP で中継するので、netstack を選べないためです。
 `WGFT_WG_INTERFACE` は TUN の名前に使います ([トンネルと中継](#トンネルと中継-試作の形))。
-1 から 15 byte で、`/`、`%`、空白を含まない値だけを受けます。
 
-次の設定は試作に無く、値があれば黙って無視せずに設定の誤り (終了コード 3) で止めます。
-無視すると、許可一覧や上限のような守りを利用者の意図より緩めるためです。
+試作に無い機能は、値があれば黙って無視せずに、種別 `prerequisite` の拒否 (終了コード 3) で止めます。
+無視すると、許可一覧のような守りを利用者の意図より緩めるためです。
 
-- `WGFT_CONFIG` と既定の dotenv (`/etc/wgft/agent.env`):dotenv を読みません
-- `WGFT_AGENT_ALLOW_TARGETS`:宛先の許可一覧
-- `WGFT_MAX_TCP_FLOWS`、`WGFT_MAX_UDP_FLOWS`:同時のフローの上限
-- `WGFT_AGENT_BATCH_MIB`:送信の向きのバッチ
+- `WGFT_MODE=kernel`:カーネルモード
+- `WGFT_AGENT_ALLOW_TARGETS`:宛先の許可一覧。値は読んで検査しますが、判定が無いので拒みます
+
+同時フロー数の上限と送信の向きのバッチは、値を受けて、まだ効かせていない旨を 1 行出します。
 
 `agent doctor`、`agent pubkey`、`agent rotate-key`、`agent teardown`、制御ソケット (`agent.json.sock`)、server と rule と status のコマンドもありません。
 ログの 1 行の形は Go の `log` と同じ `2006/01/02 15:04:05 msg` です。
