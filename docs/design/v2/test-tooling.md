@@ -1093,7 +1093,7 @@ Linux の TUN の上で Rust の engine を動かす確かめは、qbench でな
 | (無し) | 同じ所の `replay` (試験の担当) | 記録の要求の列 |
 | `internal/wgstack` の `FuzzParse` | 同じ所の `parse` (実装の担当) | Go の corpus の bytes をそのまま |
 | `FuzzAdversarialSender` | 同じ所の `adversarial_sender` (試験の担当) | u64 の種を 8 byte の little endian に |
-| (無し) | 同じ所の `raw_adversary` (実装の担当) | 無し。stable の試験は決まった種から作った入力を流します |
+| (無し) | 同じ所の `raw_adversary` (実装の担当) | 決まった種から作った 16,000 byte の入力。example の `raw_seeds` が書きます |
 | `internal/tcpharness` の `FuzzParseScript` | `crates/wgft-tcpharness/fuzz/` の `parse_script` (試験の担当) | 台本と構文の fixture の directory |
 | `proto`、`credentials`、`enroll`、`allowtargets`、`policy`、`vpsd` の fuzz | それぞれを移す crate の `fuzz/` | 1 つの引数の対象は bytes をそのまま、複数の引数の対象は対象ごとに決めた並び |
 
@@ -1116,7 +1116,8 @@ Go は書ける量が 1000 byte を超える時だけ書き、読める時だけ
 各段の後に `core` と同じ確かめをし、最後に核を閉じて会計が 0 に戻ることを確かめます。
 SYN cookie と同じ PR で実装の担当が書いたので、書き手の分離の外にあります。
 本体は公開の API だけを使います。
-PR の関門の fuzz の smoke にはまだ入れていません。
+短い入力では握手の途中の表が満ちず cookie に届かないので、cargo-fuzz は example の `raw_seeds` が書いた長い種から、長さの制御を切って始めます。
+stable の試験 (`tests/fuzz_corpus.rs`) は同じ作り方の入力を流します。
 
 `adversarial_sender` は Go の `runAudit` を公開の API で写します。
 入力の先頭の 8 byte を little endian の種として読み、短ければ 0 で埋めます。
@@ -1201,7 +1202,7 @@ git の seed の写しから固定の `-runs` を流し、壁時計の時間で�
 | Go の試験 | `go test ./...`。台本の構文の fixture、移した台本の表、`rustdut` の SKIP、記録の Go の照らし直しと上限 (1 秒ほど) | 今と同じ |
 | Rust の試験 (B13) | `cargo nextest`。構文の fixture、乱数の照合、台本を偽の時計で同じプロセスで、記録の照合、fuzz の回帰 | 1 分未満 (推定) |
 | 道具の照合 | Go の runner の `rustdut` で `dutserve` と `wgstack-dut` に全部の台本を種 1 から 5 で、Rust の runner との transcript の一致 | `dutserve` で Go の側が 12 秒ほど、Rust の側が 4 秒ほど (build を除く、1 回の測り)。`wgstack-dut` は未測定 |
-| fuzz の smoke | `parse` を 2,000,000 回、`core` を 2,500 回、`replay` を 20,000 回、`adversarial_sender` を 200 回、libFuzzer の `-runs` で流す。`core` は長さの制御を切り、最大の長さを 1024 byte にします | 1 段 2 分以内を目指します。ほかの段と並べた関門では `replay` が 1 秒に 170 回ほどに落ちました。`core` は全長の入力で、1 つの車線で 1 秒に 34 回ほどでした (1 回の測り) |
+| fuzz の smoke | `parse` を 2,000,000 回、`core` を 2,500 回、`replay` を 20,000 回、`adversarial_sender` を 200 回、`raw_adversary` を 2,000 回、libFuzzer の `-runs` で流す。`core` は長さの制御を切り、最大の長さを 1024 byte にします。`raw_adversary` も長さの制御を切り、最大の長さを 16,000 byte にし、`raw_seeds` の種から始めます | 1 段 2 分以内を目指します。ほかの段と並べた関門では `replay` が 1 秒に 170 回ほどに落ちました。`core` は全長の入力で、1 つの車線で 1 秒に 34 回ほどでした (1 回の測り)。`raw_adversary` は種から始めた全長の入力で、ほかの仕事と並べて 1 秒に 17 回ほどでした (1 回の測り) |
 | ラボ | `linuxdut` の適合の実行は表を使うので、移した台本も今と同じく流れる | 今と同じ |
 
 道具の照合の段は、CI に新しい job (`harness-rust-go`) として足します。

@@ -202,18 +202,22 @@ pub fn raw_adversary(data: &[u8]) {
     n.finish();
 }
 
-/// 種 `seed` から決まった入力を作って流します。stable の試験が使います。
-pub fn raw_adversary_seed(seed: u64, len: usize) {
+/// 種 `seed` から決まった `len` byte の入力を作ります。stable の試験と cargo-fuzz の種が使います。
+pub fn raw_adversary_input(seed: u64, len: usize) -> Vec<u8> {
     let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
-    let data: Vec<u8> = (0..len)
+    (0..len)
         .map(|_| {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
             x.to_le_bytes()[7]
         })
-        .collect();
-    raw_adversary(&data);
+        .collect()
+}
+
+/// 種 `seed` から決まった入力を作って流します。stable の試験が使います。
+pub fn raw_adversary_seed(seed: u64, len: usize) {
+    raw_adversary(&raw_adversary_input(seed, len));
 }
 
 fn syn(n: &mut Net<NoHook>, r: &mut Src<'_>, peers: &mut BTreeMap<u16, Peer>, port: u16) {

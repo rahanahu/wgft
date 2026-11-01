@@ -27,5 +27,5 @@ pub use adversary::{AdversaryCfg, adversarial_sender, adversarial_sender_seed};
 pub use core::core;
 pub use net::{DUT, MTU, Net, PEER, fuzz_limits, small_limits};
 pub use peer::{PeerConn, SackPeer};
-pub use raw::{raw_adversary, raw_adversary_seed};
+pub use raw::{raw_adversary, raw_adversary_input, raw_adversary_seed};
 pub use replay::{replay, replay_seed};

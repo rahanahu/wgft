@@ -296,11 +296,20 @@ fuzz_rs() {
   if [[ $target == replay ]]; then
     cargo run -q -p wgft-wgstack-dut --locked --example replay_seeds -- "$work/corpus" || return 1
   fi
+  # raw_adversary needs long inputs to fill the half-open table and reach the SYN cookie check, so it
+  # starts from the stable test's seeds
+  if [[ $target == raw_adversary ]]; then
+    cargo run -q -p wgft-wgstack-dut --locked --example raw_seeds -- "$work/corpus" || return 1
+  fi
   # core reads two bytes a step for up to 500 steps; libFuzzer's length control would keep its inputs to
-  # a few steps, so core runs at the full length from the start
+  # a few steps, so core runs at the full length from the start, and so does raw_adversary
   local extra=()
   [[ $target == core ]] && extra=(-len_control=0 -max_len=1024)
-  (cd crates/wgft-wgstack && cargo +nightly fuzz run -s none --no-trace-compares "$target" "$work/corpus" "fuzz/corpus/$target" -- \
+  [[ $target == raw_adversary ]] && extra=(-len_control=0 -max_len=16000)
+  # the corpus in git, when the target has one; raw_adversary has none and starts from raw_seeds
+  local corpora=("$work/corpus")
+  [[ -d $fz/corpus/$target ]] && corpora+=("fuzz/corpus/$target")
+  (cd crates/wgft-wgstack && cargo +nightly fuzz run -s none --no-trace-compares "$target" "${corpora[@]}" -- \
     -runs="$runs" -artifact_prefix="$work/" "${extra[@]}") || { echo "the failing input is under $work"; return 1; }
 }
 
@@ -363,7 +372,7 @@ step wgstack-rs-adversarial 'command -v cargo >/dev/null || { echo "SKIP: no car
 # The Rust wgstack's cargo-fuzz targets (docs/design/v2/test-tooling.md section 6) for a fixed number of
 # executions each, sized to stay within about two minutes beside the other steps. replay starts from the requests of
 # every Go recording in git besides its own seeds. SKIP where there is no nightly toolchain or cargo-fuzz.
-for t in parse:2000000 core:2500 replay:20000 adversarial_sender:200; do
+for t in parse:2000000 core:2500 replay:20000 adversarial_sender:200 raw_adversary:2000; do
   step "fuzz-rs-${t%%:*}" "fuzz_rs ${t%%:*} ${t#*:}"
 done
 step stream-seeds-full 'WGFT_WGSTACK_STREAM_SEEDS=full go test -count=1 ./internal/wgstack -run "Stream|Scoreboard|RecvBuf"'
