@@ -61,11 +61,51 @@ impl SipKey {
         v[0] ^ v[1] ^ v[2] ^ v[3]
     }
 
+    /// 24 byte の入力 `m0`、`m1`、`m2` (little endian の 3 語) の SipHash-2-4 を返します。SYN cookie の MAC が
+    /// 使います。
+    pub(crate) fn sum3(self, m0: u64, m1: u64, m2: u64) -> u64 {
+        let mut v = [
+            self.k0 ^ 0x736f_6d65_7073_6575,
+            self.k1 ^ 0x646f_7261_6e64_6f6d,
+            self.k0 ^ 0x6c79_6765_6e65_7261,
+            self.k1 ^ 0x7465_6462_7974_6573,
+        ];
+        for m in [m0, m1, m2, 24 << 56] {
+            v[3] ^= m;
+            round(&mut v);
+            round(&mut v);
+            v[0] ^= m;
+        }
+        v[2] ^= 0xff;
+        for _ in 0..4 {
+            round(&mut v);
+        }
+        v[0] ^ v[1] ^ v[2] ^ v[3]
+    }
+
     /// 4 つ組の鍵付きの hash を返します。
     pub(crate) fn hash_tuple(self, t: Tuple) -> u64 {
         self.sum(
             u64::from(t.laddr) | u64::from(t.raddr) << 32,
             u64::from(t.lport) | u64::from(t.rport) << 16,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SipHash-2-4 の論文の付録の試験の値です。鍵は 0 から 15 の byte、入力は 0 から順の byte です。
+    #[test]
+    fn matches_the_reference_vectors() {
+        let k = SipKey::from_le_bytes(core::array::from_fn(|i| u8::try_from(i).unwrap_or(0)));
+        let word = |i: u8| {
+            u64::from_le_bytes(core::array::from_fn(|j| {
+                8 * i + u8::try_from(j).unwrap_or(0)
+            }))
+        };
+        assert_eq!(k.sum(word(0), word(1)), 0x3f2a_cc7f_57c2_9bdb);
+        assert_eq!(k.sum3(word(0), word(1), word(2)), 0xb8ad_50c6_f649_af94);
     }
 }
