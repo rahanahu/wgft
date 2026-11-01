@@ -3,10 +3,10 @@
 //!
 //! 入力ごとに 1 つの試験で、核の公開の API だけを使います。保持は設定の上限でなく、実際に持つ量で確かめます。
 //!
-//! - 確保の数え (`wgft-alloc-count`):核を作った後に生きている byte の増えた分が、核の会計 (`Held`) の
-//!   chunk、送信の記録、区間の表、再組み立ての写し、UDP の chunk、置き場の chunk の byte の和から、借りている
-//!   boost の配列 (`Budget` が先に確保したもの) の byte を引いた値にちょうど一致すること (`Held` の文書の式)。核を閉じた
-//!   後に、核を作る前の値へ戻ること。生きている byte と最大値が上界 (`Bound`) の内にあること
+//! - 確保の数え (`wgft-alloc-count`):核を作った後に増えた生きている byte が、`Held` の文書の式の値に
+//!   ちょうど一致すること。式は会計の chunk、送信の記録、区間の表、再組み立ての写し、UDP の chunk、置き場の
+//!   chunk の和から、借りている boost の配列 (`Budget` が先に確保したもの) を引いた値です。核を閉じた後に、
+//!   核を作る前の値へ戻ること。生きている byte と最大値が上界 (`Bound`) の内にあること
 //! - 会計:表の行の数が表の大きさの内にあり、入力ごとの項 (接続の枠の floor の項など) を超えないこと
 //! - 入力ごとの確かめ:洪水の間に保持が増えないこと、上限で捨てた数が数えられること、入力が止まった後に
 //!   表が空に戻ること
@@ -30,7 +30,7 @@ use libtest_mimic::{Arguments, Failed, Trial};
 use wgft_alloc_count::{CountingAlloc, live_bytes, peak_bytes, reset_peak};
 use wgft_tcpharness::ip;
 use wgft_tcpharness::packet::{ACK, FIN, Options, RST, SYN, SackBlock, Segment};
-use wgft_wgstack::{BoostPolicy, Config, ConnId, Error, Held, Limits, ListenerId, NoHook};
+use wgft_wgstack::{BoostPolicy, Config, ConnId, Error, Held, Limits, ListenerId, NoHook, UdpId};
 use wgft_wgstack_dut::fuzz::{DUT, Net, PEER, PeerConn, small_limits};
 
 #[global_allocator]
@@ -72,7 +72,9 @@ impl Hold {
 
     /// 核を作った後に増えた生きている byte です。
     fn growth(&self) -> usize {
-        live_bytes().saturating_sub(self.created)
+        live_bytes()
+            .checked_sub(self.created)
+            .expect("the live bytes fell below their value right after the stack was made")
     }
 
     /// 接続の枠 1 つの floor の項 (f_s + f_r + r_f + h_f) です。
@@ -582,6 +584,16 @@ fn sack_ack_flood() {
     let mut p = p0;
     let now = h.now();
     let (c, _) = h.n.stack().accept(now, l).expect("accept");
+    // 先に data を確認して輻輳の窓を広げ、飛んでいる範囲を大きくする
+    for _ in 0..20 {
+        h.fill(c);
+        for o in h.n.drain() {
+            p.absorb(&o);
+        }
+        let s = p.ack(Vec::new());
+        h.n.inject(&s);
+        h.advance(Duration::from_millis(10));
+    }
     h.fill(c);
     let mut hi = p.rcv;
     for o in h.n.drain() {
@@ -619,7 +631,9 @@ fn sack_ack_flood() {
     h.finish();
 }
 
-/// 需要の無いまま boost の枠を持つ接続:別の接続が枠を求めると、黙った保有者は枠を返します。
+/// 需要の無いまま boost の枠を持つ接続:別の接続が枠を求めると、1 秒の間どちらの向きにも需要の無かった保有者は
+/// 枠を返します (`docs/design/userspace/wgstack-buffers.md` の回収の条件)。確立の
+/// 時刻も需要の時刻なので、確立から 1 秒の内の保有者は返しません。
 fn idle_boost_holders() {
     let limits = Limits {
         max_flows: 64,
@@ -638,32 +652,39 @@ fn idle_boost_holders() {
         "{slots} boost slots need more flows"
     );
     let l = h.listen(80);
-    for i in 0..slots + 4 {
+    // すべての枠を同じ時刻に確立した保有者が持つ
+    for i in 0..slots {
         let (c, _) = h.establish(l, 6000 + u16::try_from(i).expect("small"));
         conns.push(c);
         h.drop_output();
         h.check("accepted");
-        assert!(h.held().boosted <= slots, "{:?}", h.held());
     }
-    for _ in 0..30 {
-        h.advance(Duration::from_millis(100));
-        h.drop_output();
-    }
-    // 黙った保有者の後に来た接続は、1 秒の後に枠を得ます
-    for i in 0..4 {
-        let (c, _) = h.establish(l, 7000 + i);
-        conns.push(c);
-        h.drop_output();
-    }
-    for _ in 0..30 {
-        h.advance(Duration::from_millis(100));
-        h.drop_output();
-        h.check("reclaim");
-    }
-    assert!(
-        h.n.stack().stats().boost_reclaimed > 0,
-        "idle holders return their slots"
+    assert_eq!(h.held().boosted, slots, "every slot is lent");
+    let reclaimed = |h: &mut Hold| h.n.stack().stats().boost_reclaimed;
+    // 確立から 0.9 秒の要求では、どの保有者も回収の候補にならない
+    h.advance(Duration::from_millis(900));
+    h.drop_output();
+    let (c, _) = h.establish(l, 7000);
+    conns.push(c);
+    h.drop_output();
+    h.check("too early");
+    assert_eq!(
+        reclaimed(&mut h),
+        0,
+        "a holder idle for less than a second keeps its slot"
     );
+    // 1 秒を過ぎた後の要求では、黙った保有者が枠を返す
+    h.advance(Duration::from_millis(200));
+    h.drop_output();
+    let (c, _) = h.establish(l, 7001);
+    conns.push(c);
+    h.drop_output();
+    h.check("reclaim");
+    assert!(
+        reclaimed(&mut h) > 0,
+        "an idle holder returns its slot after a second"
+    );
+    assert!(h.held().boosted <= slots, "{:?}", h.held());
     for &c in &conns {
         let now = h.now();
         h.n.stack().abort(now, c);
@@ -679,32 +700,71 @@ fn idle_boost_holders() {
     drop(conns);
 }
 
-/// 断片の洪水:完成しない最初の断片を多数の送信元から送っても、再組み立ての表が上界で止まり、期限の後に空に
-/// 戻ります。
-fn fragment_flood() {
-    let mut h = Hold::new(small_limits());
-    for i in 0..5000u32 {
+/// 完成しない最初の断片を、送信元ごとに 1 つ送ります。
+fn first_fragments(h: &mut Hold, count: u32, size: usize, sent: &mut u64) {
+    for i in 0..count {
         let [_, b, c, d] = i.to_be_bytes();
         let src = SocketAddrV4::new(Ipv4Addr::new(172, 16 + b, c, d), 5353);
         let dg = ip::udp_packet(
             src,
             SocketAddrV4::new(DUT, 53),
             u16::try_from(i % 65536).expect("below 65536"),
-            &[0x77; 1200],
+            &vec![0x77; size + 8],
         );
-        let first = ip::frag(&dg, 0, 600);
+        let first = ip::frag(&dg, 0, size);
         h.n.write(&first.marshal());
         drop((dg, first));
-        if i % 100 == 0 {
+        *sent += 1;
+        if i % 50 == 0 {
             h.drop_output();
             h.check("fragment flood");
-            let b = h.n.bound();
-            assert!(h.held().frag_bytes as u64 <= b.frag, "{:?}", h.held());
         }
     }
+    h.drop_output();
+    h.check("fragment flood");
+}
+
+/// 断片の洪水:完成しない最初の断片を多数の送信元から送っても、再組み立ての表が項目の数と byte の上限で止まり、
+/// 期限の後に空に戻ります。核は完成しない断片をすべて `fragments_dropped` に数えます。
+fn fragment_flood() {
+    let mut h = Hold::new(small_limits());
+    let mut sent = 0;
+    // 小さな断片では項目の数が先に尽きる
+    first_fragments(&mut h, 2000, 600, &mut sent);
+    assert_eq!(
+        h.held().frag_bytes,
+        h.limits.frag_entries * 600,
+        "the table stops at its entries"
+    );
+    assert_eq!(
+        h.n.stack().stats().fragments_dropped,
+        sent,
+        "every fragment is counted"
+    );
+    for _ in 0..120 {
+        h.advance(Duration::from_secs(1));
+        h.drop_output();
+    }
+    h.check("after the small fragments");
+    assert_eq!(
+        h.held().frag_bytes,
+        0,
+        "the table empties after its timeout"
+    );
+    // 大きな断片では byte の上限が先に尽きる。表の byte は項目ごとの管理領域も数えるので、止まる所は上限から
+    // 断片 1 つと管理領域の分だけ手前になりうる。2 つの断片の分の内にあることを求める
+    let size = 60_000;
+    first_fragments(&mut h, 200, size, &mut sent);
+    let cap = h.n.bound().frag;
+    let held = h.held().frag_bytes as u64;
     assert!(
-        h.n.stack().stats().fragments_dropped > 0,
-        "the fragments past the table are counted"
+        held <= cap && cap - held < 2 * size as u64,
+        "the table stops within two fragments of its byte cap {cap}: {held}"
+    );
+    assert_eq!(
+        h.n.stack().stats().fragments_dropped,
+        sent,
+        "every fragment is counted"
     );
     for _ in 0..120 {
         h.advance(Duration::from_secs(1));
@@ -719,58 +779,103 @@ fn fragment_flood() {
     h.finish();
 }
 
-/// 読まない UDP の endpoint への洪水:endpoint の上限 (予算の 4 分の 1) と核の予算で止まり、断った数が数えられ、
-/// 読むと予約が返ります。
-fn udp_flood() {
-    let mut h = Hold::new(small_limits());
-    let now = h.now();
-    let u =
-        h.n.stack()
-            .bind_udp(now, SocketAddrV4::new(DUT, 53))
-            .expect("bind");
-    for i in 0..10_000u32 {
+/// 読まない endpoint `u` に `size` byte の datagram を `count` 個送ります。
+fn udp_datagrams(h: &mut Hold, port: u16, count: u32, size: usize) {
+    for i in 0..count {
         let dg = ip::udp_packet(
             SocketAddrV4::new(PEER, 5000 + u16::try_from(i % 100).expect("below 100")),
-            SocketAddrV4::new(DUT, 53),
+            SocketAddrV4::new(DUT, port),
             u16::try_from(i % 65536).expect("below 65536"),
-            &[0x55; 1000],
+            &vec![0x55; size],
         );
         h.n.write(&dg.marshal());
         drop(dg);
         if i % 100 == 0 {
             h.drop_output();
             h.check("udp flood");
-            let held = h.held();
-            assert!(
-                held.udp_rx_datagrams <= h.limits.udp_rx_datagrams / 4,
-                "{held:?}"
-            );
         }
     }
-    let st = h.n.stack().stats();
-    assert!(
-        st.udp_endpoint_full > 0,
-        "the datagrams past the endpoint's share are counted: {st:?}"
-    );
+    h.drop_output();
+    h.check("udp flood");
+}
+
+/// endpoint `u` の datagram をすべて読みます。
+fn udp_read_all(h: &mut Hold, u: UdpId) {
     let mut buf = [0u8; 2048];
     loop {
         let now = h.now();
         match h.n.stack().recv_from(now, u, &mut buf) {
             Ok(_) => {}
-            Err(Error::WouldBlock) => break,
+            Err(Error::WouldBlock) => return,
             Err(e) => panic!("recv_from: {e}"),
         }
     }
+}
+
+/// 読まない UDP の endpoint への洪水:endpoint は datagram の数と byte のそれぞれで核の予算の 4 分の 1 で止まり、
+/// 核の全体は予算で止まり、断った数が数えられ、読むと予約が返ります。
+fn udp_flood() {
+    let mut socks = Vec::with_capacity(8);
+    let mut h = Hold::new(small_limits());
+    for port in 53..59u16 {
+        let now = h.now();
+        socks.push(
+            h.n.stack()
+                .bind_udp(now, SocketAddrV4::new(DUT, port))
+                .expect("bind"),
+        );
+    }
+    // 小さな datagram では数の上限が先に尽きる
+    let share = h.limits.udp_rx_datagrams / 4;
+    udp_datagrams(&mut h, 53, 3000, 64);
+    assert_eq!(
+        h.held().udp_rx_datagrams,
+        share,
+        "the endpoint stops at its count share"
+    );
+    let st = h.n.stack().stats();
+    assert_eq!(
+        st.udp_endpoint_full,
+        3000 - share as u64,
+        "the refusals are counted: {st:?}"
+    );
+    udp_read_all(&mut h, socks[0]);
     h.check("read");
     let held = h.held();
     assert!(
         held.udp_rx_bytes == 0 && held.udp_rx_datagrams == 0,
         "reading returns the reservation: {held:?}"
     );
-    let now = h.now();
-    h.n.stack().close_udp(now, u);
+    // 大きな datagram では byte の上限が先に尽き、保持は平らになる
+    udp_datagrams(&mut h, 53, 1500, 1000);
+    let bytes = h.held().udp_rx_bytes;
+    udp_datagrams(&mut h, 53, 1500, 1000);
+    let held = h.held();
+    assert!(
+        held.udp_rx_bytes == bytes && held.udp_rx_datagrams < share,
+        "the endpoint stops at its byte share {bytes}, before its count share: {held:?}"
+    );
+    udp_read_all(&mut h, socks[0]);
+    // 5 つ以上の endpoint では核の全体の予算 (endpoint の上限の 4 倍) が先に尽きる
+    for port in 53..59u16 {
+        udp_datagrams(&mut h, port, 1500, 1000);
+    }
+    let held = h.held();
+    let st = h.n.stack().stats();
+    assert!(
+        held.udp_rx_bytes <= 4 * bytes && st.udp_tunnel_full > 0,
+        "the tunnel stops at its budget of four shares ({}): {held:?} {st:?}",
+        4 * bytes
+    );
+    for &u in &socks {
+        udp_read_all(&mut h, u);
+        let now = h.now();
+        h.n.stack().close_udp(now, u);
+    }
     h.check("closed");
+    assert!(h.held().udp_rx_bytes == 0, "{:?}", h.held());
     h.finish();
+    drop(socks);
 }
 
 fn trial(name: &'static str, f: fn()) -> Trial {

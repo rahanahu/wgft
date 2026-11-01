@@ -108,13 +108,15 @@ async fn core_bytes(peer: &Peer) -> usize {
         .call(|net| net.with(|s| s.core().held()))
         .await
         .unwrap();
-    h.record_bytes
+    // `Held` の文書の式。借りている boost の配列は Budget が先に確保したものなので引く
+    (h.record_bytes
         + h.interval_bytes
         + h.chunk_bytes
         + h.pool_bytes
         + h.frag_bytes
         + h.udp_rx_bytes
-        + h.udp_tx_bytes
+        + h.udp_tx_bytes)
+        - h.lent_array_bytes
 }
 
 fn sessions(m: &Manager) -> usize {

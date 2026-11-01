@@ -1113,7 +1113,7 @@ Go は書ける量が 1000 byte を超える時だけ書き、読める時だけ
 入力の先頭の 8 byte を little endian の種として読み、短ければ 0 で埋めます。
 Go の試験は各段で接続の送り手の内部の欄を確かめます。
 SND.UNA ≤ SND.NXT ≤ SND.MAX、cwnd が 0 でないこと、pipe ≤ 2 × flight + 1、scoreboard の数え直し (再送した byte、SACK 済み、その先の欄)、損失の列と再送の位置の範囲、list のつながり、損失の列と再送の途中の位置 (`qMid` と `qOff`、`rxtMid` と `rxtOff`) です。
-核の `check_invariants` は使っている接続ごとに送り手の確かめ (`check_sender`) を行い、これらと Go の `checkScoreboard` を写します (wgstack の Rust 版の設計の不変条件の確かめ)。
+核の `check_invariants` は使っている接続ごとに送り手の確かめ (`check_sender`) を行い、この送り手の欄の確かめと Go の `checkScoreboard` を写します (wgstack の Rust 版の設計の不変条件の確かめ)。
 `adversarial_sender` は各段の後に `check_invariants` を呼ぶので、Go と同じ確かめを各段で受けます。
 加えて、外から見える出力を確かめます。
 出力の確かめは、DUT の data が書いた byte の範囲の中にあって中身が stream と同じこと、FIN が stream の終わりにあること、接続が生きている間に RST を送らないことです。
@@ -1268,7 +1268,10 @@ adapter の側に核の故障の写しを作らないのは、公開の API の�
 | `rtx_bytes_drift` | 送り手の scoreboard の再送した byte の数えを、印を付け直す時に増やしすぎる | `adversarial_sender` の各段の `check_invariants` (送り手の確かめ)、記録の照合 (git の集まりと `wgstack-rs-replay-full`) |
 | `boost_never_reclaimed` | 需要の無い保有者の boost の枠を回収しない | `holding` の `idle_boost_holders` |
 | `frag_no_expiry` | 再組み立ての表の期限を外す | `holding` の `fragment_flood` (期限の後に表が空に戻る) |
-| `udp_no_endpoint_cap` | UDP の endpoint ごとの受信の上限 (予算の 4 分の 1) を外す | `holding` の `udp_flood` |
+| `udp_no_endpoint_bytes_cap` | UDP の endpoint ごとの受信の byte の上限 (予算の 4 分の 1) を外す | `holding` の `udp_flood` (大きな datagram で保持が平らになる) |
+| `udp_no_endpoint_count_cap` | UDP の endpoint ごとの受信の datagram の数の上限 (予算の 4 分の 1) を外す | `holding` の `udp_flood` (小さな datagram で数の上限にちょうど止まる) |
+| `udp_no_tunnel_cap` | 核の全体の UDP の受信の予算を外す | `holding` の `udp_flood` (5 つ以上の endpoint で `udp_tunnel_full` を数える) |
+| `frag_byte_cap_ignored` | 再組み立ての表の byte の上限で追い出さない | `holding` の `fragment_flood` (大きな断片で byte の上限の内に止まる) |
 | `udp_recv_keeps_reservation` | `recv_from` が datagram の予約を返さない | `holding` の `udp_flood` (読むと予約が返る) |
 
 故障を入れた build を流す手順 (故障ごとの別の target directory と、落ちるはずの試験の選び方) は、実装の担当が点を書いた後に試験の担当が足します。
@@ -1294,7 +1297,8 @@ cache の入力は集まりを作る時のもので、その後に増えた入�
 移行の間は Go の wgstack を凍結しているので、作り直しはまれです。
 2026-11-01 の開発のホストの 1 回の測りでは、集まりは 8712 の記録で 1.1 GB ほど、作るのに 4 分半ほど (2 回作って比べる今の手順) でした。
 敵対的な送り手の 3000 の種が 0.8 GB ほどを占めます。
-4b の段の印の記録の照合は、3 つに分けた段のそれぞれが release の build で 40 秒ほどでした。
+実装の 4b の段だけの核では、照合に入る記録 (4b の段の印の記録) の照合は、3 つに分けた段のそれぞれが release の build で 40 秒ほどでした。
+この時の核は `check_invariants` の 1 回が今より重かったので、今の時間の目安にはなりません。
 実装の 5 と 6 の段と送り手の確かめ (#722) が入った木では、大きな集まりのすべての記録が照合に入り、3 つに分けた段のそれぞれが照らすのに 7 から 11 秒ほどでした (集まりは cache にあり、ほかの段と並べた関門の 1 回の測り)。
 
 Go と Rust の wgstack を同じ反応する相手の前に並べて出力を比べる差分の試験 (レビューで使い捨てに書いたもの) は、T4 に入れません。

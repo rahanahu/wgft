@@ -9,8 +9,8 @@
 //! - Go は各段で接続の送り手の内部の欄を確かめます。SND.UNA ≤ SND.NXT ≤ SND.MAX、cwnd が 0 でないこと、
 //!   pipe ≤ 2 × flight + 1、scoreboard の数え直し (再送した byte、SACK 済み、その先の欄)、損失の列と再送の
 //!   位置の範囲、list のつながり、損失の列と再送の途中の位置 (`qMid` と `qOff`、`rxtMid` と `rxtOff`) です。
-//!   核の `check_invariants` は使っている接続ごとに送り手の確かめ (`check_sender`) を行い、これらと Go の
-//!   `checkScoreboard` を写します。この target は各段の後に `check_invariants` を呼ぶので、Go と同じ確かめを
+//!   核の `check_invariants` は使っている接続ごとに送り手の確かめ (`check_sender`) を行い、この送り手の欄の
+//!   確かめと Go の `checkScoreboard` を写します。この target は各段の後に `check_invariants` を呼ぶので、Go と同じ確かめを
 //!   各段で受けます。加えて外から見える出力を確かめます。DUT の data は書いた byte の範囲の中にあり、中身は
 //!   stream と同じで、FIN は stream の終わりにあることです
 //! - 嘘の SACK の block の範囲と ICMP の引く番号は、Go は DUT の SND.UNA と SND.MAX から取ります。ここでは
