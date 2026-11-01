@@ -128,13 +128,18 @@ func serveDUT(c *dutproto.Conn, logw io.Writer) int {
 
 // newDUTServer は HELLO の Device を公開の New で作る。既定でない上限の組は断る。小さな上限の記録は package
 // の中の testNet が作る (test-tooling.md の 4 節)。
-func newDUTServer(h *dutproto.Hello) (*dutServer, *protoError) {
+func newDUTServer(h *dutproto.Hello) (*dutServer, *protoError) { return newDUTServerWith(h, false) }
+
+// newDUTServerWith は newDUTServer で、replay なら上限の組を受け付け、Device を package の中の newDevice で
+// 自分だけの boost の枠の集まりと作る。同じプロセスで記録を次々に照らす TestRecordingsReplay が使う。
+// 別のプロセスの dutserve と同じく、Device は前の記録の状態と混ざらない。
+func newDUTServerWith(h *dutproto.Hello, replay bool) (*dutServer, *protoError) {
 	switch {
 	case h.Version != dutproto.Version:
 		return nil, protoErrorf("HELLO asks for protocol version %d; dutserve speaks %d", h.Version, dutproto.Version)
 	case h.Clock != dutproto.ClockFake:
 		return nil, protoErrorf("HELLO asks for clock %d; dutserve runs only the fake clock", h.Clock)
-	case len(h.Limits) > 0:
+	case len(h.Limits) > 0 && !replay:
 		return nil, protoErrorf("HELLO asks for %d non-default limits; dutserve builds the Device with the public New and takes only the default limits", len(h.Limits))
 	case len(h.Seed) != dutproto.SeedLen:
 		return nil, protoErrorf("HELLO carries a seed of %d bytes; want %d", len(h.Seed), dutproto.SeedLen)
@@ -145,8 +150,19 @@ func newDUTServer(h *dutproto.Hello) (*dutServer, *protoError) {
 	}
 	clk := NewManualClock()
 	// 種の 64 byte の後は読めない Reader を渡す。Go の wgstack が作成の後に Config.Rand を読めば、ここで分かる
-	dev, err := New(Config{Addr: h.Addr, MTU: int(h.MTU), Clock: clk, Rand: bytes.NewReader(h.Seed),
-		TestBoost: BoostPolicy(h.Boost), TestCongestion: CongestionControl(h.Congestion)})
+	cfg := Config{Addr: h.Addr, MTU: int(h.MTU), Clock: clk, Rand: bytes.NewReader(h.Seed),
+		TestBoost: BoostPolicy(h.Boost), TestCongestion: CongestionControl(h.Congestion)}
+	var dev *Device
+	var err error
+	if replay {
+		lim, lerr := limitsFromHello(h.Limits)
+		if lerr != nil {
+			return nil, protoErrorf("HELLO: %v", lerr)
+		}
+		dev, err = newDevice(cfg, lim, newBoostPool(boostSlots))
+	} else {
+		dev, err = New(cfg)
+	}
 	if err != nil {
 		return nil, protoErrorf("wgstack.New: %v", err)
 	}

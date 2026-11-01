@@ -22,11 +22,13 @@ type txCfg struct {
 	small    bool // 相手の窓を小さくする
 	boost    bool
 	lie      int // 0: 正直、1: 嘘の SACK、2: 嘘と取り消し
+	rec      recSpec
 }
 
 func runTx(t *testing.T, cfg txCfg) {
 	rng := rand.New(rand.NewPCG(cfg.seed, cfg.seed^0x5bd1))
 	n := newTestNet(t, smallLimits())
+	n.record(cfg.rec)
 	l := listen(t, n, 80)
 	stream := make([]byte, cfg.length)
 	for i := range stream {
@@ -36,8 +38,7 @@ func runTx(t *testing.T, cfg txCfg) {
 	tup := tuple{laddr: addrBits(dutAddr), raddr: addrBits(peerAddr), lport: 80, rport: 5000}
 	h := uint32(n.d.s.isnKey.hashTuple(tup))
 	k := cfg.dutISS - h
-	n.clk.Advance(time.Duration(k) * 4000)
-	n.d.Tick()
+	n.advance(time.Duration(k) * 4000)
 	tsVal := uint32(100)
 	peerISS := uint32(0x7fff0000)
 	n.inject(tseg{sport: 5000, dport: 80, seq: peerISS, flags: flagSYN, wnd: 65535, mss: 1380, ws: cfg.ws, sackOK: cfg.sack, ts: cfg.ts, tsVal: tsVal})
@@ -117,7 +118,7 @@ func runTx(t *testing.T, cfg txCfg) {
 		return s
 	}
 	n.inject(mkAck())
-	c := acceptOne(t, l)
+	c := n.accept(l)
 	c0 = c
 	gen := c.gen
 	written := 0
@@ -172,7 +173,7 @@ func runTx(t *testing.T, cfg txCfg) {
 	}
 	steps := 0
 	for ; steps < 600000; steps++ {
-		if finGot && rcvOff == cfg.length && c.Delivered() {
+		if finGot && rcvOff == cfg.length && n.delivered(c) {
 			break
 		}
 		switch r := rng.IntN(100); {
@@ -183,7 +184,7 @@ func runTx(t *testing.T, cfg txCfg) {
 					if rng.IntN(5) == 0 {
 						k = min(k, 1+rng.IntN(50))
 					}
-					m, err := c.Write(stream[written : written+k])
+					m, err := n.writeConn(c, stream[written:written+k])
 					if err != nil {
 						t.Fatalf("seed %d: Write: %v", cfg.seed, err)
 					}
@@ -192,9 +193,9 @@ func runTx(t *testing.T, cfg txCfg) {
 			} else if !closed {
 				closed = true
 				if rng.IntN(2) == 0 {
-					c.CloseWrite()
+					n.closeWrite(c)
 				} else {
-					c.Close()
+					n.closeConn(c)
 				}
 			}
 		case r < 45: // DUT の出力を網へ
@@ -246,6 +247,7 @@ func runTx(t *testing.T, cfg txCfg) {
 				checkScoreboard(t, c.c)
 			}
 		case r < 88 && cfg.boost:
+			n.internal("an internal boost flip")
 			n.d.s.tryBoost(c.c, gen, boostSend)
 			c.c.mu.Lock()
 			if c.c.gen == gen {
@@ -282,22 +284,23 @@ func TestSendStreamIntegrity(t *testing.T) {
 	if streamSeedsFull() {
 		seeds = 600
 	}
-	forSeeds(t, 1, seeds, func(t *testing.T, seed uint64) {
-		ws := []int{-1, 0, 2, 7, 14}[seed%5]
-		cfg := txCfg{
-			seed:    seed,
-			ts:      seed%2 == 0,
-			sack:    seed%3 == 0,
-			ws:      ws,
-			dutISS:  uint32(0xffffffff - (seed*5000)%300000),
-			length:  5000 + int(seed*6151)%400000,
-			loss:    []int{0, 3, 10, 25}[seed%4],
-			zeroWnd: seed%7 == 0,
-			small:   seed%11 == 0,
-			boost:   seed%2 == 1,
-		}
-		runTx(t, cfg)
-	})
+	forSeeds(t, 1, seeds, func(t *testing.T, seed uint64) { runTx(t, txStreamCfg(seed)) })
+}
+
+// txStreamCfg は TestSendStreamIntegrity の種の選択。記録 (recordings_test.go) も使う。
+func txStreamCfg(seed uint64) txCfg {
+	return txCfg{
+		seed:    seed,
+		ts:      seed%2 == 0,
+		sack:    seed%3 == 0,
+		ws:      []int{-1, 0, 2, 7, 14}[seed%5],
+		dutISS:  uint32(0xffffffff - (seed*5000)%300000),
+		length:  5000 + int(seed*6151)%400000,
+		loss:    []int{0, 3, 10, 25}[seed%4],
+		zeroWnd: seed%7 == 0,
+		small:   seed%11 == 0,
+		boost:   seed%2 == 1,
+	}
 }
 
 // TestSendStreamWithLyingSACK は、範囲の外や逆向きの SACK の block を混ぜ、順序外のデータを捨てる相手に
