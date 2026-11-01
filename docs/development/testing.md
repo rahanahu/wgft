@@ -43,10 +43,10 @@ v1.0 はリリース済みですが、その事実だけで新設項目の実装
 
 コードを変える PR は、マージの前にラボの一式 (A9) を両モードで流します。
 v2 への移行の間、次のものだけを変える PR は、ラボの一式の `go` の組を流しません。
-`crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、文書、ラボが使わない CI 専用の検査スクリプト (`scripts/check-*`)、`.github/workflows/ci.yml` の Rust のジョブ (`rust-*`) と `changes` の `rust` の振り分けです。
+`crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、文書、ラボが使わない CI 専用の検査スクリプト (`scripts/check-*`)、`.github/workflows/ci.yml` の Rust のジョブ (`rust-*`) と `harness-rust-go` (B16)、`changes` の `rust` と `harness` の振り分け、ラボがビルドも実行もしない package の Go の試験のファイルとその testdata (`internal/tcpharness/rustdut/*_test.go` など) です。
 `go` の組はこれらをビルドも実行もしないためです。
-CI の `harness-rust-go` (B16) は名前が `rust-` で始まらず、Go の試験を流すので、この job と `changes` の `harness` の振り分けを変える PR は、ここで言う Rust だけの変更に当たりません。
-`lab/`、ラボが流すテスト、`deploy/`、ラボが使うスクリプトと、上記以外の Go のコードを変える PR は、これまでどおり流します。
+B16 は Go の試験を流しますが、B16 が流す Go のコードのうちラボも使うもの (`internal/tcpharness` の試験でないファイル、`internal/wgstack`、`internal/dutproto`) は、ここに挙げたものに入りません。
+`lab/`、ラボが流すテスト、`deploy/`、ラボが使うスクリプトと、ここに挙げたもの以外の Go のコード (Go の試験のファイルを含む) を変える PR は、これまでどおり流します。
 
 `go` の組は、ラボの台本が起動するユーザー空間モードのエージェントを Go の agent にした既定の一式です。
 Rust の agent のビルドに入るものを変える PR は、ラボの一式の `rust` の組 (`lab/lab suite --agent-impl rust`) を流します。
@@ -110,7 +110,7 @@ B 類の契機は、次のテストを選ぶために使います。
 | `deploy` | `deploy/*.service`、`deploy/*.conf`、`deploy/*.plist`、`deploy/server.env.example`、`cmd/wgft/config.go`、`cmd/wgft/server.go`、`cmd/wgft/agent.go` (設定の読み込みと終了コード) | B2、B9 | L7 |
 | `build` | `.goreleaser.yaml`、`scripts/build-release.sh`、`scripts/goreleaser-checksum.sh`、`scripts/third-party-licenses.sh`、`scripts/check-release-assets.sh`、`scripts/docker-smoke.sh`、`deploy/Dockerfile.*`、`deploy/*.compose.yaml`、`go.mod`、`go.sum`、`.github/workflows/**` | B5、B6、B10 | 無し |
 | `rust` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、`internal/tcpharness/scripts/**` | B13、B14、B15 | 無し |
-| `harness` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`internal/tcpharness/**`、`internal/dutproto/**`、`internal/wgstack/**` | B16 | 無し |
+| `harness` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`internal/tcpharness/**`、`internal/dutproto/**`、`internal/wgstack/**`、`internal/ipv4frag/**`、`go.mod`、`go.sum` | B16 | 無し |
 | `rust-agent` | `crates/**` のうち `crates/wgft-wireguard-tun/**` 以外、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` | 無し | ラボの一式の `rust` の組を積みの先頭で 1 回。「wgstack の上の agent」の段までは報告だけで、その後はマージの関門 ([マージの前に流すテスト](#マージの前に流すテスト)) |
 | `dataplane-net` | `internal/dataplane/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` の転送の経路 | 無し (C1 と C5 は次の段階の完了時に流し直す) | L1 |
 | `phase` | 関係する実装の段階の完了 | C 類 | すべて |
@@ -202,7 +202,8 @@ advisory の検査が `cargo audit` を兼ねるため、`cargo audit` は別に
 
 B16 は、Go の runner と Rust の runner が同じ台本で DUT への同じ要求を送ることを確かめます ([v2 の試験の道具](../design/v2/test-tooling.md)の 2 節の「2 つの runner の一致の確かめ」)。
 Go の凍結した wgstack の `dutserve` を作り、Go の試験 `TestWriteTranscripts` と Rust の試験 `crates/wgft-tcpharness/tests/scripts.rs` が、すべての台本を種 1 から 5 で流して、要求と応答の列と確かめの結果を byte の単位で比べます。
-Go と cargo の両方が要るので、前節の表の `harness` の契機で、Rust の変更、試験の道具、DUT の口、凍結した Go の wgstack の変更に流します。
+Go と cargo の両方が要るので、前節の表の `harness` の契機で、Rust の変更、試験の道具、DUT の口、凍結した Go の wgstack とその build に入るものの変更に流します。
+B16 は `tests/scripts.rs` だけでなく `wgft-tcpharness` の試験をすべて流し、Go の側のデータ (frame の例、`vectors.json`) を読む Rust の試験も含めます。
 
 パスによる判定ができない、または信用できないときは、契機を問わずすべてを流します。
 `changes` ジョブの `paths-filter` の実行が失敗したとき、比較対象の直前のコミットが無いとき (ブランチの最初の push、force push)、`workflow_dispatch` による手動実行のとき、`.github/workflows/**` 自身を変更したとき (振り分けの仕組み自身の変更を、その仕組みに判定させないため) は、`build-test`、B4、B5、B6、B8、B13、B14、B15、B16 のすべてを流します。

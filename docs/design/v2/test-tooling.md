@@ -1082,13 +1082,17 @@ cargo-fuzz の crate は `[workspace]` を自分で持ち、ワークスペー�
 | ラボ | `linuxdut` の適合の実行は表を使うので、移した台本も今と同じく流れる | 今と同じ |
 
 道具の照合の段は、CI に新しい job (`harness-rust-go`) として足します。
-cargo と Go の両方が要り、`crates/**`、`internal/tcpharness/**`、`internal/dutproto/**`、`internal/wgstack/**` を変えた PR で流します。
-この job は Go の試験を流すので、ラボの一式を省ける Rust だけの CI の job には当たりません。
-[テストの規範](../../development/testing.md)は Rust の job を `rust-*` の名前で数えてラボの一式を省くので、この job は `rust-` で始めない名前にします。
-job を足す PR は、同じ PR で testing.md の B 類の表と振り分けに `harness-rust-go` を足し、この job を変える PR がラボを省けないことを書きます。
+cargo と Go の両方が要り、Rust の変更 (`crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`)、`internal/tcpharness/**`、`internal/dutproto/**`、`internal/wgstack/**` と、凍結した Go の wgstack が build に使う `internal/ipv4frag/**`、`go.mod`、`go.sum` を変えた PR で流します。
+この job は Go の試験を流すので、Rust だけの CI の job (`rust-*`) には当たらず、`rust-` で始めない名前にします。
+
+ラボの一式を省けるかは、[テストの規範](../../development/testing.md)の「マージの前に流すテスト」が決めます。
+ラボはこの job も、この job だけが流す Go の試験のファイル (`internal/tcpharness/rustdut/*_test.go` など、ラボがビルドも実行もしない package の試験とその testdata) も使いません。
+そのため、それらと `harness` の振り分けだけを変える PR は、Rust だけの変更と同じくラボの一式を省けます。
+この job が流す Go のコードのうちラボも使うもの (`internal/tcpharness` の試験でないファイル、`internal/wgstack`、`internal/dutproto`) を変える PR は、ほかの Go のコードと同じくラボの一式を流します。
 
 T3b で、この job と、testing.md の B 類の表の B16、振り分けの `harness` の契機を足しました。
-job は `dutserve` を作り、Go の `TestWriteTranscripts` と `TestRustVectors`、Rust の `tests/scripts.rs` を流します (2 節の「2 つの runner の一致の確かめ」)。
+job は `dutserve` を作り、Go の `TestWriteTranscripts` と `TestRustVectors` を流した後、`tests/scripts.rs` を含む `wgft-tcpharness` の試験をすべて流します (2 節の「2 つの runner の一致の確かめ」)。
+crate 全体を流すのは、Rust の試験が読む Go の側のデータ (frame の例、`vectors.json`) だけを変えた PR が、`rust` でなく `harness` の契機にだけ当たるためです。
 
 ホストの関門 (`scripts/wgstack-gate.sh`) には、T2a で `rustdut-dutserve` の段を、T3b で `harness-rust-go` の段を足しました。
 `rustdut-dutserve` の段は `dutserve` を作り、`rustdut` を通した適合と輻輳の制御、`wgstackdut` との一致、誤りの道の一致、transcript の繰り返しを種 1 から 5 で流します。

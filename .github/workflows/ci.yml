@@ -54,11 +54,14 @@ name: CI
 #               RustSec advisories affect code nobody touched.
 #
 #   harness -> crates/**, Cargo.toml, Cargo.lock, rust-toolchain.toml,
-#               internal/tcpharness/**, internal/dutproto/**, internal/wgstack/**
+#               internal/tcpharness/**, internal/dutproto/**, internal/wgstack/**,
+#               internal/ipv4frag/**, go.mod, go.sum
 #               -> gates harness-rust-go (B16). It runs the Go and the Rust scenario runners
 #               against the frozen Go wgstack behind the DUT frame protocol and compares their
 #               transcripts (docs/design/v2/test-tooling.md section 2), so it needs both
 #               toolchains and runs Go tests: it is not one of the Rust-only rust-* jobs.
+#               The lab runs neither the job nor the Go test files only it runs, so
+#               docs/development/testing.md lets a PR that changes only those skip the lab suite.
 #
 # A change to .github/workflows/** (the `workflows` filter below) additionally forces every
 # gated job to run, on top of what `build` and `go_code` already cover: a ci.yml change can
@@ -176,6 +179,10 @@ jobs:
               - 'internal/tcpharness/**'
               - 'internal/dutproto/**'
               - 'internal/wgstack/**'
+              # what the frozen Go wgstack builds from
+              - 'internal/ipv4frag/**'
+              - 'go.mod'
+              - 'go.sum'
             build:
               - '.goreleaser.yaml'
               - 'scripts/build-release.sh'
@@ -539,11 +546,13 @@ jobs:
           WGFT_TEST_WGSTACK_DUT: ${{ github.workspace }}/bin/wgstack-dutserve.test
           WGFT_TEST_TCPHARNESS_TRANSCRIPTS: ${{ runner.temp }}/transcripts
         run: go test ./internal/tcpharness/rustdut -run 'TestWriteTranscripts|TestRustVectors' -count=1
+      # The whole crate, not only tests/scripts.rs: a change that only touches the Go test data
+      # the other tests read (frames, vectors) reaches this job and not rust-check.
       - name: Rust runner against the same transcripts
         env:
           WGFT_TEST_WGSTACK_DUT: ${{ github.workspace }}/bin/wgstack-dutserve.test
           WGFT_TEST_TCPHARNESS_TRANSCRIPTS: ${{ runner.temp }}/transcripts
-        run: cargo nextest run -p wgft-tcpharness --test scripts --locked
+        run: cargo nextest run -p wgft-tcpharness --locked
 
   release-snapshot:
     # .github/workflows/release.yml only runs `goreleaser release --clean` on a `v*` tag push,
