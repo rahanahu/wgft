@@ -4,7 +4,9 @@
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use crate::config::{DeviceConfig, Ipv4Prefix, Limits, PeerConfig, ProtocolTimers, Roaming};
+use crate::config::{
+    DeviceConfig, Ipv4Prefix, Limits, MIN_MTU, PeerConfig, ProtocolTimers, Roaming,
+};
 use crate::device::{Device, Event};
 use crate::drops::DropReason;
 use crate::ip::tests::ipv4_packet;
@@ -242,7 +244,7 @@ fn agent_contacts_the_server_at_start_and_both_ways_work() {
 fn delivered_packets_lose_their_padding() {
     let mut n = Net::new();
     n.connect();
-    for len in [0, 1, 15, 16, 17, 1400] {
+    for len in [0, 1, 15, 16, 17, 1388] {
         n.a_sends(&vec![0x5a; len]);
         let got = n.b_got.pop().unwrap();
         assert_eq!(got.len(), 20 + len, "payload of {len} bytes");
@@ -284,14 +286,16 @@ fn outbound_packets_need_a_route_an_ipv4_header_and_to_fit_the_mtu() {
     let mut v6 = ipv4_packet(AGENT_IP, SERVER_IP, b"x");
     v6[0] = 0x60;
     n.a.handle_packet(now, &v6);
-    n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, &[0; 1401]));
+    // MTU の 1420 を 16 の倍数に切り下げた 1408 バイトまで送る
+    assert_eq!(n.a.mtu(), 1408);
+    n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, &[0; 1389]));
     n.a.handle_packet(now, &[]);
     assert!(n.a.poll_transmit().is_none());
     assert_eq!(n.a.drops().get(DropReason::NoRoute), 1);
     assert_eq!(n.a.drops().get(DropReason::InvalidInnerPacket), 2);
     assert_eq!(n.a.drops().get(DropReason::TooBig), 1);
-    // ちょうど MTU の packet は通る
-    n.a_sends(&[0; 1400]);
+    // ちょうど 1408 バイトの packet は通る
+    n.a_sends(&[0; 1388]);
     assert_eq!(n.b_got.len(), 1);
 }
 
@@ -701,7 +705,7 @@ fn bad_configurations_are_refused() {
 fn max_transmit_len_covers_a_full_packet() {
     let mut n = Net::new();
     n.connect();
-    n.a.handle_packet(n.now(), &ipv4_packet(AGENT_IP, SERVER_IP, &[0; 1400]));
+    n.a.handle_packet(n.now(), &ipv4_packet(AGENT_IP, SERVER_IP, &[0; 1388]));
     let tx = n.a.poll_transmit().unwrap();
     assert_eq!(tx.payload.len(), n.a.max_transmit_len());
 }
@@ -1072,4 +1076,211 @@ fn start_handshake_sends_one_initiation_and_establishes_a_session() {
     assert!(!m.b.start_handshake(m.now(), &a));
     assert!(!m.a.start_handshake(m.now(), &a_key));
     assert_eq!(m.b.held().transmit_packets, 0);
+}
+
+#[test]
+fn padding_never_takes_a_data_message_past_the_mtu() {
+    for mtu in [MIN_MTU, 576, 1420, 1432, 1440, 1450, 9216] {
+        let mut n = Net::with(|a| a.mtu = mtu, |b| b.mtu = 9216);
+        n.connect();
+        let inner = n.a.mtu();
+        assert_eq!(inner % 16, 0, "MTU {mtu}");
+        assert!(inner <= usize::from(mtu) && inner + 16 > usize::from(mtu));
+        let now = n.now();
+        n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, &vec![1; inner - 20]));
+        let tx = n.a.poll_transmit().unwrap();
+        // 暗号の上乗せ (ヘッダと tag の 32 バイト) を除いた長さが設定の MTU を超えない
+        assert!(tx.payload.len() - 32 <= usize::from(mtu), "MTU {mtu}");
+        assert_eq!(tx.payload.len(), n.a.max_transmit_len());
+        n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, &vec![1; inner - 19]));
+        assert!(n.a.poll_transmit().is_none());
+        assert_eq!(n.a.drops().get(DropReason::TooBig), 1);
+    }
+}
+
+/// `n.a_sent_at` の `from` 以降の最も長い途切れ。
+fn widest_silence(n: &Net, from: Duration) -> Duration {
+    let mut last = from;
+    let mut widest = Duration::ZERO;
+    for &at in n
+        .a_sent_at
+        .iter()
+        .filter(|&&at| at >= from)
+        .chain([n.t].iter())
+    {
+        widest = widest.max(at.saturating_sub(last));
+        last = at;
+    }
+    widest
+}
+
+#[test]
+fn one_way_data_gets_a_passive_keepalive_within_the_keepalive_timeout() {
+    // server (B) から agent (A) へだけ 1 秒ごとにデータが流れる。WireGuard の規則では、A は返事をして
+    // いない最初の受信から 10 秒で keepalive を送る。送らないと B は返事の無いデータの 15 秒後に
+    // ハンドシェイクを始め直す
+    let mut n = Net::new();
+    n.connect();
+    let start = n.t;
+    n.a_sent_at.clear();
+    n.b_initiations.clear();
+    for _ in 0..60 {
+        n.t += Duration::from_secs(1);
+        n.tick();
+        n.b_sends(b"one way");
+    }
+    assert_eq!(n.a_got.len(), 60);
+    let widest = widest_silence(&n, start);
+    assert!(
+        widest <= Duration::from_secs(11),
+        "the agent was silent for {widest:?}"
+    );
+    assert!(n.b_initiations.is_empty(), "the server started a handshake");
+    // keepalive は 25 秒の persistent keepalive より密だが、受信ごとには送らない
+    assert!(n.a_sent_at.len() <= 10, "{} datagrams", n.a_sent_at.len());
+}
+
+#[test]
+fn a_passive_keepalive_waits_for_the_keepalive_timeout_and_answers_once() {
+    // 1 つだけ受けたデータには、10 秒後に keepalive を 1 つ返す
+    let mut n = Net::with(|a| a.peers[0].persistent_keepalive = None, |_| {});
+    let now = n.now();
+    assert!(n.a.start_handshake(now, &n.b_pub()));
+    n.pump();
+    let start = n.t;
+    n.a_sent_at.clear();
+    n.b_sends(b"once");
+    n.run(Duration::from_secs(9), Duration::from_millis(100));
+    assert!(n.a_sent_at.is_empty(), "{:?}", n.a_sent_at);
+    n.run(Duration::from_secs(20), Duration::from_millis(100));
+    assert_eq!(n.a_sent_at.len(), 1, "{:?}", n.a_sent_at);
+    let at = n.a_sent_at[0].saturating_sub(start);
+    assert!(
+        (Duration::from_secs(10)..=Duration::from_millis(10_100)).contains(&at),
+        "{at:?}"
+    );
+}
+
+#[test]
+fn initiations_are_paced_and_pause_after_the_peer_gives_up() {
+    // agent のデータプレーンのように、セッションが無い間は起きるたびに start_handshake を呼ぶ。
+    // B は落ちているので、A が送るものはすべてハンドシェイクの開始である
+    let mut n = Net::new();
+    n.b_up = false;
+    let b = n.b_pub();
+    let mut expired_at = None;
+    while n.t < Duration::from_secs(200) {
+        n.t += Duration::from_millis(100);
+        n.tick();
+        let now = n.now();
+        if !n.a.has_session(&b, now) {
+            n.a.start_handshake(now, &b);
+        }
+        n.pump();
+        if expired_at.is_none()
+            && n.a_events
+                .iter()
+                .any(|e| matches!(e, Event::PeerExpired { .. }))
+        {
+            expired_at = Some(n.t);
+        }
+    }
+    let sent = &n.a_sent_at;
+    let tx = n.a.peer_status(&b, n.now()).unwrap().tx_bytes;
+    assert_eq!(tx, 148 * sent.len() as u64, "only initiations");
+    assert!(
+        sent.windows(2)
+            .all(|w| w[1].saturating_sub(w[0]) >= Duration::from_secs(5)),
+        "initiations closer than REKEY_TIMEOUT: {sent:?}"
+    );
+    // 90 秒の再試行を打ち切った後は、keepalive の間隔だけ始めない
+    let expired_at = expired_at.expect("the peer expired");
+    let next = sent.iter().find(|&&t| t > expired_at).unwrap();
+    assert!(
+        next.saturating_sub(expired_at) >= KEEPALIVE.saturating_sub(Duration::from_millis(100)),
+        "the first initiation after giving up came {:?} later",
+        next.saturating_sub(expired_at)
+    );
+}
+
+#[test]
+fn data_starts_a_handshake_during_the_pause_but_not_within_the_rekey_timeout() {
+    let mut n = Net::new();
+    n.b_up = false;
+    n.run(Duration::from_secs(91), Duration::from_millis(100));
+    assert_eq!(
+        Net::count(&n.a_events, |e| matches!(e, Event::PeerExpired { .. })),
+        1
+    );
+    let last = *n.a_sent_at.last().unwrap();
+    // 休止の中でもデータは開始を促す。ただし前の開始から 5 秒は空ける
+    n.a_sent_at.clear();
+    n.b_up = true;
+    n.a_sends(b"data");
+    n.run(Duration::from_secs(6), Duration::from_millis(100));
+    let first = n.a_sent_at[0];
+    assert!(
+        first >= last + Duration::from_secs(5)
+            && first <= (last + Duration::from_millis(5100)).max(Duration::from_secs(91)),
+        "last {last:?}, first {first:?}"
+    );
+    assert_eq!(n.b_got, vec![ipv4_packet(AGENT_IP, SERVER_IP, b"data")]);
+}
+
+#[test]
+fn answering_the_server_holds_back_an_own_initiation() {
+    // server が始めたハンドシェイクに答えた直後は、agent が自分の開始を重ねない
+    let mut n = Net::with(
+        |a| a.peers[0].endpoint = None,
+        |b| b.peers[0].endpoint = Some(addr("198.51.100.2:40000")),
+    );
+    let now = n.now();
+    let b = n.b_pub();
+    n.b.handle_packet(now, &ipv4_packet(SERVER_IP, AGENT_IP, b"hello"));
+    let init = n.b.poll_transmit().unwrap();
+    n.a.handle_datagram(now, n.b_addr, &init.payload);
+    let response = n.a.poll_transmit().unwrap();
+    n.a.set_endpoint(now, &b, n.b_addr);
+    // B の確認がまだ届かず、A のセッションは使えない。前は A がここで自分の開始を送った
+    assert!(!n.a.has_session(&b, now));
+    assert!(!n.a.start_handshake(now, &b));
+    assert!(n.a.poll_transmit().is_none());
+    n.b.handle_datagram(now, n.a_addr, &response.payload);
+    n.pump();
+    assert!(n.a.has_session(&b, now));
+    n.run(Duration::from_secs(6), Duration::from_millis(100));
+    // B が受け付けたハンドシェイクは A の応答の 1 つだけ
+    assert_eq!(
+        Net::count(&n.b_events, |e| matches!(
+            e,
+            Event::HandshakeAccepted { .. }
+        )),
+        1
+    );
+    assert_eq!(n.a_got, vec![ipv4_packet(SERVER_IP, AGENT_IP, b"hello")]);
+}
+
+#[test]
+fn a_held_back_data_request_keeps_its_earlier_time() {
+    // 打ち切りの後、データの要求は前の開始の 5 秒後に、データの無い要求は休止の後に許される。
+    // 後から来たデータの無い要求が、先に控えたデータの要求を遅らせない
+    let mut n = Net::new();
+    n.b_up = false;
+    n.run(Duration::from_secs(91), Duration::from_millis(100));
+    assert_eq!(
+        Net::count(&n.a_events, |e| matches!(e, Event::PeerExpired { .. })),
+        1
+    );
+    let last = *n.a_sent_at.last().unwrap();
+    n.a_sent_at.clear();
+    n.a_sends(b"data");
+    let now = n.now();
+    let b = n.b_pub();
+    assert!(!n.a.start_handshake(now, &b));
+    n.run(Duration::from_secs(6), Duration::from_millis(100));
+    let first = n.a_sent_at[0];
+    assert!(
+        first <= (last + Duration::from_millis(5100)).max(Duration::from_millis(91_100)),
+        "last {last:?}, first {first:?}"
+    );
 }
