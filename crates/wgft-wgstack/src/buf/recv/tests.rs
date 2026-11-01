@@ -40,7 +40,7 @@ fn intervals(b: &RecvBuf) -> Vec<(u64, u64)> {
 #[test]
 fn recv_intervals() {
     let mut p = ChunkPool::new().unwrap();
-    let mut b = RecvBuf::new(RECV_FLOOR, table(FLOOR_INTERVALS), 0);
+    let mut b = RecvBuf::owning(RECV_FLOOR, table(FLOOR_INTERVALS), 0);
     let limit = RECV_FLOOR;
     // 区間の上限を超える区間を作る segment は捨てます。
     for i in 0..FLOOR_INTERVALS as u64 {
@@ -95,7 +95,7 @@ fn recv_intervals() {
 fn recv_intervals_cover_a_full_buffer() {
     for (cap, h) in [(RECV_FLOOR, FLOOR_INTERVALS), (BOOST_SIZE, BOOST_INTERVALS)] {
         let mut p = ChunkPool::new().unwrap();
-        let mut b = RecvBuf::new(cap, table(h), 0);
+        let mut b = RecvBuf::owning(cap, table(h), 0);
         let seg = vec![0u8; MIN_MSS as usize];
         let mut off = MIN_MSS;
         while off + MIN_MSS <= cap {
@@ -122,7 +122,7 @@ fn height(b: &RecvBuf, t: u16) -> usize {
 fn interval_tree_stays_shallow() {
     for order in ["up", "down", "zigzag"] {
         let mut p = ChunkPool::new().unwrap();
-        let mut b = RecvBuf::new(BOOST_SIZE, table(BOOST_INTERVALS), 12345);
+        let mut b = RecvBuf::owning(BOOST_SIZE, table(BOOST_INTERVALS), 12345);
         for i in 0..BOOST_INTERVALS {
             let k = match order {
                 "down" => BOOST_INTERVALS - 1 - i,
@@ -147,7 +147,7 @@ fn interval_tree_stays_shallow() {
 #[test]
 fn set_intervals_refuses_to_truncate() {
     let mut p = ChunkPool::new().unwrap();
-    let mut b = RecvBuf::new(BOOST_SIZE, table(BOOST_INTERVALS), 0);
+    let mut b = RecvBuf::owning(BOOST_SIZE, table(BOOST_INTERVALS), 0);
     for i in 0..FLOOR_INTERVALS as u64 + 10 {
         b.insert(1 + 2 * i, &[1], BOOST_SIZE, &mut p);
     }
@@ -171,7 +171,7 @@ fn set_intervals_refuses_to_truncate() {
 #[test]
 fn renege_cuts_at_the_limit_and_the_count() {
     let mut p = ChunkPool::new().unwrap();
-    let mut b = RecvBuf::new(BOOST_SIZE, table(16), 0);
+    let mut b = RecvBuf::owning(BOOST_SIZE, table(16), 0);
     for s in [10u64, 20, 30, 40] {
         b.insert(s, &[1; 5], BOOST_SIZE, &mut p);
     }
@@ -188,7 +188,7 @@ fn renege_cuts_at_the_limit_and_the_count() {
 #[test]
 fn read_returns_in_order_bytes_and_frees_chunks() {
     let mut p = ChunkPool::new().unwrap();
-    let mut b = RecvBuf::new(RECV_FLOOR, table(4), 0);
+    let mut b = RecvBuf::owning(RECV_FLOOR, table(4), 0);
     let data: Vec<u8> = (0..40000u32).map(|i| i as u8).collect();
     assert_eq!(b.insert(0, &data, RECV_FLOOR, &mut p).accepted, data.len());
     let mut got = vec![0u8; 40000];
@@ -318,7 +318,7 @@ fn run_model(seed: u8) -> (usize, usize) {
     let mut size = tables[n(tables.len() as u64) as usize];
     let capb = if n(2) == 0 { RECV_FLOOR } else { BOOST_SIZE };
     let pri_seed = n(u64::MAX);
-    let mut b = RecvBuf::new(capb, table(size), pri_seed);
+    let mut b = RecvBuf::owning(capb, table(size), pri_seed);
     let mut m = Model {
         limit: size,
         ..Model::default()
@@ -475,7 +475,7 @@ fn snapshot(b: &RecvBuf, p: &ChunkPool) -> impl PartialEq + core::fmt::Debug + u
 #[test]
 fn failed_allocation_changes_nothing() {
     let mut p = ChunkPool::new().unwrap();
-    let mut b = RecvBuf::new(BOOST_SIZE, table(8), 99);
+    let mut b = RecvBuf::owning(BOOST_SIZE, table(8), 99);
     b.insert(0, &[1; 100], BOOST_SIZE, &mut p);
     b.insert(200, &[2; 50], BOOST_SIZE, &mut p);
     b.check().unwrap();

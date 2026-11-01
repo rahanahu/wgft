@@ -8,6 +8,7 @@ use crate::budget::Budget;
 use crate::buf::chunk::{CHUNK_SIZE, Chunk, POOL_KEEP};
 use crate::buf::records::Record;
 use crate::buf::recv::Interval;
+use crate::buf::ring::BOOST_RING_SLOTS;
 use crate::buf::{
     BOOST_INTERVALS, BOOST_RECORDS, BOOST_SIZE, BOOST_SLOTS, FLOOR_INTERVALS, FLOOR_RECORDS,
     RECV_FLOOR, SEND_FLOOR,
@@ -36,8 +37,9 @@ pub struct Bound {
     /// `floor_conn` のうち、floor の送信の記録の輪と区間の表の N_c × (r_f + h_f) です。枠を初めて使う時に確保し、
     /// 枠と共に持つので、データを運ばない接続も持ちます。`floor_conn` の内訳で、`total` に重ねて足しません。
     pub floor_arrays: u64,
-    /// B × (d_s + d_r + d_rec + d_h) と枠の管理です。d_rec と d_h は boost の輪と表の全体で、`Budget` が作成の
-    /// 時に確保します。floor の輪と表は枠に残るので `floor_conn` が数えます。
+    /// B × (d_s + d_r + d_rec + d_h + 2 × d_tbl) と枠の管理です。d_rec と d_h は boost の輪と表の全体、d_tbl は
+    /// boost の段の輪の chunk の表で、`Budget` が作成の時に確保します。floor の輪と表は枠に残るので `floor_conn`
+    /// が数えます。
     pub boost: u64,
     /// M_frag:再組み立ての表の保持 byte の上限です。
     pub frag: u64,
@@ -130,11 +132,13 @@ fn floor_arrays_per_conn() -> u64 {
     b(FLOOR_RECORDS * size_of::<Record>() + FLOOR_INTERVALS * size_of::<Interval>())
 }
 
-/// boost の枠 1 つの項 d_s + d_r + d_rec + d_h です。
+/// boost の枠 1 つの項 d_s + d_r + d_rec + d_h + 2 × d_tbl です。d_tbl は boost の段の輪の chunk の表です。
 pub(crate) fn boost_per_slot() -> u64 {
     (BOOST_SIZE - SEND_FLOOR)
         + (BOOST_SIZE - RECV_FLOOR)
-        + b(BOOST_RECORDS * size_of::<Record>() + BOOST_INTERVALS * size_of::<Interval>())
+        + b(BOOST_RECORDS * size_of::<Record>()
+            + BOOST_INTERVALS * size_of::<Interval>()
+            + 2 * BOOST_RING_SLOTS * size_of::<Option<Chunk>>())
 }
 
 /// 核の表の固定の項の内訳です。表の作成と同じ数で数えます。
