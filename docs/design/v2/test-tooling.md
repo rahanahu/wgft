@@ -1124,6 +1124,13 @@ Go は書ける量が 1000 byte を超える時だけ書き、読める時だけ
 `raw_adversary` は状態を持つ生の packet の敵で、Go に元の試験はありません。
 入力の byte を選択の列として読み、相手の番号を追いながら、option の端の値を持つ SYN、乱れた flag と番号と窓と timestamp と SACK の block、ICMP の frag-needed とほかの種類、UDP、順を混ぜて重ねた断片、アプリケーションの操作、25 日までの時刻の跳びを混ぜます。
 握手の途中の表を満たすので、SYN cookie の確かめも通ります。
+乱れた入力だけでは届かない状況のために、次の操作も選びます。
+正直な相手が握手を終える操作と、まとまったデータを順に送る (1 つの segment を抜かすこともある) 操作は、boost の枠の数を超える接続と、受信の需要と、boost の段の順序外のデータを作ります。
+アプリケーションは、すべての接続に続けて大きく書く操作、すべての接続から読み切る操作、待ち受けを閉じて開き直す操作、ping の endpoint を開いて echo を送り返事を読んで閉じる操作を持ちます。
+読まない接続は、読む操作が選ばれない間そのままです。
+hook の `may_return` の答えも操作で切り替えます。
+相手は核の echo に答えます。
+boost の枠が尽きると、新しく求めた接続のために需要の無い保有者を floor に戻す経路 (`reclaim_for`、`demote`、`hand_over`) を通ります。
 各段の後に `core` と同じ確かめをし、最後に核を閉じて会計が 0 に戻ることを確かめます。
 SYN cookie の実装の担当が書いたので、書き手の分離の外にあります。
 本体は公開の API だけを使います。
@@ -1187,6 +1194,19 @@ Go の `TestAdversarialSender` と同じ種の範囲を、同じ試験に環境�
 既定では足さず、seed の種 1 から 8 だけを流します。
 1 つの種は debug の build で 3 秒ほど、release の build で 0.1 秒ほどかかるので、多くの種はホストの関門が release の build で流します (7 節)。
 cargo-fuzz の crate は `[workspace]` を自分で持ち、ワークスペースの member に入りません。
+
+### 被覆の地図
+
+fuzz の target が届かない所は、cargo-fuzz が育てた corpus の被覆で調べます。
+
+1. 各 target を git の種の写しから固定の `-runs` で流し、corpus を育てます (下の build と flag)
+2. 育てた corpus を stable の試験で流し、被覆を取ります。
+   `WGFT_WGSTACK_CORPUS_DIRS=core=<dir>,adversarial_sender=<dir>,raw_adversary=<dir>,replay=<dir> cargo llvm-cov nextest --no-report -p wgft-wgstack-dut --test fuzz_corpus`
+3. `cargo llvm-cov report --text --output-path <file>` で行ごとの回数を書き出し、`crates/wgft-wgstack/src` の 0 回の行を関数ごとに並べます
+
+被覆は stable の build で取るので、fuzz の build と inline の違いで行の数え方が少し違います。
+`fuzz_corpus` は入力を新しい核と使い回した核で 2 回流し、2 つの確かめを並べるので、確かめのコードも被覆に入ります。
+届かない所は、入力の形が状況を表せないもの (操作を足します) と、表せるが corpus が育っていないものに分けます。
 
 ### 実行の速さ
 

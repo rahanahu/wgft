@@ -9,7 +9,11 @@
 //! - ICMP の frag-needed (送った segment を引くものと偽のもの) とほかの種類、echo
 //! - UDP の datagram。大きなものは断片に分け、順を混ぜ、重ね、同じ断片を繰り返します
 //! - 生の断片
-//! - アプリケーションの操作 (accept、読み書き、閉じる、abort、UDP の送受信)
+//! - アプリケーションの操作 (accept、読み書き、閉じる、abort、UDP の送受信、待ち受けの閉じ直し、ping の送受信)。
+//!   すべての接続に続けて大きく書く操作と、すべての接続から読み切る操作は、多くの接続が同時に boost を求める
+//!   状況と、それまで読まなかった接続が読み始める状況を作ります。boost の枠が尽きると、新しく求めた接続のために
+//!   需要の無い保有者を floor に戻します。hook の `may_return` の答えも操作で切り替えます。相手は核の echo に
+//!   答えます
 //! - 時刻の進み。最大で 25 日まで跳びます
 //!
 //! 各段の後に不変条件と保持の上界を確かめ (`Net::check`)、最後に核を閉じて会計が 0 に戻ることを確かめます。
@@ -20,13 +24,15 @@
     reason = "the step helpers name the net, the input and the peer by one letter, as the other targets do"
 )]
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::net::SocketAddrV4;
+use std::rc::Rc;
 use std::time::Duration;
 
 use wgft_tcpharness::ip::{self, Icmp, Ipv4};
 use wgft_tcpharness::packet::{ACK, FIN, Options, RST, SYN, SackBlock, Segment, Timestamps};
-use wgft_wgstack::{ConnId, NoHook, UdpId};
+use wgft_wgstack::{ConnId, Hook, ListenerId, PingId, UdpId};
 
 use super::net::{DUT, MTU, Net, PEER, small_limits};
 
@@ -34,6 +40,22 @@ use super::net::{DUT, MTU, Net, PEER, small_limits};
 const MAX_STEPS: usize = 2000;
 /// 相手のポートの数です。握手の途中の表の待ち受けの分 (small_limits で 8 行) を超え、cookie を使わせます。
 const PORTS: u32 = 24;
+
+/// 需要の無い保有者を floor に戻してよいかを、操作で切り替えた値で答える hook です。
+#[derive(Debug)]
+struct Flip(Rc<Cell<bool>>);
+
+impl Hook for Flip {
+    fn may_return(&mut self, _conn: ConnId) -> bool {
+        self.0.get()
+    }
+}
+
+/// `raw_adversary` の核です。
+type RawNet = Net<Flip>;
+
+/// 相手がまとめて送る segment の中身の長さです。
+const BULK_LEN: u32 = 1368;
 
 /// 選択の列です。尽きたら 0 を返します。
 struct Src<'a>(&'a [u8]);
@@ -114,7 +136,8 @@ fn ts(r: &mut Src<'_>, p: &mut Peer) -> Option<Timestamps> {
 /// `raw_adversary` の target の 1 回分です。
 pub fn raw_adversary(data: &[u8]) {
     let mut r = Src(data);
-    let mut n = Net::new(Net::<NoHook>::config(small_limits()), NoHook);
+    let may_return = Rc::new(Cell::new(true));
+    let mut n = Net::new(RawNet::config(small_limits()), Flip(may_return.clone()));
     let now = n.now();
     let l = n
         .stack()
@@ -125,7 +148,13 @@ pub fn raw_adversary(data: &[u8]) {
         .bind_udp(now, SocketAddrV4::new(DUT, 53))
         .expect("bind port 53");
     let mut peers: BTreeMap<u16, Peer> = BTreeMap::new();
-    let mut conns: Vec<ConnId> = Vec::new();
+    let mut app = App {
+        l,
+        u,
+        conns: Vec::new(),
+        pings: Vec::new(),
+        may_return,
+    };
     let wbuf = vec![0x5au8; 70_000];
     let mut rbuf = vec![0u8; 70_000];
     let mut steps = 0;
@@ -134,8 +163,10 @@ pub fn raw_adversary(data: &[u8]) {
         let kind = r.below(100);
         let port = 1000 + u16::try_from(r.below(PORTS)).unwrap_or(0);
         match kind {
-            0..8 => syn(&mut n, &mut r, &mut peers, port),
-            8..45 => segment(&mut n, &mut r, &mut peers, port),
+            0..5 => syn(&mut n, &mut r, &mut peers, port),
+            5..8 => connect(&mut n, &mut r, &mut peers, port),
+            8..41 => segment(&mut n, &mut r, &mut peers, port),
+            41..45 => bulk(&mut n, &mut r, &mut peers, port),
             45..50 => frag_needed(&mut n, &mut r, &peers, port),
             50..54 => {
                 let body = r.pick(&[0usize, 8, 56, 1392, 1500]);
@@ -176,7 +207,7 @@ pub fn raw_adversary(data: &[u8]) {
                 };
                 n.write(&p.marshal());
             }
-            68..82 => app(&mut n, &mut r, l, u, &mut conns, port, (&wbuf, &mut rbuf)),
+            68..82 => app.step(&mut n, &mut r, port, (&wbuf, &mut rbuf)),
             82..93 => absorb(&mut n, &mut peers),
             _ => {
                 let d = if r.below(20) == 0 {
@@ -220,7 +251,7 @@ pub fn raw_adversary_seed(seed: u64, len: usize) {
     raw_adversary(&raw_adversary_input(seed, len));
 }
 
-fn syn(n: &mut Net<NoHook>, r: &mut Src<'_>, peers: &mut BTreeMap<u16, Peer>, port: u16) {
+fn syn(n: &mut RawNet, r: &mut Src<'_>, peers: &mut BTreeMap<u16, Peer>, port: u16) {
     let mss = r.pick(&[
         None,
         Some(0u16),
@@ -260,7 +291,90 @@ fn syn(n: &mut Net<NoHook>, r: &mut Src<'_>, peers: &mut BTreeMap<u16, Peer>, po
     }
 }
 
-fn segment(n: &mut Net<NoHook>, r: &mut Src<'_>, peers: &mut BTreeMap<u16, Peer>, port: u16) {
+/// 正直な相手が接続を開きます。SYN を送り、核の SYN-ACK に正しい ACK を返して握手を終えます。乱れた SYN と
+/// segment だけでは、boost の枠の数を超える接続を同時に開くことがほとんど無いためです。
+fn connect(n: &mut RawNet, r: &mut Src<'_>, peers: &mut BTreeMap<u16, Peer>, port: u16) {
+    let seq = r.u32();
+    let ts = r.below(2) == 0;
+    n.inject(&Segment {
+        src: SocketAddrV4::new(PEER, port),
+        dst: SocketAddrV4::new(DUT, 80),
+        seq,
+        flags: SYN,
+        window: 65535,
+        opts: Options {
+            mss: Some(1380),
+            ws: 7,
+            sack_permitted: true,
+            ts: ts.then_some(Timestamps { val: 1, ecr: 0 }),
+            ..Options::none()
+        },
+        ..Segment::default()
+    });
+    let p = peers.entry(port).or_default();
+    p.snd = seq.wrapping_add(1);
+    p.ts_val = 1;
+    absorb(n, peers);
+    let Some(p) = peers.get_mut(&port) else {
+        return;
+    };
+    p.ts_val = p.ts_val.wrapping_add(1);
+    n.inject(&Segment {
+        src: SocketAddrV4::new(PEER, port),
+        dst: SocketAddrV4::new(DUT, 80),
+        seq: p.snd,
+        ack: p.rcv_hi,
+        flags: ACK,
+        window: 65535,
+        opts: Options {
+            ts: ts.then_some(Timestamps {
+                val: p.ts_val,
+                ecr: p.ts_seen,
+            }),
+            ..Options::none()
+        },
+        ..Segment::default()
+    });
+}
+
+/// 相手がまとまったデータを順に送ります。1 つの segment を抜かして順序外のデータを作ることもあります。乱れた
+/// segment だけでは、受信の需要 (区間の中に 64 KiB) と boost の段の順序外のデータにほとんど届かないためです。
+fn bulk(n: &mut RawNet, r: &mut Src<'_>, peers: &mut BTreeMap<u16, Peer>, port: u16) {
+    let Some(p) = peers.get_mut(&port) else {
+        return;
+    };
+    let count = r.pick(&[8u32, 48, 64, 200]);
+    let skip = r.pick(&[None, None, Some(0u32), Some(1), Some(7)]);
+    for k in 0..count {
+        let seq = p.snd.wrapping_add(k * BULK_LEN);
+        if skip == Some(k) {
+            continue;
+        }
+        p.ts_val = p.ts_val.wrapping_add(1);
+        n.inject(&Segment {
+            src: SocketAddrV4::new(PEER, port),
+            dst: SocketAddrV4::new(DUT, 80),
+            seq,
+            ack: p.rcv_hi,
+            flags: ACK,
+            window: 65535,
+            opts: Options {
+                ts: (p.ts_seen != 0).then_some(Timestamps {
+                    val: p.ts_val,
+                    ecr: p.ts_seen,
+                }),
+                ..Options::none()
+            },
+            payload: vec![0xb5; BULK_LEN as usize],
+            ..Segment::default()
+        });
+    }
+    if skip.is_none() {
+        p.snd = p.snd.wrapping_add(count * BULK_LEN);
+    }
+}
+
+fn segment(n: &mut RawNet, r: &mut Src<'_>, peers: &mut BTreeMap<u16, Peer>, port: u16) {
     let Some(p) = peers.get_mut(&port) else {
         return;
     };
@@ -335,7 +449,7 @@ fn segment(n: &mut Net<NoHook>, r: &mut Src<'_>, peers: &mut BTreeMap<u16, Peer>
     }
 }
 
-fn frag_needed(n: &mut Net<NoHook>, r: &mut Src<'_>, peers: &BTreeMap<u16, Peer>, port: u16) {
+fn frag_needed(n: &mut RawNet, r: &mut Src<'_>, peers: &BTreeMap<u16, Peer>, port: u16) {
     let quoted = peers.get(&port).and_then(|p| p.last_seg.clone());
     let orig = match quoted {
         Some(q) if r.below(4) != 0 => q,
@@ -360,69 +474,148 @@ fn frag_needed(n: &mut Net<NoHook>, r: &mut Src<'_>, peers: &BTreeMap<u16, Peer>
     n.write(&pkt);
 }
 
-fn app(
-    n: &mut Net<NoHook>,
-    r: &mut Src<'_>,
-    l: wgft_wgstack::ListenerId,
+/// アプリケーションが持つ handle と、hook の答えです。
+struct App {
+    l: ListenerId,
     u: UdpId,
-    conns: &mut Vec<ConnId>,
-    port: u16,
-    (wbuf, rbuf): (&[u8], &mut [u8]),
-) {
-    let now = n.now();
-    let pick_conn = |r: &mut Src<'_>, conns: &[ConnId]| {
-        conns[r.below(u32::try_from(conns.len()).unwrap_or(1)) as usize]
-    };
-    match r.below(10) {
-        0 | 1 => {
-            while let Ok((c, _)) = n.stack().accept(now, l) {
-                conns.push(c);
-            }
-        }
-        2 | 3 if !conns.is_empty() => {
-            let c = pick_conn(r, conns);
-            let k = r.pick(&[1usize, 100, 1000, 65536, 70_000]);
-            let _ = n.stack().write(now, c, &wbuf[..k]);
-        }
-        4 | 5 if !conns.is_empty() => {
-            let c = pick_conn(r, conns);
-            let _ = n.stack().read(now, c, rbuf);
-        }
-        6 if !conns.is_empty() => {
-            let i = r.below(u32::try_from(conns.len()).unwrap_or(1)) as usize;
-            let c = conns.swap_remove(i);
-            match r.below(4) {
-                0 => n.stack().abort(now, c),
-                1 => n.stack().close_for_delivery(now, c),
-                _ => n.stack().close_conn(now, c),
-            }
-        }
-        7 if !conns.is_empty() => {
-            let c = pick_conn(r, conns);
-            let _ = n.stack().close_write(now, c);
-        }
-        8 => {
-            while let Ok((_, from)) = n.stack().recv_from(now, u, rbuf) {
-                if r.below(2) == 0 {
-                    let k = r.pick(&[1usize, 1400, 9000, 65_000]);
-                    let _ = n.stack().send_to(now, u, &wbuf[..k], from);
+    conns: Vec<ConnId>,
+    pings: Vec<PingId>,
+    may_return: Rc<Cell<bool>>,
+}
+
+impl App {
+    fn step(
+        &mut self,
+        n: &mut RawNet,
+        r: &mut Src<'_>,
+        port: u16,
+        (wbuf, rbuf): (&[u8], &mut [u8]),
+    ) {
+        let now = n.now();
+        let (l, u) = (self.l, self.u);
+        let conns = &mut self.conns;
+        let pick_conn = |r: &mut Src<'_>, conns: &[ConnId]| {
+            conns[r.below(u32::try_from(conns.len()).unwrap_or(1)) as usize]
+        };
+        match r.below(16) {
+            0 | 1 => {
+                while let Ok((c, _)) = n.stack().accept(now, l) {
+                    conns.push(c);
                 }
             }
-        }
-        _ => {
-            let k = r.pick(&[1usize, 1400, 9000, 65_000]);
-            let _ = n
-                .stack()
-                .send_to(now, u, &wbuf[..k], SocketAddrV4::new(PEER, port));
+            2 | 3 if !conns.is_empty() => {
+                let c = pick_conn(r, conns);
+                let k = r.pick(&[1usize, 100, 1000, 65536, 70_000]);
+                let _ = n.stack().write(now, c, &wbuf[..k]);
+            }
+            4 | 5 if !conns.is_empty() => {
+                let c = pick_conn(r, conns);
+                let _ = n.stack().read(now, c, rbuf);
+            }
+            6 if !conns.is_empty() => {
+                let i = r.below(u32::try_from(conns.len()).unwrap_or(1)) as usize;
+                let c = conns.swap_remove(i);
+                match r.below(4) {
+                    0 => n.stack().abort(now, c),
+                    1 => n.stack().close_for_delivery(now, c),
+                    _ => n.stack().close_conn(now, c),
+                }
+            }
+            7 if !conns.is_empty() => {
+                let c = pick_conn(r, conns);
+                let _ = n.stack().close_write(now, c);
+            }
+            8 => {
+                while let Ok((_, from)) = n.stack().recv_from(now, u, rbuf) {
+                    if r.below(2) == 0 {
+                        let k = r.pick(&[1usize, 1400, 9000, 65_000]);
+                        let _ = n.stack().send_to(now, u, &wbuf[..k], from);
+                    }
+                }
+            }
+            10 => {
+                // すべての接続に続けて大きく書きます。多くの接続が同時に送信の需要を持ちます
+                let k = r.pick(&[65_536usize, 70_000]);
+                for &c in conns.iter() {
+                    let _ = n.stack().write(now, c, &wbuf[..k]);
+                }
+            }
+            11 => {
+                // すべての接続から読み切ります。読まなかった接続も受信の需要を持ちます
+                for &c in conns.iter() {
+                    while n.stack().read(now, c, rbuf).is_ok_and(|k| k > 0) {}
+                }
+            }
+            12 => self.may_return.set(!self.may_return.get()),
+            13 => {
+                // 待ち受けを閉じて開き直します。待ち行列の接続と握手の途中の行を捨てる経路を通ります
+                n.stack().close_listener(now, l);
+                self.l = n
+                    .stack()
+                    .listen_tcp(now, SocketAddrV4::new(DUT, 80))
+                    .expect("listen again on port 80");
+            }
+            14 => {
+                // ping の endpoint を開くか、開いた endpoint から echo を送ります
+                if self.pings.is_empty() || r.below(3) == 0 {
+                    if let Ok(p) = n.stack().open_ping(now, PEER) {
+                        self.pings.push(p);
+                    }
+                } else {
+                    let p =
+                        self.pings[r.below(u32::try_from(self.pings.len()).unwrap_or(1)) as usize];
+                    let len = r.pick(&[8usize, 64, 1400]);
+                    let mut m = vec![0x66u8; len];
+                    m[0] = 8;
+                    let _ = n.stack().send_ping(now, p, &m);
+                }
+            }
+            15 if !self.pings.is_empty() => {
+                // 返事を読むか、endpoint を閉じます
+                let i = r.below(u32::try_from(self.pings.len()).unwrap_or(1)) as usize;
+                if r.below(2) == 0 {
+                    while n.stack().recv_ping(now, self.pings[i], rbuf).is_ok() {}
+                } else {
+                    let p = self.pings.swap_remove(i);
+                    n.stack().close_ping(now, p);
+                }
+            }
+            _ => {
+                let k = r.pick(&[1usize, 1400, 9000, 65_000]);
+                let _ = n
+                    .stack()
+                    .send_to(now, u, &wbuf[..k], SocketAddrV4::new(PEER, port));
+            }
         }
     }
 }
 
 /// 核の出力をすべて引き取り、相手の番号を進めます。
-fn absorb(n: &mut Net<NoHook>, peers: &mut BTreeMap<u16, Peer>) {
+fn absorb(n: &mut RawNet, peers: &mut BTreeMap<u16, Peer>) {
     let mut segs = Vec::new();
     let mut others = Vec::new();
     n.drain_into(&mut segs, &mut others);
+    for pkt in others {
+        // 相手は核の echo に答えます
+        if let Ok(ip) = ip::parse_ipv4(&pkt)
+            && ip.proto == ip::PROTO_ICMP
+            && ip.payload.first() == Some(&8)
+            && ip.payload.len() >= 8
+        {
+            let mut body = ip.payload.clone();
+            body[0] = 0;
+            body[2..4].fill(0);
+            let id = u16::from_be_bytes([body[4], body[5]]);
+            let rest = u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
+            let m = Icmp {
+                typ: 0,
+                code: 0,
+                rest,
+                body: body[8..].to_vec(),
+            };
+            n.write(&ip::icmp_packet(PEER, DUT, id, &m).marshal());
+        }
+    }
     for s in segs {
         let p = peers.entry(s.dst.port()).or_default();
         let end = s.seq.wrapping_add(s.seq_len());
@@ -453,7 +646,7 @@ fn fold(b: &[u8]) -> u16 {
 }
 
 /// datagram をそのままか断片に分けて入れます。断片は順を混ぜ、先頭を繰り返し、重なる断片を足すことがあります。
-fn send_maybe_fragmented(n: &mut Net<NoHook>, r: &mut Src<'_>, p: &Ipv4) {
+fn send_maybe_fragmented(n: &mut RawNet, r: &mut Src<'_>, p: &Ipv4) {
     let len = p.payload.len();
     if len + 20 <= MTU && r.below(3) != 0 {
         n.write(&p.marshal());

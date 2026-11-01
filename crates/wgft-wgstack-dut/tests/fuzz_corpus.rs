@@ -19,6 +19,10 @@
 //! 同じことを確かめます。1 回目は新しく作った核で、2 回目はほかのポートを開いて閉じた核の表を使い回した核で
 //! 流し、外から見える出力の hash が同じことと、閉じた後に戻した表が新しい表と同じ値であることを確かめます。
 //! `replay` は fuzz の `Net` を使わないので 1 回だけ流します。
+//!
+//! 環境変数 `WGFT_WGSTACK_CORPUS_DIRS` に `<target>=<directory>` を `,` で区切って渡すと、その directory の
+//! ファイルも同じく流します (`raw_adversary` も渡せます)。cargo-fuzz が育てた corpus の被覆を `cargo llvm-cov` で
+//! 測るために使います (`docs/design/v2/test-tooling.md` の 6 節の「被覆の地図」)。
 
 use std::net::SocketAddrV4;
 use std::path::{Path, PathBuf};
@@ -177,6 +181,34 @@ fn main() {
                     Ok(())
                 }));
             }
+        }
+    }
+    for (target, dir) in env::var("WGFT_WGSTACK_CORPUS_DIRS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|e| e.split_once('='))
+    {
+        let (body, limits): (Body, fn() -> Limits) = match target {
+            "core" => (fuzz::core, fuzz::fuzz_limits),
+            "adversarial_sender" => (fuzz::adversarial_sender, adversary_limits),
+            "raw_adversary" => (fuzz::raw_adversary, fuzz::small_limits),
+            "replay" => (fuzz::replay, fuzz::fuzz_limits),
+            _ => panic!("WGFT_WGSTACK_CORPUS_DIRS names an unknown target {target:?}"),
+        };
+        let replay = target == "replay";
+        for p in files(Path::new(dir)) {
+            let name = format!(
+                "{target}/extra/{}",
+                p.file_name().expect("file name").to_string_lossy()
+            );
+            trials.push(Trial::test(name, move || {
+                let data = fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+                if replay {
+                    body(&data);
+                    return Ok(());
+                }
+                fresh_and_reused(body, &data, limits())
+            }));
         }
     }
     let start = env_u64("WGFT_WGSTACK_AUDIT_START", 1);
