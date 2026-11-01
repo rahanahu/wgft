@@ -189,6 +189,8 @@ func badFrames() []badFrame {
 		{"bad-utf8", "an ERROR message that is not UTF-8", frame(KindError, 0, 2, 0, 0xff, 0xfe)},
 		{"bad-enum", "a congestion control out of the table", badEnum},
 		{"bad-unknown-kind", "a kind out of the table", frame(0x7f)},
+		{"bad-duration", "an ADVANCE of 2^63 ns, above 2^63-1", frame(KindAdvance, 0, 0, 0, 0, 0, 0, 0, 0x80)},
+		{"bad-frame-too-long", "a frame length above MaxFrame", append(binary.LittleEndian.AppendUint32(nil, MaxFrame+1), byte(KindNow))},
 	}
 }
 
