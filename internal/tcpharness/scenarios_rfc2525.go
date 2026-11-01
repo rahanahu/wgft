@@ -31,93 +31,8 @@ func atOnce(h *H, segs []Segment) []Segment {
 
 // The RFC 2525 family: the known TCP implementation problems of RFC 2525 that the other
 // scenarios do not already show, for a passive-open stack that sends and receives.
-// wgstack-verification.md lists each problem and the scenario that covers it.
-
-// rfc2525InitialWindow writes far more than an initial window and counts what leaves before any
-// ACK. 2.1, no initial slow start: the burst stays within RFC 6928's ten segments, the initial
-// window Linux and wgstack use. 2.3, uninitialized CWND: with an MSS of 536 the window counts in
-// 536-byte segments, not in the MSS the stack would have used before it knew the peer's.
-func rfc2525InitialWindow(h *H) {
-	const port = 8301
-	l := h.Listen(port)
-	for _, mss := range []uint16{MTU - 40, 536} {
-		syn := StandardSYN()
-		syn.MSS = &mss
-		p, _, c := h.Connect(l, port, syn)
-		if _, err := c.Write(pattern(30*int(mss), 0xd1)); err != nil {
-			h.T.Fatalf("write: %v", err)
-		}
-		id := fmt.Sprintf("mss%d", mss)
-		all, _ := burst(p)
-		segs := atOnce(h, all)
-		sent := 0
-		for _, s := range segs {
-			sent += len(s.Payload)
-		}
-		later := len(all) - len(segs)
-		h.Measure(fmt.Sprintf("mss%d-later-new-segments", mss), later)
-		// one later segment is a tail loss probe of new data; more would be a second window
-		h.Check(id+".one-probe-at-most", later <= 1 && len(all) <= 11, "after the first window, at most one more new segment comes before any ACK: a tail loss probe",
-			fmt.Sprintf("%d later segments, %d in all", later, len(all)))
-		largest := 0
-		for _, s := range segs {
-			largest = max(largest, len(s.Payload))
-		}
-		h.Check(id+".at-most-iw10", len(segs) <= 10 && sent <= 10*int(mss), fmt.Sprintf("RFC 2525 2.1 and 2.3: the first burst is at most ten segments of at most %d bytes", mss),
-			fmt.Sprintf("%d segments, %d bytes, the largest %d", len(segs), sent, largest))
-		h.Check(id+".segment-size", largest <= int(mss), "no segment carries more than the peer's MSS", fmt.Sprintf("the largest %d bytes", largest))
-		h.Measure(id+"-initial-segments", len(segs))
-		c.Abort()
-	}
-}
-
-// rfc2525RTOSlowStart loses a whole flight. 2.2, no slow start after a retransmission timeout,
-// and 2.14, a retransmission of several packets: the RTO resends one segment and nothing more
-// until it is acknowledged, and the acknowledgment lets out at most two, as a window of one
-// segment growing in slow start does.
-func rfc2525RTOSlowStart(h *H) {
-	const port = 8302
-	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, NoSACKSYN())
-	segs, _ := flight(h, p, c, 6, 0xd2)
-	rto, ok := p.Await(2*time.Second, isData)
-	h.Require("rto", ok && rto.Seq == segs[0].Seq, "the RTO resends the first segment", segDesc(rto, ok))
-	more, _ := burst(p)
-	extra := 0
-	for _, s := range more {
-		if s.Seq != rto.Seq {
-			extra++
-		}
-	}
-	h.Check("one-segment", extra == 0, "RFC 2525 2.2 and 2.14: the RTO sends one segment and waits for its ACK", fmt.Sprintf("%d more segments", extra))
-	p.RcvNxt = rto.Seq + uint32(len(rto.Payload))
-	p.SendAck()
-	next, _ := burst(p)
-	h.Check("slow-start", len(next) >= 1 && len(next) <= 2, "the ACK of the resend lets out one or two segments, a window of one in slow start",
-		fmt.Sprintf("%d segments", len(next)))
-}
-
-// rfc2525SynAckRTO leaves a SYN-ACK unanswered. 2.7, an initial RTO too low: RFC 6298 2.1 sets
-// the RTO to 1 s until an RTT is measured, which Linux and wgstack use, so the SYN-ACK is resent
-// no sooner than about 1 s.
-func rfc2525SynAckRTO(h *H) {
-	const port = 8303
-	h.Listen(port)
-	p := h.NewPeer(port)
-	syn := StandardSYN()
-	syn.TS = &Timestamps{Val: p.TSVal()}
-	p.Send(Segment{Src: p.Local, Dst: p.Remote, Seq: p.ISS, Flags: FlagSYN, Window: 65535, Opts: syn})
-	first, ok := p.Await(2*time.Second, func(s Segment) bool { return s.Has(FlagSYN | FlagACK) })
-	h.Require("synack", ok, "a SYN-ACK", segDesc(first, ok))
-	at := h.Now()
-	_, ok = p.Await(5*time.Second, func(s Segment) bool { return s.Has(FlagSYN | FlagACK) })
-	gap := h.Now().Sub(at)
-	if ok {
-		h.Measure("synack-resent-after_ms", gap.Milliseconds())
-	}
-	h.Check("initial-rto", ok && gap >= 900*time.Millisecond, "RFC 2525 2.7: an unanswered SYN-ACK is resent after the initial RTO of 1 s, not sooner",
-		yesNo(!ok, "not resent within 5 s", yesNo(gap >= 900*time.Millisecond, "after 1 s or more", "before 900 ms")))
-}
+// wgstack-verification.md lists each problem and the scenario that covers it. The straight-line
+// members are scripts under scripts/; the two here react to what the DUT sends.
 
 // rfc2525WindowDeflation loses one segment of a flight of ten without SACK and answers the rest
 // with eight duplicate ACKs, which inflate a NewReno sender's window. 2.8, failure of window
@@ -214,40 +129,4 @@ func rfc2525StretchACK(h *H) {
 	}
 	h.Check("every-second-segment", worst <= 2 && last == p.SndNxt, "RFC 2525 2.13: no ACK covers more than two full segments, and all twelve are acknowledged",
 		fmt.Sprintf("the widest ACK covers %d segments; %v", worst, yesNo(last == p.SndNxt, "all acknowledged", "not all acknowledged")))
-}
-
-// rfc2525CloseFIN writes three segments, holds their ACK back and closes. 2.15, failure to send
-// FIN notification promptly: the FIN goes at once after the data, within the window, not after
-// the data is acknowledged.
-func rfc2525CloseFIN(h *H) {
-	const port = 8306
-	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
-	segs, data := flight(h, p, c, 3, 0xd6)
-	end := segs[0].Seq + uint32(len(data))
-	c.Close()
-	f, ok := p.Await(h.Prompt(), isFIN)
-	h.Check("fin-prompt", ok && f.Seq+uint32(len(f.Payload)) == end || ok && f.Seq == end, "RFC 2525 2.15: Close sends the FIN at once after the unacknowledged data", segDesc(f, ok))
-}
-
-// rfc2525DataAfterClose closes the application's side fully, lets the testbench acknowledge the
-// FIN without closing its own, then sends data. 2.16, failure to send a RST after a half-duplex
-// close: no application can read the data any more, so the DUT resets the connection.
-func rfc2525DataAfterClose(h *H) {
-	const port = 8307
-	l := h.Listen(port)
-	p, _, c := h.Connect(l, port, StandardSYN())
-	c.Close()
-	f, ok := p.Await(time.Second, isFIN)
-	h.Require("fin", ok, "Close sends a FIN", segDesc(f, ok))
-	p.RcvNxt = f.Seq + f.Len()
-	p.SendAck()
-	p.SendData([]byte("late"))
-	// Await looks only at this connection's four-tuple, the FIN_WAIT_2 one
-	r, ok := p.Await(time.Second, isRST)
-	h.Check("rst", ok, "RFC 2525 2.16: data for a closed application draws a RST", segDesc(r, ok))
-	if ok {
-		h.Check("rst.seq", r.Seq == p.RcvNxt, "the RST carries SND.NXT, past the FIN, as RFC 9293 3.10.7.4 asks for a segment that acknowledges it",
-			yesNo(r.Seq == p.RcvNxt, "SND.NXT", "another number"))
-	}
 }

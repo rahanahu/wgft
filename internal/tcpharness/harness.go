@@ -219,19 +219,6 @@ func RecordFailures(t *testing.T, e Engine, s Scenario, seed uint64) (map[string
 	return a.outcome, a.msgs
 }
 
-// RecordTrace is Record, and it also returns every line the scenario logged, in order: the
-// segments sent and seen, each wait with its bound, the check and MEASURE lines and the recorded
-// failures, and whether the run failed in any way, a Fatalf outside a check included. On a
-// ClockedDUT each line starts with the DUT's time since the scenario began, so two scenarios that
-// drive it the same way give the same lines.
-func RecordTrace(t *testing.T, e Engine, s Scenario, seed uint64) (outcome map[string][]string, lines []string, failed bool) {
-	a := attempt(t, e, s, seed)
-	if a.outcome == nil {
-		t.Fatalf("scenario %s did not start: %v", s.Name, a.msgs)
-	}
-	return a.outcome, a.lines, a.failed
-}
-
 // stallLimit and scenarioAttempts are Run's rule for running a failed scenario again. 10 ms is
 // below the margin every timed check leaves a correct DUT, and above the few milliseconds an idle
 // machine's scheduler takes.
@@ -243,7 +230,6 @@ const scenarioAttempts = 3
 type attemptResult struct {
 	outcome map[string][]string // nil when the scenario did not start
 	msgs    []string            // the failures, in order
-	lines   []string            // every logged line, in order
 	failed  bool
 	skipped bool
 	clocked bool
@@ -267,11 +253,7 @@ func attempt(t testing.TB, e Engine, s Scenario, seed uint64) attemptResult {
 			build = e.NewPerformance
 		}
 		d := build(rec, seed)
-		var c ClockedDUT
-		c, a.clocked = d.(ClockedDUT)
-		if a.clocked {
-			rec.stamp(c.Now)
-		}
+		_, a.clocked = d.(ClockedDUT)
 		h := newH(rec, e, s.Name, d, seed)
 		a.outcome = h.outcome
 		if !a.clocked {
@@ -285,9 +267,6 @@ func attempt(t testing.TB, e Engine, s Scenario, seed uint64) attemptResult {
 	}
 	rec.cleanup()
 	a.msgs, a.failed, a.skipped = rec.msgs, rec.failed, rec.skipped
-	rec.mu.Lock()
-	a.lines = append([]string(nil), rec.lines...)
-	rec.mu.Unlock()
 	return a
 }
 
@@ -314,10 +293,6 @@ func (a attemptResult) report(t testing.TB) {
 // where the real one would stop the test, and keeps the cleanups for attempt to run.
 type recorder struct {
 	testing.TB
-	mu       sync.Mutex
-	lines    []string
-	clock    func() time.Time // the DUT's clock, when it runs on the harness's
-	start    time.Time
 	msgs     []string
 	failed   bool
 	skipped  bool
@@ -332,26 +307,11 @@ func (r *recorder) Errorf(format string, args ...any) {
 	r.Logf("recorded: %s", m)
 }
 
-// stamp makes the kept lines carry the time on clock since now, so traces on the harness's clock
-// differ when two scenarios wait for different times.
-func (r *recorder) stamp(clock func() time.Time) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.clock, r.start = clock, clock()
-}
-
-// Logf logs through the real TB and keeps the line for RecordTrace.
+// Logf logs through the real TB. The recorder's own lines, such as recorded failures, go
+// through it as well.
 func (r *recorder) Logf(format string, args ...any) {
 	r.TB.Helper()
-	m := fmt.Sprintf(format, args...)
-	r.mu.Lock()
-	if r.clock != nil {
-		r.lines = append(r.lines, fmt.Sprintf("%v %s", r.clock().Sub(r.start), m))
-	} else {
-		r.lines = append(r.lines, m)
-	}
-	r.mu.Unlock()
-	r.TB.Log(m)
+	r.TB.Logf(format, args...)
 }
 func (r *recorder) Log(args ...any) {
 	r.TB.Helper()
