@@ -3,7 +3,7 @@
 v2 は、agent と server の両方を Rust で書き直し、製品から Go を取り除く版です。
 この文書は移行の決定事項を定めます。
 Rust のコードは `crates/` 以下にあり、ビルドと検査は[テストの規範](../../development/testing.md)の B13 から B15 に従います。
-実装済みのものはワークスペースと CI だけです。
+実装済みのものはワークスペース、CI、wire の版 1 の型 (`crates/wgft-proto`) だけです。
 他の節の決定はすべて未実装です。
 
 ## 動機
@@ -27,7 +27,8 @@ Go 製の v1 系は、この移行の間も動作を変えません。
 Rust の agent は、v1 の `agent.json` をそのまま読み、wire の版 1 を話します。
 形式は言語に依らない仕様として定めます。
 仕様は[境目の仕様 (wire の版 1)](../spec/README.md)にあります。
-WireGuard の通信を暗号化する層と、server と話す制御の部分の設計は、実装と同じ PR で加えます。
+server と話す制御の部分の試作の設計は [Rust の agent の制御プレーン](agent-control.md) にあります。
+WireGuard の通信を暗号化する層の設計は、実装と同じ PR で加えます。
 
 ## 配布
 

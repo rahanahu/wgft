@@ -1,0 +1,20 @@
+[package]
+name = "wgft-proto"
+description = "wgft wire version 1 types shared by the agent and the server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+time = { version = "0.3.55", features = ["formatting", "parsing"] }
+unicode-general-category = "1.1.0"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+base64 = "0.23.1"
