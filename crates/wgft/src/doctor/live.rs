@@ -14,6 +14,7 @@ use wgft_agent::controlapi::{
     REASON_HANDSHAKE_PENDING, REASON_NO_TUNNEL_BUILD_FAILED, REASON_WG_REFUSED,
     UNKNOWN_COMMAND_REPLY, control_path,
 };
+use wgft_agent::oserror;
 use wgft_agent::platform::ctlsock;
 use wgft_proto::GoTime;
 
@@ -72,18 +73,10 @@ pub(crate) fn read(input: &Input, run: &RunState) -> Live {
     }
 }
 
+/// OS の文なら接尾辞を除いて先頭を小文字にし (Go の `syscall.Errno` の文)、そうでなければそのままにする。
 fn strip_os(e: &io::Error) -> String {
     let s = e.to_string();
-    match s.rfind(" (os error ") {
-        Some(i) if s.ends_with(')') => {
-            let m = &s[..i];
-            let mut cs = m.chars();
-            cs.next()
-                .map(|c| c.to_lowercase().chain(cs).collect())
-                .unwrap_or_default()
-        }
-        _ => s,
-    }
+    oserror::strip_os_suffix(&s).map_or_else(|| s.clone(), oserror::lower_first)
 }
 
 /// 繋げなかった理由を、終了コードの分かれる 3 つの場合に振り分ける。
