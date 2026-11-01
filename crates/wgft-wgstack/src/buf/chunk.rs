@@ -51,6 +51,7 @@ impl ChunkPool {
     }
 
     /// 置き場の管理の配列の byte 数です。置き場の chunk は含みません。
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.free.heap_bytes()
     }

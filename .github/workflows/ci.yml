@@ -284,6 +284,9 @@ jobs:
           git diff --exit-code go.mod go.sum
       - name: go vet
         run: go vet ./...
+      # qbench builds only with its tag, which `go vet ./...` leaves out
+      - name: go vet qbench
+        run: go vet -tags qbench ./internal/tcpharness/qbench
       - name: build
         run: go build ./...
       - name: test

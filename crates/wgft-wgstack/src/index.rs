@@ -57,6 +57,7 @@ impl Index {
     }
 
     /// 確保した領域の byte 数です。
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.ents.heap_bytes() + self.gens.heap_bytes()
     }
