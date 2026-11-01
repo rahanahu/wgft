@@ -236,7 +236,8 @@ server と VPS の側のコマンドも `wgft` のままです。
 Go の実行環境に依る読み取りは、Rust の agent では次のように読み替えます。
 
 - `lifecycle.sh` の check 5 と 5b:エージェントの `memory soft limit:` の行の代わりに `memory bound:` の行を読み、RSS がその値と 32 MiB の和を超えないことを確かめます。
-  あわせて、洪水の前 (トンネルと待ち受けを開いた後) に RSS を測り、洪水の間の育ちが `memory bound terms:` の行のうち洪水が満たせる項 (`core fixed`、`core arrays`、`tables`、`driver`、`device`、`tcp relay`、`udp relay`) の和に 32 MiB を足した値を超えないことを確かめます。
+  あわせて、洪水の前 (トンネルと待ち受けを開いた後) に RSS を測り、洪水の間の育ちが `memory bound terms:` の行のうち洪水が満たせる項 (`core fixed`、`tables`、`driver`、`device`、`tcp relay`、`udp relay` と、洪水が使った接続の枠の配列) の和に 32 MiB を足した値を超えないことを確かめます。
+  洪水が使った接続の枠の配列は、エージェントの最後の `connection slots used so far` の行の KiB です。
   洪水はデータを運ばないので、`tcp bulk` と `core flows` は入れません。
   項の分け方は [agent-parity.md](../docs/design/v2/agent-parity.md#メモリの上界の行) にあります
 - `exhaustion.sh` の acceptq と ackflood:エージェントの GC の記録が無いので、ヒープの値を示さず RSS だけを示します

@@ -281,6 +281,7 @@ impl<H: Hook> Stack<H> {
             let (recs, ivs) = b.array_bytes();
             h.record_bytes += recs;
             h.interval_bytes += ivs;
+            h.slot_arrays += usize::from(b.has_floor_arrays());
             if t.state != State::Free {
                 h.conns += 1;
                 h.chunk_bytes += b.held_chunks() * CHUNK_SIZE;

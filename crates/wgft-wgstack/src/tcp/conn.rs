@@ -299,6 +299,11 @@ impl ConnBufs {
         }
     }
 
+    /// 枠が floor の記録の輪を持つかを返します。boost の間は控えに持ちます。区間の表は記録の輪と同じ時に確保します。
+    pub(crate) fn has_floor_arrays(&self) -> bool {
+        self.recs.capacity() != 0 || self.spare_recs.capacity() != 0
+    }
+
     /// 枠が持つ floor の記録の輪と区間の表の byte 数です。使っている配列が boost のものなら、それも数えます。
     pub(crate) fn array_bytes(&self) -> (usize, usize) {
         (
@@ -684,7 +689,9 @@ mod tests {
             (0, 0),
             "arrays are allocated on first use"
         );
+        assert!(!t.bufs(0).has_floor_arrays());
         t.alloc(&mut free).unwrap();
+        assert!(t.bufs(0).has_floor_arrays());
         let bytes = t.bufs(0).array_bytes();
         assert_eq!(
             bytes,
@@ -696,6 +703,10 @@ mod tests {
         t.bufs_mut(0).snd.write(0, &[1; 100], &mut p).unwrap();
         t.release(0, &mut free, &mut p);
         assert_eq!(t.bufs(0).array_bytes(), bytes);
+        assert!(
+            t.bufs(0).has_floor_arrays(),
+            "a released slot keeps its arrays"
+        );
         assert_eq!((t.bufs(0).held_chunks(), p.held()), (0, 0));
         t.free_all(&mut p);
         assert_eq!(t.bufs(0).array_bytes(), (0, 0));

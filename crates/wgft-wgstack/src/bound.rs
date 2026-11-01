@@ -209,6 +209,9 @@ impl Bound {
 pub struct Held {
     /// 使っている接続の枠です。
     pub conns: usize,
+    /// floor の送信の記録の輪と区間の表を持つ接続の枠です。枠は初めて使う時に配列を確保して持ち続けるので、核を
+    /// 作ってから使ったことのある枠の数です。
+    pub slot_arrays: usize,
     /// 握手の途中の行です。
     pub syn_rows: usize,
     /// TIME_WAIT と FIN_WAIT_2 の行です。

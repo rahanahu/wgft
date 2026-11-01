@@ -248,6 +248,7 @@ fn a_full_stack_meets_each_term() {
     let bound = s.bound();
     let (n, slots) = (b(limits.conns()), b(BOOST_SLOTS));
     assert_eq!(h.boosted as u64, slots);
+    assert_eq!(h.slot_arrays, limits.conns());
     let chunk_terms = n * (SEND_FLOOR + RECV_FLOOR)
         + slots * ((BOOST_SIZE - SEND_FLOOR) + (BOOST_SIZE - RECV_FLOOR));
     let record_terms =

@@ -33,9 +33,10 @@ pub const TASK_OVERHEAD: usize = 512;
 /// pair, and the handle).
 pub const IO_OVERHEAD: usize = 512;
 
-/// The size of one per-flow allocation as the bound counts it: rounded up to 64 bytes. The
-/// allocator's size classes are no finer, and the rounding keeps the term the same in the test and
-/// the release build, whose futures the compiler can lay out a few bytes apart.
+/// The size of one per-flow allocation as the bound counts it: the requested bytes, rounded up to
+/// 64 bytes. The allocator's own rounding is not counted; it falls into the margin the lab checks
+/// add. The rounding only makes the generated table drift less often, since the compiler can lay
+/// out the futures a few bytes apart in the test and the release build.
 const fn per_flow(bytes: usize) -> usize {
     bytes.next_multiple_of(64)
 }
