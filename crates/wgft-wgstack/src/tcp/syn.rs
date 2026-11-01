@@ -99,6 +99,7 @@ impl SynTable {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.rows.heap_bytes() + self.idx.heap_bytes() + self.free.heap_bytes()
     }

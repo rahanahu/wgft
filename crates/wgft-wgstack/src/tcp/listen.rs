@@ -52,11 +52,13 @@ impl<R: Default + Copy> PortTable<R> {
         PORTS * size_of::<PortRow<R>>() + BitSet::bytes_for(PORTS)
     }
 
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.rows.heap_bytes() + self.open.heap_bytes()
     }
 
     /// 開いている行の数です。
+    #[cfg(test)]
     pub(crate) fn open_count(&self) -> usize {
         self.count
     }

@@ -40,6 +40,7 @@ impl Dlist {
         nodes * 2 * size_of::<u32>() + BitSet::bytes_for(nodes)
     }
 
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.next.heap_bytes() + self.prev.heap_bytes() + self.in_list.heap_bytes()
     }
@@ -167,6 +168,7 @@ impl CtlRing {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.buf.heap_bytes() + self.lens.heap_bytes()
     }

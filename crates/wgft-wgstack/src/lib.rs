@@ -15,12 +15,6 @@
 //! この規則は `clippy.toml` の禁止の一覧と、source を走査する試験が確かめます。
 
 #![forbid(unsafe_code)]
-// 表の大きさを数える `heap_bytes` と一部の小さな部品は上界と不変条件の試験だけが使い、試験の道具の一部の欄は
-// Go の試験の道具の形を写しただけで読みません。
-#![expect(
-    dead_code,
-    reason = "heap_bytes and a few small helpers serve only the bound and invariant tests"
-)]
 
 mod bitset;
 mod bound;
