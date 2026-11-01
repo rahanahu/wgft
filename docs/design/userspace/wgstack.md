@@ -743,7 +743,8 @@ ECN は交渉しません。
 
 - SYN cookie(RFC 4987):握手の途中の表が満杯の時に状態を持たずに応える仕組みです。
   gVisor と Linux はどちらも使うので、持たない wgstack は SYN の洪水の間の新しい接続の成功率が両者より低くなります。
-  保持の上界には影響しません
+  保持の上界には影響しません。
+  凍結した Go の wgstack には足さず、Rust 版が持ちます ([wgstack の Rust 版の SYN cookie](../v2/wgstack-rs.md#syn-cookie))
 
 ## 未確認の点と未決の点
 

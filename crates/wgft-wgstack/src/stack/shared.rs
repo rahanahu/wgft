@@ -24,7 +24,7 @@ use crate::tcp::timewait::TwTable;
 use crate::tcp::{IP_TCP_HEADERS, TS_OPTION_LEN};
 use crate::udp::Udp;
 use crate::wheel::Wheel;
-use crate::wire::{self, FLAG_ACK, FLAG_RST, Segment, TcpHeader, Tuple};
+use crate::wire::{self, FLAG_ACK, FLAG_RST, OptWriter, Segment, TcpHeader, Tuple};
 
 /// 出力の組です。接続の枠の segment、握手の途中の行と TIME_WAIT の行の segment、UDP の datagram、制御の輪の
 /// 順で、Go と同じ番号です。
@@ -101,7 +101,15 @@ impl Output {
 #[non_exhaustive]
 pub struct Stats {
     pub mss_floor_drops: u64,
+    /// 握手の途中の表が満杯で捨てた SYN です。cookie で応えた SYN は数えません。
     pub syn_table_full: u64,
+    /// 握手の途中の表が満杯で、行を作らずに cookie で応えた SYN です。
+    pub syn_cookies_sent: u64,
+    /// cookie が通り、接続を作った ACK です。
+    pub syn_cookies_accepted: u64,
+    /// cookie を送ってから 2 周期の内に届き、cookie が通らなかった ACK です。どの行にも当たらない segment と
+    /// して RST を返します。
+    pub syn_cookies_rejected: u64,
     pub accept_overflow: u64,
     pub tw_evicted: u64,
     pub ctl_dropped: u64,
@@ -176,6 +184,8 @@ pub enum LogKind {
     MssFloor,
     /// 握手の途中の表が満杯で SYN を捨てました。
     SynFull,
+    /// 握手の途中の表が満杯で、SYN に cookie で応えました。`count` は応えた数です。
+    SynCookies,
     /// accept の待ち行列か接続の表が満杯で、握手の最後の ACK を捨てました。
     AcceptOverflow,
     /// TIME_WAIT の表が満杯で最も古い行を外しました。
@@ -194,9 +204,10 @@ pub enum LogKind {
 }
 
 /// 門を通るログの種類です。`UdpFault` は 1 回だけ出すので門を持ちません。
-const LOG_KINDS: [LogKind; 8] = [
+const LOG_KINDS: [LogKind; 9] = [
     LogKind::MssFloor,
     LogKind::SynFull,
+    LogKind::SynCookies,
     LogKind::AcceptOverflow,
     LogKind::TwEvicted,
     LogKind::CtlDropped,
@@ -261,6 +272,10 @@ pub(crate) struct Shared {
     pub(crate) now: i64,
     pub(crate) isn_key: SipKey,
     pub(crate) ts_key: SipKey,
+    /// SYN cookie の MAC の鍵です。
+    pub(crate) cookie_key: SipKey,
+    /// 最後に cookie の SYN-ACK を積んだ時刻 (ns) です。
+    pub(crate) cookie_sent: Option<i64>,
     pub(crate) ip_id: u32,
     pub(crate) rng: ChaCha8,
     /// 空きの接続の枠です。
@@ -306,8 +321,8 @@ impl Shared {
             LogKind::CtlDropped => &mut st.ctl_dropped,
             LogKind::OooDropped => &mut st.ooo_dropped,
             LogKind::AccountingFault => &mut st.accounting_faults,
-            // UDP の数は入口が数えます。
-            LogKind::UdpDropped | LogKind::UdpFault => return,
+            // UDP の数は入口が数え、cookie の数は送った所が数えます。
+            LogKind::UdpDropped | LogKind::UdpFault | LogKind::SynCookies => return,
         };
         *c += 1;
         let n = *c;
@@ -430,15 +445,21 @@ impl Shared {
 
     /// option の無い segment を制御の輪に積みます。輪が満杯なら捨てて数えます。
     pub(crate) fn send_ctl(&mut self, h: TcpHeader) {
+        self.send_ctl_with(h, None);
+    }
+
+    /// segment を制御の輪に積み、積んだかを返します。輪が満杯なら捨てて数えます。
+    pub(crate) fn send_ctl_with(&mut self, h: TcpHeader, o: Option<&mut OptWriter>) -> bool {
         let id = self.next_id();
         let Some(b) = self.out.ctl.slot() else {
             let now = self.now;
             self.refused(LogKind::CtlDropped, now);
-            return;
+            return false;
         };
-        wire::write_tcp(b, id, &h, None, 0);
+        wire::write_tcp(b, id, &h, o, 0);
         let n = wire::finish_tcp(b);
         self.out.ctl.commit(n);
+        true
     }
 
     /// どの接続にも行にも当たらない segment に RST を返します (RFC 9293 3.10.7.1)。RST には返しません。

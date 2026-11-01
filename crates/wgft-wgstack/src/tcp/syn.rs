@@ -60,6 +60,8 @@ pub(crate) struct SynRow {
     pub(crate) ts_ok: bool,
     /// SYN-ACK を再送しました。
     pub(crate) rtx: bool,
+    /// cookie から取り戻した値です。表には入れず、`Stack::establish_cookie` が接続の枠に移します。
+    pub(crate) cookie: bool,
     pub(crate) used: bool,
     pub(crate) pending: RowSend,
 }
@@ -261,15 +263,21 @@ impl Shared {
     }
 
     /// 待ち受けへの SYN から行を作り、SYN-ACK を送ります。表が満杯か、待ち受けが N_syn の半分を使っていれば、
-    /// 状態を作らずに捨てます。`reuse` は TIME_WAIT の 4 つ組を使い直す時の前の接続の SND.NXT です。
+    /// 行を作らずに cookie の SYN-ACK で応えます (`cookie`)。`reuse` は TIME_WAIT の 4 つ組を使い直す時の前の
+    /// 接続の SND.NXT で、呼び手は行を作れる時だけ渡します。
     pub(crate) fn new_syn_row(&mut self, seg: &Segment<'_>, now: i64, reuse: Option<u32>) {
         let port = seg.tup.lport;
-        if !self
-            .listeners
-            .by_port(port)
-            .is_some_and(|l| self.syn_room(l))
-        {
-            self.refused(LogKind::SynFull, now);
+        let Some(l) = self.listeners.by_port(port) else {
+            return;
+        };
+        if self.use_cookie(l) {
+            if reuse.is_some() {
+                // 呼び手が行を作れることを確かめた後なので来ません。cookie の ISN は前の接続の番号の先に
+                // 置けないので、来ても cookie で応えません。
+                self.refused(LogKind::SynFull, now);
+            } else {
+                self.send_cookie(seg, now);
+            }
             return;
         }
         let ts = seg.opt.ts;
@@ -363,17 +371,23 @@ impl Shared {
             self.row_ack(id, now);
             return false;
         }
+        self.reserve_accept(r.listener, now)
+    }
+
+    /// 待ち受け `port` の accept の待ち行列の枠を 1 つ予約し、予約できたかを返します。待ち受けの分 (Q の半分)、
+    /// 全体の Q、空きの接続の枠のどれかが尽きていれば、数えて偽を返します。
+    pub(crate) fn reserve_accept(&mut self, port: u16, now: i64) -> bool {
         let q = self.config.limits.accept_queue;
         let full = self
             .listeners
-            .by_port(r.listener)
+            .by_port(port)
             .is_none_or(|l| usize::from(l.qlen) >= q / 2);
         if full || self.queued >= q || self.conn_free.is_empty() {
             self.refused(LogKind::AcceptOverflow, now);
             return false;
         }
         self.queued += 1;
-        if let Some(l) = self.listeners.by_port_mut(r.listener) {
+        if let Some(l) = self.listeners.by_port_mut(port) {
             l.qlen += 1;
         }
         true
