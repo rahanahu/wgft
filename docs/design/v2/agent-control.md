@@ -109,10 +109,14 @@ root が書き直すときは、前のファイルの持ち主と group を一�
 保存の rename の後は、Unix ではディレクトリも fsync します。
 メモリの上の秘密は、捨てるときに 0 で消します (`zeroize::Zeroizing`)。
 対象は、WireGuard の秘密鍵 (認証情報の `wg_private_key` と `previous_wg_private_key`、device の鍵、鍵を作る乱数)、恒久トークン、接続文字列の登録トークン、登録の要求と応答の本文、`agent.json` を読み書きするバッファです。
+接続文字列を読む `Join::parse` は、`%XX` を戻した path の byte 列 (トークンを持ちます) と、途中で断った戻しの byte 列も消します。
 `agent.json` は長さの分の容量を先に取ってから読み、保存は 8 KiB の 0 で消すバッファを通して一時ファイルへ書くので、途中で伸ばした前の領域を消さずに手放しません。
 鍵の型 (`PrivateKey::from_bytes` と `generate`) は鍵の byte を参照で受け、値渡しの写しを残しません。
 消せない写しもあります。
 `Authorization` の header の値、hyper と rustls と tungstenite の内部のバッファ、カーネルのソケットとファイルの頁、プロセスの環境変数とコマンドラインの `WGFT_JOIN` と `--join` の値です。
+serde_json が JSON の文字列を読む作業のバッファも消せません。
+秘密の値が `\` の escape を含むときだけ、serde_json は戻した文字をこのバッファに書き、読み終わった後も消さずに使い回すか手放します。
+server と agent が作る秘密 (base64 の鍵とトークン) は escape の要る文字を含まないので、手で書いた `agent.json` のように escape を含めた入力のときだけの写しです。
 このため、`agent run` の設定が持つ接続文字列 (`Options::join`) は普通の文字列のままにしました。
 同じ値がプロセスの環境変数かコマンドラインに残り、写しだけを消しても秘密を守る範囲が変わらないためです。
 認証情報とトークンを持つ型の `Debug` の出力は秘密を伏せ、stream の `Authorization` の header は秘密の値として扱います。
