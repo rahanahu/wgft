@@ -103,6 +103,8 @@ pub struct Stats {
     pub mss_floor_drops: u64,
     /// 握手の途中の表が満杯で捨てた SYN です。cookie で応えた SYN は数えません。
     pub syn_table_full: u64,
+    /// 握手の途中の表が満杯で cookie を使う所だったが、accept の待ち行列か接続の枠も満杯で捨てた SYN です。
+    pub syn_accept_full: u64,
     /// 握手の途中の表が満杯で、行を作らずに cookie で応えた SYN です。
     pub syn_cookies_sent: u64,
     /// cookie が通り、接続を作った ACK です。
@@ -110,6 +112,11 @@ pub struct Stats {
     /// cookie を送ってから 2 周期の内に届き、cookie が通らなかった ACK です。握手の途中の行に当たる ACK と、
     /// 中身も FIN も持たない ACK には RST を返し、ほかは捨てます。
     pub syn_cookies_rejected: u64,
+    /// cookie が通ったが accept の待ち行列か接続の枠が満杯で、cookie の値で握手の途中の行にした ACK です。
+    pub syn_cookies_deferred: u64,
+    /// cookie が通ったが接続も行も作れず、RST で切った ACK と、cookie の値の行が SYN-ACK の再送を使い切って
+    /// RST で切った数です。
+    pub syn_cookies_reset: u64,
     pub accept_overflow: u64,
     pub tw_evicted: u64,
     pub ctl_dropped: u64,
@@ -186,6 +193,8 @@ pub enum LogKind {
     SynFull,
     /// 握手の途中の表が満杯で、SYN に cookie で応えました。`count` は応えた数です。
     SynCookies,
+    /// 握手の途中の表と accept の待ち行列の両方が満杯で SYN を捨てました。
+    SynAcceptFull,
     /// accept の待ち行列か接続の表が満杯で、握手の最後の ACK を捨てました。
     AcceptOverflow,
     /// TIME_WAIT の表が満杯で最も古い行を外しました。
@@ -204,10 +213,11 @@ pub enum LogKind {
 }
 
 /// 門を通るログの種類です。`UdpFault` は 1 回だけ出すので門を持ちません。
-const LOG_KINDS: [LogKind; 9] = [
+const LOG_KINDS: [LogKind; 10] = [
     LogKind::MssFloor,
     LogKind::SynFull,
     LogKind::SynCookies,
+    LogKind::SynAcceptFull,
     LogKind::AcceptOverflow,
     LogKind::TwEvicted,
     LogKind::CtlDropped,
@@ -316,6 +326,7 @@ impl Shared {
         let c = match kind {
             LogKind::MssFloor => &mut st.mss_floor_drops,
             LogKind::SynFull => &mut st.syn_table_full,
+            LogKind::SynAcceptFull => &mut st.syn_accept_full,
             LogKind::AcceptOverflow => &mut st.accept_overflow,
             LogKind::TwEvicted => &mut st.tw_evicted,
             LogKind::CtlDropped => &mut st.ctl_dropped,

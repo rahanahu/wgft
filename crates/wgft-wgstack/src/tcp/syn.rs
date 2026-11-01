@@ -39,6 +39,8 @@ pub(crate) enum RowSend {
     None,
     SynAck,
     Ack,
+    /// cookie の値の行が SYN-ACK の再送を使い切った後の RST です。送ったら行を外します。
+    Rst,
 }
 
 /// 握手の途中の 1 つの行です。
@@ -71,7 +73,9 @@ pub(crate) struct SynRow {
     pub(crate) ts_ok: bool,
     /// SYN-ACK を再送しました。
     pub(crate) rtx: bool,
-    /// cookie から取り戻した値です。表には入れず、`Stack::establish_cookie` が接続の枠に移します。
+    /// cookie から取り戻した値です。`Stack::establish_cookie` が接続の枠に移し、移せなければ
+    /// [`Shared::defer_cookie`] が表に入れます。相手は握手を終えて接続を開いたと思っているので、表の行は
+    /// SYN-ACK の再送を使い切ったら黙って消さずに RST を送ります。
     pub(crate) cookie: bool,
     pub(crate) used: bool,
     pub(crate) pending: RowSend,
@@ -275,24 +279,22 @@ impl Shared {
     }
 
     /// 待ち受けへの SYN から行を作り、SYN-ACK を送ります。表が満杯か、待ち受けが N_syn の半分を使っていれば、
-    /// 行を作らずに cookie の SYN-ACK で応えます (`cookie`)。accept の待ち行列に空きが無ければ cookie でも
-    /// 応えずに捨てます。`reuse` は TIME_WAIT の 4 つ組を使い直す時の前の
-    /// 接続の SND.NXT で、呼び手は行を作れる時だけ渡します。
+    /// 行を作らずに cookie の SYN-ACK で応え (`cookie`)、accept の待ち行列にも空きが無ければ捨てます。
+    /// `reuse` は TIME_WAIT の 4 つ組を使い直す時の前の接続の SND.NXT で、呼び手は行を作れる時だけ渡します。
     pub(crate) fn new_syn_row(&mut self, seg: &Segment<'_>, now: i64, reuse: Option<u32>) {
         let port = seg.tup.lport;
         let Some(l) = self.listeners.by_port(port) else {
             return;
         };
         if self.use_cookie(l) {
-            // `reuse` は呼び手が行を作れることを確かめた後なので来ません。cookie の ISN は前の接続の番号の
-            // 先に置けないので、来ても cookie で応えません。
-            //
-            // accept の待ち行列に空きが無ければ、cookie で応えずに SYN を捨てます。cookie の接続は SYN-ACK を
-            // 再送しないので、最後の ACK を待ち行列が満杯で捨てると、先に送るものの無い相手 (相手が話し始める
-            // 前に待つ protocol) の接続は相手の側だけで開いたまま、こちらに届きません。SYN を捨てれば、相手は
-            // SYN を送り直し、その時に空きがあれば握手を終えます。
-            if reuse.is_some() || !self.accept_room(l) {
+            if reuse.is_some() {
+                // 呼び手が行を作れることを確かめた後なので来ません。cookie の ISN は前の接続の番号の先に
+                // 置けないので、来ても cookie で応えません。
                 self.refused(LogKind::SynFull, now);
+            } else if !self.accept_room(l) {
+                // accept の待ち行列に空きが無ければ、cookie で応えずに SYN を捨てます。相手は SYN を送り直し、
+                // その時に空きがあれば握手を終えます (wgstack-rs.md の「使う時」)。
+                self.refused(LogKind::SynAcceptFull, now);
             } else {
                 self.send_cookie(seg, now);
             }
@@ -324,6 +326,33 @@ impl Shared {
             l.syn_count += 1;
         }
         self.queue_row(id);
+    }
+
+    /// cookie の値 `r` で握手の途中の行を作り、作れたかを返します。accept の待ち行列か接続の枠が満杯で、
+    /// cookie が通った最後の ACK から接続を作れない時に使います。行は SYN-ACK をすぐには送らず、最初の再送の
+    /// 期限に送ります。握手を終えた相手は SYN-ACK の写しに ACK を返し、その ACK が空きのできた待ち行列に
+    /// 行を移します。表の全体が満杯なら作りません。
+    pub(crate) fn defer_cookie(&mut self, r: &SynRow, now: i64) -> bool {
+        // 待ち受けの分は見ません。cookie を使うのはその分が満杯の時なので、分を守るとほぼすべてが RST になります。
+        // 行を作れるのは握手を終えた相手だけで、経路の外から表を埋められません。
+        if !self.syn.has_free() || self.listeners.by_port(r.listener).is_none() {
+            return false;
+        }
+        debug_assert!(r.cookie, "only a recovered cookie becomes a deferred row");
+        // 相手は最初の SYN-ACK に ACK を返し済みなので、行の SYN-ACK を RTT の標本にしません (`rtx`)。
+        let row = SynRow {
+            deadline: time(now + SYNACK_RTO),
+            rtx: true,
+            pending: RowSend::None,
+            ..*r
+        };
+        if self.syn.insert(row).is_none() {
+            return false;
+        }
+        if let Some(l) = self.listeners.by_port_mut(r.listener) {
+            l.syn_count += 1;
+        }
+        true
     }
 
     /// 行を外して空きに返します。
@@ -456,6 +485,17 @@ impl Shared {
                     break;
                 }
                 if usize::from(r.retries) >= SYNACK_RETRIES {
+                    if r.cookie {
+                        // 相手は握手を終えて接続を開いたと思っているので、黙って消さずに RST で切ります。RST は
+                        // 行の出力で送り、送った時に行を外します。制御の輪と違って溢れないので、RST を失いません。
+                        self.syn.list_remove(id);
+                        let row = self.syn.row_mut(id);
+                        row.deadline = time(now + (SYNACK_RTO << row.retries));
+                        row.pending = RowSend::Rst;
+                        self.syn.list_push(id);
+                        self.queue_row(id);
+                        continue;
+                    }
                     self.remove_syn_row(id);
                     continue;
                 }
@@ -479,6 +519,23 @@ impl Shared {
         let r = *self.syn.row(id);
         if !r.used || r.pending == RowSend::None {
             return 0;
+        }
+        if r.pending == RowSend::Rst {
+            if b.len() < IP_HEADER_LEN + TCP_HEADER_LEN {
+                return 0; // 行は残り、次の期限にもう一度 RST を積みます
+            }
+            let h = TcpHeader {
+                tup: r.tup,
+                seq: r.iss.wrapping_add(1),
+                ack: r.irs.wrapping_add(1),
+                flags: FLAG_RST | FLAG_ACK,
+                wnd: 0,
+            };
+            let ip_id = self.next_id();
+            wire::write_tcp(b, ip_id, &h, None, 0);
+            self.stats.syn_cookies_reset += 1;
+            self.remove_syn_row(id);
+            return wire::finish_tcp(b);
         }
         let row = self.syn.row_mut(id);
         row.pending = RowSend::None;
