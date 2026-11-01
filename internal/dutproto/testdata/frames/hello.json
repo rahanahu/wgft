@@ -11,5 +11,5 @@
     "boost": 1,
     "congestion": 1
   },
-  "display": "HELLO version=1 clock=fake addr=10.200.0.2 mtu=1420 seed=64:01080f161d242b323940474e555c636a... limits=default boost=1 congestion=1"
+  "display": "HELLO version=1 clock=fake addr=10.200.0.2 mtu=1420 seed=64:01080f161d242b323940474e555c636a... limits=default boost=at-accept congestion=newreno"
 }

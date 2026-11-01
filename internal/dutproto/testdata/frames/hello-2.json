@@ -20,5 +20,5 @@
     "boost": 0,
     "congestion": 0
   },
-  "display": "HELLO version=1 clock=real addr=10.200.0.2 mtu=1280 seed=64:01080f161d242b323940474e555c636a... limits=maxFlows:8,acceptQ:4 boost=0 congestion=0"
+  "display": "HELLO version=1 clock=real addr=10.200.0.2 mtu=1280 seed=64:01080f161d242b323940474e555c636a... limits=maxFlows:8,acceptQ:4 boost=on-demand congestion=cubic"
 }

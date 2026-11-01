@@ -501,8 +501,9 @@ Rust の wgstack ができた後は、`wgstack-dut` のバイナリを両方の 
 DUT の側は、`WOULD_BLOCK` と `WROTE 0` と空の `DATA` を返す要求で engine の状態を変えません (3 節)。
 
 `NOW` の答えは、ほかの問い合わせと違い、`ADVANCE` だけが変えます。
+この規則は手で進める時計 (`--clock fake`) だけに当てます。
 `rustdut` は `ADVANCE` と `NOW` の応答の時刻を覚え、時刻を一度知った後は `NOW` を送りません。
-手で進める時計の待ちは 1 ms ごとに `POLL`、`NOW`、`ADVANCE` を呼ぶので、`POLL` の後の `NOW` を送り直すと往復が 3 割増えるためです。
+手で進める時計の待ちは 1 ms ごとに `POLL`、`NOW`、`ADVANCE` を呼ぶので、`POLL` の後の `NOW` を送り直すと 1 ms の歩の往復が 2 から 3 に増える (5 割増し) ためです。
 Rust の `ProcessDut` も同じ規則を持ちます。
 
 ## 3. DUT の口 (標準入出力)
@@ -525,7 +526,10 @@ DUT は台本の試行ごとに新しいプロセスで作ります。
 frame は、長さ (u32、little endian、種類と本体の byte 数)、種類 (u8)、本体の順に並びます。
 本体の整数は little endian、byte の列は u32 の長さと中身、文字列は u16 の長さと UTF-8 です。
 addrport は IPv4 の 4 byte (ネットワークの順) と u16 のポートです。
-時刻と時間は DUT を作ってからの u64 の nanosecond です。
+時刻と時間は DUT を作ってからの u64 の nanosecond で、2^63-1 以下です。
+
+符号は本体が運べない値を変えずに誤りにします。
+65,535 byte を超える文字列、UTF-8 でない文字列、IPv4 でないアドレス、64 byte でない種、負の時間、表に無い列挙の値 (時計、boost、輻輳の制御、誤りの種類) は、符号化でも復号でも口の誤りです。
 packet は binary なので、JSON でなく binary の frame にします。
 人が読む形は、`crates/wgft-tcpharness` と `internal/dutproto` が持つ表示の関数で出します。
 
@@ -574,8 +578,11 @@ Rust の wgstack では、これが hook の `may_return` に当たります。
 frame の種類の番号と本体の並びの正本は、`internal/dutproto` の Go の定義と[付録](#付録-frame-の種類と本体)の表です。
 Rust の符号は同じ表から書き、2 つの符号が同じ bytes を作ることを、Go の試験が書き出した frame の例 (`internal/dutproto/testdata/frames/`) で照らします。
 例は種類ごとに、frame の bytes の `.bin` と、欄の値と表示の文字列の `.json` の対です。
-`.json` の bytes の欄は小文字の 16 進、アドレスは `10.200.0.2` と `10.200.0.1:40001` の形、時間は nanosecond の整数です。
-Go の試験は `-update` で例を書き直し、`.bin` と `.json` が今の符号と一致することを確かめます。
+`.json` の bytes の欄は小文字の 16 進、アドレスは `10.200.0.2` と `10.200.0.1:40001` の形、時間は nanosecond の整数、列挙は番号です。
+`display` の文字列は Go の表示の関数の出力で、Rust の符号は同じ文字列を作らなくてかまいません。
+例には問い合わせの形 (空の `DATA`、`WROTE 0`、空の `WRITE`) も含めます。
+`bad-` で始まる例は、どの符号も口の誤りとして断る frame で、`.json` は `expect` に `reject` と、`reason` に理由を持ちます。
+Go の試験は `-update` で例を書き直し、`.bin` と `.json` が今の符号と一致し、`bad-` の例を断ることを確かめます。
 
 ### Go の DUT の adapter (`rustdut`)
 
@@ -601,6 +608,8 @@ Go の wgstack の `Read` と `Write` は、閉じた接続と書けない接続
 `rustdut` は締め切りを過ぎると、最大 0 の `READ` か空の `WRITE` を送り、誤りが返ればそれを、返らなければ timeout を返します。
 どちらの要求も engine の状態を変えません。
 UDP の `ReadFrom` と `WriteTo` は、`rustdut` が覚えている `Close` の有無で閉じた誤りと timeout を選びます。
+`WriteTo` は、Go の wgstack と同じく、宛先の誤りと大きすぎる datagram (`EMSGSIZE`) を締め切りより先に自分で返します。
+これらの誤りの道が `wgstackdut` と同じ誤りを返すことは、`TestErrorsAsWgstackdut` が確かめます。
 
 `Engine` の名前は `rustdut` で、DUT の `Name` は `HELLO_OK` の engine の名前です。
 `OnBoost` は floor に戻ることを許す hook を置き、登録の時の状態を 1 回渡します。
@@ -636,6 +645,7 @@ Go の wgstack の公開の `Read`、`Write`、`Accept` は待つ操作で、締
 - `ACCEPT`:`acceptReady` が真の時だけ `Accept` を呼びます。待ち受けの列に接続がある時と、待ち受けか Device を閉じた後 (誤りで戻る) が真です
 - `READ`:`readReady` が真の時だけ `Read` を呼びます。`FuzzCore` の `readable` に、閉じた Device と締め切りを足した形です。データ、EOF、誤りのどれでも待たずに戻ります
 - `WRITE`:`writeRoom` が空きと書ける状態を返します。空きがあればその量までを `Write` に渡し、書けない状態 (閉じた後、誤りの後、送信の向きを閉じた後) なら `Write` を呼んで誤りを受け取ります。書ける状態で空きが 0 なら `WROTE 0` を返します
+- 最大 0 の `READ` と空の `WRITE`:確かめを飛ばして `Read` と `Write` を呼びます。どちらも待たずに、誤りか 0 byte で戻ります
 - `UDP_RECV`、`UDP_SEND`、`PING_RECV`:`udpRecvReady`、`udpSendReady`、`pingRecvReady` が真の時だけ呼びます。`udpSendReady` は `udpReserve` の予約の判定を状態を変えずに写します。予約できない `WriteTo` は待つ前に印を立てるので、呼ばずに `WOULD_BLOCK` を返します
 
 確かめが操作の振る舞いとちょうど一致することは、`TestDutserveReadyMatchesBlocking` が確かめます。
@@ -646,20 +656,17 @@ Device を閉じた後は、すべての確かめが真であることも求め�
 各確かめが真と偽の両方を見たことを数え、どちらかを見なければ試験を落とします。
 列は、件数の予算を尽くす小さな datagram、予算の尽きた socket を閉じた後の送信、大きすぎる datagram も流し、5 つの socket で Device の件数の予算にも届きます。
 
-検出力は、確かめから条件を 1 つずつ抜いた変異を `go test -overlay` で流して見ました。
-試験が落ちた変異は次のとおりです。
+確かめのうち、ほかの条件と重なる条件は次のとおりです。
+これらは抜いても振る舞いが変わらないので、試験はそれらを抜いた形と区別しません。
+重なりは wgstack のコードの不変条件から次のように示せます。
 
-- `acceptReady`:閉じた待ち受け、待ち受けの列
-- `readReady`:未読のデータ、相手の FIN
-- `writeRoom`:CLOSE-WAIT を書ける状態に数えること
-- `udpRecvReady`:閉じた endpoint
-- `udpSendReady`:閉じた endpoint、大きすぎる datagram、endpoint の件数と byte の予算、Device の件数と byte の予算、今の chunk の枠の空き
-- `pingRecvReady`:閉じた endpoint、閉じた Device、応答の有無
+- `readReady` の誤り (`err != nil`):誤りを置くのは CLOSED に移す `toClosed` だけなので、CLOSED の条件が同じ場面で真になります
+- `readReady` の CLOSED:誤りを持つ CLOSED は上の誤りの条件が、誤りの無い CLOSED は相手の FIN の条件が真になります。誤りの無い `toClosed` は、LAST-ACK の FIN の確認、TIME_WAIT と FIN-WAIT-2 の期限、TIME_WAIT の RST と SYN の再利用だけから呼ばれます。LAST-ACK と TIME_WAIT は相手の FIN の後で、FIN-WAIT-2 の期限はアプリケーションが閉じた接続だけに置くので、アプリケーションが閉じていない誤りの無い CLOSED は相手の FIN を受けています
+- `writeRoom` の誤りと送信の向きを閉じた印 (`sndShut`):誤りを持つ接続は CLOSED で、`sndShut` を立てると状態は FIN-WAIT-1 か LAST-ACK に移るので、どちらも ESTABLISHED か CLOSE-WAIT の条件が同じ場面で偽になります
+- `acceptReady`、`readReady`、`udpRecvReady` の閉じた Device:Device の `Close` は待ち受けを閉じ、接続の枠を返し、UDP の endpoint を閉じるので、それぞれの閉じた待ち受け、枠の世代、閉じた endpoint の条件が同じ場面で真になります
+- `udpCanReserve` の chunk の置き場の空き:Device の 2 つの向きの予算の和が置き場の大きさなので、Device の byte の予算の条件が先に偽になります。空きの datagram の list と Device の件数の予算は同じ数を見ます
 
-試験が通った変異は次のとおりです。
-
-- 同じ場面でほかの条件が真になるもの:`acceptReady` の閉じた Device (Device の `Close` が待ち受けを閉じる)、`readReady` の閉じた Device (`Close` が接続の枠を返す)、`udpRecvReady` の閉じた UDP の状態 (`Close` が endpoint を閉じる)、`udpCanReserve` の chunk の置き場の空き (Device の 2 つの向きの予算の和が置き場の大きさである)、`udpCanReserve` の空きの datagram の list と Device の件数の予算の片方 (2 つは同じ数を見る)
-- 列が区別する状態に届いたかを確かめていないもの:`readReady` の CLOSED と誤り、`writeRoom` の誤りと送信の向きを閉じた印。どちらも状態の確かめ (ESTABLISHED か CLOSE-WAIT) が同じ場面で偽になると見ていますが、確かめていません
+`udpSendReady` の UDP の会計の不整合 (`u.fault`) の条件は、列が不整合を起こさないので、試験が通りません。
 
 `ADVANCE` は手で進める時計を進めた後に `Tick` を 1 回呼び、新しい時刻を返します。
 `RTO_AT` と `CONN_SOCKET` は `--clock real` だけの要求なので、誤りを返します。
@@ -851,7 +858,9 @@ cargo と Go の両方が要り、`crates/**`、`internal/tcpharness/**`、`inte
 job を足す PR は、同じ PR で testing.md の B 類の表と振り分けに `harness-rust-go` を足し、この job を変える PR がラボを省けないことを書きます。
 
 ホストの関門 (`scripts/wgstack-gate.sh`) には、T2a で `rustdut-dutserve` の段を足しました。
-この段は `dutserve` を作り、`rustdut` を通した適合と輻輳の制御 (`wgstackdut` の package の `TestRustdutConformance` と `TestRustdutCongestion`。凍結した Go の wgstack の期待した差の一覧がその package にあるため)、`wgstackdut` との一致、transcript の繰り返しを種 1 から 5 で流します。
+この段は `dutserve` を作り、`rustdut` を通した適合と輻輳の制御、`wgstackdut` との一致、誤りの道の一致、transcript の繰り返しを種 1 から 5 で流します。
+適合と輻輳の制御は、`wgstackdut` の package の `TestRustdutConformance` と `TestRustdutCongestion` です。
+凍結した Go の wgstack の期待した差の一覧が、その package にあるためです。
 今後、Rust の段 (Rust の台本と記録の照合、`wgstack-dut` に対する `rustdut` の適合の種 1 から 5、fuzz の smoke) を足します。
 対象の crate やバイナリが無い木では、今の段と同じく SKIP にします。
 凍結した Go の wgstack の段は、Go の wgstack を消すまで残します。
@@ -897,7 +906,7 @@ Rust の wgstack を相手にするのは T3c からで、実装の 4 の API �
 ## 9. 未決の点
 
 - 口の往復の費用:1 往復を数 µs から数十 µs と見込んでいますが、測っていません。`rustdut` で 30 秒の待ちを持つ台本は、1 ms ごとに `POLL` と `ADVANCE` の 2 往復をします。遅すぎる場合は、`POLL` が空の時に時計を 1 ms 進めて次の packet を返す要求を足します
-- `dutserve` の待たない操作の検出力:3 節の変異のうち `readReady` の CLOSED と誤り、`writeRoom` の誤りと送信の向きを閉じた印を抜いた変異は試験が通ります。ほかの条件と同じ場面で偽になるためと見ていますが、確かめていません
+- `dutserve` の `udpSendReady`:UDP の会計の不整合の条件は、`TestDutserveReadyMatchesBlocking` の列が通りません
 - `rustdut` の往復の費用:`dutserve` を相手に全部の台本を 1 つの種で流すと、適合と輻輳の制御の実行で 5 秒ほどでした (1 回の測り)。1 往復の時間は測っていません
 - 記録の大きさ:git に入れる上限の 5 MiB は測る前の値です。T2b で測って直します
 - 乱数の写し:Go の PCG と `IntN` の写しと、Go の `%q` と `%.0f` の丸めの写しは、Go の試験が書き出した値との照合で確かめます。照合の値の数は T3b で決めます

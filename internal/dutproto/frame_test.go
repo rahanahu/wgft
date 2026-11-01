@@ -2,6 +2,7 @@ package dutproto
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -42,6 +43,7 @@ func examples() []Msg {
 		&Accept{handleBody{H: 1}},
 		&Read{H: 2, Max: 65536},
 		&Write{H: 2, Data: Bytes("after")},
+		&Write{H: 2, Data: Bytes{}}, // the form rustdut sends to learn a write's error after its deadline
 		&Close{handleBody{H: 2}},
 		&CloseWrite{handleBody{H: 2}},
 		&Abort{handleBody{H: 2}},
@@ -70,7 +72,9 @@ func examples() []Msg {
 		&HandleResp{handleBody{H: 7}},
 		&Accepted{H: 2, Remote: peer},
 		&Data{Data: Bytes("bye")},
+		&Data{Data: Bytes{}}, // a READ of 0 bytes: a query
 		&Wrote{N: 1000},
+		&Wrote{N: 0}, // the write has to wait: a query
 		&Bool{V: true},
 		&EventList{Events: []BoostEvent{{H: 2, Boosted: true}, {H: 5, Boosted: false}}},
 		&Datagram{From: peer, Data: Bytes("hello")},
@@ -79,8 +83,8 @@ func examples() []Msg {
 	}
 }
 
-// exampleName is the file name of the i-th example: its kind, and a number when the kind has
-// more than one example.
+// exampleNames returns the file name of each example: its kind, and a number from the second
+// example of a kind on.
 func exampleNames(ms []Msg) []string {
 	seen := map[Kind]int{}
 	names := make([]string, len(ms))
@@ -157,8 +161,89 @@ func TestFrameExamples(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 2*len(ms) {
-		t.Errorf("%s has %d files, want a .bin and a .json for each of the %d examples; run with -update", dir, len(entries), len(ms))
+	if want := 2 * (len(ms) + len(badFrames())); len(entries) != want {
+		t.Errorf("%s has %d files, want %d: a .bin and a .json for each example and each bad frame; run with -update", dir, len(entries), want)
+	}
+}
+
+// badFrame is a frame every codec must refuse as a protocol error.
+type badFrame struct {
+	name, reason string
+	frame        []byte
+}
+
+func badFrames() []badFrame {
+	frame := func(k Kind, body ...byte) []byte {
+		b := binary.LittleEndian.AppendUint32(nil, uint32(1+len(body)))
+		return append(append(b, byte(k)), body...)
+	}
+	hello := AppendFrame(nil, examples()[0])
+	badEnum := slices.Clone(hello)
+	badEnum[len(badEnum)-1] = 7 // congestion control 7
+	return []badFrame{
+		{"bad-bool", "a bool byte of 2", frame(KindBool, 2)},
+		{"bad-trailing-byte", "a byte after NOW's empty body", frame(KindNow, 0)},
+		{"bad-huge-list", "a packet list longer than the body", frame(KindPackets, 0xff, 0xff, 0xff, 0x7f)},
+		{"bad-huge-bytes", "a byte string longer than the body", frame(KindData, 0xff, 0xff, 0xff, 0x7f)},
+		{"bad-zero-length", "a frame length of 0", []byte{0, 0, 0, 0}},
+		{"bad-utf8", "an ERROR message that is not UTF-8", frame(KindError, 0, 2, 0, 0xff, 0xfe)},
+		{"bad-enum", "a congestion control out of the table", badEnum},
+		{"bad-unknown-kind", "a kind out of the table", frame(0x7f)},
+	}
+}
+
+// TestBadFrames checks that the codec refuses every bad frame and keeps them in testdata/frames,
+// each with a .json that says it must be refused and why.
+func TestBadFrames(t *testing.T) {
+	dir := filepath.Join("testdata", "frames")
+	for _, bf := range badFrames() {
+		if _, err := ReadMsg(bytes.NewReader(bf.frame)); !errors.Is(err, ErrProtocol) {
+			t.Errorf("%s: ReadMsg returned %v, want a protocol error", bf.name, err)
+		}
+		js, err := json.MarshalIndent(map[string]string{"expect": "reject", "reason": bf.reason}, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		js = append(js, '\n')
+		bin, jsf := filepath.Join(dir, bf.name+".bin"), filepath.Join(dir, bf.name+".json")
+		if *update {
+			if err := os.WriteFile(bin, bf.frame, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(jsf, js, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if got, err := os.ReadFile(bin); err != nil || !bytes.Equal(got, bf.frame) {
+			t.Errorf("%s: %s differs or is missing (%v); run with -update", bf.name, bin, err)
+		}
+		if got, err := os.ReadFile(jsf); err != nil || !bytes.Equal(got, js) {
+			t.Errorf("%s: %s differs or is missing (%v); run with -update", bf.name, jsf, err)
+		}
+	}
+}
+
+// TestEncodeRejects checks that the encoder refuses what the body cannot carry instead of
+// changing it.
+func TestEncodeRejects(t *testing.T) {
+	cases := []Msg{
+		&PingOpen{To: netip.MustParseAddr("2001:db8::1")},
+		&PingOpen{},
+		&Hello{Version: Version, Addr: netip.MustParseAddr("10.200.0.2"), Seed: make(Bytes, 10), Limits: []Limit{}},
+		&Hello{Version: Version, Addr: netip.MustParseAddr("10.200.0.2"), Seed: make(Bytes, SeedLen), Boost: 9},
+		&Error{Err: 6},
+		&Text{S: strings.Repeat("x", 0x10000)},
+		&Text{S: "\xff"},
+		&Advance{D: -1},
+	}
+	for _, m := range cases {
+		if _, err := Encode(m); !errors.Is(err, ErrProtocol) {
+			t.Errorf("Encode(%T) returned %v, want a protocol error", m, err)
+		}
+		if _, err := Frame(m); err == nil {
+			t.Errorf("Frame(%T) accepted it", m)
+		}
 	}
 }
 

@@ -1,0 +1,4 @@
+{
+  "expect": "reject",
+  "reason": "a byte after NOW's empty body"
+}

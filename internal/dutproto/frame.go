@@ -77,7 +77,11 @@ func unexpected(err error) error {
 
 // WriteMsg encodes m and writes it as one frame.
 func WriteMsg(w io.Writer, m Msg) error {
-	return WriteFrame(w, m.Kind(), Encode(m))
+	body, err := Encode(m)
+	if err != nil {
+		return err
+	}
+	return WriteFrame(w, m.Kind(), body)
 }
 
 // ReadMsg reads one frame and decodes it.
@@ -89,9 +93,24 @@ func ReadMsg(r io.Reader) (Msg, error) {
 	return Decode(k, body)
 }
 
-// AppendFrame appends m as one frame to b.
+// Frame returns m as one frame, or Encode's error.
+func Frame(m Msg) ([]byte, error) {
+	body, err := Encode(m)
+	if err != nil {
+		return nil, err
+	}
+	b := binary.LittleEndian.AppendUint32(nil, uint32(1+len(body)))
+	b = append(b, byte(m.Kind()))
+	return append(b, body...), nil
+}
+
+// AppendFrame appends m as one frame to b. It is for messages the caller built from values it
+// knows the body can carry, and panics with Encode's error otherwise; Frame returns the error.
 func AppendFrame(b []byte, m Msg) []byte {
-	body := Encode(m)
+	body, err := Encode(m)
+	if err != nil {
+		panic(err)
+	}
 	b = binary.LittleEndian.AppendUint32(b, uint32(1+len(body)))
 	b = append(b, byte(m.Kind()))
 	return append(b, body...)

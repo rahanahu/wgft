@@ -2,17 +2,20 @@ package rustdut
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"math/rand/v2"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/rahanahu/wgft/internal/dutproto"
 	"github.com/rahanahu/wgft/internal/tcpharness"
@@ -290,4 +293,94 @@ func transcriptEngine(bin string, w io.Writer) tcpharness.Engine {
 	}
 	e.New, e.NewPerformance = build(dutproto.BoostOnDemand), build(dutproto.BoostAtAccept)
 	return e
+}
+
+// errorScenario drives the error paths where rustdut answers without the engine's operation:
+// a deadline that has already passed, an oversized datagram, and Accept after its context ended.
+// Each check records the error's message and what errors.Is and Timeout find in it.
+var errorScenario = tcpharness.Scenario{Name: "rustdut-errors", Refs: "rustdut's error paths", Run: func(h *tcpharness.H) {
+	const port = 9101
+	past := time.Unix(1, 0)
+	desc := func(err error) string {
+		var ne net.Error
+		return fmt.Sprintf("%v; closed %v, EPIPE %v, EMSGSIZE %v, EOF %v, timeout %v", err, errors.Is(err, net.ErrClosed),
+			errors.Is(err, syscall.EPIPE), errors.Is(err, syscall.EMSGSIZE), errors.Is(err, io.EOF), errors.As(err, &ne) && ne.Timeout())
+	}
+	check := func(id string, err error, want func(error) bool, what string) {
+		h.Check(id, want(err), what, desc(err))
+	}
+	isTimeout := func(err error) bool {
+		var ne net.Error
+		return errors.As(err, &ne) && ne.Timeout()
+	}
+	l := h.Listen(port)
+
+	_, _, c := h.Connect(l, port, tcpharness.StandardSYN())
+	c.Abort()
+	c.SetReadDeadline(past)
+	_, err := c.Read(make([]byte, 10))
+	check("read-after-abort", err, func(err error) bool { return errors.Is(err, net.ErrClosed) }, "Read after Abort with a passed deadline is closed")
+
+	_, _, c = h.Connect(l, port, tcpharness.StandardSYN())
+	c.CloseWrite()
+	c.SetWriteDeadline(past)
+	_, err = c.Write([]byte("x"))
+	check("write-after-close-write", err, func(err error) bool { return errors.Is(err, syscall.EPIPE) }, "Write after CloseWrite with a passed deadline is EPIPE")
+
+	_, _, c = h.Connect(l, port, tcpharness.StandardSYN())
+	c.SetWriteDeadline(past)
+	_, err = c.Write([]byte("x"))
+	check("write-deadline", err, isTimeout, "Write on a writable connection with a passed deadline times out")
+	c.SetReadDeadline(past)
+	_, err = c.Read(make([]byte, 10))
+	check("read-deadline", err, isTimeout, "Read on an open connection with a passed deadline times out")
+
+	u, err := h.DUT.ListenUDP(port)
+	if err != nil {
+		h.T.Fatalf("ListenUDP: %v", err)
+	}
+	to := net.UDPAddrFromAddrPort(netip.AddrPortFrom(tcpharness.PeerAddr, 7))
+	u.SetWriteDeadline(past)
+	_, err = u.WriteTo(make([]byte, 65508), to)
+	check("udp-oversize", err, func(err error) bool { return errors.Is(err, syscall.EMSGSIZE) }, "an oversized WriteTo with a passed deadline is EMSGSIZE")
+	_, err = u.WriteTo([]byte("x"), to)
+	check("udp-write-deadline", err, isTimeout, "WriteTo with a passed deadline times out")
+	u.Close()
+	u.SetReadDeadline(past)
+	_, _, err = u.ReadFrom(make([]byte, 10))
+	check("udp-read-after-close", err, func(err error) bool { return errors.Is(err, net.ErrClosed) }, "ReadFrom after Close with a passed deadline is closed")
+
+	l2, err := h.DUT.Listen(port + 1)
+	if err != nil {
+		h.T.Fatalf("Listen: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	_, err = l2.Accept(ctx)
+	cancel()
+	check("accept-context", err, func(err error) bool { return errors.Is(err, context.DeadlineExceeded) }, "Accept returns its context's error")
+	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+	_, err = l2.Accept(ctx)
+	cancel()
+	check("accept-after-context", err, func(err error) bool { return errors.Is(err, net.ErrClosed) }, "a later Accept finds the listener closed")
+}}
+
+// TestErrorsAsWgstackdut checks that rustdut's error paths give the errors the Go wgstack gives
+// in-process: every check passes on both and the two traces are the same.
+func TestErrorsAsWgstackdut(t *testing.T) {
+	requireDutserve(t)
+	direct, remote := wgstackdut.Engine(nil), Engine(nil)
+	direct.Name, remote.Name = "go-wgstack", "go-wgstack"
+	want := tcpharness.RecordChecks(t, direct, errorScenario, 1)
+	got := tcpharness.RecordChecks(t, remote, errorScenario, 1)
+	for _, tr := range []tcpharness.CheckTrace{want, got} {
+		if tr.Failed || len(tr.Failures) > 0 {
+			t.Errorf("the error scenario failed: %v", tr.Failures)
+		}
+	}
+	if d := traceDiff(want, got); d != "" {
+		t.Errorf("rustdut over dutserve differs from wgstackdut:\n%s", d)
+	}
+	if len(want.Checks) < 9 {
+		t.Errorf("the error scenario ran %d checks; it stopped early", len(want.Checks))
+	}
 }

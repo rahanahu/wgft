@@ -1,0 +1,4 @@
+{
+  "expect": "reject",
+  "reason": "an ERROR message that is not UTF-8"
+}

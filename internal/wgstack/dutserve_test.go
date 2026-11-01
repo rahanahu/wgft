@@ -231,9 +231,7 @@ func (s *dutServer) handle(m dutproto.Msg) (dutproto.Msg, *protoError) {
 		}
 		return out, nil
 	case *dutproto.Advance:
-		if m.D < 0 {
-			return nil, protoErrorf("ADVANCE by a negative %v", m.D)
-		}
+		// 復号が 2^63-1 ns を超える時間を断るので、m.D は負にならない
 		s.clk.Advance(m.D)
 		s.dev.Tick()
 		return &dutproto.Time{Now: s.clk.Now()}, nil

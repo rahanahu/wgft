@@ -99,6 +99,16 @@ const (
 	ClockReal Clock = 1
 )
 
+func (c Clock) String() string {
+	switch c {
+	case ClockFake:
+		return "fake"
+	case ClockReal:
+		return "real"
+	}
+	return fmt.Sprintf("clock-%d", uint8(c))
+}
+
 // Boost is HELLO's boost policy. The values are internal/wgstack's BoostPolicy.
 type Boost uint8
 
@@ -108,6 +118,18 @@ const (
 	BoostNever    Boost = 2
 )
 
+func (b Boost) String() string {
+	switch b {
+	case BoostOnDemand:
+		return "on-demand"
+	case BoostAtAccept:
+		return "at-accept"
+	case BoostNever:
+		return "never"
+	}
+	return fmt.Sprintf("boost-%d", uint8(b))
+}
+
 // Congestion is HELLO's congestion control. The values are internal/wgstack's CongestionControl.
 type Congestion uint8
 
@@ -115,6 +137,16 @@ const (
 	CongestionCubic   Congestion = 0
 	CongestionNewReno Congestion = 1
 )
+
+func (c Congestion) String() string {
+	switch c {
+	case CongestionCubic:
+		return "cubic"
+	case CongestionNewReno:
+		return "newreno"
+	}
+	return fmt.Sprintf("congestion-%d", uint8(c))
+}
 
 // ErrKind is an ERROR response's kind, which the client turns back into the error the engine
 // returned.
@@ -157,14 +189,17 @@ type Msg interface {
 	decode(d *dec)
 }
 
-// Encode returns m's body.
-func Encode(m Msg) []byte {
+// Encode returns m's body, or an error when m holds a value the body cannot carry.
+func Encode(m Msg) ([]byte, error) {
 	var e enc
 	m.encode(&e)
-	if e.b == nil {
-		return []byte{}
+	if e.err != nil {
+		return nil, fmt.Errorf("%s: %w", m.Kind(), e.err)
 	}
-	return e.b
+	if e.b == nil {
+		return []byte{}, nil
+	}
+	return e.b, nil
 }
 
 // Decode decodes a body of kind k.
@@ -229,9 +264,12 @@ type Hello struct {
 func (*Hello) Kind() Kind { return KindHello }
 func (m *Hello) encode(e *enc) {
 	e.u16(m.Version)
-	e.u8(uint8(m.Clock))
+	e.enum(uint8(m.Clock), 2, "clock")
 	e.addr(m.Addr)
 	e.u32(m.MTU)
+	if len(m.Seed) != SeedLen {
+		e.fail("seed of %d bytes; want %d", len(m.Seed), SeedLen)
+	}
 	var seed [SeedLen]byte
 	copy(seed[:], m.Seed)
 	e.b = append(e.b, seed[:]...)
@@ -240,12 +278,12 @@ func (m *Hello) encode(e *enc) {
 		e.str(l.Name)
 		e.u64(l.Value)
 	}
-	e.u8(uint8(m.Boost))
-	e.u8(uint8(m.Congestion))
+	e.enum(uint8(m.Boost), 3, "boost policy")
+	e.enum(uint8(m.Congestion), 2, "congestion control")
 }
 func (m *Hello) decode(d *dec) {
 	m.Version = d.u16()
-	m.Clock = Clock(d.u8())
+	m.Clock = Clock(d.enum(2, "clock"))
 	m.Addr = d.addr()
 	m.MTU = d.u32()
 	m.Seed = append(Bytes{}, d.take(SeedLen)...)
@@ -253,8 +291,8 @@ func (m *Hello) decode(d *dec) {
 	for range d.list(10) {
 		m.Limits = append(m.Limits, Limit{Name: d.str(), Value: d.u64()})
 	}
-	m.Boost = Boost(d.u8())
-	m.Congestion = Congestion(d.u8())
+	m.Boost = Boost(d.enum(3, "boost policy"))
+	m.Congestion = Congestion(d.enum(2, "congestion control"))
 }
 
 // Inject hands the engine a batch of IPv4 packets, as one write from the tunnel.
@@ -574,11 +612,11 @@ type Error struct {
 
 func (*Error) Kind() Kind { return KindError }
 func (m *Error) encode(e *enc) {
-	e.u8(uint8(m.Err))
+	e.enum(uint8(m.Err), 6, "error kind")
 	e.str(m.Msg)
 }
 func (m *Error) decode(d *dec) {
-	m.Err = ErrKind(d.u8())
+	m.Err = ErrKind(d.enum(6, "error kind"))
 	m.Msg = d.str()
 }
 

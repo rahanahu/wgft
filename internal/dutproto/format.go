@@ -61,10 +61,6 @@ func formatValue(field string, x any) string {
 			parts[i] = fmt.Sprintf("%s:%d", l.Name, l.Value)
 		}
 		return strings.Join(parts, ",")
-	case Clock:
-		return map[Clock]string{ClockFake: "fake", ClockReal: "real"}[x]
-	case ErrKind:
-		return x.String()
 	}
 	return fmt.Sprint(x)
 }

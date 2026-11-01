@@ -94,6 +94,7 @@ type DUT struct {
 	nowSet  bool
 	broken  error
 	closed  bool
+	hooked  bool // some connection registered a boost hook
 }
 
 // New starts the DUT binary and builds its engine at addr with the given MTU and seed.
@@ -127,6 +128,9 @@ func New(cfg Config, addr netip.Addr, mtu int, seed uint64) (*DUT, error) {
 		for sc.Scan() {
 			cfg.Log("dut: %s", sc.Text())
 		}
+		// a line longer than the scanner's buffer ends Scan; keep reading so the DUT never blocks
+		// on a full pipe
+		io.Copy(io.Discard, stderr)
 	}()
 	s := Seed(seed)
 	resp, err := d.do(&dutproto.Hello{Version: dutproto.Version, Clock: dutproto.ClockFake, Addr: addr, MTU: uint32(mtu),
@@ -231,7 +235,10 @@ func (d *DUT) ask(req dutproto.Msg) (dutproto.Msg, <-chan struct{}, error) {
 	if d.closed {
 		return nil, d.changed, errDUTClosed
 	}
-	frame := dutproto.AppendFrame(nil, req)
+	frame, err := dutproto.Frame(req)
+	if err != nil {
+		return nil, d.changed, fmt.Errorf("rustdut: %w", err)
+	}
 	if req.Kind() == dutproto.KindNow && d.nowSet {
 		return &dutproto.Time{Now: d.now}, d.changed, nil
 	}
@@ -290,6 +297,13 @@ func (d *DUT) Close() error {
 		d.mu.Unlock()
 		return nil
 	}
+	hooked := d.hooked && d.broken == nil
+	d.mu.Unlock()
+	var lost error
+	if hooked {
+		lost = d.lostBoostEvents()
+	}
+	d.mu.Lock()
 	d.closed = true
 	if d.broken == nil {
 		close(d.changed)
@@ -310,6 +324,19 @@ func (d *DUT) Close() error {
 		d.cmd.Process.Kill()
 		<-exited
 		return fmt.Errorf("the DUT process %s did not end within 10 s of its standard input closing; killed", d.cfg.Bin)
+	}
+	return lost
+}
+
+// lostBoostEvents asks the DUT for the boost changes its hooks saw. OnBoost does not deliver
+// them, so any change is an error: a scenario that relies on one must not pass unnoticed.
+func (d *DUT) lostBoostEvents() error {
+	resp, err := d.do(&dutproto.Events{})
+	if err != nil {
+		return err
+	}
+	if ev, ok := resp.(*dutproto.EventList); ok && len(ev.Events) > 0 {
+		return fmt.Errorf("rustdut: %d boost changes after OnBoost registered its hook reached no hook; rustdut reports only the state at registration", len(ev.Events))
 	}
 	return nil
 }
@@ -600,8 +627,12 @@ func (c *conn) Delivered() bool {
 // OnBoost registers a hook that lets the connection return to its floor buffers, which is what
 // the engine does without one, and tells f the state at registration. Later changes, which the
 // DUT keeps for EVENTS, do not reach f: no scenario registers a hook, and asking EVENTS after every
-// request would add a request to every step of the transcript.
+// request would add a request to every step of the transcript. Close asks EVENTS once and fails
+// if a change came, so a scenario that relies on one fails loudly.
 func (c *conn) OnBoost(f func(boosted bool) bool) {
+	c.d.mu.Lock()
+	c.d.hooked = true
+	c.d.mu.Unlock()
 	resp, err := c.d.do(&dutproto.BoostPolicy{H: c.h, Floor: true})
 	if r, ok := resp.(*dutproto.Bool); ok && err == nil {
 		f(r.V)
@@ -683,21 +714,25 @@ func (u *udpConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	}
 }
 
-// udpMaxPayload is the largest UDP payload in an IPv4 packet; WriteTo checks it before the
-// deadline, as wgstack does.
+// udpMaxPayload is the largest UDP payload in an IPv4 packet. WriteTo refuses a larger one itself,
+// with the error wgstack returns before it looks at the deadline.
 const udpMaxPayload = 65535 - 20 - 8
 
-// WriteTo sends one datagram. With the write deadline passed it returns the error wgstack checks
-// first, from the address, the size or its own record of Close, or else the timeout.
+// WriteTo sends one datagram. It refuses a bad address and an oversized datagram itself, as
+// wgstack does before anything else. With the write deadline passed it returns the error wgstack
+// checks next, from its own record of Close, or else the timeout.
 func (u *udpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	ua, ok := addr.(*net.UDPAddr)
 	if !ok || ua.Port <= 0 || ua.Port > 65535 || ua.IP.To4() == nil {
 		return 0, u.opErr("write", addr, errors.New("invalid UDP address"))
 	}
+	if len(b) > udpMaxPayload {
+		return 0, u.opErr("write", addr, syscall.EMSGSIZE)
+	}
 	to := netip.AddrPortFrom(netip.AddrFrom4([4]byte(ua.IP.To4())), uint16(ua.Port))
 	for {
 		_, wdl, closed := u.state()
-		if expired(wdl) && len(b) <= udpMaxPayload {
+		if expired(wdl) {
 			if closed {
 				return 0, net.ErrClosed
 			}
