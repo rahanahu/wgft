@@ -51,7 +51,7 @@ fn flood_port(n: &mut TestNet, port: u16, from: u32, count: u32) {
     n.drain();
 }
 
-fn flooded() -> (TestNet, ListenerId) {
+pub(crate) fn flooded() -> (TestNet, ListenerId) {
     let mut n = TestNet::new(small_limits());
     let l = n.listen(80);
     flood(&mut n, 0, 200);
@@ -63,7 +63,7 @@ fn flooded() -> (TestNet, ListenerId) {
 }
 
 /// 相手の SYN を送り、cookie の SYN-ACK を 1 つ受けます。
-fn cookie_syn(n: &mut TestNet, sport: u16, ts: bool, sack: bool, ws: bool) -> PeerConn {
+pub(crate) fn cookie_syn(n: &mut TestNet, sport: u16, ts: bool, sack: bool, ws: bool) -> PeerConn {
     let before = n.s.stats().syn_cookies_sent;
     let rows = n.s.held().syn_rows;
     let p = n.handshake_sack(sport, 80, ts, sack, ws);
@@ -307,12 +307,12 @@ fn syn_past_a_full_accept_queue_is_dropped_not_answered_with_a_cookie() {
 
 /// 待ち受けの分 (Q の半分) を 1 つ残して cookie の接続で埋め、空きのある間に `sport` の相手に cookie を
 /// 送り、最後の ACK の前にほかの相手に残りの 1 つを埋めさせます。相手は timestamp を示します。
-fn cookie_then_full_queue(n: &mut TestNet, sport: u16) -> PeerConn {
+pub(crate) fn cookie_then_full_queue(n: &mut TestNet, sport: u16) -> PeerConn {
     cookies_then_full_queue(n, &[sport])[0]
 }
 
 /// [`cookie_then_full_queue`] の、相手を `sports` の数だけ持つ形です。
-fn cookies_then_full_queue(n: &mut TestNet, sports: &[u16]) -> Vec<PeerConn> {
+pub(crate) fn cookies_then_full_queue(n: &mut TestNet, sports: &[u16]) -> Vec<PeerConn> {
     let half = small_limits().accept_queue / 2;
     for i in 0..half - 1 {
         cookie_syn(n, 41000 + i as u16, false, false, false);
