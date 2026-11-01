@@ -112,13 +112,15 @@ fn other(path: &Path, e: impl std::fmt::Display) -> CredentialsError {
     CredentialsError::Other(format!("credentials file {}: {e}", path.display()))
 }
 
-/// `path` を開く。最後の要素が symlink なら辿らず (Unix は `O_NOFOLLOW`)、開いた記述子の fstat で
+/// `path` を開く。最後の要素が symlink なら辿らず (Unix は `O_NOFOLLOW`、FIFO で止まらないよう `O_NONBLOCK`)、開いた記述子の fstat で
 /// 通常のファイルであることを確かめる。名前を差し替えられても、確かめたのは開いたファイルである。
 fn open_regular(path: &Path, opts: &mut OpenOptions) -> std::io::Result<(File, fs::Metadata)> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NOFOLLOW);
+        // FIFO を開いた時点で止まらないよう O_NONBLOCK も付ける。開いた後の検査が通常のファイルでない
+        // ものを拒み、通常のファイルの読み書きには効かない
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
     #[cfg(windows)]
     {
@@ -428,47 +430,10 @@ impl Credentials {
     /// 中身は一時ファイルへ直に書き、全体を 1 つのバッファに組まない。全体状態を持つファイルは 1 通の
     /// 全体状態の数倍の長さになり、保存のたびにその長さの一時の確保を作らないためである。
     pub fn save(&self, path: &Path) -> Result<(), CredentialsError> {
-        let old = match fs::symlink_metadata(path) {
-            Ok(m) if !m.file_type().is_file() => {
-                return Err(other(
-                    path,
-                    "is not a regular file, so it was left untouched",
-                ));
-            }
-            Ok(m) => Some(m),
-            Err(_) => None,
-        };
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let (tmp_path, tmp) = create_temp(dir)
-            .map_err(|e| other(path, format!("create temp credentials file: {e}")))?;
-        let mut w = Capped {
-            inner: std::io::BufWriter::new(tmp),
-            left: MAX_FILE_SIZE,
-        };
-        let result = self
-            .write_go_json(&mut w)
-            .map_err(std::io::Error::from)
-            .and_then(|()| {
-                w.inner
-                    .into_inner()
-                    .map_err(std::io::IntoInnerError::into_error)
-            })
-            .and_then(|tmp| tmp.sync_all().map(|()| tmp))
-            .and_then(|tmp| keep_owner(&tmp, old.as_ref()).map(|()| tmp))
-            .and_then(|tmp| {
-                drop(tmp);
-                fs::rename(&tmp_path, path)
-            });
-        if let Err(e) = result {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(other(path, e));
-        }
-        // rename をディスクに残すため、ディレクトリも fsync する (Unix)
-        #[cfg(unix)]
-        if let Err(e) = File::open(dir).and_then(|d| d.sync_all()) {
-            return Err(other(path, format!("sync the data directory: {e}")));
-        }
-        Ok(())
+        replace_private_file(path, "credentials", MAX_FILE_SIZE, |w| {
+            self.write_go_json(w).map_err(std::io::Error::from)
+        })
+        .map_err(|e| other(path, e))
     }
 
     /// 今の鍵を 1 つ前の鍵として移す (Go の `KeepPreviousKey`)。カーネルモードの記録を持つファイルで
@@ -516,6 +481,55 @@ fn keep_owner(tmp: &File, old: Option<&fs::Metadata>) -> std::io::Result<()> {
     reason = "the same signature as the Unix version"
 )]
 fn keep_owner(_tmp: &File, _old: Option<&fs::Metadata>) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// `path` を、同じディレクトリに作った一時ファイルへ `write` で書き、fsync して rename で置き換える。
+/// 一時ファイルは `create_new` で作り、名前は乱数で選び、Unix では作った瞬間から 0600、Windows では
+/// 作った時点から DACL を付ける。書いた長さが `max` を超えれば誤りにする。既にある `path` の持ち主と
+/// group は保ち (root が書き直す場合)、通常のファイルでなければ何も書かずに拒む。rename の後は
+/// ディレクトリも fsync する (Unix)。一時ファイルの名前は [`TEMP_PREFIX`] で始まるので、途中で止まって
+/// 残った一時ファイルは [`remove_leftover_temps`] が消す。誤りの文の頭には `path` を付けない。
+pub(crate) fn replace_private_file(
+    path: &Path,
+    what: &str,
+    max: u64,
+    write: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
+) -> Result<(), String> {
+    let old = match fs::symlink_metadata(path) {
+        Ok(m) if !m.file_type().is_file() => {
+            return Err("is not a regular file, so it was left untouched".into());
+        }
+        Ok(m) => Some(m),
+        Err(_) => None,
+    };
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let (tmp_path, tmp) = create_temp(dir).map_err(|e| format!("create temp {what} file: {e}"))?;
+    let mut w = Capped {
+        inner: std::io::BufWriter::new(tmp),
+        left: max,
+    };
+    let result = write(&mut w)
+        .and_then(|()| {
+            w.inner
+                .into_inner()
+                .map_err(std::io::IntoInnerError::into_error)
+        })
+        .and_then(|tmp| tmp.sync_all().map(|()| tmp))
+        .and_then(|tmp| keep_owner(&tmp, old.as_ref()).map(|()| tmp))
+        .and_then(|tmp| {
+            drop(tmp);
+            fs::rename(&tmp_path, path)
+        });
+    if let Err(e) = result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(e.to_string());
+    }
+    // rename をディスクに残すため、ディレクトリも fsync する (Unix)
+    #[cfg(unix)]
+    if let Err(e) = File::open(dir).and_then(|d| d.sync_all()) {
+        return Err(format!("sync the data directory: {e}"));
+    }
     Ok(())
 }
 
@@ -809,6 +823,28 @@ fn tighten_existing(f: &File) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FIFO の `agent.json` は、開いた時点で止まらずに通常のファイルでないとして拒む。
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_without_blocking() {
+        let d = tmpdir("fifo");
+        let p = d.join(FILE_NAME);
+        let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: 有効な NUL 終端のパスを渡すだけである
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = p.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Credentials::load(&path).map(|_| ()));
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("loading a FIFO does not block");
+        let e = got.unwrap_err().to_string();
+        assert!(e.contains("not a regular file"), "{e}");
+        fs::remove_dir_all(d).unwrap();
+    }
 
     fn tmpdir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("wgft-agent-test-{}-{name}", std::process::id()));

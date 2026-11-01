@@ -233,13 +233,23 @@ impl Agent {
         format!("wireguard: {why}; retrying in {}s", wait.as_secs())
     }
 
+    /// 中継とトンネルを閉じる (作り直しの前)。
     pub(crate) async fn close(&mut self) {
+        self.close_tunnel(false).await;
+    }
+
+    /// プロセスの終わりに中継とトンネルを閉じる。時刻の印の水位を余裕を足さずに残す。
+    pub(crate) async fn close_for_exit(&mut self) {
+        self.close_tunnel(true).await;
+    }
+
+    async fn close_tunnel(&mut self, exiting: bool) {
         // 中継の接続を先に RST で切り、リスナーを閉じてからトンネルを閉じる
         if let Some(mut r) = self.relay.take() {
             r.close().await;
         }
         if let Some(t) = self.tunnel.take() {
-            t.close(&mut self.dataplane).await;
+            t.close(&mut self.dataplane, exiting).await;
         }
         self.wg = None;
     }
@@ -633,7 +643,7 @@ pub(crate) async fn main_loop(
             timed("stop the control socket", async { c.stop() }).await;
         }
         let mut a = timed("take the agent lock", agent.lock()).await;
-        timed("close the relays and the tunnel", a.close()).await;
+        timed("close the relays and the tunnel", a.close_for_exit()).await;
     })
     .await;
     result
@@ -1453,6 +1463,41 @@ mod tests {
         assert!(matches!(got, Ok(Ok(_))), "{got:?}");
         stop.send(()).unwrap();
         ends_within_2s(run, "a probe round").await.unwrap();
+    }
+
+    /// プロセスの中のトンネルの作り直しは、時刻の印の水位の記録から余裕を落とさない。作り直した device は
+    /// 記録を読み直さずに印を使うので、次の定期の保存の前に落ちても、次の起動の下限が使った印を超える
+    /// ためである。余裕を落とすのはプロセスの終わりだけである。
+    #[tokio::test]
+    async fn a_rebuild_keeps_the_clock_margin_and_only_the_exit_drops_it() {
+        let (agent, _gate, _peer, dir) = tunnel_agent().await;
+        let clock = dir.path().join("agent.json.clock");
+        let saved = || -> u64 {
+            std::fs::read_to_string(&clock)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        let mut a = agent.lock().await;
+        a.tunnel.as_ref().unwrap().persist_clock().await;
+        let before = saved();
+        a.close().await;
+        assert!(
+            saved() >= before,
+            "a rebuild lowered the saved clock from {before} to {}",
+            saved()
+        );
+        let st = a.creds.last_state.clone().unwrap();
+        a.apply(st).await.unwrap();
+        a.tunnel.as_ref().unwrap().persist_clock().await;
+        let before = saved();
+        a.close_for_exit().await;
+        assert!(
+            saved() + 30 < before,
+            "the exit kept the margin: {} after {before}",
+            saved()
+        );
     }
 
     /// 止める合図は、30 秒ごとの見回りの長い試し接続の 1 周の途中でも効き、2 秒以内に終わる。
