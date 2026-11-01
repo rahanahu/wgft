@@ -32,3 +32,12 @@ harness = false
 
 [dev-dependencies]
 libtest-mimic.workspace = true
+wgft-alloc-count.workspace = true
+
+[[test]]
+name = "fuzz_corpus"
+harness = false
+
+[[test]]
+name = "holding"
+harness = false
