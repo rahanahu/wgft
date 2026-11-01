@@ -688,16 +688,16 @@ mod tests {
     #[cfg(windows)]
     mod windows {
         use super::*;
-        use crate::platform::winsec::{dacl_is_private, restrict_file};
+        use crate::platform::winsec::{assert_private, dacl_is_private, restrict_file};
 
         #[test]
         fn saved_file_and_lock_carry_the_private_dacl() {
             let d = tmpdir("win-save");
             let p = d.join(FILE_NAME);
             let _lock = acquire(&p).unwrap();
-            assert!(dacl_is_private(&lock_path(&p), false).unwrap());
+            assert_private(&lock_path(&p), false);
             Credentials::default().save(&p).unwrap();
-            assert!(dacl_is_private(&p, false).unwrap());
+            assert_private(&p, false);
             // 既存のファイルへの rename が置き換える
             let c = Credentials {
                 name: "second".into(),
@@ -705,7 +705,7 @@ mod tests {
             };
             c.save(&p).unwrap();
             assert_eq!(Credentials::load(&p).unwrap().name, "second");
-            assert!(dacl_is_private(&p, false).unwrap());
+            assert_private(&p, false);
             fs::remove_dir_all(d).unwrap();
         }
 
@@ -718,9 +718,9 @@ mod tests {
             fs::write(lock_path(&p), b"").unwrap();
             assert!(!dacl_is_private(&p, false).unwrap());
             Credentials::load(&p).unwrap();
-            assert!(dacl_is_private(&p, false).unwrap());
+            assert_private(&p, false);
             let _lock = acquire(&p).unwrap();
-            assert!(dacl_is_private(&lock_path(&p), false).unwrap());
+            assert_private(&lock_path(&p), false);
             // 締め直しは内容を変えない
             restrict_file(&p, true).unwrap();
             fs::remove_dir_all(d).unwrap();
@@ -731,7 +731,7 @@ mod tests {
             let d = tmpdir("win-dir");
             let fresh = d.join("a").join("wgft");
             ensure_data_dir(&fresh).unwrap();
-            assert!(dacl_is_private(&fresh, true).unwrap());
+            assert_private(&fresh, true);
             let before = crate::platform::winsec::read_dacl_sddl(&d).unwrap();
             ensure_data_dir(&d).unwrap();
             assert_eq!(crate::platform::winsec::read_dacl_sddl(&d).unwrap(), before);

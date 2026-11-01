@@ -99,9 +99,9 @@ mod imp {
     }
 
     pub(super) fn raise() -> std::io::Result<Option<Raised>> {
-        let (cur, hard) = get()?;
+        let (cur, raw_hard) = get()?;
         // RLIM_INFINITY は u64::MAX に揃えて比べる
-        let hard = if hard == libc::RLIM_INFINITY {
+        let hard = if raw_hard == libc::RLIM_INFINITY {
             u64::MAX
         } else {
             hard
@@ -111,7 +111,8 @@ mod imp {
         if cur >= to {
             return Ok(Some(Raised { from: cur, to: cur }));
         }
-        set(to, if hard == u64::MAX { u64::MAX } else { hard })?;
+        // hard は読んだ値のまま渡す (macOS の RLIM_INFINITY は u64::MAX でない)
+        set(to, raw_hard)?;
         Ok(Some(Raised { from: cur, to }))
     }
 }

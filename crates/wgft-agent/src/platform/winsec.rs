@@ -305,6 +305,14 @@ pub fn dacl_is_private(path: &Path, inherit: bool) -> io::Result<bool> {
     Ok(same_dacl(&got, &want))
 }
 
+/// 試験用。3 者だけの DACL でなければ、読み返した SDDL と期待を添えて panic する。
+#[cfg(test)]
+pub(crate) fn assert_private(path: &Path, inherit: bool) {
+    let got = read_dacl_sddl(path).unwrap();
+    let want = sddl_for(&current_user_sid().unwrap(), inherit);
+    assert!(same_dacl(&got, &want), "{path:?}: got {got} want {want}");
+}
+
 fn split_dacl(s: &str) -> Option<(bool, Vec<String>)> {
     let body = s.strip_prefix("D:")?;
     let (flags, aces) = body.split_at(body.find('(').unwrap_or(body.len()));
@@ -363,11 +371,7 @@ mod tests {
         let d = tmpdir("file");
         let p = d.join("agent.json");
         let _f = create_private_file(&p, true).unwrap();
-        assert!(
-            dacl_is_private(&p, false).unwrap(),
-            "{}",
-            read_dacl_sddl(&p).unwrap()
-        );
+        assert_private(&p, false);
         // 既にあれば create_new は失敗する
         assert!(create_private_file(&p, true).is_err());
         let _ = std::fs::remove_dir_all(&d);
@@ -379,11 +383,7 @@ mod tests {
         let p = d.join("old.json");
         std::fs::write(&p, b"{}").unwrap();
         restrict_file(&p, true).unwrap();
-        assert!(
-            dacl_is_private(&p, false).unwrap(),
-            "{}",
-            read_dacl_sddl(&p).unwrap()
-        );
+        assert_private(&p, false);
         // 内容は変わらない
         assert_eq!(std::fs::read(&p).unwrap(), b"{}");
         let _ = std::fs::remove_dir_all(&d);
@@ -394,11 +394,7 @@ mod tests {
         let d = tmpdir("dir");
         let sub = d.join("data");
         create_private_dir(&sub).unwrap();
-        assert!(
-            dacl_is_private(&sub, true).unwrap(),
-            "{}",
-            read_dacl_sddl(&sub).unwrap()
-        );
+        assert_private(&sub, true);
         assert_eq!(
             create_private_dir(&sub).unwrap_err().kind(),
             io::ErrorKind::AlreadyExists

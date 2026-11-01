@@ -357,7 +357,7 @@ mod tests {
         let d = short_dir("dacl");
         let p = d.join("a.sock");
         let _l = Listener::bind(&p).unwrap();
-        assert!(super::super::winsec::dacl_is_private(&p, false).unwrap());
+        super::super::winsec::assert_private(&p, false);
         let _ = std::fs::remove_dir_all(&d);
     }
 }
