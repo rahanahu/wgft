@@ -1,4 +1,5 @@
 //! Go の `encoding/json` の `Marshal` と同じ bytes を書く、小さな JSON の値と書き手です。
+//! Go の試験が書いた例と一覧を読む、整数だけの小さな読み手 ([`parse`]) も持ちます。
 //!
 //! Go の構文解析器の fixture は `json.Marshal` が書いたもので、Rust の側は同じ bytes を作って比べます。
 //! そのため、Go の規則をそのまま写します。
@@ -156,6 +157,232 @@ pub fn lossy(s: &[u8]) -> String {
     out
 }
 
+/// JSON の text を読みます。数は整数だけを受け付けます。試験の道具が Go の書いた例と一覧を読むための
+/// 小さな読み手で、object は鍵の順の [`Json::Obj`] になります。
+pub fn parse(src: &[u8]) -> Result<Json, String> {
+    let mut r = Reader { s: src, i: 0 };
+    let v = r.value()?;
+    r.ws();
+    if r.i != r.s.len() {
+        return Err(format!("trailing data at byte {}", r.i));
+    }
+    Ok(v)
+}
+
+struct Reader<'a> {
+    s: &'a [u8],
+    i: usize,
+}
+
+impl Reader<'_> {
+    fn ws(&mut self) {
+        while self.s.get(self.i).is_some_and(u8::is_ascii_whitespace) {
+            self.i += 1;
+        }
+    }
+
+    fn err<T>(&self, what: &str) -> Result<T, String> {
+        Err(format!("{what} at byte {}", self.i))
+    }
+
+    fn lit(&mut self, word: &[u8], v: Json) -> Result<Json, String> {
+        if self.s[self.i..].starts_with(word) {
+            self.i += word.len();
+            Ok(v)
+        } else {
+            self.err("bad literal")
+        }
+    }
+
+    fn value(&mut self) -> Result<Json, String> {
+        self.ws();
+        match self.s.get(self.i) {
+            None => self.err("unexpected end"),
+            Some(b'n') => self.lit(b"null", Json::Null),
+            Some(b't') => self.lit(b"true", Json::Bool(true)),
+            Some(b'f') => self.lit(b"false", Json::Bool(false)),
+            Some(b'"') => Ok(Json::Str(self.string()?)),
+            Some(b'[') => {
+                self.i += 1;
+                let mut items = Vec::new();
+                self.ws();
+                if self.s.get(self.i) == Some(&b']') {
+                    self.i += 1;
+                    return Ok(Json::Arr(items));
+                }
+                loop {
+                    items.push(self.value()?);
+                    self.ws();
+                    match self.s.get(self.i) {
+                        Some(b',') => self.i += 1,
+                        Some(b']') => {
+                            self.i += 1;
+                            return Ok(Json::Arr(items));
+                        }
+                        _ => return self.err("expected , or ]"),
+                    }
+                }
+            }
+            Some(b'{') => {
+                self.i += 1;
+                let mut m = BTreeMap::new();
+                self.ws();
+                if self.s.get(self.i) == Some(&b'}') {
+                    self.i += 1;
+                    return Ok(Json::Obj(m));
+                }
+                loop {
+                    self.ws();
+                    if self.s.get(self.i) != Some(&b'"') {
+                        return self.err("expected a key");
+                    }
+                    let k = self.string()?;
+                    self.ws();
+                    if self.s.get(self.i) != Some(&b':') {
+                        return self.err("expected :");
+                    }
+                    self.i += 1;
+                    let v = self.value()?;
+                    m.insert(k, v);
+                    self.ws();
+                    match self.s.get(self.i) {
+                        Some(b',') => self.i += 1,
+                        Some(b'}') => {
+                            self.i += 1;
+                            return Ok(Json::Obj(m));
+                        }
+                        _ => return self.err("expected , or }"),
+                    }
+                }
+            }
+            Some(b'-' | b'0'..=b'9') => {
+                let start = self.i;
+                self.i += 1;
+                while self.s.get(self.i).is_some_and(u8::is_ascii_digit) {
+                    self.i += 1;
+                }
+                let t = std::str::from_utf8(&self.s[start..self.i]).expect("ASCII digits");
+                if t.starts_with('-') {
+                    t.parse().map(Json::Int).map_err(|e| e.to_string())
+                } else {
+                    t.parse().map(Json::Uint).map_err(|e| e.to_string())
+                }
+            }
+            Some(_) => self.err("unexpected byte"),
+        }
+    }
+
+    fn hex4(&mut self) -> Result<u32, String> {
+        let Some(h) = self.s.get(self.i..self.i + 4) else {
+            return self.err("short \\u escape");
+        };
+        let v = std::str::from_utf8(h)
+            .ok()
+            .and_then(|t| u32::from_str_radix(t, 16).ok());
+        let Some(v) = v else {
+            return self.err("bad \\u escape");
+        };
+        self.i += 4;
+        Ok(v)
+    }
+
+    fn string(&mut self) -> Result<String, String> {
+        self.i += 1;
+        let mut out = String::new();
+        loop {
+            let Some(&b) = self.s.get(self.i) else {
+                return self.err("unterminated string");
+            };
+            self.i += 1;
+            match b {
+                b'"' => return Ok(out),
+                b'\\' => {
+                    let Some(&e) = self.s.get(self.i) else {
+                        return self.err("unterminated escape");
+                    };
+                    self.i += 1;
+                    match e {
+                        b'"' => out.push('"'),
+                        b'\\' => out.push('\\'),
+                        b'/' => out.push('/'),
+                        b'b' => out.push('\u{8}'),
+                        b'f' => out.push('\u{c}'),
+                        b'n' => out.push('\n'),
+                        b'r' => out.push('\r'),
+                        b't' => out.push('\t'),
+                        b'u' => {
+                            let mut c = self.hex4()?;
+                            if (0xd800..0xdc00).contains(&c) && self.s[self.i..].starts_with(b"\\u")
+                            {
+                                self.i += 2;
+                                let lo = self.hex4()?;
+                                c = 0x10000
+                                    + ((c - 0xd800) << 10)
+                                    + (lo.wrapping_sub(0xdc00) & 0x3ff);
+                            }
+                            out.push(char::from_u32(c).unwrap_or('\u{fffd}'));
+                        }
+                        _ => return self.err("bad escape"),
+                    }
+                }
+                _ => {
+                    let start = self.i - 1;
+                    let mut end = self.i;
+                    while self.s.get(end).is_some_and(|c| *c != b'"' && *c != b'\\') {
+                        end += 1;
+                    }
+                    out.push_str(&lossy(&self.s[start..end]));
+                    self.i = end;
+                }
+            }
+        }
+    }
+}
+
+impl Json {
+    /// object の欄です。object でなければ `None` です。
+    pub fn get(&self, key: &str) -> Option<&Self> {
+        match self {
+            Self::Obj(m) => m.get(key),
+            Self::Struct(f) => f.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    /// 文字列の値です。
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// 0 以上の整数の値です。
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Self::Uint(n) => Some(*n),
+            Self::Int(n) => u64::try_from(*n).ok(),
+            _ => None,
+        }
+    }
+
+    /// 真偽の値です。
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// 配列の要素です。
+    pub fn as_array(&self) -> Option<&[Self]> {
+        match self {
+            Self::Arr(v) => Some(v),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +405,24 @@ mod tests {
         assert_eq!(lossy(b"a\xe2\x80b\xff"), "a\u{fffd}\u{fffd}b\u{fffd}");
         // surrogate は Go と同じく読めない
         assert_eq!(lossy(b"\xed\xa0\x80"), "\u{fffd}\u{fffd}\u{fffd}");
+    }
+
+    #[test]
+    fn reads_what_it_writes() {
+        let v = Json::obj([
+            (
+                "a",
+                Json::Arr(vec![Json::Null, Json::Bool(true), Json::Int(-3)]),
+            ),
+            ("b", Json::Str("x\u{3042}\"\n<".to_owned())),
+            ("c", Json::Uint(7)),
+        ]);
+        assert_eq!(parse(&v.to_bytes()).unwrap(), v);
+        assert_eq!(
+            parse(b" { \"k\" : \"\\ud83d\\ude00\" } ").unwrap(),
+            Json::obj([("k", Json::Str("\u{1f600}".to_owned()))])
+        );
+        assert!(parse(b"{\"a\":1,}").is_err());
     }
 
     #[test]
