@@ -863,16 +863,13 @@ server の ID は ULID から作る短い値なので、ふだんの応答は Go
 
 - 骨組み:コマンド、停止中にも成立する検査 (`host.*`、`agent.*`、`tunnel.resolve`)、`agent.control` の接続と理由、DoctorResponse から読む `stream.*`、`tunnel.*`、`relay.*` の検査、報告の JSON と文の出力、総合判定と終了コード、設計の表との照合です。
   「制御ソケット」の段の上に積みます
-- 証明書の不一致と鍵の変更の上限の判定:`stream.connection` は、agent の応答の `pin_mismatch` と `key_change_limited` の印だけで判定します。
-  Go の CLI は印を送らない旧い版の agent のために `disconnect_reason` の文でも見分けますが、Rust の CLI は文を見ません。
-  理由の文は server が送った close の理由を含みうるので、文で見分けると server が診断と次の手順を偽れるためです。
-  Rust の CLI が話すのは印を必ず送る同じ版の Rust の agent です
 - 稼働中の検査:agent の応答に、フロー数の pool から来る `budgets`、ルールの `sessions` と `flows`、宛先の試し接続の `target_errors` を載せます。
   「宛先と予算」の段の上に積みます
 
 CLI の検査は DoctorResponse だけを読む関数なので、骨組みの段ですべて移しました。
 稼働中の agent の検査の結果は、Go の CLI と Rust の CLI のどちらで読んでも同じになります。
 骨組みの段で、どの応答が来ても Go の v1 にない理由の符号を出さないためでもあります。
+例外は、印を立てずに理由の文だけが証明書の不一致か鍵の変更の上限を示す応答で、下の「証明書の不一致と鍵の変更の上限の判定」のとおり Rust の CLI はその文で判定しません。
 2 つ目の段で足すのは agent の側の値で、今も載せない値は[応答の中身の今の範囲](#応答の中身の今の範囲)にあります。
 
 骨組みで決めたことは次のとおりです。
@@ -889,6 +886,10 @@ CLI の検査は DoctorResponse だけを読む関数なので、骨組みの段
   Go の並びと違う OS があっても、人向けの文だけが変わります
 - カーネルモードの拒否:`agent.json` の記録か稼働中の agent の応答の `mode` が `kernel` なら、検査を組む前に拒みます。
   記録が `userspace` でも `kernel` でもない値なら、その値を名指して同じ種別と対象で拒みます
+- 証明書の不一致と鍵の変更の上限の判定:`stream.connection` は、agent の応答の `pin_mismatch` と `key_change_limited` の印だけで判定します。
+  Go の CLI は印を送らない旧い版の agent のために `disconnect_reason` の文でも見分けますが、Rust の CLI は文を見ません。
+  理由の文は server が送った close の理由を含みうるので、文で見分けると server が診断と次の手順を偽れるためです。
+  Go の agent も v1.4.0 から両方の印を送ります
 
 稼働中の検査で決めたことは次のとおりです。
 
