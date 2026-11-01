@@ -1672,6 +1672,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wgft-agent-perf"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "libc",
+ "socket2",
+ "wgft-wireguard",
+]
+
+[[package]]
 name = "wgft-alloc-count"
 version = "0.1.0"
 dependencies = [

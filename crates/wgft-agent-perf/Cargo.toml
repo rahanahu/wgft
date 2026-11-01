@@ -1,0 +1,17 @@
+[package]
+name = "wgft-agent-perf"
+description = "Host-side cache, instruction and syscall measurement of the agent's tunnel socket path under perf stat; not part of the product"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+wgft-wireguard.workspace = true
+clap.workspace = true
+libc.workspace = true
+socket2.workspace = true
+
+[lints]
+workspace = true
