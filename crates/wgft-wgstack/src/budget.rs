@@ -81,7 +81,14 @@ struct Slot {
 /// boost の枠の集まりです。プロセスで 1 つ作り、核から核へ渡します。
 pub struct Budget {
     slots: FixedVec<Slot>,
+    /// 前に [`Budget::take_dirty`] を呼んでから、空きの枠に配列を返した枠の印です (枠 `i` が bit `i`)。試験と fuzz の
+    /// build だけにあります。書き換えた所だけの確かめが、空きの枠の chunk の表の確かめをこの枠に絞ります。
+    #[cfg(any(test, feature = "harness"))]
+    dirty: u64,
 }
+
+// 空きの枠の印は 1 語に収めます。
+const _: () = assert!(BOOST_SLOTS <= 64);
 
 impl core::fmt::Debug for Budget {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -123,7 +130,11 @@ impl Budget {
                 return Err(BudgetError);
             }
         }
-        Ok(Self { slots })
+        Ok(Self {
+            slots,
+            #[cfg(any(test, feature = "harness"))]
+            dirty: 0,
+        })
     }
 
     /// 枠の管理の配列の byte 数 (boost の配列を除く) です。上界が数えます。
@@ -187,19 +198,41 @@ impl Budget {
 
     /// 枠 `i` に配列を返し、枠を空きにします。
     pub(crate) fn release(&mut self, i: usize, arrays: BoostArrays) {
+        #[cfg(any(test, feature = "harness"))]
+        {
+            self.dirty |= 1 << i;
+        }
         let s = &mut self.slots[i];
         s.holder = None;
         s.arrays = arrays;
     }
 
+    /// 空きの枠に配列を返した枠の印を返し、印を外します。試験と fuzz の build だけにあります。
+    ///
+    /// 枠の配列はこの型の外から見えず、空きの枠の配列を置き換えるのは [`Budget::release`] だけです
+    /// ([`Budget::acquire`] と [`Budget::hand_over`] は配列を取り出して枠を貸した枠にします)。このため印の無い
+    /// 空きの枠の chunk の表は、印を外した時から変わっていません。
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn take_dirty(&mut self) -> u64 {
+        core::mem::take(&mut self.dirty)
+    }
+
     /// 空きの枠が配列を持ち、貸した枠が配列を持たず、保有者が重ならないことを確かめます。
+    #[cfg(test)]
     pub(crate) fn check(&self) -> Result<(), &'static str> {
+        self.check_scanning(u64::MAX)
+    }
+
+    /// 空きの枠が配列を持ち、貸した枠が配列を持たず、保有者が重ならないことを確かめます。空きの枠の chunk の表が
+    /// chunk を持たないことは、`scan` の bit の立った枠だけで確かめます (表をたどる手間が大きいためです)。核の
+    /// 全体の確かめはすべての bit を立てて呼びます。
+    pub(crate) fn check_scanning(&self, scan: u64) -> Result<(), &'static str> {
         for (i, s) in self.slots.iter().enumerate() {
             match s.holder {
                 None if !s.arrays.is_full() => {
                     return Err("a free boost slot lost its arrays");
                 }
-                None if s.arrays.holds_chunks() => {
+                None if scan >> i & 1 == 1 && s.arrays.holds_chunks() => {
                     return Err("a free boost slot's chunk table holds a chunk");
                 }
                 Some(_) if !s.arrays.is_empty() => {
@@ -301,5 +334,30 @@ mod tests {
         b.release(k, a);
         b.check().unwrap();
         assert!(b.heap_bytes() <= full);
+    }
+
+    /// 配列を返した枠だけに印が付き、印の無い枠の chunk の表は確かめを省いても同じ答えです。
+    #[test]
+    fn release_marks_the_slot_whose_tables_changed() {
+        let mut b = Budget::new().unwrap();
+        b.take_dirty();
+        let (k, mut a) = b.acquire(conn(1)).unwrap();
+        assert_eq!(b.take_dirty(), 0, "lending a slot does not mark it");
+        let mut pool = crate::buf::chunk::ChunkPool::new().unwrap();
+        a.snd[7] = Some(pool.get().unwrap());
+        b.release(k, a);
+        let dirty = b.take_dirty();
+        assert_eq!(dirty, 1 << k);
+        let bad = Err("a free boost slot's chunk table holds a chunk");
+        assert_eq!(b.check_scanning(dirty), bad);
+        assert_eq!(b.check(), bad);
+        // 印を外した後は、印の無い枠を確かめない形が chunk を見ない (印が付かない書き換えは無いので起きません)。
+        let dirty = b.take_dirty();
+        assert_eq!(b.check_scanning(dirty), Ok(()));
+        let (k, mut a) = b.acquire(conn(1)).unwrap();
+        pool.put(a.snd[7].take().unwrap());
+        b.release(k, a);
+        let dirty = b.take_dirty();
+        assert_eq!(b.check_scanning(dirty), Ok(()));
     }
 }

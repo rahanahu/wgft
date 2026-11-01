@@ -107,6 +107,27 @@ fn touched_check_reports_scoreboard_drift() {
     assert_eq!(n.s.check_invariants_touched(&mut c), full);
 }
 
+/// 空きの boost の枠に chunk を持ったまま返した表 (植えた故障) を、書き換えた所だけの確かめも全体の確かめと同じ
+/// 文で捉えます。空きの枠の表は、配列を返された枠だけを確かめ直します。
+#[test]
+fn touched_check_reports_a_released_table_keeping_a_chunk() {
+    let mut n = two_conns();
+    let mut c = TouchedCheck::new();
+    n.s.check_invariants_touched(&mut c).unwrap();
+    let id = n.s.conns.id(0);
+    let (k, mut a) = n.s.s.budget.acquire(id).unwrap();
+    n.s.s.budget.release(k, {
+        a.rcv[0] = Some(n.s.s.chunks.get().unwrap());
+        a
+    });
+    let full = n.s.check_invariants();
+    assert_eq!(
+        full.unwrap_err().what(),
+        "a free boost slot's chunk table holds a chunk"
+    );
+    assert_eq!(n.s.check_invariants_touched(&mut c), full);
+}
+
 /// 待ち受け、接続、UDP、ping、知らせを使い、ほかのポートを開いて閉じる台本です。出力と知らせを文字列にして
 /// 返します。
 fn scenario(n: &mut TestNet) -> String {

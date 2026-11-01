@@ -968,7 +968,7 @@ Rust の wgstack が持つ印の集まりは、`crates/wgft-wgstack-dut/stages.j
 今はすべての段が `landed` にあります。
 段を `landed` に足すと、その段の印の記録が照合に入り、2 節の台本の試験にもその段の台本が入ります。
 `replay.rs` は印がすべて入った段の印の中にある記録だけを照らし、残りを ignored の試験にして、足りない印ごとに数を出します。
-ignored の記録も `cargo nextest run --run-ignored all` (`cargo test` では `-- --include-ignored`) で照らせます。
+ignored の記録も `cargo nextest run -p wgft-wgstack-dut --run-ignored all` (`cargo test -p wgft-wgstack-dut` では `-- --include-ignored`) で照らせます。
 `proto-<番号>` の印はどの段にも無いので、その印の記録は照合に入りません。
 ほかにどの段にも無い印を持つ記録があれば、段の表の足し忘れか記録の作り方の変化なので、照合の一覧を作る所で落ちます。
 4b の段の印が Go の `dutproto.Stage4bTags` と同じことは、`tests/rec.rs` が Go の定義の行を読んで確かめます。
@@ -1131,6 +1131,9 @@ Go は書ける量が 1000 byte を超える時だけ書き、読める時だけ
 hook の `may_return` の答えも操作で切り替えます。
 相手は核の echo に答えます。
 boost の枠が尽きると、新しく求めた接続のために需要の無い保有者を floor に戻す経路 (`reclaim_for`、`demote`、`hand_over`) を通ります。
+古い受信の輪の chunk を返さない故障は、chunk の置き場の数と輪の数の確かめが捉えます。
+白箱の試験 `demote_holds_within_the_connection_s_reservation` が決まった並びで確かめます。
+fuzz で届くには、受信も boost の段にあり未読のデータを持つ需要の無い保有者を、16 個の枠がすべて貸されている時に取り戻す並びが要ります。
 各段の後に `core` と同じ確かめをし、最後に核を閉じて会計が 0 に戻ることを確かめます。
 SYN cookie の実装の担当が書いたので、書き手の分離の外にあります。
 本体は公開の API だけを使います。

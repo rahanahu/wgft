@@ -2,6 +2,17 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# 引数の無い `cargo build` と `cargo test` は製品の crate だけを対象にします。試験の道具 (wgft-wgstack-dut) を
+# 同じ build に入れると、wgstack の feature `harness` が製品の binary にも付くためです (docs/design/v2/wgstack-rs.md の
+# 「boost の hook」の後の規則)。ワークスペースの全体は `--workspace` で選びます。
+default-members = [
+  "crates/wgft",
+  "crates/wgft-agent",
+  "crates/wgft-netstack",
+  "crates/wgft-proto",
+  "crates/wgft-wgstack",
+  "crates/wgft-wireguard",
+]
 
 [workspace.package]
 version = "0.1.0"
