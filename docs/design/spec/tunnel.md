@@ -43,8 +43,11 @@ agent は、全体状態の `wg` ([messages.md](messages.md#wgconfig)) と認証
 - persistent keepalive:`wg.keepalive` の秒数です。
   0、負の値、65535 を超える値は 25 秒として扱います。
   v1 の server は常に 25 を送ります
-- MTU:`wg.mtu` を netstack の MTU にします。
-  agent の netstack は TCP の MSS を MTU から 40 を引いた値で示すので、server と agent の MTU が揃っていれば、server の側に MSS のクランプは要りません ([4 節](../network.md#4-ネットワーク))。
+- MTU:`wg.mtu` を netstack の MTU の上限にします。
+  v1 の agent は `wg.mtu` をそのまま使います。
+  v2 の agent は、WireGuard の詰め物が `wg.mtu` を超えないように 16 の倍数に切り下げた値を使います ([v2 の device の層の MTU と詰め物](../v2/wireguard-device.md#mtu-と詰め物))。
+  agent の netstack は TCP の MSS を netstack の MTU から 40 を引いた値で示します。
+  MSS は `wg.mtu` から 40 を引いた値以下なので、server と agent の MTU が揃っていれば、server の側に MSS のクランプは要りません ([4 節](../network.md#4-ネットワーク))。
   server が送る値は 576 から 9216 で、既定は 1420 です
 
 v1 の agent は、wireguard-go の device に次の UAPI の設定を 1 回で渡します。
@@ -433,7 +436,7 @@ v1 の agent は、netstack の実装を `WGFT_AGENT_NETSTACK` で選びます (
 wgstack は wgft が Go で書いた netstack で、受動の open だけを持ちます ([エージェントの wgft の netstack](../userspace/wgstack.md))。
 
 - 契約に入るもの:この文書の要件は、どちらの netstack でも同じです。
-  トンネルの入口の検査、TCP の MSS を MTU から 40 を引いた値で示すこと、待ち受けの無いポートの SYN に RST を返すこと、待ち受けの無い UDP のポートに Port Unreachable を返すこと、UDP の受信の予算がこれに当たります
+  トンネルの入口の検査、TCP の MSS を netstack の MTU から 40 を引いた値で示すこと、待ち受けの無いポートの SYN に RST を返すこと、待ち受けの無い UDP のポートに Port Unreachable を返すこと、UDP の受信の予算がこれに当たります
 - 保証の外:wgstack を選んだときの転送の品質と資源の挙動は、互換性の保証に含めません ([互換性の保証](../compatibility.md))。
   TCP の option の組、輻輳の制御、RTO、窓の大きさ、SACK の扱い、TIME_WAIT の扱い、尽きたときの細部 ([尽きたときの動作](../userspace/wgstack.md#尽きたときの動作)) がこれに当たります
 - 自分宛ての echo:agent は自分のアドレス宛ての ICMP の echo request に応答します。
