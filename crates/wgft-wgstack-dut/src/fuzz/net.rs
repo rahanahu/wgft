@@ -6,7 +6,7 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use wgft_tcpharness::ip::{self, PROTO_TCP};
-use wgft_tcpharness::packet::{self, Segment};
+use wgft_tcpharness::packet::{self, ACK, RST, SYN, Segment};
 use wgft_wgstack::{Bound, Budget, Config, Held, Hook, Limits, Spare, Stack, Time, TouchedCheck};
 
 /// DUT のアドレスです。Go の試験の `dutAddr` と同じです。
@@ -153,6 +153,101 @@ pub struct Net<H: Hook> {
     options: Options,
     touched: TouchedCheck,
     digest: DefaultHasher,
+    edges: Edges,
+}
+
+/// 核が広告した右端 (ACK の番号 + 窓) を接続ごとに覚え、後ろへ戻らないことを確かめます (RFC 9293 3.8.6 の
+/// SHLD-14。wgstack-performance.md の「受信の窓と boost の方針」と agent-throughput.md の「受信の窓の段」)。
+///
+/// 窓の欄は scale の単位に切り下げるので、欄から読む右端は核の右端より最大 1 単位手前にあり、その分だけ戻って
+/// 見えることを許します。SYN-ACK は接続を始め直し、RST は見ません。
+///
+/// 握手の途中の表の行が送る ACK (SYN-ACK の後で相手の ACK の前) は、凍結した Go の wgstack と同じく SYN-ACK の
+/// scale しない窓の欄を運びます。RFC 7323 2.2 は SYN でない segment の窓の欄を scale するので、相手はこの欄を
+/// scale して読みますが、核はその窓を持ちません。この ACK は右端の比べから外します。
+///
+/// 握手の後の最初の ACK は比べずに右端を覚え直します。SYN cookie の接続は相手の ACK の番号から始まり、相手が
+/// SYN と違う番号で ACK を返せば、SYN-ACK の確認の番号と続かないためです。同じ理由で、cookie の timestamp の
+/// bit を偽った相手の接続は、SYN-ACK が窓の scale を示しても scale しない窓の欄を運ぶことがあります。scale した
+/// 窓が核の受信の予約の最大 ([`MAX_WINDOW`]) を超える欄は、握手の後の最初の ACK に限り scale しない欄とみなし、
+/// その接続の scale を 0 にして右端を覚え直します。ほかの ACK でこの最大を超える窓は誤りです。
+///
+/// 行は相手のポートで決まる 1 つの枠に置き、ぶつかった組は前の行を置き換えて比べを始め直します。保持の
+/// 試験は核を作った後のスレッドの確保を数えるので、この表は作る時の後に確保しません。
+#[derive(Debug)]
+struct Edges([Option<EdgeRow>; EDGE_ROWS]);
+
+/// [`Edges`] の枠の数です。
+const EDGE_ROWS: usize = 64;
+
+/// 核が 1 つの接続に広告できる窓の最大 (boost の受信の予約、4 MiB) です。
+const MAX_WINDOW: u64 = 4 << 20;
+
+impl Default for Edges {
+    fn default() -> Self {
+        Self([const { None }; EDGE_ROWS])
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EdgeRow {
+    /// DUT と相手のポートです。
+    ports: (u16, u16),
+    /// DUT の窓の scale です。
+    shift: u32,
+    edge: u32,
+    /// 握手の途中の行の ACK の番号と窓の欄です。接続の ACK を見たら外します。
+    row: Option<(u32, u32, u16)>,
+}
+
+impl Edges {
+    fn watch(&mut self, s: &Segment) {
+        if s.flags & RST != 0 || s.flags & ACK == 0 {
+            return;
+        }
+        let ports = (s.src.port(), s.dst.port());
+        // 相手のポートで枠を選びます。fuzz の相手のポートは連番なので、続くポートは別の枠に入ります
+        let slot = &mut self.0[usize::from(ports.1) % EDGE_ROWS];
+        if s.flags & SYN != 0 {
+            *slot = Some(EdgeRow {
+                ports,
+                shift: u32::try_from(s.opts.ws).unwrap_or(0),
+                edge: s.ack.wrapping_add(u32::from(s.window)),
+                row: Some((s.seq.wrapping_add(1), s.ack, s.window)),
+            });
+            return;
+        }
+        let Some(r) = slot.as_mut().filter(|r| r.ports == ports) else {
+            return;
+        };
+        if r.row == Some((s.seq, s.ack, s.window)) {
+            return;
+        }
+        let first = r.row.take().is_some();
+        if u64::from(s.window) << r.shift > MAX_WINDOW {
+            // scale しない欄とみなすのは、握手の後の最初の ACK (cookie の接続) だけです
+            assert!(
+                first,
+                "a window field of {} with scale {} exceeds the largest reservation on ports {ports:?}: {s:?}",
+                s.window, r.shift
+            );
+            r.shift = 0;
+        }
+        let rebase = first;
+        let edge = s.ack.wrapping_add(u32::from(s.window) << r.shift);
+        if rebase {
+            r.edge = edge;
+            return;
+        }
+        let back = r.edge.wrapping_sub(edge).cast_signed();
+        assert!(
+            back < 1 << r.shift,
+            "the advertised edge went back by {back} bytes on ports {ports:?}: {s:?}"
+        );
+        if back < 0 {
+            r.edge = edge;
+        }
+    }
 }
 
 impl<H: Hook> Net<H> {
@@ -194,6 +289,7 @@ impl<H: Hook> Net<H> {
             options,
             touched,
             digest: DefaultHasher::new(),
+            edges: Edges::default(),
         }
     }
 
@@ -272,6 +368,7 @@ impl<H: Hook> Net<H> {
             }
             let seg = packet::parse(pkt)
                 .unwrap_or_else(|e| panic!("the stack sent a bad TCP segment: {e}"));
+            self.edges.watch(&seg);
             segs.push(seg);
         }
         panic!("the stack kept sending past {DRAIN_MAX} packets in one drain");
@@ -292,6 +389,7 @@ impl<H: Hook> Net<H> {
                 pkt.hash(&mut self.digest);
             }
             if let Ok(seg) = packet::parse(pkt) {
+                self.edges.watch(&seg);
                 segs.push(seg);
             }
         }
@@ -392,5 +490,63 @@ impl<H: Hook> Net<H> {
         });
         assert!(held.is_zero(), "after close {held:?}");
         held
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddrV4;
+
+    use wgft_tcpharness::packet::{ACK, Options, SYN, Segment};
+
+    use super::{DUT, Edges, PEER};
+
+    fn seg(port: u16, flags: u8, ack: u32, window: u16, ws: i64) -> Segment {
+        Segment {
+            src: SocketAddrV4::new(DUT, 80),
+            dst: SocketAddrV4::new(PEER, port),
+            seq: 1,
+            ack,
+            flags,
+            window,
+            opts: Options {
+                ws,
+                ..Options::none()
+            },
+            ..Segment::default()
+        }
+    }
+
+    /// 連番のポートの接続をいくつも開いた後に、どの接続の右端が戻っても見つけることを確かめます。
+    #[test]
+    fn edges_watch_every_connection() {
+        for moved in 1000..1008 {
+            let mut e = Edges::default();
+            for port in 1000..1008 {
+                e.watch(&seg(port, SYN | ACK, 100, 1000, 7));
+                e.watch(&seg(port, ACK, 100, 1000, -1));
+                e.watch(&seg(port, ACK, 200, 1000, -1));
+            }
+            let caught = std::panic::catch_unwind(move || {
+                e.watch(&seg(moved, ACK, 200, 990, -1));
+            });
+            assert!(
+                caught.is_err(),
+                "a right edge moved back on port {moved} unnoticed"
+            );
+        }
+    }
+
+    /// 握手の後の最初の ACK でない ACK が予約の最大を超える窓を示すと、scale しない欄とみなさずに落とすことを
+    /// 確かめます。
+    #[test]
+    fn edges_refuse_an_oversized_window() {
+        let mut e = Edges::default();
+        e.watch(&seg(1000, SYN | ACK, 100, 1000, 7));
+        e.watch(&seg(1000, ACK, 100, 1000, -1));
+        let caught = std::panic::catch_unwind(move || {
+            e.watch(&seg(1000, ACK, 100, 40_000, -1));
+        });
+        assert!(caught.is_err(), "an oversized window was taken as unscaled");
     }
 }
