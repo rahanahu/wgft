@@ -149,7 +149,7 @@ func TestFrameExamples(t *testing.T) {
 		if !bytes.Equal(frame, want) {
 			t.Errorf("%s: frame\n got %x\nwant %x", names[i], frame, want)
 		}
-		wantJS, err := os.ReadFile(js1)
+		wantJS, err := readLF(js1)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -220,7 +220,7 @@ func TestBadFrames(t *testing.T) {
 		if got, err := os.ReadFile(bin); err != nil || !bytes.Equal(got, bf.frame) {
 			t.Errorf("%s: %s differs or is missing (%v); run with -update", bf.name, bin, err)
 		}
-		if got, err := os.ReadFile(jsf); err != nil || !bytes.Equal(got, js) {
+		if got, err := readLF(jsf); err != nil || !bytes.Equal(got, js) {
 			t.Errorf("%s: %s differs or is missing (%v); run with -update", bf.name, jsf, err)
 		}
 	}
@@ -348,4 +348,11 @@ func TestPacketString(t *testing.T) {
 	if !slices.Contains(strings.Fields(Format(&Poll{Max: 1})), "max=1") {
 		t.Errorf("Format(Poll) = %q", Format(&Poll{Max: 1}))
 	}
+}
+
+// readLF reads a JSON fixture with its line ends as LF. .gitattributes keeps them LF in a checkout;
+// this also covers a checkout made before that rule or with a setting that overrides it.
+func readLF(path string) ([]byte, error) {
+	b, err := os.ReadFile(path)
+	return bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n")), err
 }
