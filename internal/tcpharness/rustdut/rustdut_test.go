@@ -184,7 +184,7 @@ func TestSameAsWgstackdut(t *testing.T) {
 func engineLines(lines []string) []string {
 	var out []string
 	for _, l := range lines {
-		if _, rest, ok := strings.Cut(l, " "); ok && strings.HasPrefix(rest, "dut: ") {
+		if _, rest, ok := strings.Cut(l, " "); strings.HasPrefix(l, "dut: ") || ok && strings.HasPrefix(rest, "dut: ") {
 			continue
 		}
 		out = append(out, l)
@@ -463,13 +463,15 @@ func TestWriteScenarioRecordings(t *testing.T) {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" || os.Getenv("GOAMD64") != "v1" || os.Getenv(recordCommitEnv) == "" {
 		t.Fatalf("recordings are made on linux/amd64 with GOAMD64=v1 and %s set; use scripts/wgstack-record.sh", recordCommitEnv)
 	}
-	// The congestion scenarios' recordings are the largest; the git set has their run seed 1 only
-	// (test-tooling.md section 4), the full set for a local cache all five.
-	ccRuns := uint64(1)
+	// The congestion scenarios' recordings are the largest, and the recordings of the concurrent
+	// receive-overflow and window-pacing scenarios grow and vary the most from one making to the
+	// next; the git set has their run seed 1 only (test-tooling.md section 4), the full set for a
+	// local cache all five.
+	ccRuns, heavyRuns := uint64(1), uint64(1)
 	switch v := os.Getenv("WGFT_WGSTACK_RECORD_SET"); v {
 	case "", "git":
 	case "full":
-		ccRuns = 5
+		ccRuns, heavyRuns = 5, 5
 	default:
 		t.Fatalf("WGFT_WGSTACK_RECORD_SET=%q; want git or full", v)
 	}
@@ -479,7 +481,11 @@ func TestWriteScenarioRecordings(t *testing.T) {
 	}
 	var plan []planned
 	for _, s := range tcpharness.Scenarios {
-		plan = append(plan, planned{s, 5})
+		runs := uint64(5)
+		if strings.HasPrefix(s.Name, "rcv-overflow-") || strings.HasPrefix(s.Name, "rcv-window-pacing") {
+			runs = heavyRuns
+		}
+		plan = append(plan, planned{s, runs})
 	}
 	for _, s := range tcpharness.CongestionScenarios {
 		plan = append(plan, planned{s, ccRuns})
