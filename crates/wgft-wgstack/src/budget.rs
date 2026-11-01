@@ -85,6 +85,7 @@ impl Budget {
     }
 
     /// 枠の管理と、貸していない boost の配列が確保した byte 数です。
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.slots.heap_bytes()
             + self

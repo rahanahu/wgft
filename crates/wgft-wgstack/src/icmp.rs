@@ -77,6 +77,7 @@ impl Pings {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.eps.heap_bytes() + self.replies.heap_bytes()
     }

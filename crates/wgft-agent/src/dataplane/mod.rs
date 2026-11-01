@@ -1,5 +1,5 @@
 //! データプレーン。トンネルの世代ごとに 1 つの OS のスレッドを立て、tokio の current-thread の実行環境で
-//! WireGuard の device の層 (`wgft_wireguard::Device`)、上の層 ([`Upper`]、後で Rust の wgstack の核)、
+//! WireGuard の device の層 (`wgft_wireguard::Device`)、上の層 ([`Upper`]、Rust の wgstack の核)、
 //! WireGuard の UDP のソケットを動かす。TUN は使わない。
 //!
 //! 規則の正本は `docs/design/v2/wgstack-rs.md` の「データプレーンの駆動」で、この module はそれを実装する。
@@ -14,10 +14,10 @@
 //!   上の層の `Budget` を [`Carry`] で返す。[`Generations`] はそれを次の世代に渡し、スレッドがどの理由で
 //!   終わっても [`Generations::exited`] で知らせる
 
-pub mod clock;
+pub(crate) mod clock;
 mod driver;
 mod socket;
-pub mod stack;
+pub(crate) mod stack;
 #[cfg(test)]
 mod tests;
 
@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use wgft_wireguard::{Device, DeviceConfig, Drops, Event, Held, PeerStatus};
 
-pub use socket::{REQUESTED, REQUIRED, SocketBuffers};
+pub(crate) use socket::{REQUIRED, SocketBuffers};
 
 /// The layer above the WireGuard device: the TCP/IP core that ends the tunnel's traffic.
 ///

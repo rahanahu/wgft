@@ -108,8 +108,6 @@ impl std::error::Error for HelloError {}
 
 /// `HELLO` の上限の組を核の表の大きさにします。空なら既定です。名前の無い欄と 0 の欄は本番の値で、表の大きさの
 /// 初めの 5 つは必ず要ります (4 節)。
-///
-/// UDP の datagram の数 (`udpRxDgrams`、`udpTxDgrams`) は、核が UDP を持つ段 (PR 6) までは受け取って使いません。
 pub fn limits_from_hello(ls: &[frame::Limit]) -> Result<Limits, HelloError> {
     let def = Limits::default();
     if ls.is_empty() {
@@ -205,7 +203,7 @@ impl WgstackDut {
         self.stack.held()
     }
 
-    fn config(h: &Hello, limits: Limits) -> Config {
+    pub(crate) fn config(h: &Hello, limits: Limits) -> Config {
         Config {
             addr: h.addr,
             mtu: usize::try_from(h.mtu).unwrap_or(usize::MAX),
@@ -342,7 +340,7 @@ fn udp_reason(stack: &Stack<DutHook>, e: Error) -> String {
 
 /// `Debug` の形の平らな構造体 (`Name { a: 1, b: [0, 0] }`) を `a=1 b=[0,0]` にします。`STATS`、`BOUND`、`HELD`
 /// の応答の文字列です。照合は応答の種類だけを比べるので、欄の名前は Rust の名前のままです。
-fn key_values(debug: &str) -> String {
+pub(crate) fn key_values(debug: &str) -> String {
     let inner = debug
         .split_once('{')
         .and_then(|(_, r)| r.rsplit_once('}'))
