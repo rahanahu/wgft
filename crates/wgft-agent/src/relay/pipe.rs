@@ -81,16 +81,27 @@ thread_local! {
     static BULK_FREE: std::cell::RefCell<Vec<Box<[u8]>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// The bulk buffers alive on all threads, lent or kept for reuse. The memory bound's test reads it.
+#[cfg(test)]
+pub(super) static BULK_ALIVE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 fn borrow() -> Box<[u8]> {
-    BULK_FREE
-        .with_borrow_mut(Vec::pop)
-        .unwrap_or_else(|| vec![0; BULK_BUF].into_boxed_slice())
+    BULK_FREE.with_borrow_mut(Vec::pop).unwrap_or_else(|| {
+        #[cfg(test)]
+        BULK_ALIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        vec![0; BULK_BUF].into_boxed_slice()
+    })
 }
 
 fn give_back(b: Box<[u8]>) {
     BULK_FREE.with_borrow_mut(|free| {
         if free.len() < BULK_KEEP {
             free.push(b);
+        } else {
+            drop(b);
+            #[cfg(test)]
+            BULK_ALIVE.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
     });
 }

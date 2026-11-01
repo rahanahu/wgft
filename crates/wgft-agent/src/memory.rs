@@ -44,6 +44,12 @@ pub const UDP_REPLY_FUTURE: usize = 1 << 10;
 /// cells. A test checks the real size stays below it.
 pub const UDP_SESSION_ENTRY: usize = 512;
 
+/// One TCP relay's term without its bulk buffers: its task and its socket's registration.
+pub const TCP_RELAY_CONN: usize = TCP_RELAY_FUTURE + TASK_OVERHEAD + IO_OVERHEAD;
+
+/// One UDP session's term: its table entry, its socket's registration and its reply task.
+pub const UDP_SESSION: usize = UDP_SESSION_ENTRY + UDP_REPLY_FUTURE + TASK_OVERHEAD + IO_OVERHEAD;
+
 /// One resolver thread: Rust's default thread stack and the work area of `getaddrinfo`.
 pub const RESOLVER_THREAD: usize = (2 << 20) + (64 << 10);
 
@@ -69,15 +75,20 @@ pub struct MemoryBound {
     pub base: usize,
     /// The core's bound (`Stack::bound`) at the largest MTU.
     pub core: usize,
+    /// The part of [`Self::core`] the core makes when it is created and keeps whatever the flows
+    /// do: its structure, connection slots and tables (`Bound::fix`).
+    pub core_fixed: usize,
     /// The netstack's waker table and the LAN socket table the core's hook keeps.
     pub tables: usize,
     /// The data plane driver's list of wakers to wake, at most twice the table's rows.
     pub driver: usize,
     /// The WireGuard device's queues and the data plane's buffers.
     pub device: usize,
-    /// The TCP relay: per connection its task, socket and both directions' bulk buffers, and the
-    /// bulk buffers the data plane thread keeps for reuse.
+    /// The TCP relay without its bulk buffers: per connection its task and socket.
     pub tcp: usize,
+    /// The TCP relay's bulk buffers: both directions' per connection, and the ones the data plane
+    /// thread keeps for reuse. A relay borrows them only while data flows.
+    pub tcp_bulk: usize,
     /// The UDP relay: the reply buffers and per session its entry, socket and reply task.
     pub udp: usize,
     /// The resolver threads.
@@ -99,31 +110,34 @@ impl MemoryBound {
     #[must_use]
     pub fn with_core(limits: flowpool::Limits, core_limits: CoreLimits) -> Self {
         let conns = core_limits.conns();
-        let core =
-            usize::try_from(Bound::for_limits(&core_limits, MAX_MTU).total).unwrap_or(usize::MAX);
+        let core_bound = Bound::for_limits(&core_limits, MAX_MTU);
+        let core = usize::try_from(core_bound.total).unwrap_or(usize::MAX);
+        let core_fixed = usize::try_from(core_bound.fix).unwrap_or(usize::MAX);
         let tables = Netstack::<wgft_wgstack::NoHook>::waker_bound(conns)
             + LanSockets::<LanConn>::table_bytes(conns);
         let driver = 2 * Netstack::<wgft_wgstack::NoHook>::waker_slots(conns) * size_of::<Waker>();
         // データプレーンの受信のバッファと、MTU の長さの送り出しのバッファ
         let device = device_bytes() + UDP_BUF + MAX_MTU;
         // 接続ごとの項と、データプレーンのスレッドが使い回しのために残す大きいバッファ
-        let tcp = limits
+        let tcp = limits.tcp.saturating_mul(TCP_RELAY_CONN);
+        let tcp_bulk = limits
             .tcp
-            .saturating_mul(TCP_RELAY_FUTURE + TASK_OVERHEAD + IO_OVERHEAD + 2 * BULK_BUF)
+            .saturating_mul(2 * BULK_BUF)
             .saturating_add(BULK_KEEP * BULK_BUF);
-        let udp = REPLY_SLOTS * UDP_BUF
-            + limits
-                .udp
-                .saturating_mul(UDP_SESSION_ENTRY + UDP_REPLY_FUTURE + TASK_OVERHEAD + IO_OVERHEAD);
+        let udp = REPLY_SLOTS * UDP_BUF + limits.udp.saturating_mul(UDP_SESSION);
         let resolver = (TARGET_PERMITS + ENDPOINT_PERMITS) * RESOLVER_THREAD;
-        let parts = [BASE, core, tables, driver, device, tcp, udp, resolver];
+        let parts = [
+            BASE, core, tables, driver, device, tcp, tcp_bulk, udp, resolver,
+        ];
         Self {
             base: BASE,
             core,
+            core_fixed,
             tables,
             driver,
             device,
             tcp,
+            tcp_bulk,
             udp,
             resolver,
             total: parts.into_iter().fold(0, usize::saturating_add),
@@ -136,43 +150,23 @@ impl MemoryBound {
         self.total.div_ceil(1 << 20)
     }
 
-    /// The terms that the relays hold for their flows: the TCP and UDP relay terms. The lab's
-    /// growth check compares the RSS growth under a flood with it.
-    #[must_use]
-    pub fn relays(&self) -> usize {
-        self.tcp.saturating_add(self.udp)
-    }
-
-    /// The terms without the fixed base and the resolver threads: what a test that counts the
-    /// heap can compare with, since the base is mostly not heap and the threads' stacks are not
-    /// allocations.
-    #[must_use]
-    pub fn heap_terms(&self) -> usize {
-        [
-            self.core,
-            self.tables,
-            self.driver,
-            self.device,
-            self.tcp,
-            self.udp,
-        ]
-        .into_iter()
-        .fold(0, usize::saturating_add)
-    }
-
-    /// The second start line, with the terms in MiB rounded up. The lab reads the relay terms
-    /// from it; its form is not guaranteed.
+    /// The second start line, with the terms in MiB rounded up. The core's term is split into
+    /// its fixed part and the rest, and the TCP relay's into its per-connection part and its bulk
+    /// buffers, so that the lab can compare the RSS growth under a flood of idle connections and
+    /// small datagrams with the terms such a flood can fill. Its form is not guaranteed.
     #[must_use]
     pub fn terms_line(&self) -> String {
         let m = |b: usize| b.div_ceil(1 << 20);
         format!(
-            "memory bound terms: base {} MiB, core {} MiB, tables {} MiB, driver {} MiB, device {} MiB, tcp relay {} MiB, udp relay {} MiB, resolver {} MiB",
+            "memory bound terms: base {} MiB, core fixed {} MiB, core flows {} MiB, tables {} MiB, driver {} MiB, device {} MiB, tcp relay {} MiB, tcp bulk {} MiB, udp relay {} MiB, resolver {} MiB",
             m(self.base),
-            m(self.core),
+            m(self.core_fixed),
+            m(self.core.saturating_sub(self.core_fixed)),
             m(self.tables),
             m(self.driver),
             m(self.device),
             m(self.tcp),
+            m(self.tcp_bulk),
             m(self.udp),
             m(self.resolver)
         )
@@ -214,6 +208,7 @@ mod tests {
                 + small.driver
                 + small.device
                 + small.tcp
+                + small.tcp_bulk
                 + small.udp
                 + small.resolver
         );

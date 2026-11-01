@@ -179,18 +179,27 @@ agent_limit() {
 agent_limit_text() {
   if [ "$AGENT_WGFT" = wgft ]; then echo "soft limit $1 MiB, margin $2 MiB"; else echo "memory bound $1 MiB, margin $2 MiB"; fi
 }
-# agent_relay_terms <agent log>: the Rust agent's TCP and UDP relay terms of its memory bound in MiB,
-# summed, from its "memory bound terms:" start line; empty when the line is missing
-agent_relay_terms() {
+# agent_flood_terms <agent log>: the terms of the Rust agent's memory bound that check 5's floods can
+# fill, in MiB, summed, from its "memory bound terms:" start line; empty when a term is missing. The
+# floods hold idle TCP connections and send one-byte datagrams, so they fill the relays' per-flow
+# parts, the reply buffers and the queues the traffic passes, and touch the tables the core and the
+# netstack made at start; they carry no bulk data, so the TCP relays' bulk buffers and the core's
+# per-connection send and receive parts stay empty and are left out.
+agent_flood_terms() {
   local line; line=$(grep -m1 'memory bound terms:' "$1" 2>/dev/null)
-  local t u; t=$(grep -oE 'tcp relay [0-9]+ MiB' <<< "$line" | grep -oE '[0-9]+'); u=$(grep -oE 'udp relay [0-9]+ MiB' <<< "$line" | grep -oE '[0-9]+')
-  [ -n "$t" ] && [ -n "$u" ] && echo $((t + u))
+  local sum=0 term v
+  for term in 'core fixed' tables driver device 'tcp relay' 'udp relay'; do
+    v=$(grep -oE "$term [0-9]+ MiB" <<< "$line" | grep -oE '[0-9]+')
+    [ -n "$v" ] || return 0
+    sum=$((sum + v))
+  done
+  echo "$sum"
 }
 # agent_limit_checks <what> <rss> <limit> <margin> <agent log> <soft limit name> <rss at start>: the
 # RSS stays under the limit plus the margin while flooded past <what>, and the agent logged the limit
 # at start. The Rust agent's bound is dominated by the core's per-connection floors and sits far above
-# the RSS, so its RSS growth from the start sample is also held to the bound's relay terms plus the
-# margin: a leak in the relays shows there long before it reaches the whole bound.
+# the RSS, so its RSS growth from the start sample is also held to the terms the floods can fill plus
+# the margin: a leak in the relays shows there long before it reaches the whole bound.
 agent_limit_checks() {
   local what=$1 rss=$2 lim=$3 mar=$4 log=$5 name=$6 rss0=${7:-}
   if [ "$AGENT_WGFT" = wgft ]; then
@@ -201,10 +210,10 @@ agent_limit_checks() {
     okcheck "agent RSS stays under its memory bound plus $mar MiB while flooded past $what" \
       "$([ -n "$rss" ] && [ "$lim" != - ] && [ "$rss" -le "$((lim + mar))" ] && echo 1 || echo 0)"
     check "agent logs its memory bound at start" "memory bound: " "$(grep 'memory bound:' "$log")"
-    local rel; rel=$(agent_relay_terms "$log")
-    echo "   agent RSS after start, before the floods: ${rss0:-unknown} MiB; the bound's relay terms: ${rel:-unknown} MiB"
-    okcheck "agent RSS grows by at most its relay terms plus $mar MiB while flooded past $what" \
-      "$([ -n "$rss" ] && [ -n "$rss0" ] && [ -n "$rel" ] && [ $((rss - rss0)) -le $((rel + mar)) ] && echo 1 || echo 0)"
+    local fill; fill=$(agent_flood_terms "$log")
+    echo "   agent RSS after start, before the floods: ${rss0:-unknown} MiB; the bound's terms the floods can fill: ${fill:-unknown} MiB"
+    okcheck "agent RSS grows by at most the terms the floods can fill plus $mar MiB while flooded past $what" \
+      "$([ -n "$rss" ] && [ -n "$rss0" ] && [ -n "$fill" ] && [ $((rss - rss0)) -le $((fill + mar)) ] && echo 1 || echo 0)"
   fi
 }
 
