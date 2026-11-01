@@ -370,19 +370,19 @@ async fn stream_once(agent: &Shared) -> End {
                 }
             }
             () = state_changed.notified() => {
-                let hb = agent.lock().await.heartbeat().await;
+                let hb = heartbeat_after_wait(agent, &mut pong_deadline).await;
                 if let Err(e) = send_heartbeat(&mut ws, hb).await {
                     return End::Other(e);
                 }
             }
             _ = heartbeat_tick.tick() => {
-                let hb = agent.lock().await.heartbeat().await;
+                let hb = heartbeat_after_wait(agent, &mut pong_deadline).await;
                 if let Err(e) = send_heartbeat(&mut ws, hb).await {
                     return End::Other(e);
                 }
             }
             _ = follow_tick.tick(), if follow_up_until.is_some() => {
-                let hb = agent.lock().await.heartbeat().await;
+                let hb = heartbeat_after_wait(agent, &mut pong_deadline).await;
                 if let Err(e) = send_heartbeat(&mut ws, hb.clone()).await {
                     return End::Other(e);
                 }
@@ -405,6 +405,24 @@ async fn stream_once(agent: &Shared) -> End {
                 return End::Other("ping timed out".into());
             }
         }
+    }
+}
+
+/// agent の排他を待ってハートビートを組む。待つ間は stream を読めず pong を受け取れないので、待った
+/// 長さだけ pong の期限を延ばす。延ばすのは待った長さだけなので、死んだ接続はやはり見つかる。
+async fn heartbeat_after_wait(
+    agent: &Shared,
+    pong_deadline: &mut Option<tokio::time::Instant>,
+) -> Heartbeat {
+    let t0 = tokio::time::Instant::now();
+    let a = agent.lock().await;
+    extend_deadline(pong_deadline, t0.elapsed());
+    a.heartbeat().await
+}
+
+fn extend_deadline(d: &mut Option<tokio::time::Instant>, waited: Duration) {
+    if let Some(at) = d.as_mut() {
+        *at += waited;
     }
 }
 
@@ -483,6 +501,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 排他を待った長さだけ pong の期限を延ばし、ping を待っていなければ何もしない。
+    #[test]
+    fn a_lock_wait_extends_the_pong_deadline_by_the_wait() {
+        let now = tokio::time::Instant::now();
+        let mut d = Some(now + Duration::from_secs(10));
+        extend_deadline(&mut d, Duration::from_secs(22));
+        assert_eq!(d, Some(now + Duration::from_secs(32)));
+        let mut none = None;
+        extend_deadline(&mut none, Duration::from_secs(22));
+        assert_eq!(none, None);
+    }
 
     #[test]
     fn version_checks() {

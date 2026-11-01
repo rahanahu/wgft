@@ -236,21 +236,12 @@ fn validate_interface_name(name: &str) -> Result<(), Refusal> {
 }
 
 /// この版が持たない機能を要る設定を、認証情報とトンネルに触れる前に拒む。入口の検査のすぐ後に呼ぶ。
-///
-/// 宛先の許可一覧は防御の設定なので、黙って効かないより止める。判定が入る「宛先と予算」の段で外す。
+/// 今はカーネルモードだけである。
 pub fn check_supported(s: &Settings) -> Result<(), Refusal> {
     if s.mode == Mode::Kernel {
         return Err(Refusal::prerequisite(
             "WGFT_MODE",
             "this build does not include the agent's kernel mode yet, so it cannot start in kernel mode; use a build that includes it",
-        ));
-    }
-    if let Some(l) = &s.allow_targets {
-        return Err(Refusal::prerequisite(
-            allow_targets::ENV,
-            format!(
-                "is set to {l}, and this build does not enforce the target allowlist yet, so it would forward to every target; unset it, or use a build that enforces it"
-            ),
         ));
     }
     Ok(())
@@ -268,22 +259,23 @@ pub fn startup_lines(c: &Config, s: &Settings) -> Vec<LogLine> {
             "WGFT_AGENT_BATCH_MIB: not applied yet, since this build has no send batching; the setting is kept so the same agent.env works later".to_owned(),
         ));
     }
-    // フロー数の上限の予算は「宛先と予算」の段で入る。入るまで、ユーザー空間モードでは毎回書く
-    out.push(LogLine::Stamped(
-        "WGFT_MAX_UDP_FLOWS and WGFT_MAX_TCP_FLOWS: not enforced yet, since this build has no flow budget; the settings are kept so the same agent.env works later".to_owned(),
-    ));
     if c.source("WGFT_AGENT_NETSTACK") != Source::Default {
         out.push(LogLine::Stamped(format!(
             "WGFT_AGENT_NETSTACK={}: unused, since this build has no choice of network stack; the setting is kept so the same agent.env works",
             s.netstack
         )));
     }
-    if s.allow_targets.is_none() {
-        out.push(LogLine::Stamped(format!(
+    // Go の v1 と同じ文。一覧が無いことも書き、制限が無いことを運用者に見せる
+    out.push(LogLine::Stamped(match &s.allow_targets {
+        None => format!(
             "no target allowlist: {} is not set; the server can direct this agent to any address it can reach",
             allow_targets::ENV
-        )));
-    }
+        ),
+        Some(l) => format!(
+            "target allowlist {}={l}; the server can direct this agent only to these addresses",
+            allow_targets::ENV
+        ),
+    }));
     out
 }
 
@@ -360,18 +352,36 @@ mod tests {
     }
 
     #[test]
-    fn defaults_write_the_block_the_flow_notice_and_the_allowlist_line() {
+    fn defaults_write_the_block_and_the_allowlist_line() {
         let (c, s) = settings(&[], &[]);
         let lines = startup_lines(&c, &s);
         assert_eq!(lines[0], LogLine::Plain("effective config:".into()));
         let st = stamped(&lines);
-        assert_eq!(st.len(), 2, "{st:?}");
-        assert!(st[0].starts_with("WGFT_MAX_UDP_FLOWS and WGFT_MAX_TCP_FLOWS: not enforced yet"));
-        assert!(st[1].starts_with("no target allowlist: WGFT_AGENT_ALLOW_TARGETS is not set"));
+        assert_eq!(
+            st,
+            vec![
+                "no target allowlist: WGFT_AGENT_ALLOW_TARGETS is not set; the server can direct this agent to any address it can reach"
+            ]
+        );
     }
 
     #[test]
-    fn a_set_batch_netstack_and_flow_caps_each_get_their_notice() {
+    fn a_set_allowlist_is_enforced_and_logged_in_its_normal_form() {
+        let (c, s) = settings(
+            &[("WGFT_AGENT_ALLOW_TARGETS", " 10.0.0.1/8 ,192.168.1.10:80")],
+            &[],
+        );
+        assert_eq!(check_supported(&s), Ok(()));
+        assert_eq!(
+            stamped(&startup_lines(&c, &s)),
+            vec![
+                "target allowlist WGFT_AGENT_ALLOW_TARGETS=10.0.0.0/8,192.168.1.10/32:80; the server can direct this agent only to these addresses"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_set_batch_and_netstack_get_their_notice_and_flow_caps_none() {
         let (c, s) = settings(
             &[
                 ("WGFT_AGENT_NETSTACK", "gvisor"),
@@ -381,7 +391,7 @@ mod tests {
         );
         let st = stamped(&startup_lines(&c, &s)).join("\n");
         assert!(st.contains("WGFT_AGENT_BATCH_MIB: not applied yet"), "{st}");
-        assert!(st.contains("WGFT_MAX_UDP_FLOWS and WGFT_MAX_TCP_FLOWS: not enforced yet"));
+        assert!(!st.contains("WGFT_MAX_UDP_FLOWS"), "{st}");
         assert!(
             st.contains("WGFT_AGENT_NETSTACK=gvisor: unused, since this build has no choice of network stack;"),
             "{st}"

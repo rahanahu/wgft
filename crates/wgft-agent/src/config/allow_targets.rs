@@ -2,10 +2,10 @@
 //!
 //! 形は `CIDR`、`CIDR:ポート`、`CIDR:下限-上限` をコンマで並べたもの。アドレスと CIDR の解釈は Go の
 //! `net/netip` に従う。v1 が受けた `agent.env` を拒むと更新で止まるので、受け付ける集合を Go に合わせる。
-//! 判定 (宛先が一覧に入るか) はこの module の外の「宛先と予算」の段が持つ。
+//! 宛先が一覧に入るかの判定は [`AllowList::allows`] で、中継の宛先の規則 (`targets`) が使う。
 
 use std::fmt::{self, Write as _};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::gostd::quote;
 
@@ -31,6 +31,22 @@ struct Entry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AllowList {
     entries: Vec<Entry>,
+}
+
+impl AllowList {
+    /// 宛先 `addr` の `port` への接続を許すか。Go の `List.Allows` と同じく、IPv4 を写した IPv6 の
+    /// アドレスは IPv4 として判定し、アドレスの族が違う項目には当てない。
+    #[must_use]
+    pub fn allows(&self, addr: IpAddr, port: u16) -> bool {
+        let ip = match addr.to_canonical() {
+            IpAddr::V4(a) => Ip::V4(a.into()),
+            IpAddr::V6(a) => Ip::V6(a.into()),
+        };
+        self.entries.iter().any(|e| {
+            let same_family = matches!((ip, e.ip), (Ip::V4(_), Ip::V4(_)) | (Ip::V6(_), Ip::V6(_)));
+            same_family && mask(ip, e.bits) == e.ip && (e.lo == 0 || (e.lo..=e.hi).contains(&port))
+        })
+    }
 }
 
 impl fmt::Display for AllowList {
@@ -70,7 +86,7 @@ impl fmt::Display for Entry {
 
 /// Go の `netip.Addr.String` の IPv6。小文字で、2 つ以上続く 0 の最長の並びを `::` にする (同じ長さなら先頭)。
 /// Rust の `Display` は IPv4 を写したアドレスを別の形で書くので使わない。
-fn format_v6(a: u128) -> String {
+pub(crate) fn format_v6(a: u128) -> String {
     let groups: [u16; 8] = std::array::from_fn(|i| ((a >> (112 - 16 * i)) & 0xffff) as u16);
     let (mut best_at, mut best_len) = (0, 0);
     let mut i = 0;
@@ -273,6 +289,29 @@ mod tests {
     fn entries_are_normalised() {
         let l = parse("10.0.0.1/8,[2001:db8::1]:80-90").unwrap().unwrap();
         assert_eq!(l.to_string(), "10.0.0.0/8,[2001:db8::1/128]:80-90");
+    }
+
+    #[test]
+    fn allows_judges_the_address_family_prefix_and_ports() {
+        let l = parse("10.0.0.0/8:80-90, 192.168.1.10, [2001:db8::/32]:443, [::/0]:22")
+            .unwrap()
+            .unwrap();
+        let ok = |a: &str, p| l.allows(a.parse().unwrap(), p);
+        assert!(ok("10.1.2.3", 80) && ok("10.1.2.3", 90));
+        assert!(!ok("10.1.2.3", 79) && !ok("10.1.2.3", 91));
+        assert!(!ok("11.0.0.1", 80));
+        // ポートの無い項目はどのポートも許す
+        assert!(ok("192.168.1.10", 1) && ok("192.168.1.10", 65535));
+        assert!(!ok("192.168.1.11", 1));
+        assert!(ok("2001:db8::5", 443) && !ok("2001:db8::5", 444));
+        // IPv4 を写した IPv6 は IPv4 として判定し、IPv6 の ::/0 には入らない
+        assert!(ok("::ffff:10.0.0.1", 80));
+        assert!(!ok("::ffff:11.0.0.1", 22));
+        assert!(ok("fe80::1", 22));
+        // 族の違う 0 の帯は他の族を含まない
+        let v4all = parse("0.0.0.0/0").unwrap().unwrap();
+        assert!(v4all.allows("1.2.3.4".parse().unwrap(), 1));
+        assert!(!v4all.allows("2001:db8::1".parse().unwrap(), 1));
     }
 
     #[test]

@@ -10,11 +10,14 @@ use tokio::sync::{Mutex, Notify, watch};
 use wgft_proto::{GoTime, Heartbeat, Join, STATUS_ERROR, STATUS_OK, State, TunnelStatus, WgConfig};
 use zeroize::Zeroizing;
 
+use crate::config::allow_targets::AllowList;
 use crate::credentials::{self, Credentials};
 use crate::enroll::{register, token_hash};
 use crate::error::{AgentError, Refusal};
-use crate::relay::{Manager, OpenPorts};
+use crate::flowpool::Limits;
+use crate::relay::{Manager, OpenPorts, ProbeRound};
 use crate::stream;
+use crate::targets::Targets;
 use crate::tunnel::{self, Tunnel};
 
 /// トンネルはあるがハンドシェイクがまだ済んでいないときの理由 (Go の `controlapi`)。
@@ -45,6 +48,10 @@ pub struct Options {
     pub version: String,
     /// トンネルの TUN の名前。試作は `WGFT_WG_INTERFACE` から取る。
     pub tun_name: String,
+    /// 宛先の許可一覧 (`WGFT_AGENT_ALLOW_TARGETS`)。`None` は制限しない。
+    pub allow_targets: Option<AllowList>,
+    /// フロー数の上限 (`WGFT_MAX_UDP_FLOWS` と `WGFT_MAX_TCP_FLOWS`)。
+    pub limits: Limits,
 }
 
 // 接続文字列は秘密なので Debug に出さない
@@ -63,6 +70,8 @@ impl std::fmt::Debug for Options {
             .field("name", &self.name)
             .field("version", &self.version)
             .field("tun_name", &self.tun_name)
+            .field("allow_targets", &self.allow_targets)
+            .field("limits", &self.limits)
             .finish()
     }
 }
@@ -85,6 +94,8 @@ pub(crate) struct Agent {
     pub(crate) private_key: Zeroizing<String>,
     tunnel: Option<Tunnel>,
     relay: Option<Manager>,
+    /// 宛先の規則。トンネルの世代をまたいで分け合う。
+    targets: Arc<Targets>,
     wg: Option<WgConfig>,
     pub(crate) generation: u64,
     /// トンネルの作成に失敗した全体状態と、次に立て直す時刻と、失敗の回数。
@@ -163,6 +174,8 @@ impl Agent {
                         server,
                         Some(self.opts.tun_name.clone()),
                         open,
+                        Arc::clone(&self.targets),
+                        self.opts.limits,
                     ));
                     self.tunnel = Some(t);
                     self.wg = Some(st.wg.clone());
@@ -286,9 +299,10 @@ impl Agent {
         hb
     }
 
-    /// 30 秒ごとの見回り。作成に失敗したトンネルを時刻が来たら立て直し、開けなかったリスナーを
-    /// 開き直す。立て直せたら、接続中の stream にハートビートを送らせる。
-    async fn tick(&mut self) {
+    /// 30 秒ごとの見回りのうち排他の中で行う部分。作成に失敗したトンネルを時刻が来たら立て直し、
+    /// 開けなかったリスナーを開き直す。立て直せたら、接続中の stream にハートビートを送らせる。宛先の
+    /// 試し接続の 1 周を返し、呼び手は排他を放してから走らせる ([`tick_round`])。
+    async fn tick(&mut self) -> Option<ProbeRound> {
         self.watch_tunnel(false).await;
         if let Some(st) = self.retry.clone()
             && self.retry_at.is_none_or(|at| Instant::now() >= at)
@@ -301,9 +315,7 @@ impl Agent {
                 Err(e) => logf!("tunnel: rebuilding for generation {}: {e}", st.generation),
             }
         }
-        if let Some(r) = self.relay.as_mut() {
-            r.retry();
-        }
+        self.relay.as_mut().map(Manager::retry_round)
     }
 }
 
@@ -396,12 +408,14 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
     let _lock = credentials::acquire(&path).map_err(|e| AgentError::Other(e.to_string()))?;
     credentials::remove_leftover_temps(&path);
     let (creds, private_key) = prepare(&opts).await?;
+    let targets = Arc::new(Targets::new(opts.allow_targets.clone()));
     let agent = Arc::new(Mutex::new(Agent {
         opts,
         creds,
         private_key,
         tunnel: None,
         relay: None,
+        targets,
         wg: None,
         generation: 0,
         retry: None,
@@ -451,8 +465,8 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
                 agent.lock().await.watch_tunnel(true).await;
             }
             _ = tick.tick() => {
-                let mut a = agent.lock().await;
-                a.tick().await;
+                tick_round(&agent).await;
+                let a = agent.lock().await;
                 let hb = a.heartbeat().await;
                 let mut s = format!("generation {} tunnel={} {} endpoint={}", hb.generation, hb.tunnel.state, hb.tunnel.reason, hb.tunnel.endpoint);
                 for r in &hb.rules {
@@ -470,6 +484,20 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
     stream_task.abort();
     agent.lock().await.close().await;
     result
+}
+
+/// 30 秒ごとの見回り。排他の中で見回りの前半を行い、宛先の試し接続は排他を放して走らせ、結果を
+/// 書くときだけ排他を取り直す。試し接続の 1 周は応えない宛先が多いと長くなり、その間に stream の
+/// ハートビートと適用を止めないためである。走らせている間にトンネルを作り直していれば、結果は捨てる。
+async fn tick_round(agent: &Shared) {
+    let round = agent.lock().await.tick().await;
+    let Some(round) = round.filter(|r| !r.is_empty()) else {
+        return;
+    };
+    let done = round.run().await;
+    if let Some(r) = &agent.lock().await.relay {
+        r.finish_probes(done);
+    }
 }
 
 /// 認証情報を読み、モードを確かめ、鍵を用意し、未登録なら登録する。呼び手がロックを持つ。
@@ -689,6 +717,7 @@ mod tests {
             private_key: Zeroizing::new(String::new()),
             tunnel: None,
             relay: None,
+            targets: Arc::new(Targets::new(None)),
             wg: None,
             generation: 0,
             retry: None,
@@ -711,6 +740,85 @@ mod tests {
         assert_eq!(hb.tunnel.state, "error");
         assert_eq!(hb.tunnel.reason, REASON_NO_TUNNEL_FULL_STATE_PENDING);
         assert_eq!(hb.rules, vec![]);
+    }
+
+    /// 見回りの試し接続は agent の排他を放して走り、その間に変わったリスナーには古い結果を書かない。
+    #[tokio::test]
+    async fn the_probe_round_runs_without_the_agent_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use wgft_proto::{AgentRule, Proto};
+
+        use crate::flowpool::Limits;
+        use crate::targets::resolve::Resolver;
+        use crate::targets::unicast::Unicast;
+
+        let slow = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let (s, r) = (Arc::clone(&slow), Arc::clone(&release));
+        let resolver = Resolver::with_lookup(
+            8,
+            2,
+            Arc::new(move |_h: &str, _| {
+                while s.load(Ordering::SeqCst) && !r.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(vec!["127.0.0.1".parse().unwrap()])
+            }),
+        );
+        let targets = Arc::new(Targets::with(
+            None,
+            Unicast::new(Box::new(|| Ok(Vec::new()))),
+            Arc::new(resolver),
+        ));
+        let free = || {
+            std::net::TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port()
+        };
+        let (port, dead) = (free(), free());
+        let up = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rule = |target: String| AgentRule {
+            id: "r_a".into(),
+            proto: Proto::Tcp,
+            listen_port: port.to_string().parse().unwrap(),
+            target,
+            enabled: true,
+        };
+        let mut m = Manager::new(
+            std::net::Ipv4Addr::LOCALHOST,
+            std::net::Ipv4Addr::LOCALHOST,
+            None,
+            OpenPorts::default(),
+            Arc::clone(&targets),
+            Limits::default(),
+        );
+        m.apply(&[rule(format!("nas.lan:{dead}"))]).await;
+        let mut a = agent();
+        a.targets = targets;
+        a.relay = Some(m);
+        let shared: Shared = Arc::new(Mutex::new(a));
+        slow.store(true, Ordering::SeqCst);
+        let round = tokio::spawn({
+            let shared = Arc::clone(&shared);
+            async move { tick_round(&shared).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // 試し接続が名前の解決で止まっている間も、排他は取れる。宛先を変えると待ち受けは開き直される
+        {
+            let mut a = tokio::time::timeout(Duration::from_millis(200), shared.lock())
+                .await
+                .expect("the agent lock is free during the probe round");
+            let target = up.local_addr().unwrap().to_string();
+            a.relay.as_mut().unwrap().apply(&[rule(target)]).await;
+            assert_eq!(a.relay.as_ref().unwrap().status()[0].state, "ok");
+        }
+        release.store(true, Ordering::SeqCst);
+        round.await.unwrap();
+        // 開き直す前のリスナーの結果 (閉じたポートへの拒否) は書かれない
+        let st = shared.lock().await.relay.as_ref().unwrap().status();
+        assert_eq!(st[0].state, "ok", "{st:?}");
     }
 
     #[test]
