@@ -196,6 +196,16 @@ case "$ID" in
     exit 1
     ;;
 esac
+# ラボで使わない定時の仕事と常駐を止める。パッケージの一覧の更新などの定時の仕事が確認の最中に走ると、
+# CPU とメモリを使う。tty1 の getty と polkit はラボで使わない。シリアルの getty は incus console が使うので
+# 残す。無い unit は飛ばす。journal は 32 MiB までにする
+for unit in apt-daily.timer apt-daily-upgrade.timer dpkg-db-backup.timer e2scrub_all.timer fstrim.timer \
+  man-db.timer dnf-makecache.timer; do
+  systemctl disable --now "$unit" >/dev/null 2>&1 || true
+done
+systemctl mask getty@tty1.service polkit.service >/dev/null 2>&1 || true
+mkdir -p /etc/systemd/journald.conf.d
+printf '[Journal]\nSystemMaxUse=32M\nRuntimeMaxUse=16M\n' > /etc/systemd/journald.conf.d/wgft-lab.conf
 mkdir -p /var/lib/wgft-lab && touch /var/lib/wgft-lab/provisioned
 EOF
 }
