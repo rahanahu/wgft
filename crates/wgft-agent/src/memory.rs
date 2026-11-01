@@ -107,18 +107,26 @@ pub const STATE: usize = STATE_COPIES * STATE_HELD_FACTOR * STREAM_READ_LIMIT + 
 pub const RESOLVER_THREAD: usize = (2 << 20) + (64 << 10);
 
 /// The WireGuard device's queues at the largest MTU, for the agent's one peer: staged packets,
-/// datagrams to send and packets to deliver, with a vector header per queued item, and the one
-/// datagram buffer a call uses while it decrypts.
+/// datagrams to send (handshake messages and the packets that waited for a handshake) with a vector
+/// header per queued item, and the events. The buffers the data plane passes to the device are
+/// counted apart ([`data_plane_buffers`]).
 pub(crate) fn device_bytes() -> usize {
     let l = wgft_wireguard::Limits::default();
     let item = size_of::<Vec<u8>>() + size_of::<std::net::SocketAddr>();
     l.staged_packets * (MAX_MTU + item)
         + l.transmit_bytes
         + l.transmit_packets * item
-        + l.deliver_bytes
-        + l.deliver_packets * item
         + l.events * 64
-        + UDP_BUF
+}
+
+/// The buffers the data plane allocates once for the device and uses for every packet, at the
+/// largest MTU: the datagram it receives (`UDP_BUF`), the plaintext the device decrypts into
+/// (`UDP_BUF`, the largest datagram), the packet the core writes to send (one MTU) and the datagram
+/// the device encrypts it into (one MTU and the 32 bytes of header and tag). Nothing else is
+/// allocated per packet. With batching these become the batch's buffers and move to
+/// [`batch_bytes`].
+pub(crate) const fn data_plane_buffers() -> usize {
+    2 * UDP_BUF + MAX_MTU + MAX_MTU + wgft_wireguard::DATA_OVERHEAD
 }
 
 /// The tunnel batching's buffers: what one receive batch and one send batch of the WireGuard socket
@@ -190,8 +198,8 @@ impl MemoryBound {
         let tables = Netstack::<wgft_wgstack::NoHook>::waker_bound(conns)
             + LanSockets::<LanConn>::table_bytes(conns);
         let driver = 2 * Netstack::<wgft_wgstack::NoHook>::waker_slots(conns) * size_of::<Waker>();
-        // データプレーンの受信のバッファと、MTU の長さの送り出しのバッファ
-        let device = device_bytes() + UDP_BUF + MAX_MTU;
+        // device の層のキューと、データプレーンが device に渡す使い回しのバッファ
+        let device = device_bytes() + data_plane_buffers();
         let batch = batch_bytes();
         // 接続ごとの項と、データプレーンのスレッドが使い回しのために残す大きいバッファ
         let tcp = limits.tcp.saturating_mul(tcp_relay_conn());

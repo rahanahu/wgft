@@ -4,22 +4,19 @@
 //! 後の定常で、1 つのメッセージを N 回流す。確保の呼び出しは、データプレーンのスレッドの上で
 //! `thread_alloc_calls` を読んで数える。トンネルの受信と送信 (UDP のソケット、device、核)、中継の task、
 //! LAN 側のソケットはこのスレッドで動く。試験の相手と宛先は別のスレッドの上にあり、数えない。
-//! 許容は「agent と試験の相手の間を通った WireGuard の datagram 1 つにつき 2 回」で、窓の間に通った
-//! datagram の数は試験の相手が数える。確保は Device の層の次の 4 か所だけで、受けた datagram ごとに
-//! 2 回、送る packet ごとに 2 回である。TCP の ACK も datagram として数えるので、ACK の数が起床の時刻で
-//! 揺れても割り算は崩れない。中継の層 (relay、wgft-netstack、wgstack、tokio) の許容は 0 である。
-//! - crates/wgft-wireguard/src/protocol.rs:242  復号の宛先の `vec!` (受けた datagram ごと)
-//! - crates/wgft-wireguard/src/device.rs:387    詰め物を除いた packet の `to_vec` (受けた datagram ごと)
-//! - crates/wgft-wireguard/src/device.rs:412    送る packet の `to_vec` (送る packet ごと)
-//! - crates/wgft-wireguard/src/protocol.rs:280  暗号文の宛先の `vec!` (送る packet ごと)
+//! 許容は「agent と試験の相手の間を通った WireGuard の datagram 1 つにつき 0 回」で、窓の間に通った
+//! datagram の数は試験の相手が数える。トンネルの受信と送信 (device の層)、中継の層 (relay、
+//! wgft-netstack、wgstack、tokio) のどれも、定常の状態で packet ごとに確保しない。TCP の ACK も datagram
+//! として数えるので、ACK の数が起床の時刻で揺れても割り算は崩れない。読みの前に遅延 ACK の timer が
+//! 切れるまで待つので、最後の ACK も窓に入る。
 //!
-//! 確保を減らしたら [`PER_DATAGRAM`] を下げる。
+//! 確保が 1 つでも packet ごとに戻れば、数える datagram の数だけ増えて試験が落ちる。
 //!
 //! 数える窓は読みの 2 回の `call` の間で、その外の確保 (窓の端の `call` 自体) は含まない。窓の間に
 //! データプレーンのスレッドで起きる、packet の数に比例しない確保 (タイマーの回り、ログ) を見込んで、
-//! [`BACKGROUND`] だけ全体の許容に足す。測りでは 0 だった。250 より十分小さくしておく必要がある。大きい
-//! バッファの経路の読みごとに 1 回の確保が加わっても、読みは約 8 segment をまとめるので、2000 メッセージで
-//! 250 から 522 しか増えず、大きい値にすると見逃す。
+//! [`BACKGROUND`] だけ全体の許容に足す。測りでは 0 だった。窓の datagram の数より十分小さくしておく。
+//! 大きいバッファの経路では、読みごとに 1 回の確保が加わると約 8 segment に 1 回の割合になり、大きい
+//! 値にすると見逃す。
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -40,10 +37,10 @@ const WARMUP: usize = 300;
 const N: usize = 2000;
 /// メッセージの大きさ。MTU に収まる 1 packet。
 const SIZE: usize = 1000;
-/// datagram 1 つあたりの確保の許容。Device の層の 2 回。
-const PER_DATAGRAM: usize = 2;
+/// datagram 1 つあたりの確保の許容。
+const PER_DATAGRAM: usize = 0;
 /// packet の数に比例しない、窓の間のデータプレーンのスレッドの確保の見込み。測りは 0。
-const BACKGROUND: usize = 64;
+const BACKGROUND: usize = 16;
 const WAIT: Duration = Duration::from_secs(5);
 
 /// データプレーンのスレッドの確保の呼び出しの数と、その時までに agent と試験の相手の間を通った datagram の数。
@@ -59,7 +56,7 @@ async fn reading(peer: &Peer) -> (usize, usize) {
     (calls, peer.datagrams())
 }
 
-/// 窓の間に通った datagram 1 つあたり、Device の層の 2 回までしか確保しないことを確かめる。
+/// 窓の間に通った datagram 1 つあたり、確保しないことを確かめる。
 fn check(path: &str, before: (usize, usize), after: (usize, usize)) {
     let calls = after.0 - before.0;
     let datagrams = after.1 - before.1;

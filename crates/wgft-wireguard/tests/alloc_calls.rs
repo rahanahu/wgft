@@ -1,26 +1,17 @@
 //! トンネルの受信と送信が、packet ごとに何回ヒープを確保するかの試験。
 //!
-//! 慣らし (ハンドシェイクと最初の数 packet) の後の定常で、`Device` の送信 (`handle_packet` と
-//! `poll_transmit`) と受信 (`handle_datagram` と `poll_packet`) を N 回流し、確保の呼び出しの数を数える。
-//! 許容は今の測りの値で、新しい確保が増えると試験が落ちる。確保を減らしたら許容を下げる。数えは窓を開いた
-//! スレッドだけを数える。
-//!
-//! 許容に含まれる確保 (Device の層の内側。復号の相手は `wgft-agent` の駆動が呼ぶ `poll_packet` の戻りで、
-//! 呼び手が捨てる):
-//! - 送信:`crates/wgft-wireguard/src/device.rs` の `handle_packet` が packet を `to_vec` で写す
-//!   (1 packet 1 回)、`crates/wgft-wireguard/src/protocol.rs` の `encapsulate` が暗号文の宛先を `vec!` で
-//!   確保する (1 packet 1 回)
-//! - 受信:`crates/wgft-wireguard/src/protocol.rs` の `receive` が復号の宛先を `vec!` で確保する
-//!   (1 datagram 1 回)、`crates/wgft-wireguard/src/device.rs` の `deliver` が詰め物を除いた packet を
-//!   `to_vec` で写す (1 datagram 1 回)
+//! 慣らし (ハンドシェイクと最初の数 packet) の後の定常で、`Device` の送信 (`handle_packet`) と受信
+//! (`handle_datagram`) を N 回流し、確保の呼び出しの数を数える。許容は packet あたり 0 で、確保が増えると
+//! 試験が落ちる。暗号文と平文の宛先は、窓を開く前に確保した buffer で、呼び手の側の置き場に当たる。数えは
+//! 窓を開いたスレッドだけを数える。
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use wgft_alloc_count::{CountingAlloc, ThreadWindow};
 use wgft_wireguard::{
-    Device, DeviceConfig, Ipv4Prefix, Limits, PeerConfig, PrivateKey, ProtocolTimers, Roaming,
-    Transmit,
+    DATA_OVERHEAD, Device, DeviceConfig, Ipv4Prefix, Limits, PeerConfig, PrivateKey,
+    ProtocolTimers, Roaming,
 };
 
 #[global_allocator]
@@ -35,10 +26,8 @@ const N: usize = 1000;
 /// 1 packet の IP の全長。
 const SIZE: usize = 1000;
 
-/// 送信の 1 packet あたりの確保の許容。device.rs の `to_vec` と protocol.rs の暗号文の `vec!`。
-const SEND_ALLOWED: usize = 2;
-/// 受信の 1 datagram あたりの確保の許容。protocol.rs の復号の宛先の `vec!` と device.rs の `to_vec`。
-const RECEIVE_ALLOWED: usize = 2;
+/// 暗号文 1 つの buffer の長さ。詰め物で 16 の倍数に伸びるので、packet の長さに header と tag を足しただけでは足りない。
+const SLOT: usize = SIZE.next_multiple_of(16) + DATA_OVERHEAD;
 
 fn ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr, total: usize) -> Vec<u8> {
     let mut p = vec![0xa5u8; total];
@@ -57,6 +46,8 @@ struct Pair {
     a_addr: SocketAddr,
     b_addr: SocketAddr,
     now: Instant,
+    /// 復号の行き先。
+    plain: Vec<u8>,
 }
 
 impl Pair {
@@ -94,6 +85,7 @@ impl Pair {
             a_addr,
             b_addr,
             now,
+            plain: vec![0; usize::from(u16::MAX)],
         };
         let t = pair.a.poll_timeout().unwrap();
         pair.now = pair.now.max(t);
@@ -112,13 +104,14 @@ impl Pair {
             let mut moved = false;
             while let Some(tx) = self.a.poll_transmit() {
                 moved = true;
-                self.b.handle_datagram(self.now, self.a_addr, &tx.payload);
+                self.b
+                    .handle_datagram(self.now, self.a_addr, &tx.payload, &mut self.plain);
             }
             while let Some(tx) = self.b.poll_transmit() {
                 moved = true;
-                self.a.handle_datagram(self.now, self.b_addr, &tx.payload);
+                self.a
+                    .handle_datagram(self.now, self.b_addr, &tx.payload, &mut self.plain);
             }
-            while self.a.poll_packet().is_some() || self.b.poll_packet().is_some() {}
             while self.a.poll_event().is_some() || self.b.poll_event().is_some() {}
             if !moved {
                 break;
@@ -128,45 +121,55 @@ impl Pair {
 }
 
 #[test]
-fn the_tunnel_send_and_receive_allocate_only_what_is_allowed() {
+fn the_tunnel_send_and_receive_allocate_nothing_per_packet() {
     let mut pair = Pair::connected();
     let packet = ipv4_packet(AGENT_IP, SERVER_IP, SIZE);
-    // 慣らし:待ち行列と内部の表が育ち切るまで流す
+    let mut plain = vec![0u8; usize::from(u16::MAX)];
+    let mut sealed = vec![0u8; pair.a.max_transmit_len()];
+    // 慣らし:内部の表が育ち切るまで流す
     for _ in 0..64 {
-        pair.a.handle_packet(pair.now, &packet);
-        while let Some(tx) = pair.a.poll_transmit() {
-            pair.b.handle_datagram(pair.now, pair.a_addr, &tx.payload);
-        }
-        while pair.b.poll_packet().is_some() {}
+        let out = pair
+            .a
+            .handle_packet(pair.now, &packet, &mut sealed)
+            .expect("a datagram");
+        let got = pair
+            .b
+            .handle_datagram(pair.now, pair.a_addr, &sealed[..out.len], &mut plain);
+        assert_eq!(got, Some(SIZE));
         while pair.a.poll_event().is_some() || pair.b.poll_event().is_some() {}
     }
 
-    // 送信:暗号文を先に集めておき、後で受信に流す
-    let mut sent: Vec<Transmit> = Vec::with_capacity(N);
+    // 送信:暗号文を、先に確保した連続した buffer に集めておき、後で受信に流す
+    let mut arena = vec![0u8; N * SLOT];
+    let mut lens = vec![0usize; N];
     let window = ThreadWindow::open();
-    for _ in 0..N {
-        pair.a.handle_packet(pair.now, &packet);
-        sent.push(pair.a.poll_transmit().expect("a datagram"));
+    for (slot, len) in arena.as_chunks_mut::<SLOT>().0.iter_mut().zip(&mut lens) {
+        *len = pair
+            .a
+            .handle_packet(pair.now, &packet, slot)
+            .expect("a datagram")
+            .len;
     }
     let send_calls = window.calls();
     eprintln!("send: {send_calls} calls for {N} packets");
 
     // 受信
     let window = ThreadWindow::open();
-    for tx in &sent {
-        pair.b.handle_datagram(pair.now, pair.a_addr, &tx.payload);
-        let p = pair.b.poll_packet().expect("a packet");
-        assert_eq!(p.len(), SIZE);
+    for (slot, len) in arena.as_chunks::<SLOT>().0.iter().zip(&lens) {
+        let got = pair
+            .b
+            .handle_datagram(pair.now, pair.a_addr, &slot[..*len], &mut plain);
+        assert_eq!(got, Some(SIZE));
     }
     let receive_calls = window.calls();
     eprintln!("receive: {receive_calls} calls for {N} datagrams");
 
-    assert!(
-        send_calls <= SEND_ALLOWED * N,
-        "send allocates {send_calls} times for {N} packets; the allowance is {SEND_ALLOWED} per packet"
+    assert_eq!(
+        send_calls, 0,
+        "send allocates {send_calls} times for {N} packets; the allowance is 0"
     );
-    assert!(
-        receive_calls <= RECEIVE_ALLOWED * N,
-        "receive allocates {receive_calls} times for {N} datagrams; the allowance is {RECEIVE_ALLOWED} per datagram"
+    assert_eq!(
+        receive_calls, 0,
+        "receive allocates {receive_calls} times for {N} datagrams; the allowance is 0"
     );
 }

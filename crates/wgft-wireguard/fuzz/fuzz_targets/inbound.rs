@@ -76,8 +76,6 @@ fn check(device: &Device) {
     let limits = device.limits();
     assert!(held.transmit_packets <= limits.transmit_packets);
     assert!(held.transmit_bytes <= limits.transmit_bytes);
-    assert!(held.deliver_packets <= limits.deliver_packets);
-    assert!(held.deliver_bytes <= limits.deliver_bytes);
     assert!(held.events <= limits.events);
     assert!(held.staged_packets_max <= limits.staged_packets);
     assert!(held.staged_bytes_max <= limits.staged_packets * device.mtu());
@@ -104,8 +102,6 @@ fuzz_target!(|data: &[u8]| {
         staged_packets: 4,
         transmit_packets: 8,
         transmit_bytes: 4096,
-        deliver_packets: 8,
-        deliver_bytes: 4096,
         events: 4,
     };
     let cb = DeviceConfig {
@@ -125,6 +121,9 @@ fuzz_target!(|data: &[u8]| {
     let mut a = Device::with_seed(ca, Zeroizing::new([1; 32]), base, unix).unwrap();
     let mut b = Device::with_seed(cb, Zeroizing::new([2; 32]), base, unix).unwrap();
     let mut t = Duration::ZERO;
+    // 呼び手の buffer。復号の行き先と、暗号文の行き先
+    let mut plain = vec![0u8; usize::from(u16::MAX)];
+    let mut sealed = vec![0u8; b.max_transmit_len().max(a.max_transmit_len())];
 
     while let Some(op) = input.byte() {
         let now = base + t;
@@ -134,7 +133,7 @@ fuzz_target!(|data: &[u8]| {
             2 => {
                 // A の送ったものを B へ運ぶ。A の送信のキューはここでだけ空く
                 while let Some(tx) = a.poll_transmit() {
-                    b.handle_datagram(now, a_addr, &tx.payload);
+                    b.handle_datagram(now, a_addr, &tx.payload, &mut plain);
                 }
             }
             3 => {
@@ -146,7 +145,7 @@ fuzz_target!(|data: &[u8]| {
                         tx.payload[at] ^= input.byte().unwrap_or(1) | 1;
                     }
                     let from = if how & 0x80 == 0 { b_addr } else { other };
-                    a.handle_datagram(now, from, &tx.payload);
+                    a.handle_datagram(now, from, &tx.payload, &mut plain);
                 }
             }
             4 => {
@@ -156,18 +155,24 @@ fuzz_target!(|data: &[u8]| {
                 if let Some(first) = d.first_mut() {
                     *first %= 6;
                 }
-                a.handle_datagram(now, other, &d);
+                a.handle_datagram(now, other, &d, &mut plain);
             }
             5 => {
                 let len = usize::from(input.byte().unwrap_or(0)) * 8;
                 let payload = input.bytes(len).to_vec();
-                b.handle_packet(now, &ipv4(SERVER_IP, AGENT_IP, &payload));
+                if let Some(o) = b.handle_packet(now, &ipv4(SERVER_IP, AGENT_IP, &payload), &mut sealed)
+                {
+                    a.handle_datagram(now, b_addr, &sealed[..o.len], &mut plain);
+                }
             }
             6 => {
                 let len = usize::from(input.byte().unwrap_or(0));
                 let raw = input.bytes(len).to_vec();
-                a.handle_packet(now, &raw);
-                a.handle_packet(now, &ipv4(AGENT_IP, SERVER_IP, &raw));
+                for packet in [raw.clone(), ipv4(AGENT_IP, SERVER_IP, &raw)] {
+                    if let Some(o) = a.handle_packet(now, &packet, &mut sealed) {
+                        b.handle_datagram(now, a_addr, &sealed[..o.len], &mut plain);
+                    }
+                }
             }
             7 => {
                 a.handle_timeout(now);
@@ -179,17 +184,15 @@ fuzz_target!(|data: &[u8]| {
                 let len = usize::from(input.byte().unwrap_or(0)) * 2;
                 let raw = input.bytes(len).to_vec();
                 if let Some(d) = b.encapsulate_unchecked(now, &a_pub, &raw) {
-                    a.handle_datagram(now, b_addr, &d);
+                    a.handle_datagram(now, b_addr, &d, &mut plain);
                 }
             }
             _ => {
-                while a.poll_packet().is_some() {}
                 while a.poll_event().is_some() {}
             }
         }
         check(&a);
         let _ = a.poll_timeout();
         while b.poll_event().is_some() {}
-        while b.poll_packet().is_some() {}
     }
 });

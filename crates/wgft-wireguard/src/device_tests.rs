@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::config::{
     DeviceConfig, Ipv4Prefix, Limits, MIN_MTU, PeerConfig, ProtocolTimers, Roaming,
 };
-use crate::device::{Device, Event};
+use crate::device::{Device, Event, Held, Transmit};
 use crate::drops::DropReason;
 use crate::ip::tests::ipv4_packet;
 use crate::keys::{PrivateKey, PublicKey};
@@ -17,6 +17,37 @@ const AGENT_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 2);
 const SERVER_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 1);
 const UNIX: Duration = Duration::from_hours(500_000);
 const KEEPALIVE: Duration = Duration::from_secs(25);
+
+/// 試験の手当て。製品の API は呼び手の buffer を使うので、試験は使い捨ての buffer で呼ぶ。
+trait Shim {
+    /// 復号した packet を返す。
+    fn recv(&mut self, now: Instant, from: SocketAddr, datagram: &[u8]) -> Option<Vec<u8>>;
+    /// 暗号化した datagram を device のキューに積み、`poll_transmit` で取れるようにする。
+    fn send(&mut self, now: Instant, packet: &[u8]);
+}
+
+impl Shim for Device {
+    fn recv(&mut self, now: Instant, from: SocketAddr, datagram: &[u8]) -> Option<Vec<u8>> {
+        let mut out = vec![0u8; usize::from(u16::MAX)];
+        let len = self.handle_datagram(now, from, datagram, &mut out)?;
+        out.truncate(len);
+        Some(out)
+    }
+
+    fn send(&mut self, now: Instant, packet: &[u8]) {
+        let mut out = vec![0u8; self.max_transmit_len()];
+        if let Some(o) = self.handle_packet(now, packet, &mut out) {
+            out.truncate(o.len);
+            // 呼び手が送らずに溜めた場合の手当て。キューの上限を試験する
+            if !self.transmits.push(Transmit {
+                to: o.to,
+                payload: out,
+            }) {
+                self.drops.add(DropReason::TransmitOverflow, 1);
+            }
+        }
+    }
+}
 
 fn addr(s: &str) -> SocketAddr {
     s.parse().unwrap()
@@ -151,7 +182,8 @@ impl Net {
                 self.a_sent_at.push(self.t);
                 if self.b_up && tx.to == self.b_addr {
                     self.carried += 1;
-                    self.b.handle_datagram(now, self.a_addr, &tx.payload);
+                    self.b_got
+                        .extend(self.b.recv(now, self.a_addr, &tx.payload));
                 }
             }
             while let Some(tx) = self.b.poll_transmit() {
@@ -165,18 +197,13 @@ impl Net {
                 }
                 if tx.to == self.a_addr {
                     self.carried += 1;
-                    self.a.handle_datagram(now, self.b_addr, &tx.payload);
+                    self.a_got
+                        .extend(self.a.recv(now, self.b_addr, &tx.payload));
                 }
             }
             if !moved {
                 break;
             }
-        }
-        while let Some(p) = self.a.poll_packet() {
-            self.a_got.push(p);
-        }
-        while let Some(p) = self.b.poll_packet() {
-            self.b_got.push(p);
         }
         while let Some(e) = self.a.poll_event() {
             self.a_events.push(e);
@@ -199,15 +226,13 @@ impl Net {
 
     fn a_sends(&mut self, payload: &[u8]) {
         let now = self.now();
-        self.a
-            .handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, payload));
+        self.a.send(now, &ipv4_packet(AGENT_IP, SERVER_IP, payload));
         self.pump();
     }
 
     fn b_sends(&mut self, payload: &[u8]) {
         let now = self.now();
-        self.b
-            .handle_packet(now, &ipv4_packet(SERVER_IP, AGENT_IP, payload));
+        self.b.send(now, &ipv4_packet(SERVER_IP, AGENT_IP, payload));
         self.pump();
     }
 
@@ -257,7 +282,7 @@ fn packets_from_outside_the_peers_allowed_ips_are_dropped() {
     n.connect();
     let now = n.now();
     // A は宛先で B を選ぶので、送信元が A の AllowedIPs の外でも送れる。受ける B が捨てる
-    n.a.handle_packet(
+    n.a.send(
         now,
         &ipv4_packet(Ipv4Addr::new(10, 200, 0, 99), SERVER_IP, b"x"),
     );
@@ -265,7 +290,7 @@ fn packets_from_outside_the_peers_allowed_ips_are_dropped() {
     assert_eq!(n.b_got.len(), 0);
     assert_eq!(n.b.drops().get(DropReason::DisallowedSource), 1);
     // B から A へも同じ
-    n.b.handle_packet(
+    n.b.send(
         now,
         &ipv4_packet(Ipv4Addr::new(10, 200, 0, 7), AGENT_IP, b"x"),
     );
@@ -279,17 +304,17 @@ fn outbound_packets_need_a_route_an_ipv4_header_and_to_fit_the_mtu() {
     let mut n = Net::new();
     n.connect();
     let now = n.now();
-    n.a.handle_packet(
+    n.a.send(
         now,
         &ipv4_packet(AGENT_IP, Ipv4Addr::new(10, 200, 0, 5), b"x"),
     );
     let mut v6 = ipv4_packet(AGENT_IP, SERVER_IP, b"x");
     v6[0] = 0x60;
-    n.a.handle_packet(now, &v6);
+    n.a.send(now, &v6);
     // MTU の 1420 を 16 の倍数に切り下げた 1408 バイトまで送る
     assert_eq!(n.a.mtu(), 1408);
-    n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, &[0; 1389]));
-    n.a.handle_packet(now, &[]);
+    n.a.send(now, &ipv4_packet(AGENT_IP, SERVER_IP, &[0; 1389]));
+    n.a.send(now, &[]);
     assert!(n.a.poll_transmit().is_none());
     assert_eq!(n.a.drops().get(DropReason::NoRoute), 1);
     assert_eq!(n.a.drops().get(DropReason::InvalidInnerPacket), 2);
@@ -309,9 +334,8 @@ fn inner_packets_that_are_not_ipv4_are_dropped_on_receive() {
     bad_len[2..4].copy_from_slice(&40u16.to_be_bytes());
     for plaintext in [vec![0x60; 40], vec![0x45; 8], bad_len] {
         let datagram = n.b.proto.encapsulate(0, now, &plaintext).unwrap().unwrap();
-        n.a.handle_datagram(now, n.b_addr, &datagram);
+        assert_eq!(n.a.recv(now, n.b_addr, &datagram), None);
     }
-    assert!(n.a.poll_packet().is_none());
     assert_eq!(n.a.drops().get(DropReason::InvalidInnerPacket), 3);
 }
 
@@ -334,7 +358,7 @@ fn garbage_gets_no_answer_and_does_not_move_the_endpoint() {
         &[3; 64],
         &[4; 31],
     ] {
-        n.b.handle_datagram(now, stranger, d);
+        n.b.recv(now, stranger, d);
     }
     assert!(n.b.poll_transmit().is_none(), "errors are never answered");
     let s = n.b.peer_status(&n.a_pub(), now).unwrap();
@@ -347,12 +371,13 @@ fn a_replayed_datagram_from_elsewhere_does_not_move_the_endpoint() {
     let mut n = Net::new();
     n.connect();
     let now = n.now();
-    n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, b"once"));
+    n.a.send(now, &ipv4_packet(AGENT_IP, SERVER_IP, b"once"));
     let tx = n.a.poll_transmit().unwrap();
-    n.b.handle_datagram(now, n.a_addr, &tx.payload);
-    n.b.handle_datagram(now, addr("192.0.2.66:9999"), &tx.payload);
-    assert_eq!(n.b.poll_packet().map(|p| p.len()), Some(24));
-    assert!(n.b.poll_packet().is_none());
+    assert_eq!(
+        n.b.recv(now, n.a_addr, &tx.payload).map(|p| p.len()),
+        Some(24)
+    );
+    assert_eq!(n.b.recv(now, addr("192.0.2.66:9999"), &tx.payload), None);
     assert_eq!(n.b.drops().get(DropReason::Replayed), 1);
     assert_eq!(
         n.b.peer_status(&n.a_pub(), now).unwrap().endpoint,
@@ -392,7 +417,7 @@ fn an_initiation_from_an_unknown_key_gets_no_answer() {
     .unwrap();
     c.handle_timeout(n.now());
     let init = c.poll_transmit().unwrap();
-    n.b.handle_datagram(n.now(), addr("192.0.2.66:9999"), &init.payload);
+    n.b.recv(n.now(), addr("192.0.2.66:9999"), &init.payload);
     assert!(n.b.poll_transmit().is_none());
     assert_eq!(n.b.drops().get(DropReason::UnknownPeer), 1);
     assert_eq!(n.b.peer_status(&n.a_pub(), n.now()).unwrap().endpoint, None);
@@ -404,7 +429,7 @@ fn packets_wait_for_the_handshake_within_the_bound_and_keep_their_order() {
     n.b_up = false;
     for i in 0..1000u16 {
         let now = n.now();
-        n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, &i.to_be_bytes()));
+        n.a.send(now, &ipv4_packet(AGENT_IP, SERVER_IP, &i.to_be_bytes()));
     }
     let held = n.a.held();
     assert_eq!(held.staged_packets_max, 128);
@@ -432,7 +457,7 @@ fn undrained_output_stays_within_the_limits() {
     n.connect();
     let now = n.now();
     for i in 0..2000u32 {
-        n.b.handle_packet(now, &ipv4_packet(SERVER_IP, AGENT_IP, &i.to_be_bytes()));
+        n.b.send(now, &ipv4_packet(SERVER_IP, AGENT_IP, &i.to_be_bytes()));
     }
     let limits = n.b.limits();
     let held = n.b.held();
@@ -442,32 +467,11 @@ fn undrained_output_stays_within_the_limits() {
         n.b.drops().get(DropReason::TransmitOverflow),
         2000 - limits.transmit_packets as u64
     );
-    // A は取り出さずに受け続ける
+    // 受ける側は何も持ち越さない。復号した packet は呼び手の buffer に残るだけである
     while let Some(tx) = n.b.poll_transmit() {
-        n.a.handle_datagram(now, n.b_addr, &tx.payload);
+        assert!(n.a.recv(now, n.b_addr, &tx.payload).is_some());
     }
-    let held = n.a.held();
-    assert_eq!(held.deliver_packets, limits.deliver_packets);
-    assert!(held.deliver_bytes <= limits.deliver_bytes);
-}
-
-#[test]
-fn delivery_is_bounded_by_bytes_too() {
-    let mut n = Net::with(
-        |a| {
-            a.limits.deliver_bytes = 10_000;
-        },
-        |_| {},
-    );
-    n.connect();
-    let now = n.now();
-    for _ in 0..20 {
-        n.b.handle_packet(now, &ipv4_packet(SERVER_IP, AGENT_IP, &[0; 1000]));
-        let tx = n.b.poll_transmit().unwrap();
-        n.a.handle_datagram(now, n.b_addr, &tx.payload);
-    }
-    assert_eq!(n.a.held().deliver_packets, 9);
-    assert_eq!(n.a.drops().get(DropReason::DeliverOverflow), 11);
+    assert_eq!(n.a.held().transmit_packets, 0);
 }
 
 #[test]
@@ -625,7 +629,7 @@ fn the_server_learns_the_endpoint_and_sends_first_after_the_agent_contacts_it() 
     let mut n = Net::new();
     let now = n.now();
     // endpoint を知らない B は送れない
-    n.b.handle_packet(now, &ipv4_packet(SERVER_IP, AGENT_IP, b"early"));
+    n.b.send(now, &ipv4_packet(SERVER_IP, AGENT_IP, b"early"));
     assert_eq!(n.b.drops().get(DropReason::NoEndpoint), 1);
     n.connect();
     n.b_sends(b"later");
@@ -664,7 +668,7 @@ fn same_seeds_give_the_same_bytes() {
         let mut n = Net::new();
         n.tick();
         let mut out = Vec::new();
-        n.a.handle_packet(n.now(), &ipv4_packet(AGENT_IP, SERVER_IP, b"x"));
+        n.a.send(n.now(), &ipv4_packet(AGENT_IP, SERVER_IP, b"x"));
         while let Some(tx) = n.a.poll_transmit() {
             out.push(tx.payload);
         }
@@ -705,7 +709,7 @@ fn bad_configurations_are_refused() {
 fn max_transmit_len_covers_a_full_packet() {
     let mut n = Net::new();
     n.connect();
-    n.a.handle_packet(n.now(), &ipv4_packet(AGENT_IP, SERVER_IP, &[0; 1388]));
+    n.a.send(n.now(), &ipv4_packet(AGENT_IP, SERVER_IP, &[0; 1388]));
     let tx = n.a.poll_transmit().unwrap();
     assert_eq!(tx.payload.len(), n.a.max_transmit_len());
 }
@@ -743,7 +747,7 @@ fn an_idle_responder_keeps_contacting_the_server() {
 }
 
 #[test]
-fn padded_packets_are_held_at_their_own_size() {
+fn padded_packets_are_delivered_at_their_own_size() {
     let mut n = Net::new();
     n.connect();
     let now = n.now();
@@ -752,15 +756,30 @@ fn padded_packets_are_held_at_their_own_size() {
     padded.resize(60_000, 0);
     for _ in 0..300 {
         let datagram = n.b.proto.encapsulate(0, now, &padded).unwrap().unwrap();
-        n.a.handle_datagram(now, n.b_addr, &datagram);
+        let p = n.a.recv(now, n.b_addr, &datagram).unwrap();
+        assert_eq!(p.len(), 21);
     }
-    let held = n.a.held();
-    let limits = n.a.limits();
-    assert_eq!(held.deliver_packets, limits.deliver_packets);
-    assert!(held.deliver_bytes <= limits.deliver_bytes);
-    assert_eq!(held.deliver_bytes, limits.deliver_packets * 21);
-    let p = n.a.poll_packet().unwrap();
-    assert_eq!((p.len(), p.capacity()), (21, 21));
+    assert_eq!(n.a.held(), Held::default());
+}
+
+#[test]
+fn a_datagram_longer_than_the_caller_buffer_is_dropped_before_decrypting() {
+    let mut n = Net::new();
+    n.connect();
+    let now = n.now();
+    n.b.send(now, &ipv4_packet(SERVER_IP, AGENT_IP, &[7; 100]));
+    let tx = n.b.poll_transmit().unwrap();
+    let mut small = vec![0u8; tx.payload.len() - 17];
+    assert_eq!(
+        n.a.handle_datagram(now, n.b_addr, &tx.payload, &mut small),
+        None
+    );
+    assert_eq!(n.a.drops().get(DropReason::Malformed), 1);
+    // 捨てた datagram は再送の窓を進めないので、足りる buffer なら受け取れる
+    assert_eq!(
+        n.a.recv(now, n.b_addr, &tx.payload).map(|p| p.len()),
+        Some(120)
+    );
 }
 
 #[test]
@@ -820,10 +839,10 @@ fn a_replayed_initiation_from_elsewhere_gets_no_answer() {
     let now = n.now();
     n.a.handle_timeout(now);
     let init = n.a.poll_transmit().unwrap();
-    n.b.handle_datagram(now, n.a_addr, &init.payload);
+    n.b.recv(now, n.a_addr, &init.payload);
     assert!(n.b.poll_transmit().is_some());
     let stranger = addr("192.0.2.66:9999");
-    n.b.handle_datagram(now, stranger, &init.payload);
+    n.b.recv(now, stranger, &init.payload);
     assert!(n.b.poll_transmit().is_none());
     assert_eq!(n.b.drops().get(DropReason::Replayed), 1);
     assert_eq!(
@@ -838,12 +857,12 @@ fn a_replayed_response_gets_no_answer() {
     let now = n.now();
     n.a.handle_timeout(now);
     let init = n.a.poll_transmit().unwrap();
-    n.b.handle_datagram(now, n.a_addr, &init.payload);
+    n.b.recv(now, n.a_addr, &init.payload);
     let response = n.b.poll_transmit().unwrap();
-    n.a.handle_datagram(now, n.b_addr, &response.payload);
+    n.a.recv(now, n.b_addr, &response.payload);
     assert!(n.a.poll_transmit().is_some(), "the confirming keepalive");
     let stranger = addr("192.0.2.66:9999");
-    n.a.handle_datagram(now, stranger, &response.payload);
+    n.a.recv(now, stranger, &response.payload);
     assert!(n.a.poll_transmit().is_none());
     assert_eq!(n.a.drops().total(), 1);
     assert_eq!(
@@ -887,7 +906,7 @@ fn a_replayed_server_initiation_after_an_agent_restart_does_not_move_the_endpoin
     n.tick();
     let now = n.now();
     let attacker = addr("192.0.2.66:9999");
-    n.a.handle_datagram(now, attacker, &recorded);
+    n.a.recv(now, attacker, &recorded);
     // 応答は送信元へ返るが、endpoint は server のまま
     let mut answered = false;
     while let Some(tx) = n.a.poll_transmit() {
@@ -966,7 +985,7 @@ fn debug_output_shows_counts_but_no_packet_bytes() {
     let mut n = Net::new();
     n.b_up = false;
     let now = n.now();
-    n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, b"SECRETPAYLOAD"));
+    n.a.send(now, &ipv4_packet(AGENT_IP, SERVER_IP, b"SECRETPAYLOAD"));
     assert_eq!(n.a.held().staged_packets_max, 1);
     let text = format!("{:?}", n.a);
     assert!(text.contains("peers: 1"), "{text}");
@@ -990,8 +1009,8 @@ fn limits_above_their_bounds_are_refused() {
         Err(ConfigError::LimitTooLarge("transmit_packets"))
     );
     assert_eq!(
-        make(&|c| c.limits.deliver_bytes = MAX_LIMIT_BYTES + 1),
-        Err(ConfigError::LimitTooLarge("deliver_bytes"))
+        make(&|c| c.limits.transmit_bytes = MAX_LIMIT_BYTES + 1),
+        Err(ConfigError::LimitTooLarge("transmit_bytes"))
     );
     // 件数は上限の中でも、MTU を掛けたバイト数が上限を超える
     assert_eq!(
@@ -1024,7 +1043,7 @@ fn has_session_follows_the_handshake_and_the_session_age() {
     assert!(n.a.has_session(&b, n.now()));
     // 真の間は、packet はハンドシェイクを待たずに暗号になる
     let now = n.now();
-    n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, b"late"));
+    n.a.send(now, &ipv4_packet(AGENT_IP, SERVER_IP, b"late"));
     assert_eq!(n.a.held().staged_packets_max, 0);
     assert_eq!(n.a.poll_transmit().unwrap().payload[0], 4, "a data message");
     n.run(Duration::from_secs(2), Duration::from_secs(1));
@@ -1060,7 +1079,7 @@ fn start_handshake_sends_one_initiation_and_establishes_a_session() {
     let tx = n.a.poll_transmit().unwrap();
     assert_eq!(tx.payload.len(), 148);
     assert_eq!(n.a.held().transmit_packets, 0);
-    n.b.handle_datagram(n.now(), n.a_addr, &tx.payload);
+    n.b.recv(n.now(), n.a_addr, &tx.payload);
     n.pump();
     assert!(n.a.has_session(&b, n.now()));
     assert_eq!(
@@ -1087,12 +1106,12 @@ fn padding_never_takes_a_data_message_past_the_mtu() {
         assert_eq!(inner % 16, 0, "MTU {mtu}");
         assert!(inner <= usize::from(mtu) && inner + 16 > usize::from(mtu));
         let now = n.now();
-        n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, &vec![1; inner - 20]));
+        n.a.send(now, &ipv4_packet(AGENT_IP, SERVER_IP, &vec![1; inner - 20]));
         let tx = n.a.poll_transmit().unwrap();
         // 暗号の上乗せ (ヘッダと tag の 32 バイト) を除いた長さが設定の MTU を超えない
         assert!(tx.payload.len() - 32 <= usize::from(mtu), "MTU {mtu}");
         assert_eq!(tx.payload.len(), n.a.max_transmit_len());
-        n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, &vec![1; inner - 19]));
+        n.a.send(now, &ipv4_packet(AGENT_IP, SERVER_IP, &vec![1; inner - 19]));
         assert!(n.a.poll_transmit().is_none());
         assert_eq!(n.a.drops().get(DropReason::TooBig), 1);
     }
@@ -1236,16 +1255,16 @@ fn answering_the_server_holds_back_an_own_initiation() {
     );
     let now = n.now();
     let b = n.b_pub();
-    n.b.handle_packet(now, &ipv4_packet(SERVER_IP, AGENT_IP, b"hello"));
+    n.b.send(now, &ipv4_packet(SERVER_IP, AGENT_IP, b"hello"));
     let init = n.b.poll_transmit().unwrap();
-    n.a.handle_datagram(now, n.b_addr, &init.payload);
+    n.a.recv(now, n.b_addr, &init.payload);
     let response = n.a.poll_transmit().unwrap();
     n.a.set_endpoint(now, &b, n.b_addr);
     // B の確認がまだ届かず、A のセッションは使えない。前は A がここで自分の開始を送った
     assert!(!n.a.has_session(&b, now));
     assert!(!n.a.start_handshake(now, &b));
     assert!(n.a.poll_transmit().is_none());
-    n.b.handle_datagram(now, n.a_addr, &response.payload);
+    n.b.recv(now, n.a_addr, &response.payload);
     n.pump();
     assert!(n.a.has_session(&b, now));
     n.run(Duration::from_secs(6), Duration::from_millis(100));

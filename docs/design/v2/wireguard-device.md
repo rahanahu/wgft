@@ -37,21 +37,27 @@ sanstun を別の実装に替える必要が出た場合は、`protocol.rs` を�
 
 | 入力 | 関数 | 中身 |
 | --- | --- | --- |
-| UDP の datagram | `handle_datagram(now, from, datagram)` | 届いた datagram と送信元のアドレス |
-| トンネルの中の packet | `handle_packet(now, packet)` | トンネルの側から送る IPv4 の packet |
+| UDP の datagram | `handle_datagram(now, from, datagram, out)` | 届いた datagram と送信元のアドレス、復号の行き先の呼び手の buffer |
+| トンネルの中の packet | `handle_packet(now, packet, out)` | トンネルの側から送る IPv4 の packet、暗号文の行き先の呼び手の buffer |
 | timer | `handle_timeout(now)` | ハンドシェイクの再送、鍵の更新、keepalive、期限切れ |
 
-出力は呼び手が `poll_*` で取り出します。
+データの packet は呼び手の buffer を通り、packet ごとの確保も写しもありません。
+それ以外の出力は呼び手が `poll_*` で取り出します。
 
 | 出力 | 関数 | 中身 |
 | --- | --- | --- |
-| 送る datagram | `poll_transmit()` | 宛先のアドレスと WireGuard の message |
-| トンネルへ渡す packet | `poll_packet()` | 検査を通り、詰め物を切った IPv4 の packet |
+| トンネルへ渡す packet | `handle_datagram` の戻り | 呼び手の `out` の先頭の、戻りの長さの byte。検査を通り、詰め物を切った IPv4 の packet です。次に同じ `out` を使うまで残ります |
+| 送る datagram (データ) | `handle_packet` の戻り (`Outgoing`) | 宛先のアドレスと、呼び手の `out` の先頭の長さ。セッションがあり、待っている packet が無いときだけ返ります |
+| 送る datagram (そのほか) | `poll_transmit()` | ハンドシェイク、cookie の返事、keepalive、ハンドシェイクを待っていた packet の暗号文。宛先のアドレスと WireGuard の message |
 | event | `poll_event()` | ハンドシェイクの受け付け、セッションの確立、endpoint の変化、ピアの期限切れ |
 | 次に起こす時刻 | `poll_timeout()` | 次に `handle_timeout` を呼ぶ時刻 |
 
 呼び手は、入力を 1 つ渡すたびに出力を取り出します。
-取り出さない出力はキューの上限まで溜まり、溢れたものは捨てて数えます。
+`out` には、復号では受ける datagram の長さから 16 byte を引いた長さ、暗号化では `max_transmit_len()` の長さを渡します。
+復号の `out` が足りない datagram は、復号を始めずに不正な message として捨てます。
+`handle_packet` が返した datagram は、同じ `out` を次に使う前に送ります。
+順を保つため、先に `poll_transmit()` が持つ datagram を送ります。
+取り出さない `poll_transmit()` の出力はキューの上限まで溜まり、溢れたものは捨てて数えます。
 
 状態の読み出しは `peer_status` (endpoint、最後のハンドシェイクの時刻、送受信のバイト数)、`drops` (捨てた理由ごとの数)、`held` (キューが今持つ量) です。
 制御プレーンが endpoint を引き直したときは `set_endpoint` で渡します。
@@ -222,7 +228,6 @@ device が呼び出しの間に持つものと、既定の上限は次のとお�
 | --- | --- | --- | --- |
 | ハンドシェイクを待つ送信の packet (ピアごと) | 128 | 128 × MTU | 古いものから捨てます |
 | 送る datagram | 256 | 512 KiB | 新しいものを捨てます |
-| トンネルへ渡す packet | 256 | 512 KiB | 新しいものを捨てます |
 | event | 64 | | 古いものから捨てます |
 
 ハンドシェイクを待つ packet の 128 は、Linux の WireGuard と wireguard-go の `MAX_STAGED_PACKETS` と同じ数です。
@@ -232,10 +237,11 @@ device が呼び出しの間に持つものと、既定の上限は次のとお�
 
 - ハンドシェイクを待つ packet:128 × 1420 バイト (約 178 KiB)
 - 送る datagram:512 KiB
-- トンネルへ渡す packet:512 KiB
 
-このほかに sanstun の状態と、1 回の呼び出しの中で使う一時的なバッファがあります。
-一時的なバッファは復号に使う datagram 1 つ分で、中身を写した後、呼び出しが返る前に解放します。
+このほかに sanstun の状態があります。
+復号の行き先と暗号文の行き先は呼び手の buffer で、device は持ちません。
+agent のデータプレーンが起動の時に 1 回だけ確保する量は[メモリの上界の行](agent-parity.md#メモリの上界の行)の `device` の項に数えます。
+キューに積むのは、定常の経路を通らない message に限ります。
 sanstun の状態は、設定したピアの数と、作り直したトンネルの index に比例します。
 sanstun が設定に無い鍵のために状態を増やさないことは、sanstun の試験 (`initiations_from_unknown_peers_leave_no_state`) が確かめています。
 上の和に sanstun の状態を足した値は測っていません。
@@ -424,7 +430,7 @@ sanstun を改変 (fork やパッチ) しない所有者の方針に従い、受
   この違いで負荷の高いときの挙動がどう変わるかは確かめていません。
 - cookie の返事の経路 (負荷が高いときのハンドシェイク) は device の層の試験で通していません。
   sanstun の試験が sanstun の中で確かめています。
-- 性能 (packet ごとの割り当て、1 秒あたりの packet の数、CPU) は測っていません。
+- 性能 (1 秒あたりの packet の数、CPU) の device 単体の値は測っていません。定常の状態で packet ごとの確保が 0 であることは、`tests/alloc_calls.rs` が確かめます。
 - device のキューと sanstun の状態を合わせたメモリの保持量は測っていません。
 - MTU の切り下げで、agent が送る 1381 から 1392 バイトの UDP の datagram は、核が断片に分けて送るようになりました。
   断片に分けた UDP が v1 の server (カーネルモードとユーザー空間モード) を通って相手に届くことは、端から端までは確かめていません。

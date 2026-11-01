@@ -29,8 +29,6 @@ pub enum DropReason {
     StagedOverflow,
     /// The transmit queue was full.
     TransmitOverflow,
-    /// The delivery queue was full.
-    DeliverOverflow,
     /// The event queue was full; the oldest event was lost.
     EventOverflow,
     /// sanstun refused a call that the device should never make; a bug in this crate.
@@ -39,7 +37,7 @@ pub enum DropReason {
 
 impl DropReason {
     /// Every reason, in declaration order.
-    pub const ALL: [DropReason; 16] = [
+    pub const ALL: [DropReason; 15] = [
         DropReason::Malformed,
         DropReason::Unauthenticated,
         DropReason::Replayed,
@@ -53,7 +51,6 @@ impl DropReason {
         DropReason::TooBig,
         DropReason::StagedOverflow,
         DropReason::TransmitOverflow,
-        DropReason::DeliverOverflow,
         DropReason::EventOverflow,
         DropReason::Internal,
     ];
@@ -75,7 +72,6 @@ impl DropReason {
             DropReason::TooBig => "too-big",
             DropReason::StagedOverflow => "staged-overflow",
             DropReason::TransmitOverflow => "transmit-overflow",
-            DropReason::DeliverOverflow => "deliver-overflow",
             DropReason::EventOverflow => "event-overflow",
             DropReason::Internal => "internal",
         }

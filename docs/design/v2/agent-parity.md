@@ -641,12 +641,16 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
 - 表:handle の層の waker の表の上界と、核の hook が持つ LAN の側のソケットの表です。
   後者は作成の時に接続の枠の数だけ確保し、育ちません
 - データプレーンの駆動:waker を移す `Vec` は表の行の数 (`Netstack::waker_slots`) まで育ち、容量はその 2 倍までなので、2 × 行の数 × `Waker` の大きさです
-- WireGuard の device:device の上限の件数とバイト数に、件数ごとの `Vec` の頭と、復号の一時のバッファと、データプレーンの受信と送り出しのバッファを足します
+- WireGuard の device:device のキューの上限の件数とバイト数 (ハンドシェイクを待つ packet、device が積む送る datagram、event) に、件数ごとの `Vec` の頭を足します。
+  それに、データプレーンが起動の時に 1 回だけ確保して device に渡す、4 つの使い回しのバッファを足します。
+  受ける datagram の buffer と復号の行き先 (どちらも最大の datagram の長さ 65535 byte)、核が書く packet の buffer (MTU)、device が暗号化して書く datagram の buffer (MTU と header と tag の 32 byte) です。
+  データの packet は、この 4 つの buffer を通るだけで、packet ごとに確保も写しもしません。
+  device の層は、定常の状態で受けた packet の待ち行列を持ちません (`deliver` の上限は無くなりました)
 - トンネルのバッチ:`batch_bytes` の項で、今は 0 です。
   バッチを入れる変更は、1 回の受信と送信のバッチが持つバッファ (`recvmmsg` と `sendmmsg` の datagram の配列、GRO と GSO でまとめた datagram、`WGFT_AGENT_BATCH_MIB` の送信の向きの予算) をこの項に数え、同じ変更で[上界の表](agent-bound.md)を作り直します。
   device の層の使い回しのバッファの数え方は、[バッチの作りの規則](agent-throughput.md#バッチの作りの規則)が決めます。
-  バッチの段の最初の段階 (確保をやめ、まだ 1 packet ずつ送受信する間)は `device` の項に数えます。
-  バッチの段が入った後は、データプレーンの受信と送信のバッファを `device` の項から `batch` の項に移します。
+  バッチの段の最初の段階 (確保をやめ、まだ 1 packet ずつ送受信する間) は、上の 4 つの buffer を `device` の項に数えます。
+  バッチの段が入った後は、これらの buffer を `device` の項から `batch` の項に移し、1 つずつの buffer を連続した配列にします。
   バッチのバッファは起動の時に確保するので、ラボの check 5 と 5b の洪水が満たせる項に `batch` を加えます
 - TCP の中継:接続 1 本につき、中継の task の future、tokio の task と I/O の登録の余裕 (各 512 byte)、両方の向きの大きいバッファ (32 KiB ずつ) です。
   データプレーンのスレッドが使い回しに残す大きいバッファ 16 個を足します。
@@ -730,8 +734,9 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
   比べる量には、流れの数によらない誤差として 64 KiB を足します。
   数えはプロセスで 1 つなので、試験ごとにプロセスを分けて流す cargo-nextest の下でだけ測り、`cargo test` では測らずに終わります
 - packet ごとの確保の呼び出しの数の試験 (`relay/alloc_tests.rs`、`wgft-wireguard` の `tests/alloc_calls.rs`、`wgft-netstack` の `tests/alloc_calls.rs`):慣らしの後の定常で、トンネルの受信と送信、TCP と UDP の中継の両向き、核と handle の層を流し、確保の呼び出しの数 (`wgft-alloc-count` の `thread_alloc_calls`) を数えます。
-  許容は測った値で、確保の出どころを file:line でコメントに書きます。新しい確保は試験が落ち、確保を減らしたら許容を下げます。
-  全体の試験の許容は、agent と試験の相手の間を通った datagram 1 つにつき 2 回で、通った数は試験の相手が数えます。TCP の ACK も数えるので、ACK の数が揺れても結果は揺れません。
+  許容は packet あたり 0 で、新しい確保は試験が落ちます。
+  全体の試験の許容は、agent と試験の相手の間を通った datagram 1 つにつき 0 回に、packet の数に比例しない確保の見込み (16) を足した値です。通った数は試験の相手が数えます。TCP の ACK も数えるので、ACK の数が揺れても結果は揺れません。数える前に、遅延 ACK の timer が切れるまで待ちます。
+  全体の試験は、トンネルの受信と送信、TCP の中継の両向き (大きい書き込みを含む) と UDP の中継の両向きを通します。ping は、核と handle の層の試験が手で運ぶ packet で通します。全体の試験では、ping の間隔が長いので通していません
   中継はデータプレーンのスレッドの上で動くので、そのスレッドで数を読み、試験の相手と宛先の確保は数えません
 - ラボの check 5 と 5b:Rust の agent では、洪水の前 (トンネルと待ち受けを開いた後) の RSS を測り、洪水の間の RSS の育ちが、洪水が満たせる項と余裕の 32 MiB の和を超えないことも確かめます。
   洪水は黙った TCP の接続と 1 byte の datagram なので、満たせる項は核の固定の部分 (触れていなかった表)、洪水が使った接続の枠の配列、表、駆動、device、TCP の中継の接続ごとの部分、UDP の中継です。

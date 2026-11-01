@@ -44,7 +44,7 @@ Go の文書と食い違う点は、この文書が理由と共に挙げたも�
 - 決定:適合の台本は混成で持ちます。直線の台本はデータにし、Go の runner と Rust の runner が同じファイルを流します。反応する台本と測る台本は Go のまま残し、Rust の試験用のプログラムを標準入出力で時計ごと動かします。C ABI は作りません (2026-11-01)
 - 決定:内部に触れる試験 (fuzz、不変条件、手で進める時計の試験、単体の試験) は実装と一緒に Rust に移します。実ネットワークの面から製品を確かめる試験は Go のまま残せます ([テスト](README.md#テスト))
 - 決定:割り当て器は、予算を持つ保持を自前の置き場から取ることを前提に、OS の標準と mimalloc を測ってから選びます (2026-11-01)
-- 決定:device の層は datagram ごとに確保せず、buffer を使い回します。割り当て器は OS の標準のまま、Linux の build は musl の静的な build のままにします。glibc に動的に結ぶ build は、バッチの段で写しを減らした後に残る差を測り直してから決めます ([割り当て器と libc の比べ](#割り当て器と-libc-の比べ)、2026-11-02)
+- 決定:device の層は datagram ごとに確保せず、データプレーンが起動の時に確保した buffer を呼び手の buffer として使い回します。割り当て器は OS の標準のまま、Linux の build は musl の静的な build のままにします。glibc に動的に結ぶ build は、バッチの段で写しを減らした後に残る差を測り直してから決めます ([割り当て器と libc の比べ](#割り当て器と-libc-の比べ)、2026-11-02)
 - 決定:上界の表は `Bound` の計算から生成し、生成し直しの差分で検査します (2026-11-01)
 - 決定:wgstack の実装の担当は Linux の source を読みません。Linux の振る舞いは文書で渡します。実装の担当は wgft 自身のコードである Go の wgstack を読んで写せます。GotaTun (MPL-2.0) のコードは写しません。gVisor と smoltcp のコードも写しません (2026-10-30、2026-11-01)
 - 決定:需要で育つバッファは採用済みで、性能の段階の後に実装します ([決めたこと](../userspace/wgstack-buffers.md#決めたこと)、2026-10-31)
@@ -393,7 +393,7 @@ UDP のソケットは駆動の task が持ちます。
 
 駆動の task は、UDP のソケットの準備、タイマー、操作の知らせ (後述) の 3 つを待ち、起きたら次の順に処理します。
 
-1. UDP のソケットから datagram を読み、`Device::handle_datagram` に渡し、`Device::poll_packet` が出す packet をすべて核の `handle_packet` に渡します
+1. UDP のソケットから datagram を読み、`Device::handle_datagram` に呼び手の復号の buffer と一緒に渡し、戻りの長さの packet を核の `handle_packet` に借用で渡します
 2. 時刻が来ていれば、device の層と核の `handle_timeout` を呼びます
 3. 送り出しを次の規則で行います
 4. `poll_event` の知らせで waker を起こし、`poll_log` の行をログに出します
@@ -710,13 +710,12 @@ sanstun のデータの経路は呼び手の buffer を使います。
 `Interface::receive` はデータの message のヘッダを読むだけで、確保しません。
 sanstun が確保するのは、ハンドシェイク、cookie の返事、keepalive の datagram (`Datagram` の `Box`) だけです。
 
-device の層の確保は、データの packet 1 つにつき次のとおりです。
+device の層の確保は、バッチの段の最初の段階の前は、データの packet 1 つにつき次のとおりでした。
 
 - 受ける向き:`Protocol::receive` の復号の buffer (`vec!` の零埋め) と、`Device::deliver` の平文の写し (`to_vec`)
 - 送る向き:`Device::handle_packet` の packet の写し (`to_vec`) と、`Protocol::encapsulate` の datagram の buffer (`vec!` の零埋め)
 
-受けた packet の `Vec` は、駆動が核に渡した後に解放します。
-送る datagram の `Vec` は、駆動が送った後に解放します。
+受けた packet の `Vec` は、駆動が核に渡した後に解放し、送る datagram の `Vec` は、駆動が送った後に解放していました。
 核と `wgft-netstack` の handle の層は、packet ごとに確保しません。
 
 #### 測った build
@@ -734,7 +733,7 @@ device の層の確保は、データの packet 1 つにつき次のとおりで
 C の libc は musl の名前の target ですが、`cargo zigbuild` は zig の同梱の libc を結び、`malloc` と `free` は zig の実装です。
 B から E は測るための試作で、製品には入れていません。
 
-E の使い回しは向きごとに 8 個までで、容量が MTU と 32 byte を超える buffer は持たずに解放します。
+E の試作の使い回しは向きごとに 8 個までで、容量が MTU と 32 byte を超える buffer は持たずに解放しました。
 持つ量は 2 × 8 × (MTU + 32) byte で、最大の MTU (9216) で約 145 KiB の決まった項になります。
 復号の buffer は最大の datagram の 64 KiB で、今の上界の device の項が数える「復号に使う datagram 1 つ分」と同じ大きさです。
 渡す packet の buffer はどれも容量が MTU と 32 byte になり、送る datagram も buffer の容量で待ち行列の byte に数えます。
@@ -860,7 +859,11 @@ D は動き、Miri の試験も通りましたが、採用を勧めません。
 
 1. device の層を E の形にします。
    復号は device が持つ 1 つの buffer に行い、渡す packet と送る datagram の buffer は呼び手が返したものを向きごとに 8 個まで使い回します。
-   バッチの段の最初の段階 (確保をやめ、まだ 1 packet ずつ送受信する間)は、使い回しの量 2 × 8 × (MTU + 32) byte を上界の device の項に足します。
+   バッチの段の最初の段階の実装は、この E の形を呼び手の buffer を取る形に進めました (2026-11-02、実装の判断)。
+   device は buffer の `Vec` を持たず、受ける向きは呼び手の復号の buffer に復号して先頭の長さを返し、送る向きは呼び手の buffer に暗号化して宛先と長さを返します。
+   E の使い回しの組は、受ける向きの packet の写し 1 回を残していました。借用で渡すと、この写しと使い回しの組の管理が要りません。
+   バッチの段の最初の段階 (確保をやめ、まだ 1 packet ずつ送受信する間)は、データプレーンが起動の時に 1 回だけ確保する 4 つの buffer (受ける datagram と復号の行き先がそれぞれ 65535 byte、核が書く packet が MTU、暗号文が MTU と 32 byte) を上界の device の項に数えます。
+   device の受信の待ち行列 (`deliver` の上限) は無くなったので、上界の device の項は、その分の約 0.5 MiB だけ小さくなりました。
    unsafe も依存も増やさずに、C に対して受ける向きの CPU を 14% 減らしました。
    送る向きは 0.9 から 1.0 の間で、決まっていません。
    buffer はバッチの段が持つので、実装はバッチの段と一緒に入れます。
@@ -922,8 +925,8 @@ Rust の wgstack は Go と同じ floor と boost の枠の模型で書き、Go 
 
 agent では packet は次のように流れます。
 
-- 受信:UDP のソケット、`Device::handle_datagram`、`Device::poll_packet`、核の `handle_packet`
-- 送信:核の `poll_transmit`、`Device::handle_packet`、`Device::poll_transmit`、UDP のソケット
+- 受信:UDP のソケット、`Device::handle_datagram` (復号の buffer を渡す)、核の `handle_packet`
+- 送信:核の `poll_transmit`、`Device::handle_packet` (暗号文の buffer を渡す)、UDP のソケット。ハンドシェイクと keepalive の datagram は `Device::poll_transmit` から取る
 - アプリケーション:中継の task が `wgft-netstack` の handle を読み書きし、LAN の宛先へは OS のソケットで接続します
 
 TUN も、トンネルのアドレスの経路も、専用の経路表と rule も要りません。
@@ -931,9 +934,8 @@ agent はどの OS でも利用者の権限で動き、Go の v1 のユーザー
 核は OS に依らないので、Windows と macOS でも同じ形で動きます。
 CI はこの 2 つの OS で build と単体の試験を流しますが、実機での動作は未確認です。
 
-device の層の `poll_packet` は packet ごとに `Vec` を確保して返し、agent はこの形のまま使います。
-device の層に呼び手の buffer へ書く口を足すかは、CPU を測ってから決めます。
-送信の向きも同じです。
+device の層は packet ごとに確保せず、呼び手の buffer に復号と暗号化を行います。
+バッチの段では、この buffer がバッチの配列の枠になります ([速さを制限しない経路の agent の性能](agent-throughput.md#バッチの作りの規則))。
 
 ### 入口の検査
 
@@ -2003,8 +2005,7 @@ agent の置き換えが終わった後に、次の作業を順に決めます�
 
 - 写さずに読み書きする口:`read_slices` と `write_slices` を足すか。CPU を測ってから決めます
 - device の層との受け渡し:`Device::poll_packet` と `Device::poll_transmit` が packet ごとに確保する形を、呼び手の buffer に書く形に替えるか。
-  2026-11-02 に使い回す形に決めました ([決めたこと](#決めたこと))。
-  実装はバッチの段と一緒に入れます
+  2026-11-02 に呼び手の buffer に書く形に決め、バッチの段の最初の段階で実装しました ([決めたこと](#決めたこと))
 - 受け付けるアドレスが増えたときの待ち受けと UDP の endpoint の表の持ち方 (dial の側を足すときに決めます)
 - 1 回の起床の上限:1 回に作る packet の数と、`WGFT_AGENT_BATCH_MIB` から導く式
 - glibc に動的に結ぶ build:バッチの段で写しを減らした後に、musl の静的な build との差を測り直して決めます ([決めたこと](#決めたこと))

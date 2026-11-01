@@ -411,20 +411,29 @@ async fn serve(
     inner: Arc<Inner>,
 ) {
     let mut buf = vec![0u8; 65535];
+    let mut plain = vec![0u8; 65535];
+    let mut sealed = vec![0u8; device.max_transmit_len()];
     loop {
         let deadline = device.poll_timeout();
         tokio::select! {
             r = sock.recv_from(&mut buf) => {
                 let Ok((n, from)) = r else { continue };
                 inner.datagrams.fetch_add(1, Ordering::Relaxed);
-                device.handle_datagram(clock::now(), from, &buf[..n]);
-                while let Some(p) = device.poll_packet() {
-                    if let Some(reply) = route(&p, &inner) {
-                        device.handle_packet(clock::now(), &reply);
-                    }
+                if let Some(len) = device.handle_datagram(clock::now(), from, &buf[..n], &mut plain)
+                    && let Some(reply) = route(&plain[..len], &inner)
+                    && let Some(o) = device.handle_packet(clock::now(), &reply, &mut sealed)
+                    && sock.send_to(&sealed[..o.len], o.to).await.is_ok()
+                {
+                    inner.datagrams.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            Some(p) = out.recv() => device.handle_packet(clock::now(), &p),
+            Some(p) = out.recv() => {
+                if let Some(o) = device.handle_packet(clock::now(), &p, &mut sealed)
+                    && sock.send_to(&sealed[..o.len], o.to).await.is_ok()
+                {
+                    inner.datagrams.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             () = crate::dataplane::clock::sleep_until(deadline.unwrap_or_else(|| clock::now() + Duration::from_secs(1))) => {
                 device.handle_timeout(clock::now());
             }
