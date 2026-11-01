@@ -1,0 +1,22 @@
+# Leave a SYN-ACK unanswered. RFC 2525 2.7, an initial RTO too low: RFC 6298 2.1 sets the RTO to
+# 1 s until an RTT is measured, which Linux and wgstack use, so the SYN-ACK is resent no sooner
+# than about 1 s.
+scenario rfc2525-synack-rto
+refs: RFC 2525 2.7, RFC 6298 2.1
+
+listen l 8303
+peer p 8303
+send p syn(p, with(opts_standard(), ts=ts(ts_val(p), seq(0))))
+await p 2s match=is_synack(s) -> first
+require synack first.ok
+  what: a SYN-ACK
+  got: {seg_desc(first)}
+let at = now
+await p 5s match=is_synack(s) -> again
+let gap = now - at
+if again.ok
+  measure synack-resent-after_ms ms(gap)
+end
+check initial-rto again.ok && gap >= 900ms
+  what: RFC 2525 2.7: an unanswered SYN-ACK is resent after the initial RTO of 1 s, not sooner
+  got: {yes_no(!again.ok, "not resent within 5 s", yes_no(gap >= 900ms, "after 1 s or more", "before 900 ms"))}

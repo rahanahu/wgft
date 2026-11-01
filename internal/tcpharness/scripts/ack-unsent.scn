@@ -1,0 +1,25 @@
+# Data whose ACK acknowledges bytes the DUT never sent. RFC 9293 3.10.7.4 drops the segment and
+# sends an ACK; RFC 5961 5.2 keeps the ACK. wgstack sends it within its rate limit. Linux dropped
+# it silently up to v7.0 and answers with a rate-limited challenge ACK from v7.1, so the reference
+# 7.2 passes.
+scenario ack-unsent
+refs: RFC 9293 3.10.7.4, RFC 5961 5.2; packetimpact tcp_unacc_seq_ack
+
+listen l 8018
+connect p l 8018 syn=opts_standard()
+send p with(segment(p, ACK|PSH, p.snd_nxt, "BAD!"), ack=p.rcv_nxt+1000)
+await p 500ms -> r
+measure reply seg_desc(r)
+check ack-reply r.ok && is_pure_ack(r) && r.ack == p.snd_nxt
+  what: an ACK that does not cover the dropped segment answers it, RFC 9293 3.10.7.4
+  got: {ack_desc(r, p.snd_nxt, r.ok && is_pure_ack(r))}
+read p.conn 4 300ms -> d
+let dropped = len(d.data) == 0 && err_kind(d.err) == "timeout"
+check not-delivered dropped
+  what: the segment's bytes are not delivered
+  got: {len(d.data)} bytes, error {err_kind(d.err)}
+if !dropped
+  log the bytes were delivered, so the testbench's next bytes would overlap them; after.* not reached
+  stop
+end
+alive after p p.conn

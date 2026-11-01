@@ -1,0 +1,66 @@
+# Reassembly with fragments in order, out of order, duplicated and overlapping. Each datagram is
+# 3000 bytes split at 1000 and 2000.
+scenario udp-reassembly
+refs: RFC 791 3.2, RFC 815; packet-validation.md, the fragment checks
+
+listen_udp u 5303
+let dst = addrport(DUT_ADDR, 5303)
+let src = addrport(PEER_ADDR, 41003)
+
+let msg = pattern(3000, 0x71)
+inject_ip fragments(udp(src, dst, 301, msg), 1000, 2000)
+udp_read u 1s -> r
+check in-order r.err == none && r.data == msg
+  what: three fragments in order reassemble
+  got: {yes_no(r.err == none && r.data == msg, "delivered", text(len(r.data)) + " bytes, error " + err_kind(r.err))}
+
+let msg = pattern(3000, 0x72)
+let fs = fragments(udp(src, dst, 302, msg), 1000, 2000)
+inject_ip fs[2]
+inject_ip fs[1]
+inject_ip fs[0]
+udp_read u 1s -> r
+check out-of-order r.err == none && r.data == msg
+  what: three fragments in reverse order reassemble
+  got: {yes_no(r.err == none && r.data == msg, "delivered", text(len(r.data)) + " bytes, error " + err_kind(r.err))}
+
+let msg = pattern(3000, 0x73)
+let fs = fragments(udp(src, dst, 303, msg), 1000, 2000)
+inject_ip fs[0]
+inject_ip fs[1]
+inject_ip fs[1]
+inject_ip fs[2]
+udp_read u 1s -> r
+check duplicate r.err == none && r.data == msg
+  what: an exact duplicate fragment does not stop reassembly
+  got: {yes_no(r.err == none && r.data == msg, "delivered", text(len(r.data)) + " bytes, error " + err_kind(r.err))}
+udp_read u 300ms -> r
+check duplicate.once r.err != none
+  what: the datagram is delivered once
+  got: {yes_no(r.err != none, "nothing", "a datagram of " + text(len(r.data)) + " bytes")}
+
+# The second fragment starts 8 bytes inside the first, with the same bytes there.
+let whole = udp(src, dst, 304, pattern(3000, 0x74))
+let fs = fragments(whole, 1000, 2000)
+inject_ip fs[0]
+inject_ip frag(whole, 992, 2000)
+inject_ip fs[2]
+udp_read u 300ms -> r
+check overlap-dropped r.err != none
+  what: packet-validation.md and Linux since 4.19: an overlapping fragment drops the datagram
+  got: {yes_no(r.err != none, "nothing", "a datagram of " + text(len(r.data)) + " bytes")}
+# The missing piece, exactly: a stack that dropped only the overlapping fragment completes the
+# datagram now; one that dropped the datagram, as Linux kills the queue
+# (v6.1:net/ipv4/ip_fragment.c:383-391), has only the later pieces left and delivers nothing.
+inject_ip fs[1]
+udp_read u 300ms -> r
+check overlap-drops-datagram r.err != none
+  what: the overlap dropped the whole datagram, not only the overlapping fragment
+  got: {yes_no(r.err != none, "nothing", "a datagram of " + text(len(r.data)) + " bytes")}
+
+let msg = pattern(3000, 0x75)
+inject_ip fragments(udp(src, dst, 305, msg), 1000, 2000)
+udp_read u 1s -> r
+check after r.err == none && r.data == msg
+  what: a later datagram still reassembles
+  got: {yes_no(r.err == none && r.data == msg, "delivered", text(len(r.data)) + " bytes, error " + err_kind(r.err))}

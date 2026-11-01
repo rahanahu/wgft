@@ -166,6 +166,9 @@ func (in *interp) call(e *Expr, local map[string]any) any {
 	case "quote":
 		return []byte(strconv.Quote(string(in.bytes(arg(0)))))
 	}
+	if v, ok := in.netCall(e, arg); ok {
+		return v
+	}
 	in.failf("unknown function %s", e.Name)
 	return nil
 }
@@ -192,6 +195,13 @@ func (in *interp) with(x any, e *Expr, local map[string]any) any {
 				cp.seg.Payload = in.bytes(val)
 			case "opts":
 				cp.seg.Opts = copyOptions(in.opts(val))
+			case "mss":
+				if val == nil {
+					cp.seg.Opts.MSS = nil
+				} else {
+					m := uint16(in.int(val))
+					cp.seg.Opts.MSS = &m
+				}
 			case "ts_val":
 				if cp.seg.Opts.TS == nil {
 					in.failf("with ts_val= on a segment without timestamps")

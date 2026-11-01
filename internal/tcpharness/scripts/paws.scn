@@ -1,0 +1,40 @@
+# A data segment whose timestamp is older than the last one the DUT accepted. RFC 7323 5.3 drops
+# it and answers with an ACK; the bytes must not reach the application.
+scenario paws
+refs: RFC 7323 5.3; packetimpact tcp_paws_mechanism
+
+listen l 8010
+connect p l 8010 syn=opts_standard()
+require timestamps p.ts
+  what: timestamps negotiated
+  got: {yes_no(p.ts, "timestamps", "none")}
+send_data p "fresh1"
+read p.conn 6 1s -> r
+require fresh.delivered r.err == none && r.data == "fresh1"
+  what: a current segment is delivered
+  got: {len(r.data)} bytes, error {err_kind(r.err)}
+await p 1s match=acks(s, p.snd_nxt) -> a
+require fresh.acked a.ok
+  what: the current segment is acknowledged
+  got: {seg_desc(a)}
+
+# 100 s older than the clock
+send p with(segment(p, ACK|PSH, p.snd_nxt, "OLD!"), ts_val=ts_val(p)-100000)
+await p prompt match=has(s, ACK) -> a
+check old.dupack a.ok && a.ack == p.snd_nxt
+  what: the old segment draws at once an ACK that does not cover it
+  got: {ack_desc(a, p.snd_nxt)}
+read p.conn 4 300ms -> r
+let dropped = len(r.data) == 0 && err_kind(r.err) == "timeout"
+check old.not-delivered dropped
+  what: the old segment's bytes are not delivered
+  got: {len(r.data)} bytes, error {err_kind(r.err)}
+if !dropped
+  log the old bytes were delivered, so the same bytes with a current timestamp would be a duplicate; retry.delivered not reached
+  stop
+end
+send_data p "NEW!"
+read p.conn 4 1s -> r
+check retry.delivered r.err == none && r.data == "NEW!"
+  what: the same bytes with a current timestamp are delivered
+  got: {quote(r.data)}, error {err_kind(r.err)}

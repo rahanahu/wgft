@@ -36,8 +36,8 @@ func loadScript(file string) (*Script, error) {
 }
 
 // CheckLines keeps the lines of a trace that a real-time DUT gives the same way on every run:
-// each check's outcome, key, expectation and observation, every recorded failure, and the names
-// of the measured values without the values. Segment lines carry the engine's own random numbers and
+// each check's outcome, key and expectation, the observation of every check that did not pass,
+// every recorded failure, and the names of the measured values without the values. Segment lines carry the engine's own random numbers and
 // are left out.
 func CheckLines(lines []string) []string {
 	var out []string
@@ -46,7 +46,15 @@ func CheckLines(lines []string) []string {
 			out = append(out, l) // every failure, a Fatalf outside a check included
 			continue
 		}
-		for _, p := range []string{"PASS  ", "FAIL  ", "KNOWN DIFFERENCE  ", "CHANGED DIFFERENCE  ", "UNEXPECTED PASS  "} {
+		// A passing check's observation may carry what a real-time run measured, such as how many
+		// segments a burst had, so only its key and expectation are kept. Every other outcome keeps
+		// its observation, which the expected-difference lists match.
+		if strings.HasPrefix(l, "PASS  ") {
+			l, _, _ = strings.Cut(l, "; got: ")
+			out = append(out, l)
+			continue
+		}
+		for _, p := range []string{"FAIL  ", "KNOWN DIFFERENCE  ", "CHANGED DIFFERENCE  ", "UNEXPECTED PASS  "} {
 			if strings.HasPrefix(l, p) {
 				out = append(out, l)
 			}
