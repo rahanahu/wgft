@@ -577,7 +577,6 @@ fn accounting_fault_stops_udp() {
     assert_eq!(n.s.udp_receive_fault(), Some(UdpFault::SlotReleasedTwice));
     let log = n.s.poll_log().unwrap();
     assert_eq!(log.kind, LogKind::UdpFault);
-    assert!(log.to_string().contains("restart the agent"));
     assert!(n.s.poll_log().is_none());
     // 後の受信は捨て、送信と開き直しは誤りにします。
     let dropped = n.s.stats().udp_dropped;

@@ -253,15 +253,23 @@ pub fn check_supported(s: &Settings) -> Result<(), Refusal> {
 pub fn startup_lines(c: &Config, s: &Settings) -> Vec<LogLine> {
     let mut out = vec![LogLine::Plain("effective config:".to_owned())];
     out.extend(c.effective_lines().into_iter().map(LogLine::Plain));
+    // Go の `memory soft limit:` の行の代わり。フロー数の上限から導く (agent-parity.md のメモリの上界の行)
+    let bound = crate::memory::MemoryBound::for_limits(crate::flowpool::Limits {
+        udp: s.max_udp_flows as usize,
+        tcp: s.max_tcp_flows as usize,
+    });
+    out.push(LogLine::Stamped(bound.line()));
+    out.push(LogLine::Stamped(bound.terms_line()));
     // 送信の向きのバッチは、値から導く量が wgstack の送信の経路で決まるまで効かせない
     if !c.get("WGFT_AGENT_BATCH_MIB").is_empty() {
         out.push(LogLine::Stamped(
             "WGFT_AGENT_BATCH_MIB: not applied yet, since this build has no send batching; the setting is kept so the same agent.env works later".to_owned(),
         ));
     }
-    if c.source("WGFT_AGENT_NETSTACK") != Source::Default {
+    // netstack は Rust の wgstack の 1 つだけである。wgstack 以外の値は使わない旨を書く
+    if c.source("WGFT_AGENT_NETSTACK") != Source::Default && s.netstack != "wgstack" {
         out.push(LogLine::Stamped(format!(
-            "WGFT_AGENT_NETSTACK={}: unused, since this build has no choice of network stack; the setting is kept so the same agent.env works",
+            "WGFT_AGENT_NETSTACK={}: unused, since this build has one network stack, wgstack, and runs on it; the setting is kept so the same agent.env works",
             s.netstack
         )));
     }
@@ -357,9 +365,13 @@ mod tests {
         let lines = startup_lines(&c, &s);
         assert_eq!(lines[0], LogLine::Plain("effective config:".into()));
         let st = stamped(&lines);
+        let bound = crate::memory::MemoryBound::for_limits(crate::flowpool::Limits::default());
+        let (line, terms) = (bound.line(), bound.terms_line());
         assert_eq!(
             st,
             vec![
+                line.as_str(),
+                terms.as_str(),
                 "no target allowlist: WGFT_AGENT_ALLOW_TARGETS is not set; the server can direct this agent to any address it can reach"
             ]
         );
@@ -372,9 +384,13 @@ mod tests {
             &[],
         );
         assert_eq!(check_supported(&s), Ok(()));
+        let bound = crate::memory::MemoryBound::for_limits(crate::flowpool::Limits::default());
+        let (line, terms) = (bound.line(), bound.terms_line());
         assert_eq!(
             stamped(&startup_lines(&c, &s)),
             vec![
+                line.as_str(),
+                terms.as_str(),
                 "target allowlist WGFT_AGENT_ALLOW_TARGETS=10.0.0.0/8,192.168.1.10/32:80; the server can direct this agent only to these addresses"
             ]
         );
@@ -393,7 +409,7 @@ mod tests {
         assert!(st.contains("WGFT_AGENT_BATCH_MIB: not applied yet"), "{st}");
         assert!(!st.contains("WGFT_MAX_UDP_FLOWS"), "{st}");
         assert!(
-            st.contains("WGFT_AGENT_NETSTACK=gvisor: unused, since this build has no choice of network stack;"),
+            st.contains("WGFT_AGENT_NETSTACK=gvisor: unused, since this build has one network stack, wgstack,"),
             "{st}"
         );
         // 空の値でも、出所が既定でなければ書く
@@ -402,6 +418,13 @@ mod tests {
             stamped(&startup_lines(&c, &s))
                 .iter()
                 .any(|l| l.starts_with("WGFT_AGENT_NETSTACK=: unused"))
+        );
+        // wgstack はそのまま使うので書かない
+        let (c, s) = settings(&[("WGFT_AGENT_NETSTACK", "wgstack")], &[]);
+        assert!(
+            !stamped(&startup_lines(&c, &s))
+                .join("\n")
+                .contains("NETSTACK")
         );
         let (c, s) = settings(&[], &[]);
         assert!(

@@ -17,6 +17,7 @@
 pub mod clock;
 mod driver;
 mod socket;
+pub mod stack;
 #[cfg(test)]
 mod tests;
 
@@ -31,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Waker;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use wgft_wireguard::{Device, DeviceConfig, Drops, Event, Held, PeerStatus};
 
 pub use socket::{REQUESTED, REQUIRED, SocketBuffers};
@@ -79,6 +80,16 @@ pub struct UpperInit<B> {
     pub mtu: usize,
     /// The previous generation's budget, or `None` when the previous one ended in a panic or
     /// there was none; the layer then makes a new one.
+    pub budget: Option<B>,
+}
+
+/// A failed factory of the layer above, with the budget it was given, so that the next attempt
+/// keeps it.
+#[derive(Debug)]
+pub struct UpperError<B> {
+    /// Why the layer could not be made.
+    pub error: io::Error,
+    /// The budget the factory took, or `None` when it had none or lost it.
     pub budget: Option<B>,
 }
 
@@ -155,7 +166,41 @@ struct Shared<U> {
     inner: RefCell<Inner<U>>,
     poisoned: Cell<bool>,
     /// 出力を生みうる操作の後に鳴らし、駆動の task を起こす。
-    notify: Notify,
+    wake: Wake,
+}
+
+/// 駆動の task を起こす知らせ。同じスレッドの中だけで使うので、錠を持たない。待つ者がいない間の知らせは
+/// 印として残り、次の待ちがすぐに解ける。
+#[derive(Default)]
+pub(crate) struct Wake {
+    woken: Cell<bool>,
+    waker: Cell<Option<Waker>>,
+}
+
+impl Wake {
+    /// 駆動の task を起こす。
+    pub(crate) fn wake(&self) {
+        self.woken.set(true);
+        if let Some(w) = self.waker.take() {
+            w.wake();
+        }
+    }
+
+    /// 前の待ちの後に [`Wake::wake`] が呼ばれていれば解ける。待つのは駆動の task 1 つだけである。
+    pub(crate) async fn woken(&self) {
+        std::future::poll_fn(|cx| {
+            if self.woken.replace(false) {
+                return std::task::Poll::Ready(());
+            }
+            let w = self.waker.take();
+            match w {
+                Some(w) if w.will_wake(cx.waker()) => self.waker.set(Some(w)),
+                _ => self.waker.set(Some(cx.waker().clone())),
+            }
+            std::task::Poll::Pending
+        })
+        .await;
+    }
 }
 
 impl<U> Shared<U> {
@@ -194,7 +239,7 @@ impl<U> Drop for Borrow<'_, U> {
     fn drop(&mut self) {
         if !self.panicking && std::thread::panicking() {
             self.shared.poisoned.set(true);
-            self.shared.notify.notify_one();
+            self.shared.wake.wake();
         }
     }
 }
@@ -237,7 +282,7 @@ impl<U> Local<U> {
     /// As for [`Local::with`].
     pub fn operate<R>(&self, f: impl FnOnce(&mut U) -> R) -> R {
         let r = self.with(f);
-        self.0.notify.notify_one();
+        self.0.wake.wake();
         r
     }
 
@@ -319,7 +364,7 @@ impl<U: Upper> Dataplane<U> {
         make: F,
     ) -> Result<Self, StartError<U::Budget>>
     where
-        F: FnOnce(UpperInit<U::Budget>) -> U + Send + 'static,
+        F: FnOnce(UpperInit<U::Budget>) -> Result<U, UpperError<U::Budget>> + Send + 'static,
     {
         let fail = |error: io::Error, carry| StartError { error, carry };
         if config.peers.len() != 1 {
@@ -433,18 +478,22 @@ impl<U: Upper> Dataplane<U> {
         Duration::from_nanos(self.high_water.load(Ordering::Relaxed))
     }
 
+    /// A handle for the control plane's tasks: status, endpoint changes and jobs on the data plane
+    /// thread. It does not keep the thread alive.
+    #[must_use]
+    pub fn handle(&self) -> Handle<U> {
+        Handle {
+            commands: self.commands.clone(),
+        }
+    }
+
     /// The current status.
     ///
     /// # Errors
     ///
     /// Fails when the thread has ended.
     pub async fn status(&self) -> io::Result<Status> {
-        let (tx, rx) = oneshot::channel();
-        self.commands
-            .send(Command::Status(tx))
-            .await
-            .map_err(|_| stopped())?;
-        rx.await.map_err(|_| stopped())
+        status(&self.commands).await
     }
 
     /// Points the peer at a new endpoint.
@@ -453,10 +502,7 @@ impl<U: Upper> Dataplane<U> {
     ///
     /// Fails when the thread has ended.
     pub async fn set_endpoint(&self, endpoint: SocketAddr) -> io::Result<()> {
-        self.commands
-            .send(Command::SetEndpoint(endpoint))
-            .await
-            .map_err(|_| stopped())
+        set_endpoint(&self.commands, endpoint).await
     }
 
     /// Runs `f` on the data plane thread, between two wake-ups of the driver, and returns its
@@ -471,15 +517,7 @@ impl<U: Upper> Dataplane<U> {
         R: Send + 'static,
         F: FnOnce(&Local<U>) -> R + Send + 'static,
     {
-        let (tx, rx) = oneshot::channel();
-        let job: Job<U> = Box::new(move |local| {
-            let _ = tx.send(f(local));
-        });
-        self.commands
-            .send(Command::Run(job))
-            .await
-            .map_err(|_| stopped())?;
-        rx.await.map_err(|_| stopped())
+        call(&self.commands, f).await
     }
 
     /// Takes the device's event stream. Events that do not fit its buffer are dropped. Returns
@@ -521,6 +559,108 @@ impl<U: Upper> Dataplane<U> {
     }
 }
 
+/// A handle on a running data plane generation, for the control plane's tasks. Cloning it is
+/// cheap; it fails every call once the generation's thread has ended.
+pub struct Handle<U: Upper> {
+    commands: mpsc::Sender<Command<U>>,
+}
+
+impl<U: Upper> Clone for Handle<U> {
+    fn clone(&self) -> Self {
+        Self {
+            commands: self.commands.clone(),
+        }
+    }
+}
+
+impl<U: Upper> fmt::Debug for Handle<U> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Handle")
+            .field("finished", &self.commands.is_closed())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<U: Upper> Handle<U> {
+    /// As [`Dataplane::status`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when the thread has ended.
+    pub async fn status(&self) -> io::Result<Status> {
+        status(&self.commands).await
+    }
+
+    /// As [`Dataplane::set_endpoint`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when the thread has ended.
+    pub async fn set_endpoint(&self, endpoint: SocketAddr) -> io::Result<()> {
+        set_endpoint(&self.commands, endpoint).await
+    }
+
+    /// As [`Dataplane::call`].
+    ///
+    /// # Errors
+    ///
+    /// Fails when the thread has ended or ends before `f` returns.
+    pub async fn call<R, F>(&self, f: F) -> io::Result<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(&Local<U>) -> R + Send + 'static,
+    {
+        call(&self.commands, f).await
+    }
+
+    /// Resolves when the generation's thread has ended or is ending, for any reason.
+    pub async fn finished(&self) {
+        self.commands.closed().await;
+    }
+
+    /// Whether the generation's thread has ended or is ending.
+    #[must_use]
+    pub fn is_finished(&self) -> bool {
+        self.commands.is_closed()
+    }
+}
+
+async fn status<U: Upper>(commands: &mpsc::Sender<Command<U>>) -> io::Result<Status> {
+    let (tx, rx) = oneshot::channel();
+    commands
+        .send(Command::Status(tx))
+        .await
+        .map_err(|_| stopped())?;
+    rx.await.map_err(|_| stopped())
+}
+
+async fn set_endpoint<U: Upper>(
+    commands: &mpsc::Sender<Command<U>>,
+    endpoint: SocketAddr,
+) -> io::Result<()> {
+    commands
+        .send(Command::SetEndpoint(endpoint))
+        .await
+        .map_err(|_| stopped())
+}
+
+async fn call<U, R, F>(commands: &mpsc::Sender<Command<U>>, f: F) -> io::Result<R>
+where
+    U: Upper,
+    R: Send + 'static,
+    F: FnOnce(&Local<U>) -> R + Send + 'static,
+{
+    let (tx, rx) = oneshot::channel();
+    let job: Job<U> = Box::new(move |local| {
+        let _ = tx.send(f(local));
+    });
+    commands
+        .send(Command::Run(job))
+        .await
+        .map_err(|_| stopped())?;
+    rx.await.map_err(|_| stopped())
+}
+
 /// スレッドを join する。panic で終わったスレッドは 1 行を出して `None` を返す。
 async fn join<B: Send + 'static>(thread: std::thread::JoinHandle<Exit<B>>) -> Option<Exit<B>> {
     let exit = tokio::task::spawn_blocking(move || thread.join().ok())
@@ -559,7 +699,7 @@ fn run_thread<U, F>(
 ) -> Exit<U::Budget>
 where
     U: Upper,
-    F: FnOnce(UpperInit<U::Budget>) -> U,
+    F: FnOnce(UpperInit<U::Budget>) -> Result<U, UpperError<U::Budget>>,
 {
     let unix_high_water = device.unix_high_water();
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -591,15 +731,24 @@ where
         }
     };
     let mtu = device.mtu();
-    let upper = make(UpperInit {
+    let upper = match make(UpperInit {
         now: clock::now(),
         mtu,
         budget,
-    });
+    }) {
+        Ok(u) => u,
+        Err(UpperError { error, budget }) => {
+            let _ = ready.send(Err((error, budget)));
+            return Exit {
+                unix_high_water,
+                budget: None,
+            };
+        }
+    };
     let shared = Rc::new(Shared {
         inner: RefCell::new(Inner { device, upper }),
         poisoned: Cell::new(false),
-        notify: Notify::new(),
+        wake: Wake::default(),
     });
     let _ = ready.send(Ok(()));
     let tasks = tokio::task::LocalSet::new();
@@ -615,13 +764,23 @@ where
             buffers,
         ),
     );
-    if let Err(e) = ended {
-        crate::logf!("tunnel: the data plane stopped: {e}");
-    }
-    // local の task を実行環境の中で落とす。task が持つ handle の `Drop` は上の層を借用しうる
+    let rest = match ended {
+        Ok(rest) => Some(rest),
+        Err(e) => {
+            crate::logf!("tunnel: the data plane stopped: {e}");
+            None
+        }
+    };
+    // local の task を実行環境の中で落とす。task が持つ handle の `Drop` は上の層を借用し、中継の接続を
+    // 切る RST を核に積みうる。止める命令で終わったときは、それを 1 回だけ送り出す
     {
         let _guard = runtime.enter();
         drop(tasks);
+        if let Some(rest) = rest
+            && !shared.poisoned.get()
+        {
+            rest.flush(&Local(Rc::clone(&shared)));
+        }
     }
     drop(runtime);
     let unix_high_water = shared.inner.borrow().device.unix_high_water();
@@ -680,7 +839,7 @@ impl<U: Upper> Generations<U> {
         make: F,
     ) -> io::Result<()>
     where
-        F: FnOnce(UpperInit<U::Budget>) -> U + Send + 'static,
+        F: FnOnce(UpperInit<U::Budget>) -> Result<U, UpperError<U::Budget>> + Send + 'static,
     {
         self.stop().await;
         let carry = self
@@ -697,6 +856,15 @@ impl<U: Upper> Generations<U> {
                 Err(e.error)
             }
         }
+    }
+
+    /// Raises the floor of the next device's handshake stamps to at least `unix_floor`, such as
+    /// the high water mark persisted in the data directory.
+    pub fn raise_floor(&mut self, unix_floor: Duration) {
+        let carry = self
+            .carry
+            .get_or_insert_with(|| Carry::first(Duration::ZERO));
+        carry.unix_high_water = carry.unix_high_water.max(unix_floor);
     }
 
     /// Stops the current generation and keeps its carry.

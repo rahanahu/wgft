@@ -184,8 +184,8 @@ shard の割り当ては `labhost run -shard K/N all` が決めます。
 結果の回収は 1 回 300 秒で打ち切ります。
 終了コードは、組ごとの結果を合わせたものです。
 組の結果は、どれかの shard の失敗、VM の中の後片付けの漏れ、中断、統合の不整合で失敗になります。
-`rust` の組は「wgstack の上の agent」の段まで報告だけなので、`go` の組も流したときは、`rust` の組の失敗をその旨の行で示すだけで終了コードに入れません。
-その段が入った後は、`rust` の組の失敗も終了コードに入れます (`lab/lab` の `SUITE_RUST_GATES`)。
+`go` の組も流したときも、`rust` の組の失敗を終了コードに入れます (`lab/lab` の `SUITE_RUST_GATES`)。
+「UDP の中継」の段までは報告だけでした。
 `rust` の組だけを流したときは、その結果が終了コードです。
 VM の削除の失敗は、終了コードに入れません。
 最後に統合までの所要時間を出し、VM を消した後に削除までを含めた所要時間を出します。
@@ -259,7 +259,10 @@ server と VPS の側のコマンドも `wgft` のままです。
 
 Go の実行環境に依る読み取りは、Rust の agent では次のように読み替えます。
 
-- `lifecycle.sh` の check 5 と 5b:エージェントの `memory soft limit:` の行の代わりに `memory bound:` の行を読み、RSS がその値と 32 MiB の和を超えないことを確かめます
+- `lifecycle.sh` の check 5 と 5b:エージェントの `memory soft limit:` の行の代わりに `memory bound:` の行を読み、RSS がその値と 32 MiB の和を超えないことを確かめます。
+  あわせて、洪水の前 (トンネルと待ち受けを開いた後) に RSS を測り、洪水の間の育ちが `memory bound terms:` の行のうち洪水が満たせる項 (`core fixed`、`tables`、`driver`、`device`、`tcp relay`、`udp relay`) の和に 32 MiB を足した値を超えないことを確かめます。
+  洪水はデータを運ばないので、`tcp bulk` と `core flows` は入れません。
+  項の分け方は [agent-parity.md](../docs/design/v2/agent-parity.md#メモリの上界の行) にあります
 - `exhaustion.sh` の acceptq と ackflood:エージェントの GC の記録が無いので、ヒープの値を示さず RSS だけを示します
 - `agentmem.sh`:Go の agent のメモリの probe に依るので、`SKIP` を 1 行出して何もしません
 - `agentdoctor.sh` の userspace の節:`AGENTDOCTOR_BASELINE` の既定を Go の `wgft` にし、Go の CLI が Rust の agent の制御ソケットから読む ID と状態と理由が、Rust の CLI と同じことを確かめます
@@ -274,9 +277,8 @@ lab/lab exec vm bash /wgft/lab/agent-handover.sh kernel
 lab/lab exec vm bash /wgft/lab/agent-handover.sh userspace
 ```
 
-今の Rust の agent は TUN の試作で、root が要ります。
-このため `rust` の組では、利用者 wgftlab で agent を動かす確認、試作に無い設定を渡す確認、UDP のルールを使う確認、2 つの agent を同じ namespace で動かして TUN の `wgft0` の名前が重なる確認などが失敗します。
-「wgstack の上の agent」の段までは、`rust` の組の結果を報告だけに使います ([テストの規範](../docs/development/testing.md#マージの前に流すテスト))。
+今の Rust の agent は Rust の wgstack の上で動き、root も TUN も要りません。
+`rust` の組の扱いは [テストの規範](../docs/development/testing.md#マージの前に流すテスト) にあります。
 
 ## 対応する VPS の環境
 

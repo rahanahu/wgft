@@ -19,10 +19,10 @@
 # The script always runs both agents, whatever WGFT_LAB_AGENT_IMPL says: the Rust one is
 # lab/sandbox.sh's RUST_WGFT, which `WGFT_LAB_AGENT_IMPL=rust lab/lab build` builds and installs, and the
 # Go one is the Go wgft on PATH. The check is opt-in in lab/suite.txt, since it needs both. The
-# tunnel, the ping and the agent's inbound filter are the lab suite's to check with the Rust agent;
-# this script keeps to the handover. The agents run as root in the home namespace, which the Rust agent still needs while it
-# carries the tunnel on a TUN device. Requires the netns topology (`lab/lab net up`). Leftovers from
-# earlier runs are killed first.
+# tunnel, the ping and the tunnel's inbound checks are the lab suite's to check with the Rust agent;
+# this script keeps to the handover. The agents run as root in the home namespace, as the script
+# always ran them; neither agent needs it in userspace mode. Requires the netns topology
+# (`lab/lab net up`). Leftovers from earlier runs are killed first.
 set -u
 mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: agent-handover.sh kernel|userspace" >&2; exit 2;; esac

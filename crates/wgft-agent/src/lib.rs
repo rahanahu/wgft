@@ -14,8 +14,8 @@ pub mod enroll;
 pub mod error;
 pub mod flowpool;
 pub mod hostaddr;
-pub mod inbound;
 pub mod logging;
+pub mod memory;
 pub mod platform;
 pub mod relay;
 mod run;
@@ -25,3 +25,9 @@ pub mod tunnel;
 
 pub use error::{AgentError, Refusal};
 pub use run::{Options, run};
+
+/// 単体の試験の確保を数える。メモリの上界と実際の保持を比べる試験 (`relay::held_tests`) が読む。
+/// cargo-nextest は試験ごとにプロセスを分けるので、数は試験ごとである。
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: wgft_alloc_count::CountingAlloc = wgft_alloc_count::CountingAlloc;

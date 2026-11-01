@@ -1662,9 +1662,11 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite",
  "unicode-general-category",
+ "wgft-alloc-count",
+ "wgft-netstack",
  "wgft-proto",
+ "wgft-wgstack",
  "wgft-wireguard",
- "wgft-wireguard-tun",
  "windows-sys 0.61.2",
  "zeroize",
 ]
@@ -1675,6 +1677,15 @@ version = "0.1.0"
 dependencies = [
  "wgft-wgstack",
  "wgft-wgstack-bench",
+]
+
+[[package]]
+name = "wgft-netstack"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "wgft-alloc-count",
+ "wgft-wgstack",
 ]
 
 [[package]]

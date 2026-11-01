@@ -149,8 +149,38 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
     }
 }
 
-/// 駆動の task。命令の channel が閉じるか止める命令で `Ok` を返し、上の層の中の panic の後と、
-/// ソケットの準備を待てなくなったときに誤りを返す。
+/// 止める命令で駆動の task が終わった後に、最後の送り出しに要るもの。
+pub(super) struct Rest {
+    socket: UdpSocket,
+    outbox: Outbox,
+    peer: PublicKey,
+}
+
+/// 最後の送り出しで引く packet の上限。中継の task を落とした後の RST は核の制御の輪に入るので、輪の
+/// 大きさで足りる。
+const FINAL_PACKETS: usize = 4096;
+
+impl Rest {
+    /// 駆動の task が終わり、local の task を落とした後に、上の層に残った出力 (中継の接続を切った RST
+    /// など) を 1 回だけ送り出す。セッションが無いか、ソケットが書けなければ送らずに終える。
+    pub(super) fn flush<U: Upper>(mut self, local: &Local<U>) {
+        let mut guard = local.0.borrow();
+        let inner = &mut *guard;
+        let now = clock::now();
+        pump(
+            &mut inner.device,
+            &mut inner.upper,
+            &self.peer,
+            now,
+            &mut self.outbox,
+            &mut &self.socket,
+            FINAL_PACKETS,
+        );
+    }
+}
+
+/// 駆動の task。命令の channel が閉じるか止める命令で、最後の送り出しに要るものを返す。上の層の中の
+/// panic の後と、ソケットの準備を待てなくなったときに誤りを返す。
 pub(super) async fn drive<U: Upper>(
     local: Local<U>,
     socket: UdpSocket,
@@ -159,7 +189,7 @@ pub(super) async fn drive<U: Upper>(
     high_water: &Arc<AtomicU64>,
     settings: Settings,
     buffers: SocketBuffers,
-) -> io::Result<()> {
+) -> io::Result<Rest> {
     let (peer, mtu) = {
         let inner = local.0.inner.borrow();
         let peer =
@@ -230,10 +260,10 @@ pub(super) async fn drive<U: Upper>(
             ready = socket.readable() => ready?,
             ready = socket.writable(), if blocked => ready?,
             () = clock::sleep_until_some(deadline) => {}
-            () = local.0.notify.notified() => {}
+            () = local.0.wake.woken() => {}
             () = tokio::task::yield_now(), if more => {}
             command = commands.recv() => match command {
-                None | Some(Command::Stop) => return Ok(()),
+                None | Some(Command::Stop) => break,
                 Some(Command::Status(reply)) => {
                     let inner = local.0.inner.borrow();
                     let now = clock::now();
@@ -255,4 +285,9 @@ pub(super) async fn drive<U: Upper>(
             },
         }
     }
+    Ok(Rest {
+        socket,
+        outbox,
+        peer,
+    })
 }

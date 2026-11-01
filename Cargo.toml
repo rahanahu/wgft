@@ -19,6 +19,7 @@ wgft-agent = { path = "crates/wgft-agent" }
 wgft-wgstack = { path = "crates/wgft-wgstack" }
 wgft-wgstack-bench = { path = "crates/wgft-wgstack-bench" }
 wgft-tcpharness = { path = "crates/wgft-tcpharness" }
+wgft-netstack = { path = "crates/wgft-netstack" }
 wgft-alloc-count = { path = "crates/wgft-alloc-count" }
 base64 = "0.23.1"
 criterion = "0.8.2"

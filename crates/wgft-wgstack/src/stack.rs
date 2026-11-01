@@ -236,6 +236,11 @@ impl<H: Hook> Stack<H> {
         &self.s.config
     }
 
+    /// 作成の時に渡した hook です。中継の層が hook と分け合う表を引くのに使います。
+    pub fn hook(&self) -> &H {
+        &self.hook
+    }
+
     /// この核の上界の式の値です。作成の時の設定と型の大きさだけから決まります。
     pub fn bound(&self) -> Bound {
         Bound::with_stack_size(&self.s.config.limits, self.s.config.mtu, size_of::<Self>())

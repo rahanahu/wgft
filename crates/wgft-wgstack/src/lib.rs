@@ -55,6 +55,16 @@ pub use tcp::conn::ConnId;
 pub use time::Time;
 pub use udp::{UdpFault, UdpId};
 
+/// ping の endpoint の表の大きさです。[`PingId::index`] はこれより小さい値です。
+pub const MAX_PINGS: usize = icmp::PING_ENDPOINTS;
+/// TCP の SYN が示す MSS の下限です。これより小さな MSS を示す SYN は捨てて [`LogKind::MssFloor`] に数えます。
+pub const MIN_MSS: usize = 536;
+const _: () = assert!(MIN_MSS as u64 == buf::MIN_MSS);
+/// 核の全体の UDP の受信の byte の予算です。endpoint 1 つの上限はその [`UDP_ENDPOINT_SHARE`] 分の 1 です。
+pub const UDP_RX_BYTES: usize = udp::RX_BYTES;
+/// UDP の endpoint 1 つの受信と送信の上限が、核の全体の予算の何分の 1 かです。
+pub const UDP_ENDPOINT_SHARE: usize = udp::ENDPOINT_SHARE;
+
 /// cargo-fuzz の target が呼ぶ入口です。`--cfg fuzzing` の build だけにあり、製品の API ではありません。
 #[cfg(fuzzing)]
 pub mod fuzz {
