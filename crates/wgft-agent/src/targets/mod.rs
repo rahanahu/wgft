@@ -2,8 +2,7 @@
 //! 設計 `docs/design/userspace/targets.md`)。
 //!
 //! 宛先の許可一覧、ブロードキャストとマルチキャストの拒否、名前の解決、接続の試し方、LAN の側の TCP の
-//! keepalive、試し接続を持つ。トンネルの側の作り (TUN の試作、wgstack) に依らないので、中継の土台が
-//! wgstack に替わってもそのまま使う。
+//! keepalive、試し接続を持つ。トンネルの側の作りには依らない。
 
 pub mod dial;
 pub mod resolve;

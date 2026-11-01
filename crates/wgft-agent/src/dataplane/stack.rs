@@ -19,9 +19,6 @@ use wgft_wgstack::{Budget, Config, Hook, Limits};
 
 use super::{Local, Upper, UpperError, UpperInit, clock};
 
-/// The core's budget that one tunnel generation hands to the next.
-pub type StackBudget = Budget;
-
 impl<H: Hook + 'static> Upper for Netstack<H> {
     type Budget = Budget;
 
@@ -72,7 +69,7 @@ impl<H: Hook + 'static> Access for Local<Netstack<H>> {
 
 /// What the agent's core is made from, besides what the data plane passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StackSettings {
+pub(crate) struct StackSettings {
     /// The tunnel address, the only address the core accepts.
     pub addr: Ipv4Addr,
     /// The table sizes; production uses [`Limits::with_max_flows`] with `WGFT_MAX_TCP_FLOWS`.
@@ -86,7 +83,7 @@ pub struct StackSettings {
 ///
 /// Fails when the configuration is refused or the tables cannot be allocated; the error carries
 /// the budget it was given.
-pub fn make<T: LanSocket + 'static>(
+pub(crate) fn make<T: LanSocket + 'static>(
     settings: StackSettings,
     init: UpperInit<Budget>,
 ) -> Result<Netstack<LanHook<T>>, UpperError<Budget>> {
@@ -119,7 +116,7 @@ pub fn make<T: LanSocket + 'static>(
 }
 
 /// The LAN socket table of a core made by [`make`].
-pub fn lan_sockets<T: LanSocket + 'static>(
+pub(crate) fn lan_sockets<T: LanSocket + 'static>(
     local: &Local<Netstack<LanHook<T>>>,
 ) -> Rc<LanSockets<T>> {
     local.with(|ns| Rc::clone(ns.core().hook().sockets()))

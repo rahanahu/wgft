@@ -1,8 +1,8 @@
 //! 待ち受けの表とポートごとの行 (wgstack-rs.md の「上界の式の写し方」の待ち受けと UDP の endpoint の上限)。
 //!
 //! Go は待ち受けを map で持ちましたが、Rust は受け付けるアドレスのポートの数の固定の行で持ちます。行は世代を
-//! 持ち、閉じた後の handle を誤りにします。UDP の endpoint の表も同じ [`PortTable`] を使い、行の型は UDP の段
-//! (PR 6) が足します。
+//! 持ち、閉じた後の handle を誤りにします。UDP の endpoint の表も同じ [`PortTable`] を使い、行の型
+//! (`UdpEp`) は [`crate::udp`] が持ちます。
 //!
 //! accept の待ち行列は Device 全体で Q 本、待ち受け 1 つで Q の半分までです。待ち行列の節は接続の番号で引く
 //! 別の配列 ([`QLink`]) に持ちます。
@@ -52,11 +52,13 @@ impl<R: Default + Copy> PortTable<R> {
         PORTS * size_of::<PortRow<R>>() + BitSet::bytes_for(PORTS)
     }
 
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.rows.heap_bytes() + self.open.heap_bytes()
     }
 
     /// 開いている行の数です。
+    #[cfg(test)]
     pub(crate) fn open_count(&self) -> usize {
         self.count
     }

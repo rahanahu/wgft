@@ -21,6 +21,17 @@ use crate::wire::{
 };
 use crate::{seq, tcp};
 
+/// 握手の途中の行への segment の処理の結果です。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowVerdict {
+    /// 処理し終えました。
+    Done,
+    /// accept の待ち行列の枠を予約しました。呼び手は行を接続の枠に移します。
+    Promote,
+    /// 確認番号が行の ISN に合わない ACK です。呼び手は cookie として確かめ、通らなければ RST を返します。
+    Cookie,
+}
+
 /// 行が次に送るものです。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum RowSend {
@@ -60,6 +71,8 @@ pub(crate) struct SynRow {
     pub(crate) ts_ok: bool,
     /// SYN-ACK を再送しました。
     pub(crate) rtx: bool,
+    /// cookie から取り戻した値です。表には入れず、`Stack::establish_cookie` が接続の枠に移します。
+    pub(crate) cookie: bool,
     pub(crate) used: bool,
     pub(crate) pending: RowSend,
 }
@@ -99,6 +112,7 @@ impl SynTable {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.rows.heap_bytes() + self.idx.heap_bytes() + self.free.heap_bytes()
     }
@@ -261,15 +275,21 @@ impl Shared {
     }
 
     /// 待ち受けへの SYN から行を作り、SYN-ACK を送ります。表が満杯か、待ち受けが N_syn の半分を使っていれば、
-    /// 状態を作らずに捨てます。`reuse` は TIME_WAIT の 4 つ組を使い直す時の前の接続の SND.NXT です。
+    /// 行を作らずに cookie の SYN-ACK で応えます (`cookie`)。`reuse` は TIME_WAIT の 4 つ組を使い直す時の前の
+    /// 接続の SND.NXT で、呼び手は行を作れる時だけ渡します。
     pub(crate) fn new_syn_row(&mut self, seg: &Segment<'_>, now: i64, reuse: Option<u32>) {
         let port = seg.tup.lport;
-        if !self
-            .listeners
-            .by_port(port)
-            .is_some_and(|l| self.syn_room(l))
-        {
-            self.refused(LogKind::SynFull, now);
+        let Some(l) = self.listeners.by_port(port) else {
+            return;
+        };
+        if self.use_cookie(l) {
+            if reuse.is_some() {
+                // 呼び手が行を作れることを確かめた後なので来ません。cookie の ISN は前の接続の番号の先に
+                // 置けないので、来ても cookie で応えません。
+                self.refused(LogKind::SynFull, now);
+            } else {
+                self.send_cookie(seg, now);
+            }
             return;
         }
         let ts = seg.opt.ts;
@@ -313,10 +333,10 @@ impl Shared {
         }
     }
 
-    /// 握手の途中の行への segment を処理します。握手の最後の ACK で accept の待ち行列の枠を予約できたら真を返し、
-    /// 呼び手は接続の枠を取って行を移します。予約できなければ ACK を捨て、行は残ります (Linux の
-    /// tcp_abort_on_overflow=0 と同じ)。
-    pub(crate) fn syn_input(&mut self, id: u32, seg: &Segment<'_>, now: i64) -> bool {
+    /// 握手の途中の行への segment を処理します。握手の最後の ACK で accept の待ち行列の枠を予約できたら
+    /// [`RowVerdict::Promote`] を返し、呼び手は接続の枠を取って行を移します。予約できなければ ACK を捨て、行は
+    /// 残ります (Linux の tcp_abort_on_overflow=0 と同じ)。
+    pub(crate) fn syn_input(&mut self, id: u32, seg: &Segment<'_>, now: i64) -> RowVerdict {
         let r = *self.syn.row(id);
         let rcv_nxt = r.irs.wrapping_add(1);
         let in_window = || {
@@ -327,7 +347,7 @@ impl Shared {
             if in_window() {
                 self.remove_syn_row(id);
             }
-            return false;
+            return RowVerdict::Done;
         }
         if seg.has(FLAG_SYN) {
             if !seg.has(FLAG_ACK) && seg.seq == r.irs {
@@ -335,45 +355,60 @@ impl Shared {
                 let row = self.syn.row_mut(id);
                 (row.pending, row.rtx) = (RowSend::SynAck, true);
                 self.queue_row(id);
-                return false;
+                return RowVerdict::Done;
             }
             if in_window() {
                 self.reply_rst(seg);
                 self.remove_syn_row(id);
-                return false;
+                return RowVerdict::Done;
             }
             self.row_ack(id, now);
-            return false;
+            return RowVerdict::Done;
         }
         if !seg.has(FLAG_ACK) {
-            return false;
+            return RowVerdict::Done;
         }
         if seg.ack != r.iss.wrapping_add(1) {
+            // 遅れて届いた cookie の SYN-ACK への ACK かもしれません。相手が SYN を送り直した時に表に空きが
+            // あれば、その SYN が行を作り、行の ISN は cookie と違います。cookie を送る窓の内だけ確かめます。
+            if self.cookie_window(now) {
+                return RowVerdict::Cookie;
+            }
             self.reply_rst(seg);
-            return false;
+            return RowVerdict::Done;
         }
         if r.ts_ok
             && let Some((ts_val, _)) = seg.opt.ts
             && seq::lt(ts_val, r.ts_recent)
         {
             self.row_ack(id, now);
-            return false;
+            return RowVerdict::Done;
         }
         if !in_window() {
             self.row_ack(id, now);
-            return false;
+            return RowVerdict::Done;
         }
+        if self.reserve_accept(r.listener, now) {
+            RowVerdict::Promote
+        } else {
+            RowVerdict::Done
+        }
+    }
+
+    /// 待ち受け `port` の accept の待ち行列の枠を 1 つ予約し、予約できたかを返します。待ち受けの分 (Q の半分)、
+    /// 全体の Q、空きの接続の枠のどれかが尽きていれば、数えて偽を返します。
+    pub(crate) fn reserve_accept(&mut self, port: u16, now: i64) -> bool {
         let q = self.config.limits.accept_queue;
         let full = self
             .listeners
-            .by_port(r.listener)
+            .by_port(port)
             .is_none_or(|l| usize::from(l.qlen) >= q / 2);
         if full || self.queued >= q || self.conn_free.is_empty() {
             self.refused(LogKind::AcceptOverflow, now);
             return false;
         }
         self.queued += 1;
-        if let Some(l) = self.listeners.by_port_mut(r.listener) {
+        if let Some(l) = self.listeners.by_port_mut(port) {
             l.qlen += 1;
         }
         true

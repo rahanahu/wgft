@@ -1,7 +1,9 @@
 //! agent の起動と、全体状態の適用とハートビートの組み立て。
 
 use crate::logf;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -406,8 +408,8 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
     credentials::remove_leftover_temps(&path);
     let (creds, private_key) = prepare(&opts).await?;
     // 止める合図の受け口は、登録の後、保存した全体状態の適用の前に作る (Go の agent と同じ位置)。
-    // 適用の間に届いた合図は失わず、主なループがすぐに止める
-    let shutdown = shutdown_signal();
+    // 適用は合図と並べて待ち、合図が来れば適用を落として止まる
+    let mut shutdown = std::pin::pin!(shutdown_signal());
     let targets = Arc::new(Targets::new(opts.allow_targets.clone()));
     let agent = Arc::new(Mutex::new(Agent {
         opts,
@@ -432,19 +434,8 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
         stream_obs: SharedObs::default(),
         reconnect: watch::Sender::new(0),
     }));
-    {
-        let mut a = agent.lock().await;
-        // server が止まっていても、server の側にピアが残っていれば転送が戻るよう、先に立てる
-        if let Some(st) = a.creds.last_state.clone() {
-            let generation = st.generation;
-            if let Err(e) = a.apply(st).await {
-                logf!(
-                    "apply saved generation {generation}: {e}; waiting for full state from stream"
-                );
-            }
-        } else {
-            logf!("no saved full state; waiting for full state from stream");
-        }
+    if apply_saved(&agent, shutdown.as_mut()).await {
+        return Ok(());
     }
     let tunnel_dead = Arc::clone(&agent.lock().await.tunnel_dead);
     // 制御ソケットは認証情報のロックを持つ間だけ開く。止めるのはロックを手放す前である
@@ -482,11 +473,41 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
     .await
 }
 
+/// 保存した全体状態を起動の時に適用する。server が止まっていても、server の側にピアが残っていれば転送が
+/// 戻るよう、stream より先に立てる。適用は名前の解決と試し接続を待つので、止める合図と並べて待つ。合図が
+/// 来れば適用を落とし、中継とトンネルを [`SHUTDOWN_LIMIT`] の内で閉じて真を返す。
+async fn apply_saved(agent: &Shared, mut shutdown: Pin<&mut impl Future<Output = ()>>) -> bool {
+    let apply = async {
+        let mut a = agent.lock().await;
+        if let Some(st) = a.creds.last_state.clone() {
+            let generation = st.generation;
+            if let Err(e) = a.apply(st).await {
+                logf!(
+                    "apply saved generation {generation}: {e}; waiting for full state from stream"
+                );
+            }
+        } else {
+            logf!("no saved full state; waiting for full state from stream");
+        }
+    };
+    tokio::select! {
+        () = apply => return false,
+        () = &mut shutdown => {}
+    }
+    logf!("shutting down");
+    within_shutdown_limit(async {
+        let mut a = timed("take the agent lock", agent.lock()).await;
+        timed("close the relays and the tunnel", a.close()).await;
+    })
+    .await;
+    true
+}
+
 /// 30 秒ごとの見回りの間隔。
 const TICK: Duration = Duration::from_secs(30);
 
 /// 止める合図から終わるまでの上限。超えたら、残りを待たずに終わる。Go の agent の止める手順に上限は
-/// 無いが、止まった段が監督の SIGKILL まで終わりを延ばさないように置く。値は止める側の待ちのうち最も
+/// 無いが、止まった段がサービスの管理 (systemd など) の SIGKILL まで終わりを延ばさないように置く。値は止める側の待ちのうち最も
 /// 短いラボの `kill_all` の 5 秒より短くする。同梱の systemd の unit は TimeoutStopSec を置かないので
 /// systemd の既定の 90 秒、Docker は 10 秒、launchd の plist は ExitTimeOut を置かないので system の既定を待つ。
 /// 打ち切れるのは await の点だけで、同期の段 (制御ソケットのスレッドを起こして待つこと) は打ち切らない。
@@ -564,7 +585,7 @@ pub(crate) async fn main_loop(
         }
     };
     logf!("shutting down");
-    let done = tokio::time::timeout(SHUTDOWN_LIMIT, async {
+    within_shutdown_limit(async {
         // stream の task を落とし、終わるのを待つ。適用の途中なら、その排他もここで返る
         if !stream_done {
             stream_task.abort();
@@ -580,13 +601,18 @@ pub(crate) async fn main_loop(
         timed("close the relays and the tunnel", a.close()).await;
     })
     .await;
-    if done.is_err() {
+    result
+}
+
+/// 止める手順 `steps` を [`SHUTDOWN_LIMIT`] で打ち切って走らせる。打ち切ったら、残りを待たずに終わる旨を
+/// ログに出す。
+async fn within_shutdown_limit(steps: impl Future<Output = ()>) {
+    if tokio::time::timeout(SHUTDOWN_LIMIT, steps).await.is_err() {
         logf!(
             "shutting down took longer than {}s; exiting without waiting for the rest",
             SHUTDOWN_LIMIT.as_secs()
         );
     }
-    result
 }
 
 /// 止める手順の 1 段を走らせ、[`SLOW_STEP`] より長ければログに出す。
@@ -651,7 +677,7 @@ async fn prepare(opts: &Options) -> Result<(Credentials, Zeroizing<String>), Age
         return Err(Refusal::mode_gate(
             "WGFT_MODE",
             format!(
-                "agent.json records {} mode, and this Rust agent prototype runs userspace mode only; start the Go agent for this data directory",
+                "agent.json records {} mode, and this build of the agent runs userspace mode only; start the Go agent for this data directory",
                 creds.recorded_mode()
             ),
         )
@@ -1439,6 +1465,38 @@ mod tests {
         stop.send(()).unwrap();
         ends_within_2s(run, "an apply").await.unwrap();
         assert!(agent.lock().await.relay.is_none());
+    }
+
+    /// 止める合図は、起動の時の保存した全体状態の適用が試し接続を待つ間も効き、中継とトンネルを閉じて
+    /// 2 秒以内に終わる。
+    #[tokio::test]
+    async fn shutdown_cuts_the_apply_of_the_saved_state() {
+        let (agent, gate, _peer, _dir) = tunnel_agent().await;
+        // 保存した全体状態の宛先を変え、適用が開き直した待ち受けの試し接続で止まるようにする
+        {
+            let mut a = agent.lock().await;
+            let st = a.creds.last_state.as_mut().unwrap();
+            st.generation += 1;
+            st.rules[0].target = "nas.lan:9".into();
+        }
+        gate.hold();
+        let (stop, stopped) = stop_switch();
+        let run = tokio::spawn({
+            let agent = Arc::clone(&agent);
+            async move {
+                let mut stopped = std::pin::pin!(stopped);
+                apply_saved(&agent, stopped.as_mut()).await
+            }
+        });
+        gate.entered().await;
+        stop.send(()).unwrap();
+        let cut = tokio::time::timeout(Duration::from_secs(2), run)
+            .await
+            .expect("the agent stops within 2 s during the apply of the saved state")
+            .unwrap();
+        assert!(cut, "the shutdown signal cuts the apply");
+        let a = agent.lock().await;
+        assert!(a.relay.is_none() && a.tunnel.is_none());
     }
 
     /// 止める合図は、トンネルの外殻の停止による作り直しの途中 (適用の試し接続の待ち) でも効く。

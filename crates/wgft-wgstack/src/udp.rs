@@ -274,11 +274,13 @@ impl Udp {
     }
 
     /// 管理の配列の byte です。endpoint の表は含みません。
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self, dir: usize) -> usize {
         self.dg[dir].heap_bytes() + self.dg_free[dir].heap_bytes()
     }
 
     /// chunk の管理の配列の byte です。
+    #[cfg(test)]
     pub(crate) fn chunk_heap_bytes(&self) -> usize {
         self.ck.heap_bytes() + self.ck_free.heap_bytes()
     }

@@ -15,7 +15,7 @@ use std::time::Instant;
 /// The current time on the data plane's clock.
 #[cfg(not(windows))]
 #[must_use]
-pub fn now() -> Instant {
+pub(crate) fn now() -> Instant {
     Instant::now()
 }
 
@@ -23,7 +23,7 @@ pub fn now() -> Instant {
 /// host sleeps, added to the `Instant` of the first call.
 #[cfg(windows)]
 #[must_use]
-pub fn now() -> Instant {
+pub(crate) fn now() -> Instant {
     use std::sync::LazyLock;
     static ANCHOR: LazyLock<(Instant, u64)> = LazyLock::new(|| (Instant::now(), interrupt_time()));
     let (base, at) = *ANCHOR;
@@ -48,7 +48,7 @@ fn interrupt_time() -> u64 {
 /// host slept, so the wait is a sleep for the time left on this clock, repeated until it is over.
 /// On Windows each sleep lasts at most [`WINDOWS_SLEEP_CHUNK`], so that a wait that spans a host
 /// sleep ends within that time after the host resumes, even if `Instant` stood still meanwhile.
-pub async fn sleep_until(deadline: Instant) {
+pub(crate) async fn sleep_until(deadline: Instant) {
     loop {
         let left = deadline.saturating_duration_since(now());
         if left.is_zero() {
@@ -62,7 +62,7 @@ pub async fn sleep_until(deadline: Instant) {
 
 /// The longest single sleep of [`sleep_until`] on Windows.
 #[cfg(windows)]
-pub const WINDOWS_SLEEP_CHUNK: Duration = Duration::from_secs(5);
+pub(crate) const WINDOWS_SLEEP_CHUNK: Duration = Duration::from_secs(5);
 
 /// Waits until `deadline`, or forever without one.
 pub(crate) async fn sleep_until_some(deadline: Option<Instant>) {
