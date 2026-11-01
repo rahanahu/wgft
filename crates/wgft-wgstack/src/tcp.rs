@@ -35,7 +35,7 @@ pub(crate) fn check_free_list(
 ) -> Result<(), &'static str> {
     // 印は 1 行 1 bit で、検査の間だけ確保します (wgstack-rs.md の「不変条件の検査の手間」)。
     let mut seen =
-        crate::output::BitSet::new(rows).map_err(|_| "allocation failed while checking")?;
+        crate::bitset::BitSet::new(rows).map_err(|_| "allocation failed while checking")?;
     for &i in free {
         if i as usize >= rows {
             return Err("a free list number is out of range");

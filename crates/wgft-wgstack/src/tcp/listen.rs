@@ -8,8 +8,9 @@
 //! 別の配列 ([`QLink`]) に持ちます。
 
 use super::conn::QLink;
+use crate::bitset::BitSet;
 use crate::fixed_vec::{AllocError, FixedVec};
-use crate::output::{BitSet, NIL};
+use crate::output::NIL;
 
 /// ポートの数です。行はポートごとに 1 つです。
 pub(crate) const PORTS: usize = 1 << 16;

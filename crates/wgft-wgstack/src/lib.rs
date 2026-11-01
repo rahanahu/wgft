@@ -22,6 +22,7 @@
     reason = "heap_bytes and a few small helpers serve only the bound and invariant tests"
 )]
 
+mod bitset;
 mod bound;
 mod budget;
 mod buf;

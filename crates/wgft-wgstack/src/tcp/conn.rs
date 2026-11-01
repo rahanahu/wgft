@@ -525,7 +525,7 @@ impl ConnSlots {
     /// 空きの list `free` と使っている印が一致し、輪と段が合うことを確かめます。
     pub(crate) fn check(&self, free: &[u32], links: &[QLink]) -> Result<(), &'static str> {
         // 印は 1 枠 1 bit で、検査の間だけ確保します (wgstack-rs.md の「不変条件の検査の手間」)。
-        let mut seen = crate::output::BitSet::new(self.hot.len())
+        let mut seen = crate::bitset::BitSet::new(self.hot.len())
             .map_err(|_| "allocation failed while checking")?;
         for &i in free {
             let t = self

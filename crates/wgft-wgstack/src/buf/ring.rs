@@ -190,9 +190,13 @@ impl Ring {
         }
     }
 
-    /// 持っている chunk の数です。
+    /// 持っている chunk の数です。容量の内の位置だけを数えます。容量の外に chunk が無いことは、不変条件の検査の中で
+    /// [`Ring::check`] が確かめます。
     pub(crate) fn held_chunks(&self) -> usize {
-        self.chunks.iter().filter(|c| c.is_some()).count()
+        self.chunks[..us(self.slots())]
+            .iter()
+            .filter(|c| c.is_some())
+            .count()
     }
 
     /// 容量の外の位置に chunk が無いことを確かめます。

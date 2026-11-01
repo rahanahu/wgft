@@ -619,8 +619,9 @@ fn gen_flag(t: &Tcb, r: &Record, f: u8) -> bool {
 /// 各段の後に確かめることと `checkScoreboard` を写します。SND.UNA ≤ SND.NXT ≤ SND.MAX と輻輳の窓が 0 でない
 /// ことを確かめ、[`check_scoreboard`] で scoreboard と pipe を数え直し、分けて送っている記録の中の位置
 /// (`q_off`、`rxt_off`) がその記録の長さより小さいことを確かめます。Go の「pipe は送り残しの 2 倍と 1 以下」は
-/// 確かめません。定義どおりの pipe は SACK 済みでない記録の長さの和と再送の印の付いた記録の長さの和の和で、どちらも
-/// 送り残し以下なので、数え直した pipe と一致すればこの上限も満たすためです。
+/// 別に確かめません。定義どおりの pipe は 2 つの和を足した値です。1 つは損失の境目から先の SACK 済みでなく
+/// 失われてもいない記録の長さの和、もう 1 つは SACK 済みでなく今の世代の再送の印を持つ記録の長さの和で、どちらも
+/// 送り残し以下です。数え直した pipe と一致すれば、この上限も満たします。
 pub(crate) fn check_sender(t: &Tcb, recs: &RecordRing) -> Result<(), &'static str> {
     if seq::gt(t.snd_una, t.snd_nxt) || seq::gt(t.snd_nxt, t.snd_max) {
         return Err("the send sequence numbers are out of order");

@@ -1183,12 +1183,14 @@ L1 の miss は別の値に移した形だけが多く、PR 6 の形と PR 5 の
 
 - SND.UNA ≤ SND.NXT ≤ SND.MAX と、輻輳の窓が 0 でないこと
 - scoreboard の数え直し (PR 5 の `check_scoreboard`):記録が SND.UNA から SND.MAX まで隙間なく並ぶこと、SACK 済みの byte と数、境目から先の byte と数、再送の byte (`rtx_bytes`)、境目から先の RACK の損失の byte、位置の欄 (`loss_idx`、`rxt_idx`) の範囲、2 つの list (`t_list`、`lost_q`) の節と印と数と順
-- pipe:増減で保つ欄から求めた値が、RFC 6675 の定義どおりに記録から求めた値と一致すること
+- pipe:増減で保つ欄から求めた値が、RFC 6675 の定義どおりに記録から求めた値と一致すること (Go の `checkScoreboard` と同じ)
 - 分けて送っている記録の中の位置:`q_mid` の間は損失の待ち行列が空でなく `q_off` がその先頭の記録の長さより小さいこと、`rxt_mid` の間は `rxt_off` が `rxt_idx` の記録の長さより小さいこと
 
-Go の「pipe は送り残しの 2 倍と 1 以下」は確かめません。
-定義どおりの pipe は SACK 済みでない記録の長さの和と再送の印の記録の長さの和の和で、どちらも送り残し以下です。
-このため、数え直した pipe と一致すればこの上限も満たし、別の確かめは届かない枝になるためです。
+Go の `checkScoreboard` も pipe を記録から数え直すので、この数え直しは Go の確かめを写したもので、強めたものではありません。
+Go の「pipe は送り残しの 2 倍と 1 以下」は別に確かめません。
+定義どおりの pipe は 2 つの和を足した値です。
+1 つは損失の境目から先の SACK 済みでなく失われてもいない記録の長さの和、もう 1 つは SACK 済みでなく今の世代の再送の印を持つ記録の長さの和で、どちらも送り残し以下です。
+数え直した pipe と一致すればこの上限も満たすので、別の確かめは届かない枝になります。
 接続の欄だけを持つ `pipe` と `seg_mss` は `Tcb` を受ける関数にし、`Conn` の同じ名前の関数はそれを呼びます。
 `rtx_bytes` の減らし忘れ (`drop_head` が減らさない故障) を入れると、核の単体の試験、記録の照合、試験の担当の `core` の fuzz (`-runs=25000 -seed=1`) が段ごとに捉えることを確かめました。
 
@@ -1210,30 +1212,38 @@ k 回に 1 回だけ確かめる形は、壊れた段を後の段で見つける
   印が 1 か所にしか無いので、行と印の食い違いは起きません。
   待ち受けの行は 20 byte から 16 byte に、UDP の endpoint の行は 36 byte から 32 byte に縮み、2 つの表で 0.5 MiB 小さくなりました ([上界の表](wgstack-bound.md))
 - 空きの list の重なりの印:接続の枠と握手の途中の表と TIME_WAIT の表の空きの list の確かめは、印を 1 行 1 bit にし、確かめの間だけ確保します。
-  レビューは 1 つの印の配列を使い回す形を提案しましたが、採りませんでした。
+  1 つの印の配列を使い回す形は採りません。
   使い回す配列は `&self` の確かめの中で書くので内部の可変性 (`Cell` か atomic) を要し、製品の核に試験のためだけの常駐の配列 (既定の表で 8 KiB) が加わります。
   小さな表での確保は 1 回 0.02 µs で、確かめの手間の中で無視できます
+- 輪の chunk の数:`Ring::held_chunks` は輪の容量の内の chunk の位置だけを数えます。
+  容量の外に chunk が無いことは、同じ検査の中で `Ring::check` が確かめます。
+  製品の `held` も同じ関数を使うので、会計を読む手間も減ります
 
-segment ごとの経路は、`Dlist` の印の読み書きが byte の読み書きから bit の演算に変わるだけで、ポートの表の引き当ては行の代わりに bit の集合の語を読みます。
+segment ごとの経路は、`Dlist` の印の読み書きが byte の読み書きから bit の演算に変わります。
+ポートの表の引き当ては、行に加えて bit の集合の語を読みます。
+TCP の確立した接続の segment はポートの表を引きませんが、UDP は datagram ごとに引きます。
+UDP の datagram ごとの手間は、UDP の bench が無いので測っていません。
 
 #### 不変条件の検査の測定
 
 2026-11-01 に、E コアの車線 (`wgft-heavy --class tool --timing`、release の build) で測りました。
 `check_invariants` と `stack_new` は `wgft-wgstack-bench` の criterion の組で、表の大きさは試験の `small_limits` (K = 16) と既定です。
-fuzz は試験の担当の `core` の target を、この PR と同じ段の核に載せた build で、`-runs=25000 -seed=1` で 3 回ずつ流しました。
+fuzz は試験の担当の `core` の target を、送り手の不変条件を足した段の核で、変える前と後の両方を `-runs=25000 -seed=1` で 3 回ずつ流しました。
+fuzz の値は、corpus に Go が生成した種 (`go-gen-*`) を足す前の corpus で、`Ring::held_chunks` を変える前に測りました。
+1 回の入力の手間は corpus で変わるので、この値は今の corpus の値と比べられません。
 
 | 測った値 | 変える前 | 変えた後 |
 | --- | --- | --- |
-| `check_invariants/small/1` | 102.7 µs | 13.3 µs |
-| `check_invariants/small/16` | 101.3 µs | 13.1 µs |
-| `check_invariants/default/1` | 2.04 ms | 1.62 ms |
-| `check_invariants/default/1024` | 2.13 ms | 2.48 ms |
+| `check_invariants/small/1` | 102.7 µs | 8.9 µs |
+| `check_invariants/small/16` | 101.3 µs | 9.7 µs |
+| `check_invariants/default/1` | 2.04 ms | 1.69 ms |
+| `check_invariants/default/1024` | 2.13 ms | 1.89 ms |
 | `stack_new/default_limits` (作って閉じる) | 3.26 ms と 8.39 ms (回ごとに揺れました) | 2.58 ms |
 | `core` の fuzz の 25,000 回 | 61、60、60 秒 | 22、22、22 秒 |
 
 既定の表の `check_invariants` は、表の行の数 (TIME_WAIT の表の 65,536 行、接続の枠ごとの輪の chunk の位置) に比例する部分が大部分で、この変更の対象ではありません。
 `default/1024` の値は回ごとに約 30% 揺れました。
-小さな表で残る約 13 µs は、接続の枠ごとの輪の chunk の位置の確かめ (枠 1 つで約 0.2 µs)、送り手と scoreboard の確かめ、UDP の datagram の管理の配列の確かめです。
+小さな表で残る約 9 µs は、接続の枠ごとの輪の容量の外の chunk の位置の確かめ、送り手と scoreboard の確かめ、UDP の datagram の管理の配列の確かめです。
 segment ごとの経路の criterion の組 (`recv_segment`、`send_segment` と `_sack` の組) は、変える前の値との差が -1% から +2% で、同じ時に流した道具だけの費用 (`rig_overhead`) の揺れ (-2.4% から +1.8%) の内でした。
 最も差の大きかった `send_segment_sack/1024` は、変える前の build と交互に流すと 659 ns と 661 ns で、差はありませんでした。
 核の作成の手間は既定の表の大きさの配列の確保と初期化が大部分で、ポートの表が小さくなった分だけ減りました。
