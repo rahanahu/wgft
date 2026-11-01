@@ -90,13 +90,28 @@ impl Peer {
     /// points at it.
     pub(crate) async fn start() -> Peer {
         let (mut peer, agent_key) = Peer::server().await;
-        let agent = DeviceConfig::agent(
+        let endpoint = peer.endpoint;
+        peer.start_agent(agent_key, endpoint, ProtocolTimers::default())
+            .await;
+        peer
+    }
+
+    /// Starts the agent's data plane with `agent_key`, its peer's endpoint being `endpoint`, which
+    /// a test may point at something in front of the server, and with `timers`.
+    pub(crate) async fn start_agent(
+        &mut self,
+        agent_key: PrivateKey,
+        endpoint: SocketAddr,
+        timers: ProtocolTimers,
+    ) {
+        let mut agent = DeviceConfig::agent(
             agent_key,
-            peer.server_key.public_key(),
-            Some(peer.endpoint),
+            self.server_key.public_key(),
+            Some(endpoint),
             SERVER_IP,
             Duration::from_secs(25),
         );
+        agent.timers = timers;
         let settings = Settings {
             listen: "127.0.0.1:0".parse().unwrap(),
             ..Settings::default()
@@ -110,8 +125,7 @@ impl Peer {
         })
         .await
         .unwrap();
-        peer.agent = Some(agent);
-        peer
+        self.agent = Some(agent);
     }
 
     /// Starts only the server device on loopback, for an agent the test starts itself with the
@@ -386,6 +400,11 @@ impl Drop for UdpClient {
 }
 
 impl UdpClient {
+    /// The port this endpoint sends from and receives on, on the server's tunnel address.
+    pub(crate) fn port(&self) -> u16 {
+        self.lport
+    }
+
     /// Sends `data` as one datagram to the agent's `port`. It must fit the tunnel's MTU.
     pub(crate) fn send(&self, port: u16, data: &[u8]) {
         let _ = self
@@ -551,7 +570,13 @@ fn tcp_packet(
     ipv4(src, dst, 6, &t)
 }
 
-fn udp_packet(src: Ipv4Addr, dst: Ipv4Addr, sport: u16, dport: u16, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn udp_packet(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    sport: u16,
+    dport: u16,
+    payload: &[u8],
+) -> Vec<u8> {
     let len = 8 + payload.len();
     let mut u = vec![0u8; len];
     u[0..2].copy_from_slice(&sport.to_be_bytes());

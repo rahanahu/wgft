@@ -12,6 +12,7 @@ use std::net::SocketAddrV4;
 use std::pin::pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use wgft_wgstack::{Error, UdpId};
 
@@ -116,6 +117,16 @@ impl<A: Access> UdpSocket<A> {
     pub async fn send_to(&self, data: &[u8], to: SocketAddrV4) -> io::Result<usize> {
         send_to(&self.access, self.id, data, to).await
     }
+
+    /// Sends `data` as one datagram to `to` without waiting; see [`UdpSender::send_to_latest`].
+    pub fn send_to_latest(
+        &self,
+        data: &[u8],
+        to: SocketAddrV4,
+        max_age: Duration,
+    ) -> io::Result<usize> {
+        send_to_latest(&self.access, self.id, data, to, max_age)
+    }
 }
 
 impl<A: Access> Drop for UdpSocket<A> {
@@ -166,6 +177,50 @@ impl<A: Access> UdpSender<A> {
     /// accounting fault, or the generation has ended.
     pub async fn send_to(&self, data: &[u8], to: SocketAddrV4) -> io::Result<usize> {
         send_to(&self.access, self.id, data, to).await
+    }
+
+    /// Sends `data` as one datagram to `to` and never waits. When the send budget is used up, the
+    /// oldest queued datagram is dropped to make room: the endpoint's own oldest when its share
+    /// is full, the tunnel's oldest when the tunnel's budget is. A datagram that has waited longer
+    /// than `max_age` without starting to leave is dropped instead of sent; a zero `max_age`
+    /// means no limit. Drops are counted in the core's statistics and logged at most once a
+    /// minute.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the endpoint is closed, `to` or the length is invalid, UDP has stopped after an
+    /// accounting fault, or the generation has ended.
+    pub fn send_to_latest(
+        &self,
+        data: &[u8],
+        to: SocketAddrV4,
+        max_age: Duration,
+    ) -> io::Result<usize> {
+        send_to_latest(&self.access, self.id, data, to, max_age)
+    }
+}
+
+fn send_to_latest<A: Access>(
+    access: &A,
+    id: UdpId,
+    data: &[u8],
+    to: SocketAddrV4,
+    max_age: Duration,
+) -> io::Result<usize> {
+    if access.is_poisoned() {
+        return Err(poisoned());
+    }
+    let ms = u16::try_from(max_age.as_millis()).unwrap_or(u16::MAX);
+    let r = access.with(|ns| {
+        let now = ns.now();
+        ns.core_mut().send_to_latest(now, id, data, to, ms)
+    });
+    match r {
+        Ok(n) => {
+            access.wake_driver();
+            Ok(n)
+        }
+        Err(e) => Err(io_error(e)),
     }
 }
 

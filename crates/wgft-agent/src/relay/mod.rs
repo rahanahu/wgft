@@ -28,6 +28,8 @@ pub(crate) mod testpeer;
 mod tests;
 mod udp;
 #[cfg(test)]
+mod udp_outage_tests;
+#[cfg(test)]
 mod udp_tests;
 
 use std::collections::BTreeMap;

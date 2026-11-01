@@ -222,6 +222,13 @@ impl<H: Hook> Netstack<H> {
                     s.udp_tunnel_full,
                 )
             }
+            LogKind::UdpSendDropped => {
+                let s = self.core.stats();
+                format!(
+                    "wgstack: dropped UDP datagrams going into the tunnel because they could not leave fast enough; {} dropped to make room for newer ones and {} dropped for waiting too long, since the tunnel was built",
+                    s.udp_send_evicted, s.udp_send_expired,
+                )
+            }
             LogKind::UdpFault => match self.core.udp_receive_fault() {
                 Some(f) => format!(
                     "wgstack: UDP accounting found an internal inconsistency and stopped all UDP on this tunnel: {f}; restart the agent to recover"
@@ -288,6 +295,7 @@ mod tests {
             LogKind::OooDropped,
             LogKind::AccountingFault,
             LogKind::UdpDropped,
+            LogKind::UdpSendDropped,
             LogKind::UdpFault,
         ];
         for kind in kinds {

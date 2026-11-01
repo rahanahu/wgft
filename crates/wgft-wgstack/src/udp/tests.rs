@@ -12,6 +12,7 @@ use super::*;
 use crate::stack::Event;
 use crate::testnet_tests::{DUT, PEER, TEST_MTU, TestNet, build_udp, small_limits};
 use crate::wire::{PROTO_ICMP, parse_ipv4};
+use std::time::Duration;
 
 const PEER_UDP: SocketAddrV4 = SocketAddrV4::new(PEER, 5000);
 
@@ -618,4 +619,239 @@ fn close_returns_udp_holdings() {
     let TestNet { s, now, .. } = n;
     let closed = s.close(now);
     assert!(closed.held.is_zero(), "{:?}", closed.held);
+}
+
+fn send_latest(n: &mut TestNet, id: UdpId, data: &[u8], age_ms: u16) -> Result<usize, Error> {
+    let r = n.s.send_to_latest(n.now, id, data, PEER_UDP, age_ms);
+    n.s.check_invariants().unwrap();
+    r
+}
+
+/// 核が送った datagram の中身の先頭の 2 byte の番号を、送った順に返します。
+fn sent_seqs(n: &mut TestNet) -> Vec<u16> {
+    n.drain_raw()
+        .iter()
+        .filter(|p| u16::from_be_bytes([p[6], p[7]]).trailing_zeros() >= 13)
+        .map(|p| u16::from_be_bytes([p[28], p[29]]))
+        .collect()
+}
+
+fn seq_payload(i: u16, len: usize) -> Vec<u8> {
+    let mut b = vec![0; len.max(2)];
+    b[..2].copy_from_slice(&i.to_be_bytes());
+    b
+}
+
+/// endpoint の上限が尽きても `send_to_latest` は待たず、その endpoint の最も古い datagram を捨てます。残るのは
+/// 新しい上限の分だけで、送る順は入れた順です。数えた数は捨てた数に等しく、予算は上限を超えません。
+#[test]
+fn send_latest_drops_the_endpoints_oldest_when_its_share_is_full() {
+    let mut n = TestNet::new(small_limits());
+    let pc = bind(&mut n, 53);
+    let cap = TX_DATAGRAMS / ENDPOINT_SHARE;
+    let total = cap * 3 + 5;
+    for i in 0..total {
+        send_latest(&mut n, pc, &seq_payload(i as u16, 100), 0).unwrap();
+        assert!(n.s.held().udp_tx_datagrams <= cap);
+    }
+    assert_eq!(n.s.held().udp_tx_datagrams, cap);
+    let st = n.s.stats();
+    assert_eq!(st.udp_send_evicted, (total - cap) as u64);
+    assert_eq!(st.udp_send_expired, 0);
+    let got = sent_seqs(&mut n);
+    let want: Vec<u16> = ((total - cap)..total).map(|i| i as u16).collect();
+    assert_eq!(got, want);
+    // 待つ形の送信は今までどおり待つ
+    for _ in 0..cap {
+        send(&mut n, pc, &[0; 10], PEER_UDP).unwrap();
+    }
+    assert_eq!(send(&mut n, pc, &[0; 10], PEER_UDP), Err(Error::WouldBlock));
+    assert_eq!(n.s.stats().udp_send_evicted, st.udp_send_evicted);
+}
+
+/// 核の全体の予算が尽きたら、どの endpoint の datagram であっても送信の FIFO の先頭 (全体で最も古い) を捨てます。
+/// 上限の中の endpoint の datagram は、ほかの endpoint の洪水で自分の上限の分より先に消えることはありません。
+#[test]
+fn send_latest_drops_the_tunnels_oldest_when_the_budget_is_full() {
+    let mut n = TestNet::new(small_limits());
+    let ports: Vec<UdpId> = (0..5).map(|i| bind(&mut n, 53 + i)).collect();
+    let cap = TX_DATAGRAMS / ENDPOINT_SHARE;
+    // 4 つの endpoint が上限まで入れて核の全体を満たす。最初に入れた endpoint の datagram が最も古い
+    let mut seq = 0u16;
+    for &p in &ports[..4] {
+        for _ in 0..cap {
+            send_latest(&mut n, p, &seq_payload(seq, 100), 0).unwrap();
+            seq += 1;
+        }
+    }
+    assert_eq!(n.s.held().udp_tx_datagrams, TX_DATAGRAMS);
+    // 5 つ目の endpoint の送信は、全体で最も古い 1 つを捨てて入る
+    send_latest(&mut n, ports[4], &seq_payload(seq, 100), 0).unwrap();
+    let st = n.s.stats();
+    assert_eq!(st.udp_send_evicted, 1);
+    assert_eq!(n.s.held().udp_tx_datagrams, TX_DATAGRAMS);
+    let got = sent_seqs(&mut n);
+    assert_eq!(got.len(), TX_DATAGRAMS);
+    assert_eq!(got[0], 1, "the oldest datagram of the first endpoint went");
+    assert_eq!(*got.last().unwrap(), seq);
+}
+
+/// 大きい datagram は複数の chunk を使うので、足りるまで続けて捨てます。捨てる数は入れた数を超えません。
+#[test]
+fn send_latest_drops_until_a_large_datagram_fits() {
+    let mut n = TestNet::new(small_limits());
+    let pc = bind(&mut n, 53);
+    let cap = TX_DATAGRAMS / ENDPOINT_SHARE;
+    for i in 0..cap {
+        send_latest(&mut n, pc, &seq_payload(i as u16, 100), 0).unwrap();
+    }
+    // endpoint の chunk の上限は 1 MiB。60000 byte の datagram は 4 chunk を使う
+    for i in 0..40u16 {
+        send_latest(&mut n, pc, &seq_payload(1000 + i, 60000), 0).unwrap();
+    }
+    let h = n.s.held();
+    assert!(h.udp_tx_bytes <= TX_BYTES / ENDPOINT_SHARE);
+    let st = n.s.stats();
+    assert!(st.udp_send_evicted > 0);
+    let got = sent_seqs(&mut n);
+    // 送るのは新しい側の連続で、最後は最後に入れた datagram
+    assert_eq!(*got.last().unwrap(), 1039);
+    assert!(got.windows(2).all(|w| w[0] < w[1]));
+    assert_eq!(n.s.held().udp_tx_datagrams, 0);
+}
+
+/// 待てる最長の時間を超えた datagram は、取り出す時に捨てます。新しい datagram は残り、時間を決めない
+/// datagram は捨てません。
+#[test]
+fn send_latest_expires_stale_datagrams_when_they_are_taken() {
+    let mut n = TestNet::new(small_limits());
+    let pc = bind(&mut n, 53);
+    send(&mut n, pc, &seq_payload(0, 20), PEER_UDP).unwrap();
+    send_latest(&mut n, pc, &seq_payload(1, 20), 100).unwrap();
+    send_latest(&mut n, pc, &seq_payload(2, 20), 100).unwrap();
+    n.advance(Duration::from_millis(60));
+    send_latest(&mut n, pc, &seq_payload(3, 20), 100).unwrap();
+    n.advance(Duration::from_millis(60));
+    // 1 と 2 は 120 ms、3 は 60 ms。0 は時間を決めていない
+    assert_eq!(sent_seqs(&mut n), [0, 3]);
+    let st = n.s.stats();
+    assert_eq!((st.udp_send_expired, st.udp_send_evicted), (2, 0));
+    assert_eq!(n.s.held().udp_tx_datagrams, 0);
+    // 100 ms ちょうどは捨てない
+    send_latest(&mut n, pc, &seq_payload(4, 20), 100).unwrap();
+    n.advance(Duration::from_millis(100));
+    assert_eq!(sent_seqs(&mut n), [4]);
+}
+
+/// 送り始めた断片の途中の datagram は、時間を超えても捨てません。
+#[test]
+fn send_latest_does_not_cut_a_datagram_that_has_started_to_leave() {
+    let mut n = TestNet::new(small_limits());
+    let pc = bind(&mut n, 53);
+    send_latest(&mut n, pc, &vec![7; 6000], 50).unwrap();
+    let mut buf = vec![0u8; TEST_MTU];
+    assert!(n.s.poll_transmit(n.now, &mut buf).is_some());
+    n.advance(Duration::from_millis(500));
+    let rest = n.drain_raw();
+    assert!(rest.len() >= 2, "the rest of the 6000 byte datagram");
+    assert_eq!(n.s.stats().udp_send_expired, 0);
+}
+
+/// 閉じた endpoint の送り残しも、全体の予算が尽きた時には先頭から捨てます。開き直した同じポートの列を乱しません。
+#[test]
+fn send_latest_evicts_leftovers_of_a_closed_endpoint() {
+    let mut n = TestNet::new(small_limits());
+    let a = bind(&mut n, 53);
+    let cap = TX_DATAGRAMS / ENDPOINT_SHARE;
+    for i in 0..cap {
+        send_latest(&mut n, a, &seq_payload(i as u16, 50), 0).unwrap();
+    }
+    n.s.close_udp(n.now, a);
+    n.s.check_invariants().unwrap();
+    let a2 = bind(&mut n, 53);
+    let others: Vec<UdpId> = (0..3).map(|i| bind(&mut n, 60 + i)).collect();
+    for (k, &p) in others.iter().enumerate() {
+        for i in 0..cap {
+            send_latest(&mut n, p, &seq_payload((1000 * (k + 1) + i) as u16, 50), 0).unwrap();
+        }
+    }
+    assert_eq!(n.s.held().udp_tx_datagrams, TX_DATAGRAMS);
+    for i in 0..3u16 {
+        send_latest(&mut n, a2, &seq_payload(5000 + i, 50), 0).unwrap();
+    }
+    assert_eq!(n.s.stats().udp_send_evicted, 3);
+    let got = sent_seqs(&mut n);
+    assert_eq!(got[0], 3, "the leftovers of the closed endpoint go first");
+    assert_eq!(&got[got.len() - 3..], [5000, 5001, 5002]);
+}
+
+/// 捨てるログは 1 分に 1 回までで、捨てた数の和を持ちます。
+#[test]
+fn send_latest_logs_at_most_once_a_minute() {
+    let mut n = TestNet::new(small_limits());
+    let pc = bind(&mut n, 53);
+    let cap = TX_DATAGRAMS / ENDPOINT_SHARE;
+    for i in 0..cap + 10 {
+        send_latest(&mut n, pc, &seq_payload(i as u16, 20), 0).unwrap();
+    }
+    let log = n.s.poll_log().unwrap();
+    assert_eq!((log.kind, log.count), (LogKind::UdpSendDropped, 1));
+    assert!(n.s.poll_log().is_none());
+    n.now = n.now + Duration::from_secs(61);
+    send_latest(&mut n, pc, &seq_payload(0, 20), 0).unwrap();
+    let log = n.s.poll_log().unwrap();
+    assert_eq!((log.kind, log.count), (LogKind::UdpSendDropped, 11));
+}
+
+/// 60 pkt/s の流れがセッションの無い間も続く時、回復の後に何が届くかを決定的に測るモデルです。
+///
+/// `stream_ms` の間 60 pkt/s で送り、その後も `outage_ms` が終わるまで核の出力を引きません
+/// (セッションが無い間は引かない作りに当たります)。回復の時刻で全部引き、届いた数と、100 ms を超えて古い
+/// 数と、最も古い datagram の古さ (ms) を返します。`max_age_ms` が 0 なら捨てるのは予算が尽きた時だけです。
+fn outage_model(max_age_ms: u16, stream_ms: u64, outage_ms: u64) -> (usize, usize, u64) {
+    let mut n = TestNet::new(small_limits());
+    let pc = bind(&mut n, 53);
+    let step = 1_000_000_000u64 / 60;
+    let mut sent_at = Vec::new();
+    let mut t = 0u64;
+    while t < stream_ms * 1_000_000 {
+        n.now = Time::ZERO + Duration::from_nanos(t);
+        let i = u16::try_from(sent_at.len()).unwrap();
+        n.s.send_to_latest(n.now, pc, &seq_payload(i, 100), PEER_UDP, max_age_ms)
+            .unwrap();
+        sent_at.push(t);
+        t += step;
+    }
+    n.now = Time::ZERO + Duration::from_millis(outage_ms);
+    n.s.handle_timeout(n.now);
+    let got = sent_seqs(&mut n);
+    let ages: Vec<u64> = got
+        .iter()
+        .map(|&i| (outage_ms * 1_000_000 - sent_at[usize::from(i)]) / 1_000_000)
+        .collect();
+    let stale = ages.iter().filter(|&&a| a > 100).count();
+    (got.len(), stale, ages.iter().copied().max().unwrap_or(0))
+}
+
+/// 設計の判断 (UDP の送信を待たずに古いものから捨てる) の根拠の数です。表は設計の文書にあります。
+#[test]
+fn outage_model_compares_drop_oldest_with_drop_by_age() {
+    // 10 秒のセッションの断の間も流れは続く。回復の時、捨てるのが予算が尽きた時だけなら、上限の分の
+    // 古い datagram がまとめて届く。時間で捨てれば、届くのは 100 ms 以内のものだけ
+    let (n, stale, oldest) = outage_model(0, 10_000, 10_000);
+    assert_eq!(
+        (n, stale),
+        (TX_DATAGRAMS / ENDPOINT_SHARE, 249),
+        "oldest {oldest}"
+    );
+    assert!((4200..4300).contains(&oldest), "{oldest}");
+    let (n, stale, oldest) = outage_model(100, 10_000, 10_000);
+    assert_eq!(stale, 0);
+    assert!(n <= 7 && oldest <= 100, "{n} {oldest}");
+    // 流れが 1 秒で止まり、120 秒後に回復する。予算が尽きない限り捨てないので、止まる前の datagram が
+    // 2 分後に届く。時間で捨てれば何も届かない
+    let (n, stale, oldest) = outage_model(0, 1_000, 120_000);
+    assert_eq!((n, stale), (61, 61), "oldest {oldest}");
+    assert!(oldest > 118_000);
+    assert_eq!(outage_model(100, 1_000, 120_000).0, 0);
 }

@@ -8,7 +8,7 @@
 //!
 //! 宛先からの応答は、セッションごとの task がバッファを持たずに読みの準備と誤りを待ち、準備が来てから
 //! 応答のバッファの枠 ([`super::replies`]) を借りて datagram の全体を読み、wgstack の endpoint から送信元へ
-//! 送る。宛先の Port Unreachable はソケットの誤りとして届くので、セッションを閉じ、トンネルへ ICMP は
+//! 待たずに送る。核の送信の予算が尽きていれば古い datagram を捨てて場所を作る。宛先の Port Unreachable はソケットの誤りとして届くので、セッションを閉じ、トンネルへ ICMP は
 //! 送らない。同じ送信元の次の datagram が新しいセッションを作る。
 //!
 //! セッションは、どちらの向きの datagram も無い時間が無通信の期限を超えると閉じる。点検は期限の 4 分の
@@ -80,6 +80,12 @@ const RETRY_MAX: Duration = Duration::from_secs(1);
 fn next_retry(d: Duration) -> Duration {
     (d * 2).clamp(RETRY_MIN, RETRY_MAX)
 }
+
+/// トンネルへ入れた応答が、送り始めるまでに待てる最長の時間。セッションが無い間やソケットが書けない間
+/// 核に溜まった応答は、回復の後に古いまま届くと役に立たないので、この時間を超えたものは捨てる。予算が
+/// 尽きた時に古いものから捨てる決まりと合わせて、溜まる量の上界は件数と時間の両方で決まる
+/// ([`wgft_netstack::UdpSender::send_to_latest`])。
+const TUNNEL_MAX_AGE: Duration = Duration::from_millis(100);
 
 /// データプレーンのスレッドの上で、核に UDP の待ち受けを開き、受け取りの task を立てる。予算の枠は
 /// 開けてから受け付けにする。
@@ -389,7 +395,9 @@ async fn reply_until_error(r: &Replying) -> io::Result<()> {
             Err(e) => return Err(e),
         };
         r.seen.set(Instant::now());
-        r.sender.send_to(&buf[..n], r.to).await?;
+        // トンネルへ入れる側は待たない。核の送信の予算が尽きている間は古いものから捨て、この task は宛先を
+        // 読み続ける。待たないので、枠を借りたまま止まることも無い
+        r.sender.send_to_latest(&buf[..n], r.to, TUNNEL_MAX_AGE)?;
     }
 }
 
