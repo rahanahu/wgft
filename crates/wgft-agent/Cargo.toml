@@ -43,3 +43,4 @@ tokio = { workspace = true, features = ["test-util"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tempfile.workspace = true
+wgft-alloc-count.workspace = true

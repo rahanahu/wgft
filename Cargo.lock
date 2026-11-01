@@ -1662,6 +1662,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite",
  "unicode-general-category",
+ "wgft-alloc-count",
  "wgft-netstack",
  "wgft-proto",
  "wgft-wgstack",
