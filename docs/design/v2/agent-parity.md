@@ -452,13 +452,14 @@ WireGuard のエンドポイントの名前は A レコードだけを引く別�
   `getaddrinfo` の順は libc と設定 (`gai.conf`) で変わるためです
 - 上界:スレッドの数は許可の数で決まり、スレッド 1 本はスタックと `getaddrinfo` の作業の領域を持ちます。
   [メモリの上界の行](#メモリの上界の行)に許可の数 × スレッド 1 本の大きさを入れます
-- 名前の形:DNS の名前の形でない名前 (Go の `net.isDomainName` が偽になる名前) は、宛先もエンドポイントも引かずに `lookup <名前>: no such host` で断ります。
-  v1 の Linux の静的な build の Go の resolver が問い合わせずに断るのと同じです。
-  macOS と Windows の Go の resolver が同じ形で断るかは確かめていません。
-  `getaddrinfo` は `/etc/hosts` などから任意の文字列を引けるので、server が配る制御の文字や長い文字列を OS の resolver に渡さないためでもあります。
-  名前は 253 byte まで (末尾の点があれば 254)、ラベルは 1 から 63 byte、文字は英字、数字、`_`、`-` だけです。
-  IP のリテラル (IPv6 の zone の付いた形を含む) は、Go と同じく名前として調べません。
-  cgo の resolver を使う Go の build は、この形でない名前も OS に渡します。v1 の配布物は静的な build です
+- 名前の形:空の名前、254 byte を超える名前と、空白か表示できない文字 (Go の `unicode.IsGraphic` でない文字) を含む名前は、宛先もエンドポイントも引かずに `lookup <名前>: no such host` で断ります。
+  `getaddrinfo` は `/etc/hosts` などから任意の文字列を引けるので、server が配る制御の文字や改行、長い文字列を OS の resolver とその設定のファイルの照合に渡さないためです。
+  判定はこの安全に要る分だけで、Go の `net.isDomainName` の形 (ラベルの長さ、使える文字、数字だけの名前) の全体は求めません。
+  v1 の Go の resolver は、Linux の静的な build では hosts のファイルを形の判定より先に引き、Windows と macOS では OS の resolver に渡すので、形の全体を求めると Go が引ける名前を断ることになるためです。
+  IP のリテラルと、IPv6 の zone の付いた形もこの判定を通ります。
+  残る差:Linux で hosts のファイルに無く、Go の形に合わない名前 (`-foo.com`、`a..b`、数字だけの `123` など) を、Go の静的な build は問い合わせずに `no such host` で断り、Rust の agent は `getaddrinfo` に渡します。
+  `getaddrinfo` は `127.1` や `123` のような数字の形を IPv4 のアドレスとして読むことがあり、そのときは Go が断る名前に Rust の agent は接続します。
+  接続の前の宛先の判定 (許可一覧、ブロードキャストとマルチキャストの拒否) は解決したアドレスに対して行うので、この差で判定を外れる宛先はありません
 
 ## ログの文字
 
