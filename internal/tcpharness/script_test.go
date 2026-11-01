@@ -34,9 +34,11 @@ func golden(t *testing.T, path string, data []byte) {
 	}
 }
 
+// astJSON is v as minified JSON with sorted keys and a final newline, which keeps the fixtures
+// small in diffs; a JSON tool shows them indented.
 func astJSON(t *testing.T, v any) []byte {
 	t.Helper()
-	b, err := json.MarshalIndent(v, "", "  ")
+	b, err := json.Marshal(v)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,1 @@
-{
-  "error": {
-    "line": 5,
-    "msg": "statement after stop is never reached"
-  }
-}
+{"error":{"line":5,"msg":"statement after stop is never reached"}}
