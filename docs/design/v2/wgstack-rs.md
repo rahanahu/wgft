@@ -138,7 +138,8 @@ device の層と核を組み、UDP のソケットとタイマーを回す駆動
 - unsafe:`wgft-wgstack` は `#![forbid(unsafe_code)]` にします。
   checksum も `as_chunks` と `u64::from_be_bytes` の安全なコードで書きます
 - 製品の木:CI の `cargo tree` の検査が、`wgft` のバイナリの依存の木に `wgft-tcpharness` と `wgft-wgstack-dut` が無いこと、測定用の feature が有効でないことを確かめます。
-  この検査は、試験の道具の crate を足す段で足します
+  crate の検査は T3a が `rust-check` に足しました。
+  feature の検査は、測定用の feature を足す段で足します
 - I7 の隔離:後で作る agent のカーネルモードの crate が、推移的にも `wgft-wgstack` に依らないことを、製品の木と同じ `cargo tree` の検査で確かめます。
   カーネルモードの agent は wgstack を作りません
 

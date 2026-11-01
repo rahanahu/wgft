@@ -42,12 +42,15 @@ name: CI
 #               This second part widens the table's own build-only mapping for B6, for the
 #               same reachability reason as go_code above.
 #
-#   rust    -> crates/**, Cargo.toml, Cargo.lock, rust-toolchain.toml, deny.toml
+#   rust    -> crates/**, Cargo.toml, Cargo.lock, rust-toolchain.toml, deny.toml,
+#               internal/tcpharness/scripts/**
 #               -> gates rust-check, rust-windows, rust-macos (B13, B14) and rust-deny
 #               (B15). The Rust workspace is the v2 migration's build
 #               (docs/development/architecture.md); it shares nothing with the Go jobs
-#               above, so a Go-only or document-only change leaves these jobs skipped and
-#               a Rust-only change leaves the Go jobs to build-test's own rule. rust-deny
+#               above except the scenario scripts and their fixtures, which the Go and the
+#               Rust parsers both read, so a Go-only or document-only change leaves these
+#               jobs skipped and a Rust-only change leaves the Go jobs to build-test's own
+#               rule. rust-deny
 #               additionally runs on the weekly schedule, because new RustSec advisories
 #               affect code nobody touched.
 #
@@ -156,6 +159,8 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - 'deny.toml'
+              # The scenario scripts and parser fixtures, which the Rust tests read as well.
+              - 'internal/tcpharness/scripts/**'
             build:
               - '.goreleaser.yaml'
               - 'scripts/build-release.sh'
@@ -397,6 +402,15 @@ jobs:
       # nextest does not run doctests.
       - name: doctests
         run: cargo test --workspace --doc --locked
+      # The test tooling crates never reach the product binary's dependency tree
+      # (docs/design/v2/wgstack-rs.md, the dependency and isolation checks).
+      - name: product tree
+        run: |
+          tree=$(cargo tree -p wgft -e normal,build --prefix none --locked)
+          if printf '%s\n' "$tree" | grep -E '^wgft-(tcpharness|wgstack-dut) '; then
+            echo "the wgft binary depends on a test tooling crate" >&2
+            exit 1
+          fi
       # The fuzz targets build these crates with code that the normal build leaves out:
       # wgft-wgstack under --cfg fuzzing, wgft-wireguard with its fuzzing and deterministic
       # features. The fuzz crates need nightly, so check that code here on the pinned stable.
