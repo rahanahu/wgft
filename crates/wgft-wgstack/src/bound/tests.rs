@@ -44,7 +44,7 @@ fn table() -> String {
         w.push_str(" ---: |");
     }
     w.push('\n');
-    let rows: [(&str, &dyn Fn(usize) -> u64); 19] = [
+    let rows: [(&str, &dyn Fn(usize) -> u64); 20] = [
         ("`stack`", &|i| parts[i].stack),
         ("`conn_slots`", &|i| parts[i].conn_slots),
         ("`conn_index`", &|i| parts[i].conn_index),
@@ -58,6 +58,7 @@ fn table() -> String {
         ("`chunk_pool`", &|i| parts[i].chunk_pool),
         ("`fix`", &|i| bounds[i].fix),
         ("`floor_conn`", &|i| bounds[i].floor_conn),
+        ("`floor_arrays`", &|i| bounds[i].floor_arrays),
         ("`boost`", &|i| bounds[i].boost),
         ("`frag`", &|i| bounds[i].frag),
         ("`udp_rx`", &|i| bounds[i].udp_rx),
@@ -247,12 +248,19 @@ fn a_full_stack_meets_each_term() {
     let bound = s.bound();
     let (n, slots) = (b(limits.conns()), b(BOOST_SLOTS));
     assert_eq!(h.boosted as u64, slots);
+    assert_eq!(h.slot_arrays, limits.conns());
+    assert_eq!(s.slots_used(), h.slot_arrays);
     let chunk_terms = n * (SEND_FLOOR + RECV_FLOOR)
         + slots * ((BOOST_SIZE - SEND_FLOOR) + (BOOST_SIZE - RECV_FLOOR));
     let record_terms =
         n * b(FLOOR_RECORDS * size_of::<Record>()) + slots * b(BOOST_RECORDS * size_of::<Record>());
     let interval_terms = n * b(FLOOR_INTERVALS * size_of::<Interval>())
         + slots * b(BOOST_INTERVALS * size_of::<Interval>());
+    assert_eq!(
+        n * b(FLOOR_RECORDS * size_of::<Record>() + FLOOR_INTERVALS * size_of::<Interval>()),
+        bound.floor_arrays,
+        "the floor arrays of every slot"
+    );
     assert_eq!(b(h.chunk_bytes), chunk_terms, "chunk bytes");
     assert_eq!(b(h.record_bytes), record_terms, "record bytes");
     assert_eq!(b(h.interval_bytes), interval_terms, "interval bytes");

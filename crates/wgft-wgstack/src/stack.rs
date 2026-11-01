@@ -281,6 +281,7 @@ impl<H: Hook> Stack<H> {
             let (recs, ivs) = b.array_bytes();
             h.record_bytes += recs;
             h.interval_bytes += ivs;
+            h.slot_arrays += usize::from(b.has_floor_arrays());
             if t.state != State::Free {
                 h.conns += 1;
                 h.chunk_bytes += b.held_chunks() * CHUNK_SIZE;
@@ -303,6 +304,12 @@ impl<H: Hook> Stack<H> {
         h.pool_chunks = self.s.chunks.kept();
         h.pool_bytes = h.pool_chunks * CHUNK_SIZE;
         h
+    }
+
+    /// 核を作ってから使ったことのある接続の枠の数です。枠は初めて使う時に floor の送信の記録の輪と区間の表を確保し、
+    /// 持ち続けるので、この数の枠がその配列を持ちます。数えは枠を初めて使う時だけ増えるので、読むのは定数の手間です。
+    pub fn slots_used(&self) -> usize {
+        self.conns.with_arrays()
     }
 
     /// 不変条件を確かめます。予約の和が上界以下であること、表の数と予約が一致すること、chunk と配列の持ち主が

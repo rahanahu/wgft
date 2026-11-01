@@ -642,6 +642,8 @@ wgstack の `Bound` に加える項は次のとおりです。
 
 wgstack の外の項は、エージェントの上界の式の wireguard-go の項です。
 送信の向きは W_tx(P_max) = (N_tx + P_max) × S、受信の向きは N_rx × k_rx × S(案 A)か (N_rx + P_max_rx) × S(案 B)にし、TUN の読み取りの goroutine と受信の goroutine の固定の buffer を足します。
+Rust のエージェントでは、wgstack の外のバッチのバッファを[メモリの上界の行](../v2/agent-parity.md#メモリの上界の行)の `batch` の項に数えます。
+今は 0 で、バッチを入れる変更がその項を埋め、[上界の表](../v2/agent-bound.md)を作り直します。
 実装の段では、[フロー数とメモリのソフト上限](flow-limits.md)、[トンネルの回復と作り直し](tunnel-recovery.md)の 1 回の件数の 2 項、[エージェントとホストのメモリの条件](memory-agent-host.md#wgstack-を使うエージェントの上界)の表を、wgstack を使う場合の値で同じ変更の中で直します。
 
 敵対的な入力がバッチで保持を増やせないことは、次の構造で決まります。

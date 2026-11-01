@@ -975,9 +975,8 @@ async fn relay_one(mut down: TcpStream<Net>, held: Held, flow: Flow) {
     deliver(closing, lan).await;
 }
 
-/// 中継の task の future の大きさ (TCP の中継 1 本、UDP のセッションの応答 1 つ)。メモリの上界の試験が
-/// 使う。
-#[cfg(test)]
+/// 中継の task の future の大きさ (TCP の中継 1 本、UDP のセッションの応答 1 つ)。メモリの上界がこの値から
+/// 項を数える。
 pub(crate) fn future_sizes() -> (usize, usize) {
     fn output_size<A, B, C, F: Future>(_: impl FnOnce(A, B, C) -> F) -> usize {
         size_of::<F>()
@@ -985,8 +984,7 @@ pub(crate) fn future_sizes() -> (usize, usize) {
     (output_size(relay_one), udp::reply_future_size())
 }
 
-/// UDP のセッション 1 つの表の項と確保のバイト。
-#[cfg(test)]
+/// UDP のセッション 1 つの表の項と確保のバイト。メモリの上界がこの値から項を数える。
 pub(crate) fn udp_session_bytes() -> usize {
     udp::session_entry_bytes()
 }

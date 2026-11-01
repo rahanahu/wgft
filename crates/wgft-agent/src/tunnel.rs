@@ -201,6 +201,7 @@ pub struct Tunnel {
     shared: Arc<Mutex<Reading>>,
     dataplane: Handle<Stack>,
     monitor: JoinHandle<()>,
+    slot_watch: JoinHandle<()>,
     /// トンネルを立てた時刻。データプレーンの時計の値。
     started_at: Instant,
     clock: Option<PathBuf>,
@@ -277,11 +278,13 @@ impl Tunnel {
             dataplane.clone(),
             dead,
         ));
+        let slot_watch = tokio::spawn(slot_watch(dataplane.clone(), limits));
         Ok(Tunnel {
             cfg,
             shared,
             dataplane,
             monitor,
+            slot_watch,
             started_at: dataplane::clock::now(),
             clock: clock.map(Path::to_path_buf),
             clock_base,
@@ -373,6 +376,8 @@ impl Tunnel {
         stamp::record(self.clock.as_deref(), self.clock_now().await, !exiting).await;
         self.monitor.abort();
         let _ = self.monitor.await;
+        self.slot_watch.abort();
+        let _ = self.slot_watch.await;
         generations.stop().await;
     }
 }
@@ -394,6 +399,37 @@ fn set_endpoint(shared: &Mutex<Reading>, ep: Result<SocketAddrV4, String>) {
             r.err = None;
         }
         Err(e) => r.err = Some(e),
+    }
+}
+
+/// 使ったことのある接続の枠の数を書く行の刻みです。行は数をこの倍数に切り上げて書くので、行の値は数の上界で、
+/// 行の数は枠の数をこの値で割った数までです。
+const SLOT_STEP: usize = 64;
+
+/// 核の接続の枠のうち floor の配列を持つ枠 (核を作ってから使ったことのある枠) の数を 1 秒ごとに読み (核が数えて
+/// 持つ値で、枠をたどらない)、
+/// [`SLOT_STEP`] の倍数に切り上げた値が増えたときだけ、その値と配列の byte を 1 行に書く。配列は枠が持ち続けるので、
+/// 数は減らない。ラボの `lifecycle.sh` の check 5 と 5b は、洪水が満たした配列の量をこの行から読む
+/// (agent-parity.md の「メモリの上界の行」)。行の形は保証の外。
+async fn slot_watch(dp: Handle<Stack>, limits: Limits) {
+    let conns = limits.conns();
+    let arrays = wgft_wgstack::Bound::for_limits(&limits, wgft_wgstack::MAX_MTU).floor_arrays;
+    let per_slot = usize::try_from(arrays).unwrap_or(usize::MAX) / conns.max(1);
+    let mut shown = 0;
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tick.tick().await;
+        let Ok(used) = dp.call(|net| net.with(|ns| ns.core().slots_used())).await else {
+            return;
+        };
+        let up = used.next_multiple_of(SLOT_STEP).min(conns);
+        if up > shown {
+            shown = up;
+            logf!(
+                "memory: connection slots used so far: at most {up} of {conns}; their floor arrays hold {} KiB",
+                (up * per_slot).div_ceil(1 << 10)
+            );
+        }
     }
 }
 

@@ -189,9 +189,12 @@ agent_limit_text() {
 # agent_flood_terms <agent log>: the terms of the Rust agent's memory bound that check 5's floods can
 # fill, in MiB, summed, from its "memory bound terms:" start line; empty when a term is missing. The
 # floods hold idle TCP connections and send one-byte datagrams, so they fill the relays' per-flow
-# parts, the reply buffers and the queues the traffic passes, and touch the tables the core and the
-# netstack made at start; they carry no bulk data, so the TCP relays' bulk buffers and the core's
-# per-connection send and receive parts stay empty and are left out.
+# parts, the reply buffers and the queues the traffic passes, touch the tables the core and the
+# netstack made at start, and make each connection slot they reach allocate the floor arrays it keeps
+# from its first use; they carry no bulk data, so the TCP relays' bulk buffers and the core's
+# per-connection send and receive buffers stay empty and are left out. The arrays count only the
+# slots the floods reached: the agent's last "connection slots used so far" line gives their bytes,
+# rounded up; without that line the whole "core arrays" term counts.
 agent_flood_terms() {
   local line; line=$(grep -m1 'memory bound terms:' "$1" 2>/dev/null)
   local sum=0 term v
@@ -200,7 +203,14 @@ agent_flood_terms() {
     [ -n "$v" ] || return 0
     sum=$((sum + v))
   done
-  echo "$sum"
+  local kib; kib=$(grep -oE 'their floor arrays hold [0-9]+ KiB' "$1" 2>/dev/null | tail -1 | grep -oE '[0-9]+')
+  if [ -n "$kib" ]; then
+    v=$(( (kib + 1023) / 1024 ))
+  else
+    v=$(grep -oE "core arrays [0-9]+ MiB" <<< "$line" | grep -oE '[0-9]+')
+    [ -n "$v" ] || return 0
+  fi
+  echo "$((sum + v))"
 }
 # agent_limit_checks <what> <rss> <limit> <margin> <agent log> <soft limit name> <rss at start>: the
 # RSS stays under the limit plus the margin while flooded past <what>, and the agent logged the limit
@@ -217,7 +227,11 @@ agent_limit_checks() {
     okcheck "agent RSS stays under its memory bound plus $mar MiB while flooded past $what" \
       "$([ -n "$rss" ] && [ "$lim" != - ] && [ "$rss" -le "$((lim + mar))" ] && echo 1 || echo 0)"
     check "agent logs its memory bound at start" "memory bound: " "$(grep 'memory bound:' "$log")"
+    # the agent writes the slots line at most a second after the slots grow; the count only grows,
+    # so a line read after the RSS sample covers the slots in use at that sample
+    sleep 2
     local fill; fill=$(agent_flood_terms "$log")
+    echo "   $(grep 'connection slots used so far' "$log" | tail -1)"
     echo "   agent RSS after start, before the floods: ${rss0:-unknown} MiB; the bound's terms the floods can fill: ${fill:-unknown} MiB"
     okcheck "agent RSS grows by at most the terms the floods can fill plus $mar MiB while flooded past $what" \
       "$([ -n "$rss" ] && [ -n "$rss0" ] && [ -n "$fill" ] && [ $((rss - rss0)) -le $((fill + mar)) ] && echo 1 || echo 0)"
