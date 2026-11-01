@@ -123,10 +123,12 @@ wait_net() { timeout 120 bash -c "$(declare -f inc); $(printf '%q ' inc wait "$V
 # WGFT_LAB_AGENT_IMPL はユーザー空間モードのエージェントの実装(go か rust)を選ぶ。値があれば VM の中のコマンドに
 # そのまま渡し、lab/sandbox.sh がそれで AGENT_WGFT を決める。未設定なら go と同じ
 # (docs/design/v2/agent-parity.md の「ラボの切り替え」)
+# WGFT_LAB_RSS_PHASES は値があればそのまま渡す。lifecycle.sh の check 5 が agent の RSS を段ごとに測って書く
 in_vm() {
   local env=()
   [[ -n ${WGFT_LAB_AGENT_NETSTACK:-} ]] && env+=(--env "WGFT_AGENT_NETSTACK=$WGFT_LAB_AGENT_NETSTACK")
   [[ -n ${WGFT_LAB_AGENT_IMPL:-} ]] && env+=(--env "WGFT_LAB_AGENT_IMPL=$WGFT_LAB_AGENT_IMPL")
+  [[ -n ${WGFT_LAB_RSS_PHASES:-} ]] && env+=(--env "WGFT_LAB_RSS_PHASES=$WGFT_LAB_RSS_PHASES")
   inc exec "$VM" "${env[@]}" --cwd "$SHARE" -- "$@"
 }
 
@@ -330,13 +332,18 @@ host_build() {
   (cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ${WGFT_LAB_BUILD_TAGS:+-tags "$WGFT_LAB_BUILD_TAGS"} -o bin/ ./cmd/... ./tools/...)
   # Rust の wgft は、WGFT_LAB_AGENT_IMPL=rust、--agent-impl に rust を含む lab suite のとき
   # bin/rust/wgft に作る。cargo-zigbuild で musl の静的バイナリにし、VM の Debian の glibc に依らない。
+  # WGFT_LAB_RUST_TARGET は Rust の wgft の target で、既定は x86_64-unknown-linux-musl。
+  # x86_64-unknown-linux-gnu.2.17 のような glibc の target にすると、libc と割り当て器の違う build を測れる。
+  # glibc の版 (.2.17) は zig が結ぶ glibc の下限で、VM の Debian の glibc はそれ以上でなければならない。
   # 既定の bin/ とその install は変えない
   if rust_wanted; then
     command -v cargo-zigbuild >/dev/null || die "the Rust build needs cargo-zigbuild and zig on the host"
+    local rtarget=${WGFT_LAB_RUST_TARGET:-x86_64-unknown-linux-musl}
     mkdir -p "$REPO/bin/rust"
-    (cd "$REPO" && cargo zigbuild --release --locked --target x86_64-unknown-linux-musl -p wgft) || die "cargo zigbuild failed"
-    install -m 0755 "$REPO/target/x86_64-unknown-linux-musl/release/wgft" "$REPO/bin/rust/wgft"
-    info "built the Rust wgft into $REPO/bin/rust/"
+    (cd "$REPO" && cargo zigbuild --release --locked --target "$rtarget" -p wgft) || die "cargo zigbuild failed"
+    # zigbuild の target の glibc の版は出力の置き場の名前に入らない
+    install -m 0755 "$REPO/target/${rtarget%%.*}/release/wgft" "$REPO/bin/rust/wgft"
+    info "built the Rust wgft for $rtarget into $REPO/bin/rust/"
   fi
   info "built into $REPO/bin/"
 }
@@ -774,8 +781,8 @@ paired_sync() {
 }
 
 cmd_paired() {
-  local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes="" tool="" streams="" udpping="" bulkmbit="" agentgso=""
-  local usage="usage: lab paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--out DIR] [--keep] fast|rate ARM_X ARM_Y"
+  local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes="" tool="" streams="" udpping="" bulkmbit="" agentgso="" rtarget_flag=""
+  local usage="usage: lab paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--out DIR] [--keep] fast|rate ARM_X ARM_Y"
   while (($#)); do
     case $1 in
       --rounds) rounds=${2:?--rounds N}; shift 2 ;;
@@ -788,6 +795,7 @@ cmd_paired() {
       --bulk-mbit) bulkmbit=${2:?--bulk-mbit N}; shift 2 ;;
       --agent-gso) agentgso=${2:?--agent-gso on|off}; shift 2 ;;
       --base) base=${2:?--base REF}; shift 2 ;;
+      --rust-target) WGFT_LAB_RUST_TARGET=${2:?--rust-target TRIPLE}; rtarget_flag=1; shift 2 ;;
       --base-rust-target) PAIRED_BASE_RUST_TARGET=${2:?--base-rust-target TRIPLE}; shift 2 ;;
       --vcpus) vcpus=${2:?--vcpus N}; shift 2 ;;
       --out) out=${2:?--out DIR}; shift 2 ;;
@@ -830,6 +838,8 @@ cmd_paired() {
   ((!uses_base)) || [[ -n $base ]] || die "an arm base:<mode> needs --base REF"
   ((uses_base)) || [[ -z $base ]] || die "--base is given, but no arm is base:<mode>"
   [[ -z ${PAIRED_BASE_RUST_TARGET:-} || -n $base ]] || die "--base-rust-target needs --base REF"
+  # --rust-target は作業ツリーの rust の腕だけに効く
+  [[ -z $rtarget_flag || $spec_x == rust || $spec_y == rust ]] || info "warning: --rust-target has no effect: no arm runs the work tree's rust build"
   # VM ごとの固定:WGFT_LAB_PAIR_CPUS の 2 つの集合の先頭から --vcpus 個ずつ。無ければ固定せず、vCPU の数だけ決める
   local pins=() sets=() used="" dup
   if [[ -n ${WGFT_LAB_PAIR_CPUS:-} ]]; then
@@ -882,7 +892,7 @@ cmd_paired() {
   git -C "$REPO" diff --quiet HEAD 2>/dev/null || dirty=-dirty
   {
     echo "lab paired: path $path, direction $direction, x=$spec_x y=$spec_y, $rounds rounds of $runs runs, tool ${tool:-tcpquality}, ${streams:-1} stream(s)${bulkmbit:+, capped at $bulkmbit Mbit/s per stream}${agentgso:+, agent UDP GSO $agentgso}${udpping:+, UDP round trips}"
-    echo "lab paired: head $(git -C "$REPO" rev-parse HEAD)$dirty${base:+, base $(git -C "$REPO" rev-parse "$base^{commit}") ($base)}${PAIRED_BASE_RUST_TARGET:+, base Rust target $PAIRED_BASE_RUST_TARGET}"
+    echo "lab paired: head $(git -C "$REPO" rev-parse HEAD)$dirty${base:+, base $(git -C "$REPO" rev-parse "$base^{commit}") ($base)}${WGFT_LAB_RUST_TARGET:+, head Rust target $WGFT_LAB_RUST_TARGET}${PAIRED_BASE_RUST_TARGET:+, base Rust target $PAIRED_BASE_RUST_TARGET}"
     echo "lab paired: VM a ${names[0]} limits.cpu=${pins[0]}, VM b ${names[1]} limits.cpu=${pins[1]}, kernel $kern, template $SUITE_TEMPLATE"
     echo "lab paired: VMs ready after $((SECONDS - t0)) s"
   } | tee "$out/header.txt"
@@ -1014,6 +1024,7 @@ usage: lab <command>
 ns: ${NAMESPACES[*]}
 env: WGFT_LAB_VM=$VM WGFT_LAB_IMAGE=$IMAGE WGFT_LAB_CPU=$CPU WGFT_LAB_MEM=$MEM WGFT_LAB_CPUS=${CPUS:-<unset: not pinned>}
      WGFT_LAB_AGENT_IMPL=${WGFT_LAB_AGENT_IMPL:-<unset: go>} (go or rust: the userspace-mode agent the checks run)
+     WGFT_LAB_RUST_TARGET=${WGFT_LAB_RUST_TARGET:-<unset: x86_64-unknown-linux-musl>} (the target of the Rust wgft)
 EOF
 }
 

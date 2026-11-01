@@ -265,9 +265,12 @@ musl の build の profile では、`calloc` と `free` (zig の `c.malloc` と 
 glibc の build の profile では、同じ確保が送る向きで 1.4%、受ける向きで 3.1% でした。
 glibc の `memset` と `memcpy` は記号の無い libc の中にあり、内訳には `[unknown]` として出るので、零埋めの分は分けられていません。
 差の大部分は datagram ごとの確保なので、バッチの段で確保をやめると、build の違いによる差も大部分が消えると見込みます。
+ただし、device の層の確保をやめた試作 (E) でも、glibc の build は受ける向きの byte あたりの CPU が 8% 少ないままでした。
+残る差は主に `memcpy` の速さと考えます ([割り当て器と libc の比べ](wgstack-rs.md#割り当て器と-libc-の比べ))。
 
 製品の割り当て器はこの段で変えません。
-割り当て器の選択は [実装の時に決めること](wgstack-rs.md#実装の時に決めること)のとおり別に決めます。
+割り当て器と libc は、2026-11-02 に所有者が決めました ([割り当て器と libc の比べ](wgstack-rs.md#割り当て器と-libc-の比べ))。
+割り当て器は OS の標準、Linux の build は musl の静的な build のままです。
 この文書の目標は、今のラボの build (musl) の値を基準にします。
 受ける向きの見積もりの多くは今の割り当て器の `calloc` の費用なので、ラボの build の libc か割り当て器を変えたときは、基準の値を測り直し、目標を導き直します。
 

@@ -218,6 +218,9 @@ WGFT_LAB_AGENT_IMPL=rust lab/lab exec vm bash /wgft/lab/e2e.sh kernel
 
 `rust` のとき、`lab/lab build` は Go のバイナリに加えて Rust の `wgft` を `cargo zigbuild --release --locked --target x86_64-unknown-linux-musl -p wgft` で musl の静的バイナリにし、`bin/rust/wgft` に置きます。
 ホストに cargo-zigbuild と zig が要ります。
+`WGFT_LAB_RUST_TARGET` は Rust の `wgft` の target を変えます (既定は `x86_64-unknown-linux-musl`)。
+`x86_64-unknown-linux-gnu.2.17` のような glibc の target にすると、glibc 2.17 以上に動的に結ぶ build になります。
+末尾の版は zig が結ぶ glibc の下限で、VM の glibc はそれ以上でなければなりません。
 VM の中では `/usr/local/lib/wgft-rust/wgft` に置きます。
 ファイル名を `wgft` に保つのは、確認がプロセスを comm の `wgft` と cmdline の ` agent run` で探すためです。
 `lab-eph.sh` で流す場合も、同じ値を環境に付けます。
@@ -239,7 +242,11 @@ Go の実行環境に依る読み取りは、Rust の agent では次のよう�
   あわせて、洪水の前 (トンネルと待ち受けを開いた後) に RSS を測り、洪水の間の育ちが `memory bound terms:` の行のうち洪水が満たせる項 (`core fixed`、`tables`、`driver`、`device`、`tcp relay`、`udp relay` と、洪水が使った接続の枠の配列) の和に 32 MiB を足した値を超えないことを確かめます。
   洪水が使った接続の枠の配列は、エージェントの最後の `connection slots used so far` の行の KiB です。
   洪水はデータを運ばないので、`tcp bulk` と `core flows` は入れません。
-  項の分け方は [agent-parity.md](../docs/design/v2/agent-parity.md#メモリの上界の行) にあります
+  項の分け方は [agent-parity.md](../docs/design/v2/agent-parity.md#メモリの上界の行) にあります。
+  `WGFT_LAB_RSS_PHASES=1` を付けると、check 5 はエージェントの RSS を段ごとに測った 1 行 (`RSSPHASES`) も出します。
+  段は、起動の後、エージェントが 512 MiB を受けた後、洪水の最中、TCP の洪水の接続が閉じた後、エージェントが 512 MiB を送った後、UDP のセッションが無通信の期限で閉じた後です。
+  libc と割り当て器の違う build を比べるためのもので、どの確認もこの値を読みません。
+  check 5 は約 2 分半長くなります
 - `exhaustion.sh` の acceptq と ackflood:エージェントの GC の記録が無いので、ヒープの値を示さず RSS だけを示します
 - `agentmem.sh`:Go の agent のメモリの probe に依るので、`SKIP` を 1 行出して何もしません
 - `agentdoctor.sh` の userspace の節:`AGENTDOCTOR_BASELINE` の既定を Go の `wgft` にし、Go の CLI が Rust の agent の制御ソケットから読む ID と状態と理由が、Rust の CLI と同じことを確かめます
@@ -290,6 +297,7 @@ iperf3 は送り手と受け手の byte あたりの CPU が `tcpquality.py` よ
 腕に `rust` があれば、Rust の `wgft` も作ります。
 `--base-rust-target` は base の Rust の `wgft` の target を変えます (既定は `x86_64-unknown-linux-musl`)。
 `--base HEAD --base-rust-target x86_64-unknown-linux-gnu.2.41` と腕 `rust base:rust` で、同じ commit の musl と glibc の build を比べます。
+`--rust-target` は作業ツリーの Rust の `wgft` の target を変えます (`WGFT_LAB_RUST_TARGET` と同じ)。
 比は 1 つ目の腕 x の値を 2 つ目の腕 y の値で割ったものです。
 
 手順は次のとおりです。

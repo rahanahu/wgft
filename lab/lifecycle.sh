@@ -1470,8 +1470,19 @@ check5_agent_memory() {
       local apid; apid=$(find_wgft_pid 'agent run')
       # the RSS after start, with the tunnel and both listeners open and before any flood
       local rss0; rss0=$(rss_mib "$apid")
+      # WGFT_LAB_RSS_PHASES=1: also the RSS after a 512 MiB transfer in each direction, after the TCP
+      # flood's connections closed and after the UDP sessions' idle timeout, to compare builds (libc,
+      # allocator) and see whether memory goes back to the OS; no check reads these values. The phases
+      # add about 2.5 minutes to check 5
+      local rss_bulk="" bulk_bytes=""
+      if [ -n "${WGFT_LAB_RSS_PHASES:-}" ]; then
+        bulk_bytes=$(client "head -c 536870912 /dev/zero | timeout -k 5 120 socat -t 30 -T 30 - TCP:198.51.100.1:39996 | grep -oE 'got=[0-9]+' | cut -d= -f2" 2>/dev/null)
+        sleep 3  # measured after the transfer settles; the value is read once
+        rss_bulk=$(rss_mib "$apid")
+      fi
 
       local udp_out; udp_out=$(ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" udp 198.51.100.1 27041 "$addrs" 260)
+      local udp_done=$SECONDS
       echo "   $udp_out"
       ip netns exec "$CLIENT_NS" python3 "$PY/flood.py" tcp 198.51.100.1 39996 "$addrs" 60 5 > $W/wgft-lifecycle-c5a-tcpflood.log 2>&1 &
       local flood_pid=$!
@@ -1489,6 +1500,30 @@ check5_agent_memory() {
       wait "$flood_pid"
       echo "   $(cat $W/wgft-lifecycle-c5a-tcpflood.log)"
       echo "   tcp connections actually held (ss on the agent's own listener, not client-side connect success): $held"
+      if [ -n "${WGFT_LAB_RSS_PHASES:-}" ]; then
+        c5a_none_held() { [ "$(ip netns exec "$HOME_NS" ss -tn state established '( dport = :25596 )' | grep -c ':25596')" = 0 ]; }
+        wait_until 30 c5a_none_held
+        sleep 5  # the UDP sessions stay until their idle timeout; this is after the TCP flood only
+        local rss_after hwm rss_down down_bytes
+        rss_after=$(rss_mib "$apid")
+        # the other direction: a LAN service that sends 512 MiB through a second TCP rule, added only
+        # now because a second rule halves the per-rule share of the flood above
+        ip netns exec "$LAN_NS" setsid nohup socat TCP-LISTEN:25597,bind=192.168.50.3,reuseaddr,fork \
+          SYSTEM:"head -c 536870912 /dev/zero" > $W/wgft-lifecycle-c5a-src.log 2>&1 < /dev/null &
+        disown
+        vps wgft rule add --agent home --tcp 39997 --to 192.168.50.3:25597 --admin "$ADMIN" >/dev/null
+        c5a_down_ok() { [ "$(client "timeout -k 5 20 socat -u TCP:198.51.100.1:39997 - | head -c 4 | wc -c" 2>/dev/null)" = 4 ]; }
+        wait_until 10 c5a_down_ok
+        down_bytes=$(client "timeout -k 5 120 socat -u -T 30 TCP:198.51.100.1:39997 - | wc -c" 2>/dev/null)
+        sleep 3
+        rss_down=$(rss_mib "$apid")
+        # the UDP sessions close after the default idle of 120 s; read once more after they have
+        local idle_wait=$((udp_done + 130 - SECONDS)) rss_quiet
+        [ "$idle_wait" -le 0 ] || sleep "$idle_wait"
+        rss_quiet=$(rss_mib "$apid")
+        hwm=$(awk '/VmHWM/{print int($2/1024)}' "/proc/$apid/status" 2>/dev/null)
+        echo "   RSSPHASES idle=${rss0:-} after_agent_received=${rss_bulk:-} received_bytes=${bulk_bytes:-} flood=${rss:-} after_tcp_flood=${rss_after:-} after_agent_sent=${rss_down:-} sent_bytes=${down_bytes:-} after_udp_idle=${rss_quiet:-} hwm=${hwm:-} (MiB)"
+      fi
       local lim mar; read -r lim mar <<< "$(agent_limit $W/wgft-lifecycle-c5a-agent.log "$SOFT_LIMIT_MIB" "$MARGIN_MIB")"
       echo "   agent RSS while flooded past its flow budget: ${rss:-unknown} MiB ($(agent_limit_text "$lim" "$mar"))"
       # the RSS bound only means something if the budget was actually filled: one rule holding
