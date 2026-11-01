@@ -175,6 +175,193 @@ pub fn read() -> std::io::Result<Vec<HostAddr>> {
     Ok(out)
 }
 
+/// このホストのネットワークのインタフェース 1 つ (Go の `net.Interface` と `Addrs`)。`agent doctor` の
+/// `host.interfaces` が示す。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Interface {
+    /// 名前。Windows では adapter の FriendlyName。
+    pub name: String,
+    /// up か。
+    pub up: bool,
+    /// ループバックか。
+    pub loopback: bool,
+    /// アドレスと帯の長さ (`192.0.2.1/24` の形)。IPv4 と IPv6 の両方。
+    pub addrs: Vec<String>,
+}
+
+fn prefix_of(addr: std::net::IpAddr, prefix_len: u32) -> String {
+    format!("{addr}/{prefix_len}")
+}
+
+/// このホストのインタフェースを、OS が返す順に読む (`getifaddrs`)。アドレスを持たないインタフェースも
+/// 数える。
+///
+/// # Errors
+///
+/// 読めなければ誤りを返す。
+#[cfg(unix)]
+pub fn interfaces() -> std::io::Result<Vec<Interface>> {
+    use std::net::{IpAddr, Ipv6Addr};
+
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: head は書き込める場所を指し、成功すれば libc が確保した一覧の先頭が入る
+    if unsafe { libc::getifaddrs(&raw mut head) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut out: Vec<Interface> = Vec::new();
+    let mut cur = head;
+    while !cur.is_null() {
+        // SAFETY: cur は getifaddrs が返した一覧の要素で、freeifaddrs までは有効である
+        let ifa = unsafe { &*cur };
+        cur = ifa.ifa_next;
+        // SAFETY: ifa_name は NUL で終わる文字列を指す
+        let name = unsafe { std::ffi::CStr::from_ptr(ifa.ifa_name) }
+            .to_string_lossy()
+            .into_owned();
+        let i = if let Some(i) = out.iter().position(|x| x.name == name) {
+            i
+        } else {
+            out.push(Interface {
+                name,
+                ..Interface::default()
+            });
+            out.len() - 1
+        };
+        let flags = ifa.ifa_flags;
+        let entry = &mut out[i];
+        entry.up |= flags & (libc::IFF_UP as libc::c_uint) != 0;
+        entry.loopback |= flags & (libc::IFF_LOOPBACK as libc::c_uint) != 0;
+        if ifa.ifa_addr.is_null() || ifa.ifa_netmask.is_null() {
+            continue;
+        }
+        // SAFETY: ifa_addr は null でない sockaddr を指す
+        let family = i32::from(unsafe { (*ifa.ifa_addr).sa_family });
+        let addr = match family {
+            libc::AF_INET => {
+                // SAFETY: family が AF_INET なので sockaddr_in として読める。netmask も同じ family である
+                let (a, m) = unsafe {
+                    (
+                        (*ifa.ifa_addr.cast::<libc::sockaddr_in>()).sin_addr.s_addr,
+                        (*ifa.ifa_netmask.cast::<libc::sockaddr_in>())
+                            .sin_addr
+                            .s_addr,
+                    )
+                };
+                prefix_of(IpAddr::V4(Ipv4Addr::from(u32::from_be(a))), m.count_ones())
+            }
+            libc::AF_INET6 => {
+                // SAFETY: family が AF_INET6 なので sockaddr_in6 として読める。netmask も同じ family である
+                let (a, m) = unsafe {
+                    (
+                        (*ifa.ifa_addr.cast::<libc::sockaddr_in6>())
+                            .sin6_addr
+                            .s6_addr,
+                        (*ifa.ifa_netmask.cast::<libc::sockaddr_in6>())
+                            .sin6_addr
+                            .s6_addr,
+                    )
+                };
+                let bits = m.iter().map(|b| b.count_ones()).sum();
+                prefix_of(IpAddr::V6(Ipv6Addr::from(a)), bits)
+            }
+            _ => continue,
+        };
+        entry.addrs.push(addr);
+    }
+    // SAFETY: head は getifaddrs が返したもので、ここで 1 回だけ解放する
+    unsafe { libc::freeifaddrs(head) };
+    Ok(out)
+}
+
+/// このホストのインタフェースを読む (`GetAdaptersAddresses`)。名前は adapter の FriendlyName である。
+///
+/// # Errors
+///
+/// 読めなければ誤りを返す。
+#[cfg(windows)]
+pub fn interfaces() -> std::io::Result<Vec<Interface>> {
+    use std::net::{IpAddr, Ipv6Addr};
+    use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_NO_DATA, ERROR_SUCCESS};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST,
+        GetAdaptersAddresses, IF_TYPE_SOFTWARE_LOOPBACK, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC};
+
+    let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    let mut size: u32 = 16 * 1024;
+    let mut buf: Vec<u64>;
+    let mut tries = 0;
+    loop {
+        buf = vec![0u64; (size as usize).div_ceil(8)];
+        // SAFETY: buf は size byte 以上の書き込める領域で、境界は構造体に足りる
+        let rc = unsafe {
+            GetAdaptersAddresses(
+                u32::from(AF_UNSPEC),
+                flags,
+                std::ptr::null(),
+                buf.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
+                &raw mut size,
+            )
+        };
+        match rc {
+            ERROR_SUCCESS => break,
+            ERROR_NO_DATA => return Ok(Vec::new()),
+            ERROR_BUFFER_OVERFLOW if tries < 4 => tries += 1,
+            e => return Err(std::io::Error::from_raw_os_error(e.cast_signed())),
+        }
+    }
+    let mut out = Vec::new();
+    let mut adapter = buf.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+    while !adapter.is_null() {
+        // SAFETY: adapter は GetAdaptersAddresses が buf の中に作った一覧の要素である
+        let a = unsafe { &*adapter };
+        adapter = a.Next;
+        let name = if a.FriendlyName.is_null() {
+            String::new()
+        } else {
+            // SAFETY: FriendlyName は NUL で終わる UTF-16 の文字列を指す
+            unsafe { crate::platform::utf16z_to_string(a.FriendlyName) }
+        };
+        let mut ifc = Interface {
+            name,
+            up: a.OperStatus == IfOperStatusUp,
+            loopback: a.IfType == IF_TYPE_SOFTWARE_LOOPBACK,
+            addrs: Vec::new(),
+        };
+        let mut u = a.FirstUnicastAddress;
+        while !u.is_null() {
+            // SAFETY: u は一覧の要素である
+            let ua = unsafe { &*u };
+            u = ua.Next;
+            let sa = ua.Address.lpSockaddr;
+            if sa.is_null() {
+                continue;
+            }
+            // SAFETY: lpSockaddr は有効な sockaddr を指す
+            let family = unsafe { (*sa).sa_family };
+            let ip = if family == AF_INET {
+                // SAFETY: sockaddr_in で、4 byte 目から IPv4 のアドレスが続く。境界 1 の配列として読む
+                IpAddr::V4(Ipv4Addr::from(unsafe {
+                    sa.cast::<u8>().add(4).cast::<[u8; 4]>().read()
+                }))
+            } else if family == AF_INET6 {
+                // SAFETY: sockaddr_in6 で、8 byte 目から IPv6 のアドレスが続く。境界 1 の配列として読む
+                IpAddr::V6(Ipv6Addr::from(unsafe {
+                    sa.cast::<u8>().add(8).cast::<[u8; 16]>().read()
+                }))
+            } else {
+                continue;
+            };
+            ifc.addrs
+                .push(prefix_of(ip, u32::from(ua.OnLinkPrefixLength)));
+        }
+        out.push(ifc);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +401,13 @@ mod tests {
             Some("address 10.200.0.2 is already assigned on this host, on wgftrs0".into())
         );
         assert_eq!(conflict(Ipv4Addr::new(10, 9, 9, 9), &host, "wgftrs0"), None);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn lists_this_hosts_interfaces_with_a_loopback() {
+        let ifs = interfaces().unwrap();
+        assert!(ifs.iter().any(|i| i.loopback), "{ifs:?}");
     }
 
     #[cfg(any(unix, windows))]

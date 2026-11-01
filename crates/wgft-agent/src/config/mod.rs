@@ -16,7 +16,9 @@ pub mod dotenv;
 pub mod gostd;
 mod perms;
 
-pub use perms::{insecure_file_warning, readable_by_other};
+pub use perms::{
+    config_file_perm_facts, go_style_path_error, insecure_file_warning, readable_by_other,
+};
 
 /// 値の出所。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

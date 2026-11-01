@@ -120,6 +120,34 @@ fn cap_eff_has_net_admin(status: &str) -> Option<bool> {
     Some(v & (1 << CAP_NET_ADMIN) != 0)
 }
 
+/// このプロセスがディレクトリに新しいファイルを作れるかを、何も作らずに `access(W_OK|X_OK)` で判定する。
+/// `access` は実 uid と実 gid で判定する。Windows では判定する手段を持たないので `None` を返す。
+///
+/// # Errors
+///
+/// 判定の誤りを返す。拒まれた場合は `PermissionDenied` である。
+#[cfg(unix)]
+pub fn can_create_in(dir: &std::path::Path) -> Option<std::io::Result<()>> {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else {
+        return Some(Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)));
+    };
+    // SAFETY: c は NUL で終わる文字列で、呼び出しの間は有効である
+    Some(
+        if unsafe { libc::access(c.as_ptr(), libc::W_OK | libc::X_OK) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        },
+    )
+}
+
+/// Windows では、ACL を読んで判定を自前で組むほかに手段が無いので判定しない。
+#[cfg(not(unix))]
+pub fn can_create_in(_dir: &std::path::Path) -> Option<std::io::Result<()>> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

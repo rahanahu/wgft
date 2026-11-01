@@ -158,9 +158,10 @@ fn open_regular(path: &Path, opts: &mut OpenOptions) -> std::io::Result<(File, f
     Ok((f, meta))
 }
 
-/// 読むだけのために `path` を開く。最後の要素の symlink を辿らず、通常のファイルでないものは拒む。
+/// 読むだけのために `path` を開く。誤りの種類は開けなかった理由のままで、symlink と通常のファイルでない
+/// ものは `Other` である。最後の要素の symlink を辿らず、通常のファイルでないものは拒む。
 /// Windows でも DACL を付け直す権限を求めない。
-fn open_regular_read(path: &Path) -> std::io::Result<(File, fs::Metadata)> {
+pub fn open_regular_read(path: &Path) -> std::io::Result<(File, fs::Metadata)> {
     let mut opts = OpenOptions::new();
     opts.read(true);
     #[cfg(unix)]
@@ -184,7 +185,7 @@ fn open_regular_read(path: &Path) -> std::io::Result<(File, fs::Metadata)> {
         // O_NOFOLLOW は symlink に ELOOP を返す
         if e.raw_os_error() == Some(libc::ELOOP) {
             std::io::Error::other(format!(
-                "{} is a symbolic link, which wgft does not follow",
+                "{} is a symbolic link, which wgft does not follow: not a regular file",
                 path.display()
             ))
         } else {
@@ -196,7 +197,7 @@ fn open_regular_read(path: &Path) -> std::io::Result<(File, fs::Metadata)> {
     let meta = f.metadata()?;
     if !meta.file_type().is_file() {
         return Err(std::io::Error::other(format!(
-            "{} is not a regular file but {}",
+            "{} is not a regular file but {}: not a regular file",
             path.display(),
             describe_type(&meta)
         )));

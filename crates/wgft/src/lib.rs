@@ -6,6 +6,7 @@
 pub mod agent_keys;
 pub mod agent_run;
 pub mod cli;
+pub mod doctor;
 pub mod failure;
 
 /// この crate の版。

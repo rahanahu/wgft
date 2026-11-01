@@ -84,8 +84,41 @@ pub enum AgentCmd {
     /// Regenerate the wg key pair
     #[command(name = "rotate-key")]
     RotateKey,
+    /// Diagnose the agent's own state and environment
+    Doctor(DoctorArgs),
     /// Remove what a stopped kernel-mode agent left: its WireGuard interface, table inet wgft_agent and the kernel-mode records
     Teardown(TeardownArgs),
+}
+
+/// `wgft agent doctor` のフラグ。環境変数と dotenv からは `agent run` と同じ項目をすべて読む。
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// output as JSON; the stable diagnostic model of this command
+    #[arg(
+        long,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_parser = go_bool,
+        overrides_with = "json"
+    )]
+    pub json: Option<bool>,
+    /// process-wide cap on concurrent UDP sessions, env WGFT_MAX_UDP_FLOWS
+    #[arg(
+        long = "max-udp-flows",
+        allow_hyphen_values = true,
+        value_parser = go_int,
+        overrides_with = "max_udp_flows"
+    )]
+    pub max_udp_flows: Option<i64>,
+    /// process-wide cap on concurrent TCP connections, env WGFT_MAX_TCP_FLOWS
+    #[arg(
+        long = "max-tcp-flows",
+        allow_hyphen_values = true,
+        value_parser = go_int,
+        overrides_with = "max_tcp_flows"
+    )]
+    pub max_tcp_flows: Option<i64>,
 }
 
 /// `wgft agent teardown` のフラグ。
@@ -229,6 +262,10 @@ pub fn command_with(defaults: &wgft_agent::config::Defaults) -> clap::Command {
             .mut_subcommand("teardown", |t| {
                 t.mut_arg("wg_interface", |a| with_default(a, "wgft0"))
             })
+            .mut_subcommand("doctor", |d| {
+                d.mut_arg("max_udp_flows", |a| with_default(a, "8192"))
+                    .mut_arg("max_tcp_flows", |a| with_default(a, "2048"))
+            })
             .mut_subcommand("run", move |mut run| {
                 for (id, d) in run_defaults {
                     run = run.mut_arg(id, |a| with_default(a, &d));
@@ -264,6 +301,13 @@ pub enum Parsed {
         /// `--config` と `--data-dir`
         global: AgentGlobal,
     },
+    /// `wgft agent doctor`
+    AgentDoctor {
+        /// `--config` と `--data-dir`
+        global: AgentGlobal,
+        /// `agent doctor` のフラグ
+        args: DoctorArgs,
+    },
     /// `wgft agent teardown`
     AgentTeardown {
         /// `--config` と `--data-dir`
@@ -292,6 +336,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, Failure
             AgentCmd::Run(run) => Parsed::AgentRun { global, run },
             AgentCmd::Pubkey => Parsed::AgentPubkey { global },
             AgentCmd::RotateKey => Parsed::AgentRotateKey { global },
+            AgentCmd::Doctor(args) => Parsed::AgentDoctor { global, args },
             AgentCmd::Teardown(args) => Parsed::AgentTeardown { global, args },
         }),
         (false, None) => Ok(Parsed::Print(help_text(&command()))),
@@ -321,8 +366,16 @@ fn first_line(rendered: &str) -> String {
     line.strip_prefix("error: ").unwrap_or(line).to_owned()
 }
 
-/// フラグと引数の誤りの終了コード。1 だが、`agent doctor` だけは 2 である。
+/// フラグと引数の誤りの終了コード。1 だが、`agent doctor` だけは 2 である。どのコマンドの誤りかは、
+/// 誤りを無視して解釈し直したコマンドの並びで決める。ルートの知らないフラグのように、解釈し直しても
+/// コマンドが決まらないときは、`-` で始まらない語の並びで決める (cobra もフラグを除いてコマンドを探す)。
 fn error_exit_code(args: &[OsString]) -> u8 {
+    if let Ok(m) = command().ignore_errors(true).try_get_matches_from(args)
+        && let Some(("agent", a)) = m.subcommand()
+        && let Some((sub, _)) = a.subcommand()
+    {
+        return if sub == "doctor" { 2 } else { 1 };
+    }
     let mut words = args
         .iter()
         .skip(1)
@@ -502,6 +555,20 @@ mod tests {
         assert_eq!(error_exit_code(&args(&["--x", "agent", "doctor"])), 2);
         assert_eq!(error_exit_code(&args(&["agent", "run", "--bogus"])), 1);
         assert_eq!(error_exit_code(&args(&["doctor"])), 1);
+        // 値を取るフラグの値が doctor という語でも、run の誤りである
+        assert_eq!(
+            error_exit_code(&args(&["agent", "--data-dir", "doctor", "run", "--bogus"])),
+            1
+        );
+        assert_eq!(error_exit_code(&args(&["agent", "doctor", "extra"])), 2);
+        assert_eq!(
+            error_exit_code(&args(&["agent", "doctor", "--json=yes"])),
+            2
+        );
+        assert_eq!(
+            error_exit_code(&args(&["agent", "doctor", "--max-udp-flows", "x"])),
+            2
+        );
     }
 
     #[test]

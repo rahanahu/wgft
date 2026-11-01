@@ -4,7 +4,7 @@ use std::path::Path;
 
 /// Go の `*os.PathError` の文。Unix の `strerror` の文は Go の `syscall.Errno` の文と、先頭の大文字だけが
 /// 違う。Windows の文は Go も OS の文のままである。
-pub(super) fn go_style_path_error(op: &str, path: &Path, e: &std::io::Error) -> String {
+pub fn go_style_path_error(op: &str, path: &Path, e: &std::io::Error) -> String {
     let msg = super::dotenv::strip_os_error(e);
     let msg = if cfg!(unix) {
         let mut cs = msg.chars();
@@ -19,8 +19,15 @@ pub(super) fn go_style_path_error(op: &str, path: &Path, e: &std::io::Error) -> 
 
 /// 設定ファイルを読めなかったときに、原因を見分けるための事実を 1 句で返す。読んだプロセスの実効 uid と
 /// gid、ファイルの持ち主とパーミッションを並べ、どちらの側に原因があるかは述べない。
-#[cfg(unix)]
 pub(super) fn read_facts(path: &Path) -> String {
+    config_file_perm_facts(path).0
+}
+
+/// [`read_facts`] の句と、ファイル自身の持ち主とパーミッションを読めたかどうか (Go の
+/// `configFilePermFacts`)。読めなかった場合は上の階層のディレクトリが通り抜けを拒んでいる。
+#[cfg(unix)]
+#[must_use]
+pub fn config_file_perm_facts(path: &Path) -> (String, bool) {
     use std::os::unix::fs::MetadataExt;
 
     // SAFETY: geteuid と getegid は引数を取らず、失敗しない。
@@ -28,23 +35,34 @@ pub(super) fn read_facts(path: &Path) -> String {
     let who = format!("this process runs as uid {uid}, gid {gid}");
     match std::fs::metadata(path) {
         // パーミッションは常に 4 桁で書く
-        Ok(m) => format!(
-            "{who}, and the file is mode {:04o} with owner uid {} and group gid {}",
-            m.mode() & 0o777,
-            m.uid(),
-            m.gid()
+        Ok(m) => (
+            format!(
+                "{who}, and the file is mode {:04o} with owner uid {} and group gid {}",
+                m.mode() & 0o777,
+                m.uid(),
+                m.gid()
+            ),
+            true,
         ),
-        Err(e) => format!(
-            "{who}, and the file's own owner and mode could not be read, so a directory above it refuses the way in: {}",
-            go_style_path_error("stat", path, &e)
+        Err(e) => (
+            format!(
+                "{who}, and the file's own owner and mode could not be read, so a directory above it refuses the way in: {}",
+                go_style_path_error("stat", path, &e)
+            ),
+            false,
         ),
     }
 }
 
-/// Windows では、読めるかを決める DACL を評価しない。
+/// Windows では、読めるかを決める DACL を評価しない。ファイル自身を読んでいないので第 2 の値は偽である。
 #[cfg(not(unix))]
-pub(super) fn read_facts(_path: &Path) -> String {
-    "who may read it is decided by the file's DACL, which this build does not evaluate".to_owned()
+#[must_use]
+pub fn config_file_perm_facts(_path: &Path) -> (String, bool) {
+    (
+        "who may read it is decided by the file's DACL, which this build does not evaluate"
+            .to_owned(),
+        false,
+    )
 }
 
 /// ファイルを other が読めるか。判定は `0o007` のビットだけで、group のビットは見ない。

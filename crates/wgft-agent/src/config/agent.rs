@@ -159,7 +159,7 @@ pub fn check_door(c: &Config, os: &str) -> Result<Settings, Refusal> {
 }
 
 /// 環境変数と dotenv の整数は `strconv.Atoi` で読む。フラグの値は 10 進に書き直してあるので同じ道を通る。
-fn flow_cap(c: &Config, env: &str) -> Result<u32, Refusal> {
+pub fn flow_cap(c: &Config, env: &str) -> Result<u32, Refusal> {
     let v = c.get(env);
     gostd::atoi(v)
         .filter(|n| (FLOWS_MIN..=FLOWS_MAX).contains(n))

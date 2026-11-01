@@ -4,7 +4,7 @@
 対象は、Rust の wgstack 自身を除くすべてです。
 契約は [agent と server の境目の仕様](../spec/README.md) です。
 この文書は、その契約を Rust の agent でどう満たすかと、どの順で作るかを書きます。
-実装済みの段は「設定の層」、「platform の層」、「agent の device の殻」、「宛先と予算」、「制御ソケット」、[ラボの切り替え](#ラボの切り替え)です。ほかの内容は未実装です。
+実装済みの段は「設定の層」、「platform の層」、「agent の device の殻」、「宛先と予算」、「制御ソケット」、「agent doctor の骨組み」、[ラボの切り替え](#ラボの切り替え)です。ほかの内容は未実装です。
 
 ## 範囲と完成の条件
 
@@ -27,6 +27,15 @@ event loop とスレッドの形は、#681 の `docs/design/v2/wgstack-rs.md` �
 完成の条件は、ラボの一式の agent の確認を Go の agent の代わりに Rust の agent で流し、server のカーネルモードとユーザー空間モードの両方ですべて通ることです。
 どの確認が条件に入るかは[ラボの切り替え](#ラボの切り替え)に書きます。
 製品の経路は root も TUN も使いません。
+
+段の途中で `feat/v2-rust` に入れ、main へ入れる前に解く制約は次のとおりです。
+
+- `agent doctor` の中継の検査:agent の応答がフロー数の予算を持つまで、`relay.listeners`、`relay.sessions`、`relay.refusals` は Rust の agent に対して `no_relay` の SKIPPED です。
+  `relay.listeners` は総合判定を動かす検査なので、この間は待ち受けを開けないルールがあっても、トンネルが立っていれば終了コードは 0 です。
+  「agent doctor の稼働中の検査」の段が応答に予算を載せて解きます。
+  予算の代わりの値を作って載せることはしません
+- v2.0.0 の前に解く制約:`agent doctor` と `agent teardown` は、カーネルモードの記録を持つデータディレクトリを終了コード 3 で拒みます。
+  agent のカーネルモードを移す段で外します
 
 ## 今の Rust の agent
 
@@ -89,13 +98,13 @@ Go の v1 の agent と仕様に対して、今の Rust の agent に無いも�
 | 項目 | 仕様 | 今の Rust | 段 |
 | --- | --- | --- | --- |
 | 制御ソケット | [control-socket.md](../spec/control-socket.md)。`rotate-key` と `doctor` | 済み。応答の中身のうちフロー数の予算と宛先の試し接続の値は無い ([応答の中身の今の範囲](#応答の中身の今の範囲)) | 「制御ソケット」 |
-| `agent doctor` | [control-socket.md の agent doctor --json](../spec/control-socket.md#agent-doctor---json) と [検査の一覧](../diagnosis/agent-evidence.md#検査の一覧と証拠の出どころ) | 無い | 「agent doctor の骨組み」と「agent doctor の稼働中の検査」 |
+| `agent doctor` | [control-socket.md の agent doctor --json](../spec/control-socket.md#agent-doctor---json) と [検査の一覧](../diagnosis/agent-evidence.md#検査の一覧と証拠の出どころ) | CLI の検査はすべて済み。agent の応答のフロー数の予算と宛先の試し接続の値は無い | 「agent doctor の骨組み」と「agent doctor の稼働中の検査」 |
 
 ### CLI と設定
 
 | 項目 | 仕様 | 今の Rust | 段 |
 | --- | --- | --- | --- |
-| コマンド | [cli-config.md のコマンド](../spec/cli-config.md#コマンド) | `agent run`、`pubkey`、`rotate-key`、`teardown` の拒否、`version` | 「制御ソケット」と「agent doctor の骨組み」 |
+| コマンド | [cli-config.md のコマンド](../spec/cli-config.md#コマンド) | `agent run`、`pubkey`、`rotate-key`、`doctor`、`teardown` の拒否、`version` | 「制御ソケット」と「agent doctor の骨組み」 |
 | `wgft version` | 2 行。版と `protocol range: v1-v1` | 2 行。版はビルドの時の環境変数 `BUILD_RELEASE_VERSION` で埋め (実行時の設定ではない)、無ければ `dev-rust-<crate の版>` | 済み |
 | `--version` と `-v` | 版の 1 行 | 版の 1 行 | 済み |
 | 優先順位 | フラグ、環境変数、dotenv、既定。出所を覚える | 出所を覚えて解決する。clap の `env` は使わない | 済み |
@@ -605,7 +614,9 @@ Go の v1 のユーザー空間モードと同じです。
 - dotenv:権限で読めなければ拒まずに所見にします
 - `host.platform`:OS、アーキテクチャ、版を示します。
   Go の「memory soft limit would be」の予測の代わりに、[メモリの上界の行](#メモリの上界の行)と同じ値を示します。
-  `detail` は人向けなので、この置き換えは保証の範囲を変えません
+  `detail` は人向けなので、この置き換えは保証の範囲を変えません。
+  上界の行が入る「UDP の中継」の段までは、値の代わりにフロー数の上限と、上界をまだ示さない旨を書きます。
+  設定ファイルを読めない実行の `unknown` と `config_unreadable` は Go と同じです
 - `host.privileges`:Windows では Go と同じく作成の可否を判定せず `permission_not_determined` にします
 - カーネルモードの検査:`dataplane.interface`、`dataplane.table`、`host.forwarding` は、ユーザー空間モードでは Go と同じく `not_tested` と `userspace_mode` です
 - カーネルモードの記録:`agent.json` がカーネルモードを記録している場合、Rust のビルドはカーネルを読めないので診断しません。
@@ -616,10 +627,30 @@ Go の v1 のユーザー空間モードと同じです。
 
 `agent doctor` は 2 つの PR に分けます。
 
-- 骨組み:コマンド、停止中にも成立する検査 (`host.*`、`agent.*`、`tunnel.resolve`)、`agent.control` の接続と理由、報告の JSON と文の出力、総合判定と終了コード、設計の表との照合です。
+- 骨組み:コマンド、停止中にも成立する検査 (`host.*`、`agent.*`、`tunnel.resolve`)、`agent.control` の接続と理由、DoctorResponse から読む `stream.*`、`tunnel.*`、`relay.*` の検査、報告の JSON と文の出力、総合判定と終了コード、設計の表との照合です。
   「制御ソケット」の段の上に積みます
-- 稼働中の検査:DoctorResponse から読む `stream.*`、`tunnel.*`、`relay.*` の検査です。
-  `relay.sessions` と `relay.refusals` の値がフロー数の pool から来るので、「宛先と予算」の段の上に積みます
+- 稼働中の検査:agent の応答に、フロー数の pool から来る `budgets`、ルールの `sessions` と `flows`、宛先の試し接続の `target_errors` を載せます。
+  「宛先と予算」の段の上に積みます
+
+CLI の検査は DoctorResponse だけを読む関数なので、骨組みの段ですべて移しました。
+稼働中の agent の検査の結果は、Go の CLI と Rust の CLI のどちらで読んでも同じになります。
+骨組みの段で、どの応答が来ても Go の v1 にない理由の符号を出さないためでもあります。
+2 つ目の段で足すのは agent の側の値で、それまでの応答の扱いは[応答の中身の今の範囲](#応答の中身の今の範囲)にあります。
+
+骨組みで決めたことは次のとおりです。
+
+- 照合:`agent-doctor.json` と `agent-doctor-stopped.json` を、fixture と同じ証拠 (認証情報、ロックの状態、インタフェース、制御ソケットの応答 `doctor-reply.json`) から Rust の診断で作り直し、`host.platform` の所見を除いて同じ byte 列になることを確かめます。
+  `host.platform` は版と上の置き換えのために違います
+- 理由の符号:設計の表にある符号のうち、カーネルモードの検査だけが使うものは持ちません。
+  試験はその一覧を明示し、表との差がちょうどその一覧であることを確かめます
+- 人向けの文のうち、ライブラリの誤りの文 (JSON の読み取りの誤り、名前の解決の誤り、OS の誤り) は Rust の文になり、Go と一致しません
+- 名前の解決:`host.resolve` と `tunnel.resolve` は、[名前の解決](#名前の解決)の宛先の名前と同じ resolver で引き、5 秒で待つのをやめます。
+  CLI は tokio の実行環境を持たないので、その場で小さな実行環境を作って待ちます。
+  A と AAAA を引いて RFC 6724 の順に並べるので、Go の `LookupHost` と同じ範囲の答えです
+- インタフェースの一覧:Unix は `getifaddrs`、Windows は `GetAdaptersAddresses` から、名前、up、ループバック、アドレスを OS が返す順に読みます。
+  Go の並びと違う OS があっても、人向けの文だけが変わります
+- カーネルモードの拒否:`agent.json` の記録か稼働中の agent の応答の `mode` が `kernel` なら、検査を組む前に拒みます。
+  記録が `userspace` でも `kernel` でもない値なら、その値を名指して同じ種別と対象で拒みます
 
 wgstack の内部に依るのは `tunnel.udp_accounting` だけです。
 `tunnel.socket_buffers` と `tunnel.transfer` は WireGuard の device とその殻に、`relay.*` は中継とフロー数の pool に依ります。
@@ -707,7 +738,8 @@ clap の derive でコマンドの構成とフラグの名前を書き、値の�
   `wgft agent` の説明と、`wgft` だけの呼び出しは、説明を標準出力に書いて終了コード 0 です。
   未知のサブコマンドは誤りで終了コード 1 です。
   余分な引数と `--help` を一緒に書くと、Go は説明を書きますが、Rust は余分な引数の誤りを先に返します。保証の外なので合わせません
-  `agent doctor` の引数の誤りが終了コード 2 になる判定は、今は引数の語を走査します。`agent doctor` の段で、解釈したコマンドから決める形に置き換えます
+  `agent doctor` の引数の誤りが終了コード 2 になる判定は、誤りを無視して解釈し直したコマンドで決めます。
+  ルートの知らないフラグのように解釈し直してもコマンドが決まらないときは、`-` で始まらない語の並びで決めます
   `wgft agent foo` を Go は説明で 0 にしますが、保証の外なので合わせません
 
 ### 既定のパス

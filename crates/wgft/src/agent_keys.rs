@@ -70,7 +70,7 @@ fn load(
 
 /// 認証情報ファイルの場所。Go の v1 と同じく、Unix では `<dir>/agent.json` を文字列でつなぐので、空の
 /// データディレクトリは `/agent.json` になる。
-fn credentials_path(dir: &str) -> PathBuf {
+pub(crate) fn credentials_path(dir: &str) -> PathBuf {
     if cfg!(all(unix, not(target_os = "macos"))) {
         PathBuf::from(format!("{dir}/{}", credentials::FILE_NAME))
     } else {
