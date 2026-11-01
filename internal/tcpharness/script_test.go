@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"flag"
 	"io/fs"
+	"math"
+	"math/rand/v2"
 	"os"
 	"path"
 	"path/filepath"
@@ -158,6 +160,40 @@ func TestScriptRNGVectors(t *testing.T) {
 		}
 	}
 	golden(t, "scripts/testdata/rng.json", astJSON(t, out))
+}
+
+// TestScriptRNGIntN writes IntN draws that hit its rejection branch, which the scenario vectors
+// above do not: a PCG state whose first IntN(20000) draw is rejected, and bounds near 2^63 where a
+// draw is rejected often. Each row ends with the Uint32 that follows, so a port that draws a
+// different number of values per IntN falls out of step. The Rust runner checks its port against
+// the file.
+func TestScriptRNGIntN(t *testing.T) {
+	type row struct {
+		Seed1  string   `json:"seed1"`
+		Seed2  string   `json:"seed2"`
+		N      string   `json:"n"`
+		Draws  []string `json:"draws"`
+		Uint32 uint32   `json:"uint32_after"`
+	}
+	var out []row
+	for _, c := range []struct {
+		s1, s2 uint64
+		n      int
+	}{
+		{6951352846511211335, 15097960536887720410, 20000},
+		{1, 2, 3 << 61},
+		{5, 7, 1<<62 + 1},
+		{0, 0, math.MaxInt64},
+	} {
+		r := rand.New(rand.NewPCG(c.s1, c.s2))
+		v := row{Seed1: strconv.FormatUint(c.s1, 10), Seed2: strconv.FormatUint(c.s2, 10), N: strconv.Itoa(c.n)}
+		for range 8 {
+			v.Draws = append(v.Draws, strconv.Itoa(r.IntN(c.n)))
+		}
+		v.Uint32 = r.Uint32()
+		out = append(out, v)
+	}
+	golden(t, "scripts/testdata/rng-intn.json", astJSON(t, out))
 }
 
 // TestScriptRuntimeError checks that a type error in a running script fails the scenario with
