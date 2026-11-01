@@ -5,8 +5,8 @@
 //! 繋ぎ直す。
 
 use crate::logf;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::watch;
@@ -41,6 +41,44 @@ const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_FRESH_MAX: Duration = Duration::from_secs(10);
 const CONNECT_DEADLINE: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// server が鍵の変更の頻度の上限で拒むときの close の理由 (Go の `reasontext.KeyChangeLimited`)。
+pub(crate) const KEY_CHANGE_LIMITED: &str = "public key changes are limited; retry later";
+
+/// 制御の stream の観測 (Go の `streamObservation`)。`agent doctor` の `stream.*` の検査が読む値を、
+/// 稼働中のプロセスの中に保つ。書き手は stream のタスクだけで、読み手は制御ソケットの応答を組むタスクで
+/// ある。agent の排他とは別の排他で守り、全体状態の適用の後ろで読みが待たないようにする。排他を
+/// 持つ区間は値の代入と写しだけである。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the observation the doctor reply carries as is"
+)]
+pub(crate) struct StreamObs {
+    /// 公開鍵を送り終えてから、その接続が終わるまで真。
+    pub(crate) connected: bool,
+    /// 直近の接続か試みが終わった時刻と理由。
+    pub(crate) disconnected_at: Option<SystemTime>,
+    pub(crate) disconnect_reason: String,
+    /// 直近の終わりが証明書のピンとの不一致だったか。
+    pub(crate) pin_mismatch: bool,
+    /// 直近の試みが server の鍵の変更の頻度の上限で拒まれたか。
+    pub(crate) key_change_limited: bool,
+    /// 直近に待った再接続の間隔と、待っている間の次に試す時刻。
+    pub(crate) backoff: Duration,
+    pub(crate) retry_at: Option<SystemTime>,
+    /// 接続ごとの ping と pong の観測。接続が成立した時点で消す。
+    pub(crate) last_ping_at: Option<SystemTime>,
+    pub(crate) last_pong_at: Option<SystemTime>,
+    pub(crate) awaiting_pong: bool,
+}
+
+/// 観測の置き場。
+pub(crate) type SharedObs = Arc<Mutex<StreamObs>>;
+
+fn note(obs: &SharedObs, f: impl FnOnce(&mut StreamObs)) {
+    f(&mut obs.lock().unwrap_or_else(PoisonError::into_inner));
+}
 
 /// 再接続の待ちに入るたびの 1 行を間引く。前の行と違う行はすぐに出し、同じ行は 1 分に 1 行までにして、
 /// 間引いた数を次に出す行に添える (Go の agent の `reconnectLog`)。
@@ -117,6 +155,8 @@ enum End {
     Closed(u16, String),
     /// server が選んだ版を受け入れられない。
     ProtocolVersion(String),
+    /// `rotate-key` が新しい鍵で繋ぎ直させた。
+    Reconnect,
     /// それ以外。
     Other(String),
 }
@@ -125,7 +165,9 @@ impl End {
     /// 再接続の待ちに、トンネルが新しい間の上限を当てるか (Go の `capsWhileFresh`)。
     fn caps_while_fresh(&self) -> bool {
         match self {
-            End::Unauthorized | End::PinMismatch(_) | End::ProtocolVersion(_) => false,
+            End::Unauthorized | End::PinMismatch(_) | End::ProtocolVersion(_) | End::Reconnect => {
+                false
+            }
             End::Closed(c, _) => {
                 !matches!(
                     CloseCode::from_code(*c),
@@ -145,7 +187,16 @@ impl std::fmt::Display for End {
             ),
             End::PinMismatch(s) | End::ProtocolVersion(s) | End::Other(s) => f.write_str(s),
             End::Closed(c, r) => write!(f, "closed by the server: status {c} reason {r:?}"),
+            End::Reconnect => f.write_str("reconnecting to announce a new public key"),
         }
+    }
+}
+
+impl End {
+    /// server が鍵の変更の頻度の上限で拒んだか。server は公開鍵の拒否と同じ 1008 で閉じるので、理由の
+    /// 文言で見分ける。
+    fn key_change_limited(&self) -> bool {
+        matches!(self, End::Closed(c, r) if *c == CLOSE_POLICY_VIOLATION && r == KEY_CHANGE_LIMITED)
     }
 }
 
@@ -153,10 +204,37 @@ impl std::fmt::Display for End {
 pub(crate) async fn stream_loop(agent: Shared) -> Result<(), AgentError> {
     let mut backoff = BACKOFF_MIN;
     let mut waits = ReconnectLog::default();
-    let handshakes = agent.lock().await.handshake_seen.clone();
+    let (handshakes, obs, reconnect) = {
+        let a = agent.lock().await;
+        (
+            a.handshake_seen.clone(),
+            Arc::clone(&a.stream_obs),
+            a.reconnect.clone(),
+        )
+    };
     loop {
         let started = Instant::now();
-        let (end, mut seen) = attempt(&handshakes, Box::pin(stream_once(&agent))).await;
+        // 待ちを抜けて接続を試み始めた。この記録は再接続の流れを変えない
+        note(&obs, |o| o.retry_at = None);
+        let (end, mut seen) = attempt(
+            &handshakes,
+            Box::pin(stream_once(&agent, &obs, reconnect.subscribe())),
+        )
+        .await;
+        let end_text = end.to_string();
+        note(&obs, |o| {
+            o.connected = false;
+            o.awaiting_pong = false;
+            o.disconnected_at = Some(SystemTime::now());
+            o.disconnect_reason.clone_from(&end_text);
+            o.pin_mismatch = matches!(end, End::PinMismatch(_));
+            o.key_change_limited = end.key_change_limited();
+        });
+        if matches!(end, End::Reconnect) {
+            logf!("stream: reconnecting");
+            backoff = BACKOFF_MIN;
+            continue;
+        }
         if started.elapsed() > Duration::from_mins(1) {
             backoff = BACKOFF_MIN;
         }
@@ -209,6 +287,10 @@ pub(crate) async fn stream_loop(agent: Shared) -> Result<(), AgentError> {
             ),
         };
         waits.print(msg);
+        note(&obs, |o| {
+            o.backoff = backoff;
+            o.retry_at = Some(SystemTime::now() + backoff);
+        });
         if wait_or_handshake(backoff, &mut seen).await {
             logf!(
                 "stream: a new wireguard handshake shows the server is reachable; reconnecting now"
@@ -222,7 +304,7 @@ pub(crate) async fn stream_loop(agent: Shared) -> Result<(), AgentError> {
 }
 
 /// 認証して接続し、公開鍵と版の範囲を送る。
-async fn connect(agent: &Shared) -> Result<Ws, End> {
+async fn connect(agent: &Shared, obs: &SharedObs) -> Result<Ws, End> {
     let (endpoint, pin_hex, token, private_key) = {
         let a = agent.lock().await;
         (
@@ -291,13 +373,20 @@ async fn connect(agent: &Shared) -> Result<Ws, End> {
         ..Message::default()
     };
     send(&mut ws, &hello).await.map_err(End::Other)?;
+    note(obs, |o| {
+        o.connected = true;
+        o.retry_at = None;
+        o.last_ping_at = None;
+        o.last_pong_at = None;
+        o.awaiting_pong = false;
+    });
     logf!("stream: connected to {endpoint}; public key sent");
     Ok(ws)
 }
 
-/// 1 本の接続の寿命。
-async fn stream_once(agent: &Shared) -> End {
-    let mut ws = match connect(agent).await {
+/// 1 本の接続の寿命。`reconnect` が変われば、新しい公開鍵を送るために接続を終える。
+async fn stream_once(agent: &Shared, obs: &SharedObs, mut reconnect: watch::Receiver<u64>) -> End {
+    let mut ws = match connect(agent, obs).await {
         Ok(ws) => ws,
         Err(e) => return e,
     };
@@ -359,7 +448,13 @@ async fn stream_once(agent: &Shared) -> End {
                             follow_tick.reset();
                         }
                     }
-                    WsMessage::Pong(_) => pong_deadline = None,
+                    WsMessage::Pong(_) => {
+                        pong_deadline = None;
+                        note(obs, |o| {
+                            o.last_pong_at = Some(SystemTime::now());
+                            o.awaiting_pong = false;
+                        });
+                    }
                     WsMessage::Close(frame) => {
                         return match frame {
                             Some(f) => End::Closed(u16::from(f.code), f.reason.to_string()),
@@ -398,7 +493,14 @@ async fn stream_once(agent: &Shared) -> End {
                         Err(_) => return End::Other("ping write timed out".into()),
                     }
                     pong_deadline = Some(tokio::time::Instant::now() + PONG_TIMEOUT);
+                    note(obs, |o| {
+                        o.last_ping_at = Some(SystemTime::now());
+                        o.awaiting_pong = true;
+                    });
                 }
+            }
+            Ok(()) = reconnect.changed() => {
+                return End::Reconnect;
             }
             () = pong_wait => {
                 logf!("stream: the server did not answer a ping within {}s; the connection is dead, closing it", PONG_TIMEOUT.as_secs());

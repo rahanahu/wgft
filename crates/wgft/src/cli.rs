@@ -79,6 +79,35 @@ pub struct AgentGlobal {
 pub enum AgentCmd {
     /// Run the agent
     Run(Box<RunArgs>),
+    /// Print the wg public key
+    Pubkey,
+    /// Regenerate the wg key pair
+    #[command(name = "rotate-key")]
+    RotateKey,
+    /// Remove what a stopped kernel-mode agent left: its WireGuard interface, table inet wgft_agent and the kernel-mode records
+    Teardown(TeardownArgs),
+}
+
+/// `wgft agent teardown` のフラグ。
+#[derive(Debug, Args)]
+pub struct TeardownArgs {
+    /// kernel-mode WireGuard interface name, env WGFT_WG_INTERFACE
+    #[arg(
+        long = "wg-interface",
+        allow_hyphen_values = true,
+        overrides_with = "wg_interface"
+    )]
+    pub wg_interface: Option<String>,
+    /// only print what would be removed and the list to restore by hand
+    #[arg(
+        long = "dry-run",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_parser = go_bool,
+        overrides_with = "dry_run"
+    )]
+    pub dry_run: Option<bool>,
 }
 
 /// `wgft agent run` のフラグ。`--config` と `--data-dir` は [`AgentGlobal`] にある。
@@ -196,12 +225,16 @@ pub fn command_with(defaults: &wgft_agent::config::Defaults) -> clap::Command {
         let agent = agent
             .mut_arg("config", |a| with_default(a, &config))
             .mut_arg("data_dir", |a| with_default(a, &data_dir));
-        agent.mut_subcommand("run", move |mut run| {
-            for (id, d) in run_defaults {
-                run = run.mut_arg(id, |a| with_default(a, &d));
-            }
-            run
-        })
+        agent
+            .mut_subcommand("teardown", |t| {
+                t.mut_arg("wg_interface", |a| with_default(a, "wgft0"))
+            })
+            .mut_subcommand("run", move |mut run| {
+                for (id, d) in run_defaults {
+                    run = run.mut_arg(id, |a| with_default(a, &d));
+                }
+                run
+            })
     })
 }
 
@@ -221,6 +254,23 @@ pub enum Parsed {
         /// `agent run` のフラグ
         run: Box<RunArgs>,
     },
+    /// `wgft agent pubkey`
+    AgentPubkey {
+        /// `--config` と `--data-dir`
+        global: AgentGlobal,
+    },
+    /// `wgft agent rotate-key`
+    AgentRotateKey {
+        /// `--config` と `--data-dir`
+        global: AgentGlobal,
+    },
+    /// `wgft agent teardown`
+    AgentTeardown {
+        /// `--config` と `--data-dir`
+        global: AgentGlobal,
+        /// `agent teardown` のフラグ
+        args: TeardownArgs,
+    },
 }
 
 /// 引数を解釈する。誤りは `Error: <文>` の 1 行で、使い方は書かない。
@@ -238,13 +288,12 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, Failure
         // 版のフラグはルートだけにある。サブコマンドの後ろに書いた場合と同じ誤りにする
         (true, Some(_)) => Err(Failure::new("unknown flag: --version", 1)),
         (false, Some(Cmd::Version)) => Ok(Parsed::Version),
-        (
-            false,
-            Some(Cmd::Agent(AgentArgs {
-                global,
-                cmd: AgentCmd::Run(run),
-            })),
-        ) => Ok(Parsed::AgentRun { global, run }),
+        (false, Some(Cmd::Agent(AgentArgs { global, cmd }))) => Ok(match cmd {
+            AgentCmd::Run(run) => Parsed::AgentRun { global, run },
+            AgentCmd::Pubkey => Parsed::AgentPubkey { global },
+            AgentCmd::RotateKey => Parsed::AgentRotateKey { global },
+            AgentCmd::Teardown(args) => Parsed::AgentTeardown { global, args },
+        }),
         (false, None) => Ok(Parsed::Print(help_text(&command()))),
     }
 }

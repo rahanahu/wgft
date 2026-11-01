@@ -158,6 +158,135 @@ fn open_regular(path: &Path, opts: &mut OpenOptions) -> std::io::Result<(File, f
     Ok((f, meta))
 }
 
+/// 読むだけのために `path` を開く。最後の要素の symlink を辿らず、通常のファイルでないものは拒む。
+/// Windows でも DACL を付け直す権限を求めない。
+fn open_regular_read(path: &Path) -> std::io::Result<(File, fs::Metadata)> {
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // FIFO を開いた時点で止まらないよう O_NONBLOCK も付ける。通常のファイルの読みには効かない
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(std::io::Error::other(NOT_FOLLOWED));
+    }
+    #[cfg(unix)]
+    let f = opts.open(path).map_err(|e| {
+        // O_NOFOLLOW は symlink に ELOOP を返す
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            std::io::Error::other(format!(
+                "{} is a symbolic link, which wgft does not follow",
+                path.display()
+            ))
+        } else {
+            e
+        }
+    })?;
+    #[cfg(not(unix))]
+    let f = opts.open(path)?;
+    let meta = f.metadata()?;
+    if !meta.file_type().is_file() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a regular file but {}",
+            path.display(),
+            describe_type(&meta)
+        )));
+    }
+    Ok((f, meta))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+const NOT_FOLLOWED: &str = "is a symbolic link, which wgft does not follow";
+
+/// 通常のファイルでないものの種別を 1 語で表す (Go の `flock.describeType`)。
+fn describe_type(m: &fs::Metadata) -> &'static str {
+    let t = m.file_type();
+    if t.is_symlink() {
+        return "a symbolic link";
+    }
+    if t.is_dir() {
+        return "a directory";
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if t.is_fifo() {
+            return "a named pipe";
+        }
+        if t.is_socket() {
+            return "a socket";
+        }
+        if t.is_block_device() || t.is_char_device() {
+            return "a device";
+        }
+    }
+    "an irregular file"
+}
+
+/// 認証情報ファイルを読むだけの誤り。
+#[derive(Debug)]
+pub enum ReadFileError {
+    /// 開けないか読めない。種類は `kind` で見分ける。
+    Io(std::io::Error),
+    /// symlink、通常のファイルでないもの、大きすぎるもの。agent も同じ理由で起動しない。
+    Refused(String),
+}
+
+impl std::fmt::Display for ReadFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadFileError::Io(e) => e.fmt(f),
+            ReadFileError::Refused(s) => f.write_str(s),
+        }
+    }
+}
+
+impl std::error::Error for ReadFileError {}
+
+/// 認証情報ファイルの中身を読むだけの読み (Go の `credentials.ReadFile`)。symlink を辿らず、通常の
+/// ファイルでないものと大きすぎるものを開いた記述子で拒む。Windows でも DACL を付け直さないので、
+/// `agent doctor` と、稼働中の agent の横で鍵を読む `agent pubkey` が使う。
+///
+/// # Errors
+///
+/// 開けないか読めなければ誤りを返す。無ければ `NotFound` の [`ReadFileError::Io`] である。
+pub fn read_file(path: &Path) -> Result<(Vec<u8>, fs::Metadata), ReadFileError> {
+    let (f, meta) = open_regular_read(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::Other {
+            ReadFileError::Refused(e.to_string())
+        } else {
+            ReadFileError::Io(e)
+        }
+    })?;
+    if meta.len() > MAX_FILE_SIZE {
+        return Err(ReadFileError::Refused(format!(
+            "{} is {} bytes, larger than wgft ever writes",
+            path.display(),
+            meta.len()
+        )));
+    }
+    let mut b = Vec::new();
+    f.take(MAX_FILE_SIZE + 1)
+        .read_to_end(&mut b)
+        .map_err(ReadFileError::Io)?;
+    if b.len() as u64 > MAX_FILE_SIZE {
+        return Err(ReadFileError::Refused(format!(
+            "{} grew while being read, past what wgft ever writes",
+            path.display()
+        )));
+    }
+    Ok((b, meta))
+}
+
 /// agent.json の書き方。Go の `json.MarshalIndent(f, "", "  ")` と同じく 2 文字で字下げし、`<`、`>`、
 /// `&`、U+2028、U+2029 を `<` の形で書く。
 struct GoIndent {
@@ -327,6 +456,17 @@ impl Credentials {
         Ok(())
     }
 
+    /// 今の鍵を 1 つ前の鍵として移す (Go の `KeepPreviousKey`)。カーネルモードの記録を持つファイルで
+    /// だけ移し、今の鍵が空なら 1 つ前の鍵を空で上書きしない。ユーザー空間モードはカーネルに鍵を残さない
+    /// ので、1 つ前の鍵を持つ理由が無い。
+    pub fn keep_previous_key(&mut self) {
+        if self.recorded_mode() != "kernel" || self.wg_private_key.is_empty() {
+            return;
+        }
+        self.previous_wg_private_key
+            .clone_from(&self.wg_private_key);
+    }
+
     /// 記録されたモード。空はユーザー空間モード。
     #[must_use]
     pub fn recorded_mode(&self) -> &str {
@@ -428,6 +568,66 @@ pub fn lock_path(credentials: &Path) -> PathBuf {
     let mut s = credentials.as_os_str().to_owned();
     s.push(".lock");
     PathBuf::from(s)
+}
+
+/// ロックファイルの状態 (Go の `flock.State`)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockState {
+    /// ロックファイルが無い。稼働している証拠が無いことだけを示す。
+    Absent,
+    /// ロックファイルがあり、誰もロックを持っていない。
+    Unlocked,
+    /// 別のプロセスが排他ロックを持っている。
+    Locked,
+}
+
+/// ロックファイルを作らずにロックの状態を読む (Go の `flock.Inspect`)。ファイルがあれば共有ロックを一瞬
+/// 取って放ち、排他ロックの持ち主の有無を見る。symlink と通常のファイルでないものは誤りにする。
+///
+/// # Errors
+///
+/// 無いこと以外で開けないか、ロックを試せなければ誤りを返す。
+pub fn inspect_lock(credentials: &Path) -> std::io::Result<LockState> {
+    let p = lock_path(credentials);
+    let f = match open_regular_read(&p) {
+        Ok((f, _)) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(LockState::Absent),
+        Err(e) => return Err(e),
+    };
+    match f.try_lock_shared() {
+        // f を閉じると共有ロックも消える
+        Ok(()) => Ok(LockState::Unlocked),
+        Err(TryLockError::WouldBlock) => Ok(LockState::Locked),
+        Err(TryLockError::Error(e)) => Err(e),
+    }
+}
+
+/// 停止中に CLI が認証情報ファイルを書くための排他 (Go の `credentials.LockWhileStopped`)。
+#[derive(Debug)]
+pub enum WhileStopped {
+    /// 別のプロセスがロックを持つ。多くは稼働中の agent で、呼び手は書かない。
+    Running,
+    /// 止まっている。ロックファイルがあれば取ったロックを持ち、無ければ作らずに `None` である。
+    /// 作ると呼び出し元の権限のロックファイルが残り、非特権で動く agent の起動を塞ぐためである。
+    Stopped(Option<Lock>),
+}
+
+/// 判定はロックファイルを作らない [`inspect_lock`] で行い、ロックファイルがあって誰も持っていなければ
+/// ロックを取る。判定の後に起動した agent がロックを取っていれば、稼働中として扱う。
+///
+/// # Errors
+///
+/// ロックファイルを読めないか、ロックを取れない誤りを返す。
+pub fn lock_while_stopped(credentials: &Path) -> Result<WhileStopped, CredentialsError> {
+    match inspect_lock(credentials).map_err(|e| other(&lock_path(credentials), e))? {
+        LockState::Locked => Ok(WhileStopped::Running),
+        LockState::Absent => Ok(WhileStopped::Stopped(None)),
+        LockState::Unlocked => match acquire(credentials) {
+            Ok(l) => Ok(WhileStopped::Stopped(Some(l))),
+            Err(CredentialsError::Locked) => Ok(WhileStopped::Running),
+            Err(e) => Err(e),
+        },
+    }
 }
 
 /// ロックを取る。取れなければ [`CredentialsError::Locked`]。ロックファイルの symlink と通常のファイル

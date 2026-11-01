@@ -183,6 +183,19 @@ impl Drop for Listener {
     }
 }
 
+/// リスナー 1 つの状態。試作の中継は TCP だけを開く。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListenerStat {
+    /// 属するルールの ID。
+    pub rule_id: String,
+    /// `tcp/<port>` の形の名前。
+    pub key: String,
+    /// 待ち受けを開けているか。
+    pub listening: bool,
+    /// 開けなかった理由か、開いている待ち受けの宛先の誤り。開けなかった理由が先。
+    pub err: Option<String>,
+}
+
 /// 中継の全体。トンネルと一緒に作り、一緒に閉じる。リスナーはポートで区別するので、数は TCP の
 /// ポートの数を超えない。v1 もルールの範囲の幅に上限を置かない。フロー数の予算もトンネルごとに作るので、
 /// 拒否の数はトンネルを作り直すと 0 に戻る。
@@ -467,6 +480,20 @@ impl Manager {
     #[must_use]
     pub fn listening(&self) -> usize {
         self.listeners.values().filter(|l| l.task.is_some()).count()
+    }
+
+    /// リスナーごとの状態。`agent doctor` の応答がルールごとに数え直す。並びはポートの順。
+    #[must_use]
+    pub fn listener_stats(&self) -> Vec<ListenerStat> {
+        self.listeners
+            .values()
+            .map(|l| ListenerStat {
+                rule_id: l.rule_id.clone(),
+                key: format!("tcp/{}", l.port),
+                listening: l.task.is_some(),
+                err: l.err(),
+            })
+            .collect()
     }
 
     /// ルールごとの状態。1 つでも誤りのリスナーがあればそのルールは `error`。

@@ -12,19 +12,19 @@ use zeroize::Zeroizing;
 
 use crate::config::allow_targets::AllowList;
 use crate::credentials::{self, Credentials};
+use crate::ctlserver;
 use crate::enroll::{register, token_hash};
 use crate::error::{AgentError, Refusal};
 use crate::flowpool::Limits;
 use crate::relay::{Manager, OpenPorts, ProbeRound};
-use crate::stream;
+use crate::stream::{self, SharedObs};
 use crate::targets::Targets;
 use crate::tunnel::{self, Tunnel};
 
-/// トンネルはあるがハンドシェイクがまだ済んでいないときの理由 (Go の `controlapi`)。
-pub(crate) const REASON_HANDSHAKE_PENDING: &str = "handshake not established";
-const REASON_NO_TUNNEL: &str = "no tunnel";
-const REASON_NO_TUNNEL_BUILD_RETRYING: &str = "no tunnel; building it failed and will be retried";
-const REASON_NO_TUNNEL_FULL_STATE_PENDING: &str = "no tunnel; full state not received";
+pub(crate) use crate::controlapi::REASON_HANDSHAKE_PENDING;
+use crate::controlapi::{
+    REASON_NO_TUNNEL, REASON_NO_TUNNEL_BUILD_RETRYING, REASON_NO_TUNNEL_FULL_STATE_PENDING,
+};
 
 /// トンネルの作成に失敗したときの立て直しの間隔。最初は 30 秒、その後は 300、600、900 秒で、
 /// 900 秒の後は 900 秒ごと (仕様 tunnel.md のトンネルの作り直し)。
@@ -92,18 +92,18 @@ pub(crate) struct Agent {
     pub(crate) opts: Options,
     pub(crate) creds: Credentials,
     pub(crate) private_key: Zeroizing<String>,
-    tunnel: Option<Tunnel>,
-    relay: Option<Manager>,
+    pub(crate) tunnel: Option<Tunnel>,
+    pub(crate) relay: Option<Manager>,
     /// 宛先の規則。トンネルの世代をまたいで分け合う。
     targets: Arc<Targets>,
     wg: Option<WgConfig>,
     pub(crate) generation: u64,
     /// トンネルの作成に失敗した全体状態と、次に立て直す時刻と、失敗の回数。
     retry: Option<State>,
-    retry_at: Option<Instant>,
+    pub(crate) retry_at: Option<Instant>,
     retry_failures: usize,
     /// トンネルの作り直しの閾値と、最後に見た最終ハンドシェイク (単調な時計) と、それを見た時刻。
-    rebuild_after: Duration,
+    pub(crate) rebuild_after: Duration,
     seen_handshake: Option<Instant>,
     seen_at: Option<Instant>,
     /// 入口の検査で捨てた数を前にログに出した値と時刻。
@@ -116,6 +116,10 @@ pub(crate) struct Agent {
     /// 見張りが新しいハンドシェイクを観測するたびに増やす。stream は再接続の待ちをこれで打ち切る
     /// (仕様 stream.md の再接続)。
     pub(crate) handshake_seen: watch::Sender<u64>,
+    /// 制御の stream の観測。stream のタスクが書き、制御ソケットの `doctor` が読む。
+    pub(crate) stream_obs: SharedObs,
+    /// `rotate-key` が増やす。stream は接続を終え、新しい公開鍵で繋ぎ直す。
+    pub(crate) reconnect: watch::Sender<u64>,
 }
 
 // 鍵と恒久トークンを Debug に出さない
@@ -428,6 +432,8 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
         state_changed: Arc::new(Notify::new()),
         tunnel_dead: Arc::new(Notify::new()),
         handshake_seen: watch::Sender::new(0),
+        stream_obs: SharedObs::default(),
+        reconnect: watch::Sender::new(0),
     }));
     {
         let mut a = agent.lock().await;
@@ -444,6 +450,25 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
         }
     }
     let tunnel_dead = Arc::clone(&agent.lock().await.tunnel_dead);
+    // 制御ソケットは認証情報のロックを持つ間だけ開く。止めるのはロックを手放す前である
+    let (doctor_tx, doctor_rx) = tokio::sync::mpsc::channel(4);
+    let (rotate_tx, mut rotate_rx) = tokio::sync::mpsc::channel(1);
+    let control = ctlserver::Server::start(
+        &path,
+        ctlserver::Senders {
+            doctor: doctor_tx,
+            rotate_key: rotate_tx,
+        },
+    );
+    let ctx = {
+        let a = agent.lock().await;
+        crate::control::Context {
+            agent: Arc::clone(&agent),
+            obs: Arc::clone(&a.stream_obs),
+            allow_targets: a.opts.allow_targets.as_ref().map(ToString::to_string),
+        }
+    };
+    crate::control::spawn_doctor(ctx.clone(), doctor_rx);
     let mut stream_task = tokio::spawn(stream::stream_loop(Arc::clone(&agent)));
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     tick.tick().await;
@@ -464,6 +489,7 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
             () = tunnel_dead.notified() => {
                 agent.lock().await.watch_tunnel(true).await;
             }
+            Some(req) = rotate_rx.recv() => crate::control::serve_rotate_key(&ctx.agent, req).await,
             _ = tick.tick() => {
                 tick_round(&agent).await;
                 let a = agent.lock().await;
@@ -482,6 +508,12 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
         }
     };
     stream_task.abort();
+    // 待っている要求の応答の送り手を落としてから、制御ソケットのスレッドを止める。待ち受けのスレッドは
+    // 起こせばすぐに終わるので、巻き戻しで drop する経路も止まらない
+    drop(rotate_rx);
+    if let Some(c) = control {
+        c.stop();
+    }
     agent.lock().await.close().await;
     result
 }
@@ -698,6 +730,12 @@ pub(crate) async fn join_for_new_pin(agent: &Shared) -> bool {
     token_hash(&j) != a.creds.used_join_token_sha256 && j.pin_hex() != a.creds.cert_sha256
 }
 
+/// 試験のための、トンネルの無い agent。
+#[cfg(test)]
+pub(crate) fn test_agent() -> Agent {
+    tests::agent()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -710,7 +748,7 @@ mod tests {
         assert_eq!(registered_tunnel_address("10.200.0.2/40"), "");
     }
 
-    fn agent() -> Agent {
+    pub(super) fn agent() -> Agent {
         Agent {
             opts: Options::default(),
             creds: Credentials::default(),
@@ -730,6 +768,8 @@ mod tests {
             state_changed: Arc::new(Notify::new()),
             tunnel_dead: Arc::new(Notify::new()),
             handshake_seen: watch::Sender::new(0),
+            stream_obs: SharedObs::default(),
+            reconnect: watch::Sender::new(0),
         }
     }
 
