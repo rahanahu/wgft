@@ -47,6 +47,7 @@ CI はラボの結合テストを実行しないため、CI の合格だけで�
 設計の改訂を伴う実装は同じコミットに含め、PR のタイトルも同じ形式にします。
 詳細と使える type は[コミットの約束](docs/development/commits.md)に従います。
 main へはスカッシュでマージします。
+例外として、feature ブランチは merge commit で main へ入れます。
 リリースは版の記述を更新する `chore(release): vX.Y.Z` のコミットに `vX.Y.Z` を付けます。
 版の選択、保守ブランチ、Latest とコンテナの `:latest` の扱いは[リリースの手順](docs/development/releases.md)に従います。
 
