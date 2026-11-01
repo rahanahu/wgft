@@ -251,11 +251,14 @@ async fn reports_unsupported_unusable_and_failed_listeners() {
     );
     assert_eq!(m.listening(), 0);
     drop(stop);
-    // 手放した核のポートは、次の見回りで開き直す
+    // 手放した核のポートは、次の見回りで開き直す。前の 1 周が走っている間の見回りは、1 周を作らずに
+    // 開き直しだけを行う
     tokio::time::sleep(Duration::from_millis(50)).await;
-    m.retry().await;
+    m.reopen().await;
     assert_eq!(m.listening(), 1);
     assert_eq!(m.tcp_pool().rules(), 1);
+    m.retry().await;
+    assert_eq!(m.listening(), 1);
 }
 
 #[tokio::test]
@@ -412,6 +415,35 @@ async fn listener_stats_and_rule_reasons_follow_go_s_key_order() {
     let rs = m.status();
     assert!(rs[0].reason.starts_with("tcp/10: "), "{rs:?}");
     assert_eq!(m.status_of(&st), rs);
+}
+
+/// 適用が排他の中で待つ試し接続は [`super::APPLY_PROBES`] 件までで、残りのリスナーは誤りを持たないまま
+/// 次の見回りで試される。
+#[tokio::test]
+async fn an_apply_probes_a_bounded_number_of_new_listeners() {
+    let peer = Peer::start().await;
+    let mut m = manager_with(&peer, targets("", vec![]), Limits::default());
+    let n = u16::try_from(super::APPLY_PROBES).unwrap() + 4;
+    let last = 30000 + n - 1;
+    // 名前の表に無い名前なので、試し接続は名前の解決ですぐに失敗する
+    m.apply(&[rule(
+        "r_a",
+        Proto::Tcp,
+        &format!("30000-{last}"),
+        "nas.invalid:1",
+        true,
+    )])
+    .await;
+    assert_eq!(m.listening(), usize::from(n));
+    let failed = |m: &Manager| {
+        m.listener_stats()
+            .iter()
+            .filter(|s| s.err.is_some())
+            .count()
+    };
+    assert_eq!(failed(&m), super::APPLY_PROBES);
+    m.retry().await;
+    assert_eq!(failed(&m), usize::from(n));
 }
 
 #[tokio::test]

@@ -17,7 +17,7 @@ use crate::ctlserver;
 use crate::enroll::{register, token_hash};
 use crate::error::{AgentError, Refusal};
 use crate::flowpool::Limits;
-use crate::relay::{Manager, ProbeRound};
+use crate::relay::{Manager, ProbeResults, ProbeRound};
 use crate::stream::{self, SharedObs};
 use crate::targets::Targets;
 use crate::tunnel::{self, Generations, Tunnel};
@@ -311,8 +311,9 @@ impl Agent {
 
     /// 30 秒ごとの見回りのうち排他の中で行う部分。作成に失敗したトンネルを時刻が来たら立て直し、
     /// 開けなかったリスナーを開き直す。立て直せたら、接続中の stream にハートビートを送らせる。宛先の
-    /// 試し接続の 1 周を返し、呼び手は排他を放してから走らせる ([`tick_round`])。
-    async fn tick(&mut self) -> Option<ProbeRound> {
+    /// 試し接続の 1 周を返し、呼び手は排他を放してから走らせる ([`tick_round`])。`probe` が偽なら (前の
+    /// 1 周が走っている間) 1 周を作らない。待ち受けごとの保持の項が数える 1 周は 1 つだけだからである。
+    async fn tick(&mut self, probe: bool) -> Option<ProbeRound> {
         self.watch_tunnel(false).await;
         if self.retry_at.is_none_or(|at| Instant::now() >= at)
             && let Some(st) = self.retry.take()
@@ -326,9 +327,12 @@ impl Agent {
                 Err(e) => logf!("tunnel: rebuilding for generation {generation}: {e}"),
             }
         }
-        match self.relay.as_mut() {
-            Some(r) => Some(r.retry_round().await),
-            None => None,
+        let r = self.relay.as_mut()?;
+        if probe {
+            Some(r.retry_round().await)
+        } else {
+            r.reopen().await;
+            None
         }
     }
 }
@@ -527,8 +531,10 @@ pub(crate) struct Loop {
     pub(crate) tick_every: Duration,
 }
 
-/// 主なループ。止める合図 `shutdown` はいつでも効く。長い仕事 (30 秒ごとの見回りの試し接続の 1 周、
-/// トンネルの作り直し) は合図と並べて待ち、合図が来たら落とす。`rotate-key` は鍵を保存した後に落とす場合
+/// 主なループ。止める合図 `shutdown` はいつでも効く。30 秒ごとの見回りの試し接続の 1 周は別の task で
+/// 走らせ、終わりを枝の 1 つで受ける。応えない宛先が多い 1 周の間も、`rotate-key` とトンネルの外殻の
+/// 終わりの知らせを待たせないためである。前の 1 周が走っている間は次の 1 周を始めない。長い仕事
+/// (トンネルの作り直し) は合図と並べて待ち、合図が来たら落とす。`rotate-key` は鍵を保存した後に落とす場合
 /// でも応答を返す ([`crate::control::serve_rotate_key`])。止めるときは stream の task を落とし、終わるのを
 /// 待ってから agent の排他を待つので、適用の途中 (試し接続の待ちを含む) で排他を持つ task がいても、
 /// 排他はその前に空く。stream の task が自分で終わっていれば、その誤り (認証の拒否など) を返す。止める
@@ -551,6 +557,8 @@ pub(crate) async fn main_loop(
     let mut tick = tokio::time::interval(tick_every);
     tick.tick().await;
     let mut last_status = Vec::new();
+    // 走っている試し接続の 1 周
+    let mut probing: Option<tokio::task::JoinHandle<ProbeResults>> = None;
     // 終わった JoinHandle をもう一度待つと panic するので、stream の task が終わったかを覚える
     let mut stream_done = false;
     let result = 'main: loop {
@@ -577,13 +585,40 @@ pub(crate) async fn main_loop(
                 }
             }
             _ = tick.tick() => {
+                let round = tokio::select! {
+                    () = &mut shutdown => break 'main Ok(()),
+                    r = tick_start(&agent, probing.is_none()) => r,
+                };
+                match round {
+                    Some(r) if probing.is_none() => probing = Some(tokio::spawn(r.run())),
+                    // 前の 1 周がまだ走っている。状態の行はその終わりに出す
+                    _ if probing.is_some() => {}
+                    _ => {
+                        tokio::select! {
+                            () = &mut shutdown => break 'main Ok(()),
+                            () = report_status(&agent, &mut last_status) => {}
+                        }
+                    }
+                }
+            }
+            done = async { probing.as_mut().expect("guarded by the precondition").await }, if probing.is_some() => {
+                probing = None;
+                let work = async {
+                    if let Ok(done) = done {
+                        tick_finish(&agent, done).await;
+                    }
+                    report_status(&agent, &mut last_status).await;
+                };
                 tokio::select! {
                     () = &mut shutdown => break 'main Ok(()),
-                    () = tick_and_report(&agent, &mut last_status) => {}
+                    () = work => {}
                 }
             }
         }
     };
+    if let Some(p) = probing.take() {
+        p.abort();
+    }
     logf!("shutting down");
     within_shutdown_limit(async {
         // stream の task を落とし、終わるのを待つ。適用の途中なら、その排他もここで返る
@@ -626,10 +661,8 @@ async fn timed<T>(what: &str, f: impl std::future::Future<Output = T>) -> T {
     r
 }
 
-/// 30 秒ごとの見回りと、状態が変わったときの状態の行。ルール ID と理由は改行を含みうるので、行に
-/// 分けてから比べてログに出す。
-async fn tick_and_report(agent: &Shared, last_status: &mut Vec<String>) {
-    tick_round(agent).await;
+/// 状態が変わったときの状態の行。ルール ID と理由は改行を含みうるので、行に分けてから比べてログに出す。
+async fn report_status(agent: &Shared, last_status: &mut Vec<String>) {
     let a = agent.lock().await;
     let hb = a.heartbeat().await;
     let s = status_lines(&hb);
@@ -657,12 +690,26 @@ fn status_lines(hb: &Heartbeat) -> Vec<String> {
 /// 30 秒ごとの見回り。排他の中で見回りの前半を行い、宛先の試し接続は排他を放して走らせ、結果を
 /// 書くときだけ排他を取り直す。試し接続の 1 周は応えない宛先が多いと長くなり、その間に stream の
 /// ハートビートと適用を止めないためである。走らせている間にトンネルを作り直していれば、結果は捨てる。
+#[cfg(test)]
 async fn tick_round(agent: &Shared) {
-    let round = agent.lock().await.tick().await;
-    let Some(round) = round.filter(|r| !r.is_empty()) else {
+    let Some(round) = tick_start(agent, true).await else {
         return;
     };
-    let done = round.run().await;
+    tick_finish(agent, round.run().await).await;
+}
+
+/// 見回りの前半を排他の中で行い、`probe` が真で試す宛先があれば試し接続の 1 周を返す。
+async fn tick_start(agent: &Shared, probe: bool) -> Option<ProbeRound> {
+    agent
+        .lock()
+        .await
+        .tick(probe)
+        .await
+        .filter(|r| !r.is_empty())
+}
+
+/// 試し接続の 1 周の結果を排他の中で書く。
+async fn tick_finish(agent: &Shared, done: ProbeResults) {
     if let Some(r) = &agent.lock().await.relay {
         r.finish_probes(done);
     }
@@ -1377,6 +1424,35 @@ mod tests {
             assert_eq!(got.exit_code(), code);
             assert!(agent.lock().await.relay.is_none(), "the close ran");
         }
+    }
+
+    /// 試し接続の 1 周は別の task で走るので、応えない宛先で長い 1 周の途中でも、`rotate-key` は待たずに
+    /// 処理される。
+    #[tokio::test]
+    async fn a_rotate_key_is_served_during_a_long_probe_round() {
+        let (agent, gate, _peer, _) = slow_agent().await;
+        let dir = tempfile::tempdir().unwrap();
+        agent.lock().await.opts.data_dir = dir.path().to_path_buf();
+        let (stop, stopped) = stop_switch();
+        let (rotate_tx, rotate_rx) = tokio::sync::mpsc::channel(1);
+        let mut l = test_loop(&agent, idle_stream(), Duration::from_millis(50));
+        l.rotate_rx = rotate_rx;
+        let run = tokio::spawn(main_loop(l, stopped));
+        gate.entered().await;
+        let (reply, got) = std::sync::mpsc::sync_channel(1);
+        rotate_tx
+            .send(ctlserver::RotateKeyRequest {
+                reply,
+                state: Arc::default(),
+            })
+            .await
+            .unwrap();
+        let got = tokio::task::spawn_blocking(move || got.recv_timeout(Duration::from_secs(2)))
+            .await
+            .unwrap();
+        assert!(matches!(got, Ok(Ok(_))), "{got:?}");
+        stop.send(()).unwrap();
+        ends_within_2s(run, "a probe round").await.unwrap();
     }
 
     /// 止める合図は、30 秒ごとの見回りの長い試し接続の 1 周の途中でも効き、2 秒以内に終わる。
