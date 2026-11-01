@@ -319,8 +319,9 @@ impl Agent {
 
     /// 30 秒ごとの見回りのうち排他の中で行う部分。作成に失敗したトンネルを時刻が来たら立て直し、
     /// 開けなかったリスナーを開き直す。立て直せたら、接続中の stream にハートビートを送らせる。宛先の
-    /// 試し接続の 1 周を返し、呼び手は排他を放してから走らせる ([`tick_round`])。
-    async fn tick(&mut self) -> Option<ProbeRound> {
+    /// 試し接続の 1 周を返し、呼び手は排他を放してから走らせる ([`tick_round`])。`probe` が偽なら (前の
+    /// 1 周が走っている間) 1 周を作らない。待ち受けごとの保持の項が数える 1 周は 1 つだけだからである。
+    async fn tick(&mut self, probe: bool) -> Option<ProbeRound> {
         self.watch_tunnel(false).await;
         if self.retry_at.is_none_or(|at| Instant::now() >= at)
             && let Some(st) = self.retry.take()
@@ -334,9 +335,12 @@ impl Agent {
                 Err(e) => logf!("tunnel: rebuilding for generation {generation}: {e}"),
             }
         }
-        match self.relay.as_mut() {
-            Some(r) => Some(r.retry_round().await),
-            None => None,
+        let r = self.relay.as_mut()?;
+        if probe {
+            Some(r.retry_round().await)
+        } else {
+            r.reopen().await;
+            None
         }
     }
 }
@@ -572,7 +576,7 @@ pub(crate) async fn main_loop(
             _ = tick.tick() => {
                 let round = tokio::select! {
                     () = &mut shutdown => break 'main Ok(()),
-                    r = tick_start(&agent) => r,
+                    r = tick_start(&agent, probing.is_none()) => r,
                 };
                 match round {
                     Some(r) if probing.is_none() => probing = Some(tokio::spawn(r.run())),
@@ -672,15 +676,20 @@ fn status_lines(hb: &Heartbeat) -> Vec<String> {
 /// ハートビートと適用を止めないためである。走らせている間にトンネルを作り直していれば、結果は捨てる。
 #[cfg(test)]
 async fn tick_round(agent: &Shared) {
-    let Some(round) = tick_start(agent).await else {
+    let Some(round) = tick_start(agent, true).await else {
         return;
     };
     tick_finish(agent, round.run().await).await;
 }
 
-/// 見回りの前半を排他の中で行い、試す宛先があれば試し接続の 1 周を返す。
-async fn tick_start(agent: &Shared) -> Option<ProbeRound> {
-    agent.lock().await.tick().await.filter(|r| !r.is_empty())
+/// 見回りの前半を排他の中で行い、`probe` が真で試す宛先があれば試し接続の 1 周を返す。
+async fn tick_start(agent: &Shared, probe: bool) -> Option<ProbeRound> {
+    agent
+        .lock()
+        .await
+        .tick(probe)
+        .await
+        .filter(|r| !r.is_empty())
 }
 
 /// 試し接続の 1 周の結果を排他の中で書く。
