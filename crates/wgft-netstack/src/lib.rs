@@ -13,7 +13,7 @@
 //! - [`LanSockets`] and [`LanHook`]: the table that pairs relayed connections with their LAN
 //!   sockets for the core's boost hook
 //!
-//! The design is `docs/design/v2/wgstack-rs.md` ("データプレーンの駆動" and "PR 7 で決めたこと").
+//! The design is `docs/design/v2/wgstack-rs.md` ("データプレーンの駆動" and "handle の層で決めたこと").
 //! The handles accept connections; the dial side is added later.
 
 #![forbid(unsafe_code)]
