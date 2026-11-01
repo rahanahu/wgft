@@ -146,7 +146,7 @@ pub struct TeardownArgs {
 /// `wgft agent run` のフラグ。`--config` と `--data-dir` は [`AgentGlobal`] にある。
 #[derive(Args)]
 pub struct RunArgs {
-    /// join string wgft://host:port/token#sha256:..., env WGFT_JOIN
+    /// join string wgft://host:port/token#sha256:..., env WGFT_JOIN; prefer the env, as a flag value shows in ps
     #[arg(long, allow_hyphen_values = true, overrides_with = "join")]
     pub join: Option<String>,
     /// agent name, env WGFT_NAME; optional, the join string is already bound to a name
