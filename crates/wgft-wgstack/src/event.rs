@@ -27,6 +27,7 @@ impl EventList {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.bits.heap_bytes() + self.order.heap_bytes()
     }

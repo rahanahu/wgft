@@ -9,7 +9,7 @@ use super::conn::RecList;
 use super::ctx::Conn;
 use super::sack::{DUP_THRESH, idx};
 use super::{MS, SEC};
-use crate::buf::records::{REC_IN_Q, REC_IN_T, REC_LOST, REC_RETRANSMITTED, REC_RTX, Record};
+use crate::buf::records::{REC_IN_Q, REC_IN_T, REC_LOST, REC_RETRANSMITTED, REC_RTX};
 use crate::seq;
 use crate::stack::ns;
 
@@ -54,10 +54,6 @@ impl Conn<'_> {
             Which::T => &mut self.t.t_list,
             Which::Q => &mut self.t.lost_q,
         }
-    }
-
-    pub(crate) fn rec(&mut self, i: usize) -> &mut Record {
-        self.b.recs.at(i)
     }
 
     pub(crate) fn rec_abs(&self, i: usize) -> u32 {

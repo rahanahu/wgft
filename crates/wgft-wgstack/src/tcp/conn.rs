@@ -43,7 +43,7 @@ impl ConnId {
 }
 
 /// 接続の枠の状態です。握手の途中 (SYN-RCVD) は握手の途中の表の行が、行に移った TIME_WAIT と FIN_WAIT_2 は
-/// TIME_WAIT の表が持ちます。dial の側を足す段で SYN-SENT を足します。
+/// TIME_WAIT の表が持ちます。dial の側を持たないので SYN-SENT はありません。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum State {
     /// 枠は空きです。
@@ -403,6 +403,7 @@ impl ConnSlots {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.hot.heap_bytes() + self.cold.heap_bytes() + self.bufs.heap_bytes()
     }
@@ -460,6 +461,7 @@ impl ConnSlots {
 
     /// 使っている枠を空きの list に返します。世代を進め、欄を 0 に戻し、輪の chunk を置き場に返します。
     /// floor の配列は持ち続けます。呼び手は先に表と待ち行列と boost の枠から外します。
+    #[cfg(test)]
     pub(crate) fn release(&mut self, i: u32, free: &mut FixedVec<u32>, pool: &mut ChunkPool) {
         let t = &mut self.hot[i as usize];
         if t.state == State::Free {
@@ -491,6 +493,7 @@ impl ConnSlots {
     }
 
     /// 使っている枠の番号です。
+    #[cfg(test)]
     pub(crate) fn in_use(&self) -> impl Iterator<Item = u32> + '_ {
         self.hot
             .iter()

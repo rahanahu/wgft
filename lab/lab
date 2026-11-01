@@ -318,38 +318,27 @@ host_build() {
   [[ -f $REPO/go.mod ]] || die "go.mod がまだない"
   # WGFT_LAB_BUILD_TAGS は go build の -tags に渡す。lab/agentmem.sh は labmemprobe を付けた build を要る
   (cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ${WGFT_LAB_BUILD_TAGS:+-tags "$WGFT_LAB_BUILD_TAGS"} -o bin/ ./cmd/... ./tools/...)
-  # Rust の wgft は、WGFT_LAB_AGENT_IMPL=rust、WGFT_LAB_RUST=1、--agent-impl に rust を含む lab suite のとき
+  # Rust の wgft は、WGFT_LAB_AGENT_IMPL=rust、--agent-impl に rust を含む lab suite のとき
   # bin/rust/wgft に作る。cargo-zigbuild で musl の静的バイナリにし、VM の Debian の glibc に依らない。
-  # WGFT_LAB_RUST=1 は v2 の試作の道具も bin/rust/ に作る。wgft-wireguard-tun と wireguard-go は
-  # lab/wg-interop.sh が使う。wireguard-go は go.mod が既に要る版の upstream のコマンドをそのまま build する。
   # 既定の bin/ とその install は変えない
   if rust_wanted; then
     command -v cargo-zigbuild >/dev/null || die "the Rust build needs cargo-zigbuild and zig on the host"
-    local pkgs=(-p wgft)
-    [[ ${WGFT_LAB_RUST:-} == 1 ]] && pkgs+=(-p wgft-wireguard-tun)
     mkdir -p "$REPO/bin/rust"
-    (cd "$REPO" && cargo zigbuild --release --locked --target x86_64-unknown-linux-musl "${pkgs[@]}") || die "cargo zigbuild failed"
+    (cd "$REPO" && cargo zigbuild --release --locked --target x86_64-unknown-linux-musl -p wgft) || die "cargo zigbuild failed"
     install -m 0755 "$REPO/target/x86_64-unknown-linux-musl/release/wgft" "$REPO/bin/rust/wgft"
-    if [[ ${WGFT_LAB_RUST:-} == 1 ]]; then
-      install -m 0755 "$REPO/target/x86_64-unknown-linux-musl/release/wgft-wireguard-tun" "$REPO/bin/rust/"
-      (cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/rust/wireguard-go golang.zx2c4.com/wireguard) || die "wireguard-go build failed"
-    fi
-    info "built the Rust wgft${WGFT_LAB_RUST:+, the Rust lab tools and wireguard-go} into $REPO/bin/rust/"
+    info "built the Rust wgft into $REPO/bin/rust/"
   fi
   info "built into $REPO/bin/"
 }
 # rust_wanted:この build が Rust の wgft を作って入れるか。LAB_BUILD_RUST は lab suite が --agent-impl で決める
-rust_wanted() { [[ ${WGFT_LAB_AGENT_IMPL:-} == rust || ${WGFT_LAB_RUST:-} == 1 || ${LAB_BUILD_RUST:-} == 1 ]]; }
+rust_wanted() { [[ ${WGFT_LAB_AGENT_IMPL:-} == rust || ${LAB_BUILD_RUST:-} == 1 ]]; }
 # vm_install:Go のバイナリを /usr/local/bin に入れる。Rust の wgft は名前を wgft のまま /usr/local/lib/wgft-rust/ に
 # 入れる。ラボの台本がプロセスを comm の wgft と cmdline の " agent run" で探すためで、lab/sandbox.sh の
-# AGENT_WGFT がこのパスを指す。WGFT_LAB_RUST=1 の試作の道具は /usr/local/bin に入れる
+# AGENT_WGFT がこのパスを指す
 vm_install() {
   in_vm sh -c 'for b in /wgft/bin/*; do [ -f "$b" ] && [ -x "$b" ] && case "$b" in *.test) ;; *) install -m 0755 "$b" /usr/local/bin/;; esac; done; ls /usr/local/bin/'
   if rust_wanted; then
     in_vm sh -c 'install -d -m 0755 /usr/local/lib/wgft-rust && install -m 0755 /wgft/bin/rust/wgft /usr/local/lib/wgft-rust/wgft'
-  fi
-  if [[ ${WGFT_LAB_RUST:-} == 1 ]]; then
-    in_vm sh -c 'for b in /wgft/bin/rust/*; do [ "$b" = /wgft/bin/rust/wgft ] && continue; [ -f "$b" ] && [ -x "$b" ] && install -m 0755 "$b" /usr/local/bin/; done'
   fi
   info "installed into VM $VM /usr/local/bin (use plain command names in the VM)$(rust_wanted && echo "; the Rust wgft as /usr/local/lib/wgft-rust/wgft")"
 }

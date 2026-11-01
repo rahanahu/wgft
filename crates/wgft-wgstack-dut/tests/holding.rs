@@ -15,8 +15,7 @@
 //! 試験の側の確保が数えに混ざらないように、試験の集まりは測る前に容量を取り、確かめは出力の列を捨てた後に
 //! します。
 //!
-//! 核の段:PR 4b の核 (TCP の受動の open とデータの経路) の入力に、PR 5 の SACK と boost の入力と、PR 6 の
-//! 断片と UDP の入力を足しています。
+//! 試す入力は、TCP の受動の open とデータの経路、SACK と boost、断片と UDP です。
 
 #![expect(
     clippy::many_single_char_names,
@@ -193,7 +192,7 @@ fn spoofed(i: u32, flags: u8) -> Segment {
 }
 
 /// 偽の送信元からの SYN の洪水:握手の途中の表が止まり、接続の枠とバッファを使いません。待ち受け 1 つの行は
-/// 表の全体の半分までです (`Limits` の約束)。
+/// 表の全体の半分までです (`Limits` の約束)。表が満ちた後の SYN には、行を作らずに SYN cookie で応えます。
 fn syn_flood() {
     let mut h = Hold::new(small_limits());
     let _l = h.listen(80);
@@ -216,8 +215,8 @@ fn syn_flood() {
         "the listener's share of the table is full"
     );
     assert!(
-        h.n.stack().stats().syn_table_full > 0,
-        "the dropped SYNs are counted"
+        h.n.stack().stats().syn_cookies_sent > 0,
+        "the SYNs past the table are answered with cookies and counted"
     );
     for _ in 0..300 {
         h.advance(Duration::from_secs(1));
