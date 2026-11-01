@@ -1,0 +1,8 @@
+{
+  "kind": "PING_CLOSE",
+  "kind_byte": 23,
+  "msg": {
+    "h": 4
+  },
+  "display": "PING_CLOSE h=4"
+}

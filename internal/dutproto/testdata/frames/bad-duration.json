@@ -1,0 +1,4 @@
+{
+  "expect": "reject",
+  "reason": "an ADVANCE of 2^63 ns, above 2^63-1"
+}

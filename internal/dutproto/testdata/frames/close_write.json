@@ -1,0 +1,8 @@
+{
+  "kind": "CLOSE_WRITE",
+  "kind_byte": 12,
+  "msg": {
+    "h": 2
+  },
+  "display": "CLOSE_WRITE h=2"
+}

@@ -1,0 +1,24 @@
+{
+  "kind": "HELLO",
+  "kind_byte": 1,
+  "msg": {
+    "version": 1,
+    "clock": 1,
+    "addr": "10.200.0.2",
+    "mtu": 1280,
+    "seed": "01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3ba",
+    "limits": [
+      {
+        "name": "maxFlows",
+        "value": 8
+      },
+      {
+        "name": "acceptQ",
+        "value": 4
+      }
+    ],
+    "boost": 0,
+    "congestion": 0
+  },
+  "display": "HELLO version=1 clock=real addr=10.200.0.2 mtu=1280 seed=64:01080f161d242b323940474e555c636a... limits=maxFlows:8,acceptQ:4 boost=on-demand congestion=cubic"
+}

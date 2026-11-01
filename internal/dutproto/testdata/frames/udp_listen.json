@@ -1,0 +1,8 @@
+{
+  "kind": "UDP_LISTEN",
+  "kind_byte": 7,
+  "msg": {
+    "port": 5353
+  },
+  "display": "UDP_LISTEN port=5353"
+}

@@ -1,0 +1,9 @@
+{
+  "kind": "DATAGRAM",
+  "kind_byte": 140,
+  "msg": {
+    "from": "10.200.0.1:40001",
+    "data": "68656c6c6f"
+  },
+  "display": "DATAGRAM from=10.200.0.1:40001 data=5:68656c6c6f"
+}

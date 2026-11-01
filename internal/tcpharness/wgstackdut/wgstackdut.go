@@ -8,6 +8,7 @@ package wgstackdut
 import (
 	"context"
 	"errors"
+	"io"
 	"math/rand/v2"
 	"net"
 	"net/netip"
@@ -46,7 +47,9 @@ func NewPerformance(addr netip.Addr, mtu int, seed uint64) (*DUT, error) {
 	return newDUT(addr, mtu, seed, wgstack.BoostAtAccept)
 }
 
-func newDUT(addr netip.Addr, mtu int, seed uint64, boost wgstack.BoostPolicy) (*DUT, error) {
+// RandSource is the engine's random source for a scenario's seed: a ChaCha8 keyed from the seed.
+// rustdut hands its first 64 bytes to a DUT process, so the engine there gets the same bytes.
+func RandSource(seed uint64) io.Reader {
 	var key [32]byte
 	for i := range 4 {
 		v := seed ^ uint64(i)*0x9e3779b97f4a7c15
@@ -54,8 +57,12 @@ func newDUT(addr netip.Addr, mtu int, seed uint64, boost wgstack.BoostPolicy) (*
 			key[i*8+j] = byte(v >> (8 * j))
 		}
 	}
+	return randSource{rand.NewChaCha8(key)}
+}
+
+func newDUT(addr netip.Addr, mtu int, seed uint64, boost wgstack.BoostPolicy) (*DUT, error) {
 	clk := wgstack.NewManualClock()
-	dev, err := wgstack.New(wgstack.Config{Addr: addr, MTU: mtu, Clock: clk, Rand: randSource{rand.NewChaCha8(key)}, TestBoost: boost})
+	dev, err := wgstack.New(wgstack.Config{Addr: addr, MTU: mtu, Clock: clk, Rand: RandSource(seed), TestBoost: boost})
 	if err != nil {
 		return nil, err
 	}

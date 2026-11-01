@@ -1,0 +1,9 @@
+{
+  "kind": "CONN_SOCKET",
+  "kind_byte": 28,
+  "msg": {
+    "h": 2,
+    "path": "/tmp/qbench/conn-2.sock"
+  },
+  "display": "CONN_SOCKET h=2 path=\"/tmp/qbench/conn-2.sock\""
+}

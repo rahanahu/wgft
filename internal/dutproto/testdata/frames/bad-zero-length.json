@@ -1,0 +1,4 @@
+{
+  "expect": "reject",
+  "reason": "a frame length of 0"
+}

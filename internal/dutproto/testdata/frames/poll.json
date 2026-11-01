@@ -1,0 +1,8 @@
+{
+  "kind": "POLL",
+  "kind_byte": 3,
+  "msg": {
+    "max": 1
+  },
+  "display": "POLL max=1"
+}

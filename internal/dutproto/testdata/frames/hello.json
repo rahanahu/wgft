@@ -1,0 +1,15 @@
+{
+  "kind": "HELLO",
+  "kind_byte": 1,
+  "msg": {
+    "version": 1,
+    "clock": 0,
+    "addr": "10.200.0.2",
+    "mtu": 1420,
+    "seed": "01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3ba",
+    "limits": [],
+    "boost": 1,
+    "congestion": 1
+  },
+  "display": "HELLO version=1 clock=fake addr=10.200.0.2 mtu=1420 seed=64:01080f161d242b323940474e555c636a... limits=default boost=at-accept congestion=newreno"
+}

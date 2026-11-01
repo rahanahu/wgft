@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/rahanahu/wgft/internal/tcpharness"
+	"github.com/rahanahu/wgft/internal/tcpharness/rustdut"
 )
 
 // Known is wgstack's expected-difference list. Only the test author and the owner add entries
@@ -54,4 +55,22 @@ func TestCongestion(t *testing.T) {
 		t.Skipf("set %s=1 to run", RunEnv)
 	}
 	tcpharness.Run(t, Engine(nil), tcpharness.CongestionScenarios)
+}
+
+// TestRustdutConformance runs the scenarios through rustdut against the DUT binary that
+// rustdut.BinEnv names. Against the Go wgstack's dutserve it is the frozen Go wgstack, so this
+// list applies; the Rust wgstack's list is rustdut's own file (test-tooling.md section 2).
+func TestRustdutConformance(t *testing.T) {
+	if os.Getenv(rustdut.BinEnv) == "" {
+		t.Skipf("set %s to the Go wgstack's dutserve to run", rustdut.BinEnv)
+	}
+	tcpharness.Run(t, rustdut.Engine(Known), tcpharness.Scenarios)
+}
+
+// TestRustdutCongestion runs the CUBIC and HyStart++ scenarios through rustdut.
+func TestRustdutCongestion(t *testing.T) {
+	if os.Getenv(rustdut.BinEnv) == "" {
+		t.Skipf("set %s to the Go wgstack's dutserve to run", rustdut.BinEnv)
+	}
+	tcpharness.Run(t, rustdut.Engine(nil), tcpharness.CongestionScenarios)
 }

@@ -195,7 +195,8 @@ func TestDependencyDirection(t *testing.T) {
 // the module, they import only proto and each other, never dataplane/*, frontend/*, platform/*,
 // vpsd or agent. internal/resource, internal/lograte, internal/startup, internal/textsafe,
 // internal/reasontext and internal/ipv4frag are even stricter and import nothing at all from the
-// module (design.md 7a.7 節, wgstack.md).
+// module (design.md 7a.7 節, wgstack.md), and so does internal/dutproto, whose frames
+// internal/wgstack's tests import (docs/design/v2/test-tooling.md).
 func TestPureLayersStayPure(t *testing.T) {
 	root := moduleRoot(t)
 	var pure []string
@@ -221,7 +222,7 @@ func TestPureLayersStayPure(t *testing.T) {
 	// by cmd/wgft, internal/vpsd, internal/agent and internal/dataplane/linuxkernel/wg alike, so it
 	// stays a leaf. If it grew an import of, say, internal/vpsd/store, every one of those layers
 	// would pull the control plane in through it and the direction of 7a.7 節 would break.
-	for _, name := range []string{"internal/resource", "internal/lograte", "internal/startup", "internal/textsafe", "internal/reasontext", "internal/ipv4frag"} {
+	for _, name := range []string{"internal/resource", "internal/lograte", "internal/startup", "internal/textsafe", "internal/reasontext", "internal/ipv4frag", "internal/dutproto"} {
 		pkgs := packagesUnder(t, root, name)
 		if len(pkgs) == 0 {
 			t.Fatalf("found no packages under %s; did it move?", name)
@@ -874,6 +875,8 @@ func TestTCPHarnessStaysInTests(t *testing.T) {
 		harness + "/gvisordut":  {harness: true, module + "/internal/nettun": true},
 		harness + "/linuxdut":   {harness: true},
 		harness + "/wgstackdut": {harness: true, module + "/internal/wgstack": true},
+		// rustdut drives an engine in another process over the frame protocol, so it builds no engine
+		harness + "/rustdut": {harness: true, module + "/internal/dutproto": true},
 	}
 	for _, pkg := range packagesUnder(t, root, "internal/tcpharness") {
 		if pkg == harness {

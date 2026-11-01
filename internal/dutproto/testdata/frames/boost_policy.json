@@ -1,0 +1,9 @@
+{
+  "kind": "BOOST_POLICY",
+  "kind_byte": 16,
+  "msg": {
+    "h": 2,
+    "floor": true
+  },
+  "display": "BOOST_POLICY h=2 floor=true"
+}
