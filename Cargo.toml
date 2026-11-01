@@ -46,6 +46,9 @@ missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 unused_must_use = "deny"
 unused_extern_crates = "warn"
+# 製品の build に渡さない cfg。fuzzing は cargo-fuzz が付ける (crates/wgft-wgstack/fuzz)。
+# crate の [lints] は workspace = true とほかの項目を併せて書けないので、ここで宣言する。
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
