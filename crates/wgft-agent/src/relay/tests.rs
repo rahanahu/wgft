@@ -251,11 +251,14 @@ async fn reports_unsupported_unusable_and_failed_listeners() {
     );
     assert_eq!(m.listening(), 0);
     drop(stop);
-    // 手放した核のポートは、次の見回りで開き直す
+    // 手放した核のポートは、次の見回りで開き直す。前の 1 周が走っている間の見回りは、1 周を作らずに
+    // 開き直しだけを行う
     tokio::time::sleep(Duration::from_millis(50)).await;
-    m.retry().await;
+    m.reopen().await;
     assert_eq!(m.listening(), 1);
     assert_eq!(m.tcp_pool().rules(), 1);
+    m.retry().await;
+    assert_eq!(m.listening(), 1);
 }
 
 #[tokio::test]
