@@ -47,15 +47,17 @@ pub const UDP_SESSION_ENTRY: usize = 512;
 
 /// One TCP listener: its entry in the relay's table, its state shared with its relays, its budget
 /// entry, its accept task and its netstack registration, and the failure text of its last probe,
-/// which is clipped at the reason's length cap. The rule ID and the target host are shared by every
-/// listener of a rule. A test measures 1.5 KiB with a clipped failure text; the rest covers the
-/// listener's row of a status read and its entry in the plan of an apply, which live only while they
-/// run. The core's port table is part of the core's term.
-pub const LISTENER_TCP: usize = 2 << 10;
+/// which is clipped at the reason's length cap and held in an allocation of its exact length. The
+/// rule ID and the target host are shared by every listener of a rule, and identical failure texts of
+/// neighbouring listeners share one allocation. The term also covers a probe round in flight: its
+/// entry and result per listener, with a new failure text of the longest form before it replaces the
+/// old one, and a status read's row per listener taken at the same time. A test measures that worst
+/// case at 2.3 KiB on Linux. The core's port table is part of the core's term.
+pub const LISTENER_TCP: usize = 5 << 9;
 
 /// One UDP listener: its receive buffer of the largest datagram (Go's relay has the same per
 /// listener), its task, its session table and the shared parts of a TCP listener. A test measures
-/// the buffer plus 2.8 KiB.
+/// the buffer plus 2.9 KiB with a status read's rows.
 pub const LISTENER_UDP: usize = UDP_BUF + (4 << 10);
 
 /// One TCP relay's term without its bulk buffers: its task and its socket's registration.

@@ -219,6 +219,29 @@ fn prefix_of(addr: std::net::IpAddr, prefix_len: u32) -> String {
     format!("{addr}/{prefix_len}")
 }
 
+/// BSD 系 (macOS を含む) の `getifaddrs` が link-local の IPv6 のアドレス (`fe80::/10`) の 3 byte 目と
+/// 4 byte 目に埋めるインタフェースの番号 (KAME の埋め込みの scope) を 0 に戻す。Go の `net.Interfaces`
+/// も同じく消すので、一覧のアドレスが Go と同じ形になる。
+#[cfg_attr(
+    not(any(
+        test,
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    )),
+    expect(dead_code, reason = "only BSD-derived systems embed the scope")
+)]
+fn strip_kame_scope(mut a: [u8; 16]) -> [u8; 16] {
+    if a[0] == 0xfe && a[1] & 0xc0 == 0x80 {
+        a[2] = 0;
+        a[3] = 0;
+    }
+    a
+}
+
 /// このホストのインタフェースを、OS が返す順に読む (`getifaddrs`)。アドレスを持たないインタフェースも
 /// 数える。
 ///
@@ -290,6 +313,15 @@ pub fn interfaces() -> std::io::Result<Vec<Interface>> {
                     )
                 };
                 let bits = m.iter().map(|b| b.count_ones()).sum();
+                #[cfg(any(
+                    target_os = "macos",
+                    target_os = "ios",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd",
+                    target_os = "dragonfly"
+                ))]
+                let a = strip_kame_scope(a);
                 prefix_of(IpAddr::V6(Ipv6Addr::from(a)), bits)
             }
             _ => continue,
@@ -411,6 +443,21 @@ mod tests {
         assert!(one.contains(Ipv4Addr::new(10, 200, 0, 2)));
         assert!(!one.contains(Ipv4Addr::new(10, 200, 0, 3)));
         assert!(h("any", [0, 0, 0, 0], 0).contains(Ipv4Addr::new(203, 0, 113, 1)));
+    }
+
+    /// link-local のアドレスに埋めたインタフェースの番号だけを消し、他のアドレスは変えない。
+    #[test]
+    fn the_kame_scope_is_stripped_from_link_local_addresses() {
+        use std::net::Ipv6Addr;
+        let embedded: Ipv6Addr = "fe80:4::1".parse().unwrap();
+        assert_eq!(
+            Ipv6Addr::from(strip_kame_scope(embedded.octets())),
+            "fe80::1".parse::<Ipv6Addr>().unwrap()
+        );
+        for other in ["2001:db8:4::1", "fec0:4::1", "ff02:4::1"] {
+            let a: Ipv6Addr = other.parse().unwrap();
+            assert_eq!(Ipv6Addr::from(strip_kame_scope(a.octets())), a, "{other}");
+        }
     }
 
     /// BSD 系の短い netmask (`255.255.0.0` を `sa_len` 6 で表したもの) は、`sa_len` の外の byte を
