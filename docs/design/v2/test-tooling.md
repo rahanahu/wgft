@@ -2,8 +2,8 @@
 
 この文書は、Rust に移る wgstack を確かめる試験の道具の設計を定めます。
 対象は、適合の台本をデータにする言語、台本を流す 2 つの runner、Rust の DUT を別のプロセスとして叩く標準入出力の口、凍結した Go の wgstack の記録との照合、qbench、fuzz、関門です。
-1 節の台本の言語、2 節の Go の runner と Rust の runner と 2 つの runner の一致の確かめ、Rust の構文解析器と台本の乱数の写し、3 節の口の Go と Rust の符号と `dutserve` と `rustdut` と `ProcessDut`、4 節の記録は実装済みです。
-Rust の wgstack を包む `wgstack-dut`、記録の Rust での照合と、5 節から後の節は未実装です。
+1 節の台本の言語、2 節の Go の runner と Rust の runner と 2 つの runner の一致の確かめ、Rust の構文解析器と台本の乱数の写し、3 節の口の Go と Rust の符号と `dutserve` と `rustdut` と `ProcessDut` と `wgstack-dut`、4 節の記録は実装済みです。
+記録の Rust での照合と、5 節から後の節は未実装です。
 実装は 8 節の順に積んだ PR で行い、各 PR がこの文書の該当する節を実装に合わせて直します。
 
 Rust の wgstack そのもの (sans-IO の API、crate の分け方、bit の一致の条件、実装の PR の順) は、wgstack の Rust 版の設計 (`docs/design/v2/wgstack-rs.md`) が決めます。
@@ -466,7 +466,8 @@ DUT そのものが壊れた時 (プロセスの終わり、口の誤り) は、
 `crates/wgft-wgstack-dut` の adapter が Rust の wgstack を同じプロセスで包み、`crates/wgft-tcpharness` の `ProcessDut` が 3 節の口で別のプロセスを叩きます。
 adapter は `inject` を同じ時刻の `handle_packet` の列に、`advance` を新しい時刻での 1 回の `handle_timeout` に、`poll` を `poll_transmit` に写します。
 1 回の `handle_timeout` は、Go の `ManualClock.Advance` の後の 1 回の `Tick` と同じく、新しい時刻までに期限の来たタイマーをすべて動かします。
-`poll_event` の知らせは adapter が読み捨て、操作の結果だけを runner に返します。
+adapter は `poll_event` を呼ばず、操作の結果だけを runner に返します。
+核の知らせは対象と種類ごとに 1 つにまとまるので、読まなくても溜まり続けません。
 台本を Rust の wgstack に流す試験は `crates/wgft-wgstack-dut/tests/scenarios.rs` に置きます。
 
 偽の時計の規則は Go の harness と同じです。
@@ -499,7 +500,7 @@ Go の `rustdut` の `Read` は 0 byte を返し、締め切りを持つ Go の 
 どちらも今の台本と `dutserve` では起きません。
 
 この扱いは DUT が次の 2 つを守ることに頼ります。
-`dutserve` は守っていて、T3c の `wgstack-dut` の adapter も守ります。
+`dutserve` と `wgstack-dut` の adapter は守っていて、adapter の側は `crates/wgft-wgstack-dut/tests/server.rs` が確かめます。
 
 - 最大 0 の `READ` (`read(c, 0)`) は空の `DATA` か誤りを返し、`WOULD_BLOCK` を返しません (3 節の表)。`WOULD_BLOCK` が返ると、2 つの runner は読む文の結果を timeout でなく応答の誤り (`rustdut: read answered WOULD_BLOCK`) にします
 - 閉じた待ち受けの `CLOSE` は、`OK` か engine の誤りを返し、口の誤りにしません。受け入れの timeout で閉じた待ち受けを、台本の `close` と台本の終わりの後始末がもう一度閉じるためです
@@ -801,6 +802,20 @@ boost の枠の集まりはプロセスで 1 つですが、`dutserve` は DUT �
 上限の組は Go の `limits` の欄に当たる値で、`FuzzCore` が使う小さな上限も渡せる必要があります。
 3 節の口と記録は、この API に無い操作を求めません。
 API の名前が実装で変わったときは、adapter とこの段落を同じ PR で直します。
+
+adapter の写し方は次のとおりです。
+
+- 応答は `dutserve` と同じ bytes にします。engine の誤りの文は Go の `net.OpError` の文 (`read tcp 10.200.0.2:80->10.200.0.1:40001: connection reset by peer` の形) で、接続の 2 つのアドレスは受け入れた時に覚えます。誤りの種類は `dutserve` の `errResp` の分け方で、再送の打ち切り (`ETIMEDOUT`) は timeout です
+- `WRITE` は `write` を 1 回呼びます。`dutserve` は書ける量で bytes を切ってから Go の `Write` を呼び、`testNet` の記録 (4 節) も書ける量 (`room`) までしか渡さないので、Go の `Write` の繰り返しは 1 回で書き終えます。核の `write` が受け取れる量の一部しか受け取らなければ、照合が食い違いとして捉えます。書いた後は空の `write` で書けない状態を確かめます。Go の `Write` は書いた後にもう 1 回まわり、誤りを確かめてから戻るためです。書いた後の処理が会計の不整合で接続を閉じた時にこの確かめが誤りを返す道は、核の公開の API で起こせないので確かめていません
+- `BOOST_POLICY` と `EVENTS` は、hook の `boost_granted` と `may_return` を Go の `OnBoost` の関数の呼び出しに写します。`may_return` は呼ばれるたびに変化を残し、`BOOST_POLICY` の答えを返します。今 boost を持つかは、hook が見た取得と戻りで決めます。この 2 つの要求を送る記録 (`boost-hook` の印) は git の集まりに無いので、この写し方は記録で確かめていません
+- UDP と ping の要求は、核が UDP と ICMP を持つ段 (実装の 6) までは engine の誤りを返します。`HELLO` の上限の組の `udpRxDgrams` と `udpTxDgrams` は、同じ段まで受け取って使いません
+- `STATS`、`BOUND`、`HELD` は、核の `Stats`、`Bound`、`Held` の欄を Rust の名前のまま `名前=値` で並べます。照合は応答の種類だけを比べます
+- 上限の組を持つ `HELLO` は、`dutserve` と同じく `WgstackDut::new` が断り、記録の照合が使う `WgstackDut::for_replay` だけが受け付けます。Go の `TestRecordingsReplay` の `newDUTServerWith` と同じ分け方です
+
+`wgstack-dut` のバイナリは `dutserve` と同じ規則で動きます。
+起動の引数は `--clock fake` だけを受け付け、口の誤りでは `ERROR` を書いて終了コード 2 で、標準入力が frame の境目で閉じたら終了コード 0 で終わります。
+`RTO_AT` と `CONN_SOCKET` は `dutserve` と同じ文の engine の誤り (`RTO_AT needs --clock real; ...`) を返し、応答を書けなければ終了コード 2 で終わります。
+同じ要求の列にバイナリと同じプロセスの adapter が同じ bytes を返すこと、誤りの文と種類 (再送の打ち切りの timeout を含む)、`CLOSE_FOR_DELIVERY` の後の届け終わり、`INJECT` の batch の順は、`tests/server.rs` が確かめます。
 
 4 節の記録と一致させる条件 (種の配分、ChaCha8、SipHash、タイマーの輪の 1 ms の tick、枠と出力の順、`math.Cbrt`) は、wgstack の Rust 版の設計の「bit の一致の条件」が決めます。
 試験の道具は種と上限の組を `HELLO` で渡すだけで、これらの条件を持ちません。

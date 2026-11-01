@@ -17,6 +17,7 @@ wgft-wireguard-tun = { path = "crates/wgft-wireguard-tun" }
 wgft-proto = { path = "crates/wgft-proto" }
 wgft-agent = { path = "crates/wgft-agent" }
 wgft-wgstack = { path = "crates/wgft-wgstack" }
+wgft-tcpharness = { path = "crates/wgft-tcpharness" }
 base64 = "0.23.1"
 criterion = "0.8.2"
 clap = { version = "4.6.7", features = ["derive"] }
