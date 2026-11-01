@@ -5,7 +5,7 @@
 //! 「接続の枠の配置」にあります。
 
 use core::net::{Ipv4Addr, SocketAddrV4};
-use wgft_wgstack::{Budget, Config, ConnId, NoHook, Stack, Time};
+use wgft_wgstack::{BoostPolicy, Budget, Config, ConnId, Limits, NoHook, Stack, Time};
 
 const DUT: Ipv4Addr = Ipv4Addr::new(10, 9, 0, 1);
 const PEER: Ipv4Addr = Ipv4Addr::new(10, 9, 0, 2);
@@ -109,7 +109,16 @@ impl Rig {
     /// `new` と同じで、`sack` が真なら相手が SACK-permitted を示し、SACK を交渉した接続の経路 (RACK の状態の更新と
     /// TLP の期限) を通ります。
     pub fn with_sack(conns: usize, sack: bool) -> Self {
-        let config = Config::new(DUT, MTU);
+        Self::build(conns, sack, Limits::default(), BoostPolicy::OnDemand)
+    }
+
+    /// `with_sack` と同じで、表の大きさ `limits` と boost の与え方 `boost` を選びます。
+    pub fn build(conns: usize, sack: bool, limits: Limits, boost: BoostPolicy) -> Self {
+        let config = Config {
+            limits,
+            boost,
+            ..Config::new(DUT, MTU)
+        };
         let stack =
             Stack::new(config, Budget::new().expect("budget"), &[7; 64], NoHook).expect("stack");
         let mut r = Self {
@@ -232,6 +241,19 @@ impl Rig {
     pub fn check(&self) {
         self.stack.check_invariants().expect("invariants");
     }
+
+    /// 核の不変条件を確かめ、合っていれば真を返します。不変条件の検査の手間を測るのに使います。
+    pub fn check_ok(&self) -> bool {
+        self.stack.check_invariants().is_ok()
+    }
+}
+
+/// 既定の表の大きさの核を作って閉じます。核の作成の手間を測るのに使います。
+pub fn new_and_close() {
+    let config = Config::new(DUT, MTU);
+    let stack =
+        Stack::new(config, Budget::new().expect("budget"), &[7; 64], NoHook).expect("stack");
+    core::hint::black_box(stack.close(Time::ZERO));
 }
 
 #[cfg(test)]
