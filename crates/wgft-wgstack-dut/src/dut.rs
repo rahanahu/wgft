@@ -18,7 +18,8 @@ use std::time::Duration;
 use wgft_tcpharness::dut::{Accepted, ClockedDut, Datagram, DutError, Op};
 use wgft_tcpharness::frame::{self, BoostEvent, Clock, ErrKind, Handle, Hello, MAX_FRAME, VERSION};
 use wgft_wgstack::{
-    BoostPolicy, Budget, Config, Congestion, ConnId, Error, Hook, Limits, ListenerId, Stack, Time,
+    BoostPolicy, Budget, Closed, Config, Congestion, ConnId, Error, Held, Hook, Limits, ListenerId,
+    Stack, Time,
 };
 
 /// `HELLO_OK` が返す engine の名前です。
@@ -175,6 +176,59 @@ impl WgstackDut {
         Self::build(h, true)
     }
 
+    /// fuzz の `replay` の target のために、`HELLO` の上限の組の代わりに表の大きさ `limits` で、渡した `budget`
+    /// を持つ核を作ります。作れなければ誤りと `budget` を返します。`HELLO` の版と時計は確かめません。
+    pub fn for_fuzz(
+        h: &Hello,
+        limits: Limits,
+        budget: Budget,
+    ) -> Result<Self, (HelloError, Budget)> {
+        let config = Self::config(h, limits);
+        let hook = DutHook::default();
+        let stack = Stack::new(config, budget, &h.seed, hook.clone())
+            .map_err(|e| (HelloError(format!("wgstack: {e}")), e.into_budget()))?;
+        Ok(Self::with_stack(stack, hook, h.addr))
+    }
+
+    /// 核を閉じ、`Budget` と最後の会計を返します。
+    pub fn close_stack(self) -> Closed {
+        let now = self.time();
+        self.stack.close(now)
+    }
+
+    /// 核の今の保持です。
+    pub fn held(&self) -> Held {
+        self.stack.held()
+    }
+
+    fn config(h: &Hello, limits: Limits) -> Config {
+        Config {
+            addr: h.addr,
+            mtu: usize::try_from(h.mtu).unwrap_or(usize::MAX),
+            limits,
+            congestion: match h.congestion {
+                frame::Congestion::Cubic => Congestion::Cubic,
+                frame::Congestion::NewReno => Congestion::NewReno,
+            },
+            boost: match h.boost {
+                frame::Boost::OnDemand => BoostPolicy::OnDemand,
+                frame::Boost::AtAccept => BoostPolicy::AtAccept,
+                frame::Boost::Never => BoostPolicy::Never,
+            },
+        }
+    }
+
+    fn with_stack(stack: Stack<DutHook>, hook: DutHook, addr: Ipv4Addr) -> Self {
+        Self {
+            stack,
+            hook,
+            now: 0,
+            addr,
+            objs: Vec::new(),
+            buf: vec![0; 65536],
+        }
+    }
+
     fn build(h: &Hello, replay: bool) -> Result<Self, HelloError> {
         if h.version != VERSION {
             return Err(HelloError(format!(
@@ -193,32 +247,12 @@ impl WgstackDut {
                 h.limits.len()
             )));
         }
-        let config = Config {
-            addr: h.addr,
-            mtu: usize::try_from(h.mtu).unwrap_or(usize::MAX),
-            limits: limits_from_hello(&h.limits)?,
-            congestion: match h.congestion {
-                frame::Congestion::Cubic => Congestion::Cubic,
-                frame::Congestion::NewReno => Congestion::NewReno,
-            },
-            boost: match h.boost {
-                frame::Boost::OnDemand => BoostPolicy::OnDemand,
-                frame::Boost::AtAccept => BoostPolicy::AtAccept,
-                frame::Boost::Never => BoostPolicy::Never,
-            },
-        };
+        let config = Self::config(h, limits_from_hello(&h.limits)?);
         let budget = Budget::new().map_err(|e| HelloError(format!("wgstack: {e}")))?;
         let hook = DutHook::default();
         let stack = Stack::new(config, budget, &h.seed, hook.clone())
             .map_err(|e| HelloError(format!("wgstack: {e}")))?;
-        Ok(Self {
-            stack,
-            hook,
-            now: 0,
-            addr: h.addr,
-            objs: Vec::new(),
-            buf: vec![0; 65536],
-        })
+        Ok(Self::with_stack(stack, hook, h.addr))
     }
 
     /// 核の不変条件を確かめます。
