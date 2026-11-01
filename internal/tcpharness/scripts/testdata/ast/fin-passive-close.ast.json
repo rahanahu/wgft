@@ -1,0 +1,670 @@
+{
+  "body": [
+    {
+      "args": [
+        {
+          "name": "l"
+        },
+        {
+          "int": "8011"
+        }
+      ],
+      "line": 6,
+      "verb": "listen"
+    },
+    {
+      "args": [
+        {
+          "name": "p"
+        },
+        {
+          "name": "l"
+        },
+        {
+          "int": "8011"
+        }
+      ],
+      "line": 7,
+      "named": {
+        "syn": {
+          "args": [],
+          "call": "opts_standard"
+        }
+      },
+      "verb": "connect"
+    },
+    {
+      "args": [
+        {
+          "name": "p"
+        },
+        {
+          "str": "bye"
+        }
+      ],
+      "line": 8,
+      "verb": "send_fin"
+    },
+    {
+      "args": [
+        {
+          "name": "p"
+        },
+        {
+          "dur": "500000000"
+        }
+      ],
+      "bind": "a",
+      "line": 11,
+      "named": {
+        "match": {
+          "args": [
+            {
+              "name": "s"
+            },
+            {
+              "field": "snd_nxt",
+              "of": {
+                "name": "p"
+              }
+            }
+          ],
+          "call": "acks"
+        }
+      },
+      "verb": "await"
+    },
+    {
+      "args": [
+        {
+          "field": "ok",
+          "of": {
+            "name": "a"
+          }
+        }
+      ],
+      "got": [
+        {
+          "expr": {
+            "args": [
+              {
+                "name": "a"
+              }
+            ],
+            "call": "seg_desc"
+          }
+        }
+      ],
+      "id": "fin.acked",
+      "line": 12,
+      "verb": "check",
+      "what": [
+        {
+          "text": "the DUT acknowledges the data and the FIN within the 500 ms delayed-ACK bound"
+        }
+      ]
+    },
+    {
+      "args": [
+        {
+          "field": "conn",
+          "of": {
+            "name": "p"
+          }
+        },
+        {
+          "int": "3"
+        },
+        {
+          "dur": "1000000000"
+        }
+      ],
+      "bind": "r",
+      "line": 15,
+      "verb": "read"
+    },
+    {
+      "args": [
+        {
+          "l": {
+            "l": {
+              "field": "err",
+              "of": {
+                "name": "r"
+              }
+            },
+            "op": "==",
+            "r": {
+              "name": "none"
+            }
+          },
+          "op": "\u0026\u0026",
+          "r": {
+            "l": {
+              "field": "data",
+              "of": {
+                "name": "r"
+              }
+            },
+            "op": "==",
+            "r": {
+              "str": "bye"
+            }
+          }
+        }
+      ],
+      "got": [
+        {
+          "expr": {
+            "args": [
+              {
+                "field": "data",
+                "of": {
+                  "name": "r"
+                }
+              }
+            ],
+            "call": "quote"
+          }
+        },
+        {
+          "text": ", error "
+        },
+        {
+          "expr": {
+            "args": [
+              {
+                "field": "err",
+                "of": {
+                  "name": "r"
+                }
+              }
+            ],
+            "call": "err_kind"
+          }
+        }
+      ],
+      "id": "data-before-fin",
+      "line": 16,
+      "verb": "check",
+      "what": [
+        {
+          "text": "the application reads the data that came with the FIN"
+        }
+      ]
+    },
+    {
+      "args": [
+        {
+          "field": "conn",
+          "of": {
+            "name": "p"
+          }
+        },
+        {
+          "int": "1"
+        },
+        {
+          "dur": "1000000000"
+        }
+      ],
+      "bind": "r",
+      "line": 19,
+      "verb": "read"
+    },
+    {
+      "args": [
+        {
+          "l": {
+            "args": [
+              {
+                "field": "err",
+                "of": {
+                  "name": "r"
+                }
+              }
+            ],
+            "call": "err_kind"
+          },
+          "op": "==",
+          "r": {
+            "str": "EOF"
+          }
+        }
+      ],
+      "got": [
+        {
+          "text": "error "
+        },
+        {
+          "expr": {
+            "args": [
+              {
+                "field": "err",
+                "of": {
+                  "name": "r"
+                }
+              }
+            ],
+            "call": "err_kind"
+          }
+        }
+      ],
+      "id": "eof",
+      "line": 20,
+      "verb": "check",
+      "what": [
+        {
+          "text": "the next read returns EOF"
+        }
+      ]
+    },
+    {
+      "args": [
+        {
+          "field": "conn",
+          "of": {
+            "name": "p"
+          }
+        },
+        {
+          "str": "after"
+        }
+      ],
+      "bind": "w",
+      "line": 24,
+      "verb": "write"
+    },
+    {
+      "args": [
+        {
+          "name": "p"
+        },
+        {
+          "dur": "1000000000"
+        }
+      ],
+      "bind": "d",
+      "line": 25,
+      "named": {
+        "match": {
+          "args": [
+            {
+              "name": "s"
+            }
+          ],
+          "call": "is_data"
+        }
+      },
+      "verb": "await"
+    },
+    {
+      "args": [
+        {
+          "l": {
+            "l": {
+              "l": {
+                "l": {
+                  "field": "err",
+                  "of": {
+                    "name": "w"
+                  }
+                },
+                "op": "==",
+                "r": {
+                  "name": "none"
+                }
+              },
+              "op": "\u0026\u0026",
+              "r": {
+                "field": "ok",
+                "of": {
+                  "name": "d"
+                }
+              }
+            },
+            "op": "\u0026\u0026",
+            "r": {
+              "l": {
+                "field": "seq",
+                "of": {
+                  "name": "d"
+                }
+              },
+              "op": "==",
+              "r": {
+                "field": "rcv_nxt",
+                "of": {
+                  "name": "p"
+                }
+              }
+            }
+          },
+          "op": "\u0026\u0026",
+          "r": {
+            "l": {
+              "field": "payload",
+              "of": {
+                "name": "d"
+              }
+            },
+            "op": "==",
+            "r": {
+              "str": "after"
+            }
+          }
+        }
+      ],
+      "got": [
+        {
+          "text": "write error "
+        },
+        {
+          "expr": {
+            "args": [
+              {
+                "field": "err",
+                "of": {
+                  "name": "w"
+                }
+              }
+            ],
+            "call": "err_kind"
+          }
+        },
+        {
+          "text": "; "
+        },
+        {
+          "expr": {
+            "args": [
+              {
+                "name": "d"
+              }
+            ],
+            "call": "seg_desc"
+          }
+        }
+      ],
+      "id": "close-wait.sends",
+      "line": 26,
+      "verb": "check",
+      "what": [
+        {
+          "text": "the application can still send in CLOSE-WAIT"
+        }
+      ]
+    },
+    {
+      "args": [
+        {
+          "field": "ok",
+          "of": {
+            "name": "d"
+          }
+        }
+      ],
+      "line": 29,
+      "then": [
+        {
+          "args": [
+            {
+              "l": {
+                "field": "seq",
+                "of": {
+                  "name": "d"
+                }
+              },
+              "op": "+",
+              "r": {
+                "field": "len",
+                "of": {
+                  "name": "d"
+                }
+              }
+            }
+          ],
+          "bind": "p.rcv_nxt",
+          "line": 30,
+          "verb": "set"
+        },
+        {
+          "args": [
+            {
+              "name": "p"
+            }
+          ],
+          "line": 31,
+          "verb": "send_ack"
+        }
+      ],
+      "verb": "if"
+    },
+    {
+      "args": [
+        {
+          "field": "conn",
+          "of": {
+            "name": "p"
+          }
+        }
+      ],
+      "line": 33,
+      "verb": "close"
+    },
+    {
+      "args": [
+        {
+          "name": "p"
+        },
+        {
+          "dur": "1000000000"
+        }
+      ],
+      "bind": "f",
+      "line": 34,
+      "named": {
+        "match": {
+          "args": [
+            {
+              "name": "s"
+            }
+          ],
+          "call": "is_fin"
+        }
+      },
+      "verb": "await"
+    },
+    {
+      "args": [
+        {
+          "l": {
+            "field": "ok",
+            "of": {
+              "name": "f"
+            }
+          },
+          "op": "\u0026\u0026",
+          "r": {
+            "l": {
+              "field": "seq",
+              "of": {
+                "name": "f"
+              }
+            },
+            "op": "==",
+            "r": {
+              "field": "rcv_nxt",
+              "of": {
+                "name": "p"
+              }
+            }
+          }
+        }
+      ],
+      "got": [
+        {
+          "expr": {
+            "args": [
+              {
+                "name": "f"
+              }
+            ],
+            "call": "seg_desc"
+          }
+        }
+      ],
+      "id": "last-ack.fin",
+      "line": 35,
+      "verb": "check",
+      "what": [
+        {
+          "text": "Close sends a FIN after the data"
+        }
+      ]
+    },
+    {
+      "args": [
+        {
+          "args": [
+            {
+              "int": "0"
+            }
+          ],
+          "call": "seq"
+        }
+      ],
+      "bind": "ack_ts",
+      "line": 38,
+      "verb": "let"
+    },
+    {
+      "args": [
+        {
+          "field": "ok",
+          "of": {
+            "name": "f"
+          }
+        }
+      ],
+      "line": 39,
+      "then": [
+        {
+          "args": [
+            {
+              "l": {
+                "field": "seq",
+                "of": {
+                  "name": "f"
+                }
+              },
+              "op": "+",
+              "r": {
+                "field": "seq_len",
+                "of": {
+                  "name": "f"
+                }
+              }
+            }
+          ],
+          "bind": "p.rcv_nxt",
+          "line": 40,
+          "verb": "set"
+        },
+        {
+          "args": [
+            {
+              "name": "p"
+            }
+          ],
+          "bind": "ack_ts",
+          "line": 41,
+          "verb": "send_fresh_ack"
+        }
+      ],
+      "verb": "if"
+    },
+    {
+      "args": [
+        {
+          "name": "p"
+        },
+        {
+          "dur": "500000000"
+        },
+        {
+          "name": "ack_ts"
+        },
+        {
+          "name": "f"
+        },
+        {
+          "field": "conn",
+          "of": {
+            "name": "p"
+          }
+        }
+      ],
+      "bind": "q",
+      "line": 45,
+      "verb": "quiet_since"
+    },
+    {
+      "args": [
+        {
+          "field": "quiet",
+          "of": {
+            "name": "q"
+          }
+        }
+      ],
+      "got": [
+        {
+          "expr": {
+            "field": "desc",
+            "of": {
+              "name": "q"
+            }
+          }
+        }
+      ],
+      "id": "closed.quiet",
+      "line": 46,
+      "verb": "check",
+      "what": [
+        {
+          "text": "nothing follows the ACK of the DUT's FIN"
+        }
+      ]
+    },
+    {
+      "args": [
+        {
+          "field": "stale",
+          "of": {
+            "name": "q"
+          }
+        }
+      ],
+      "id": "resent-before-the-ack",
+      "line": 49,
+      "verb": "measure"
+    },
+    {
+      "args": [
+        {
+          "field": "conn",
+          "of": {
+            "name": "p"
+          }
+        }
+      ],
+      "id": "delivered",
+      "line": 50,
+      "verb": "delivered"
+    }
+  ],
+  "linux": [],
+  "refs": "RFC 9293 3.6 and 3.10.7.4 CLOSE-WAIT and LAST-ACK",
+  "scenario": "fin-passive-close"
+}

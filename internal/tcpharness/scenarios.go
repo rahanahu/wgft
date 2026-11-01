@@ -14,9 +14,9 @@ import (
 // feature set would break the relay. Every TCP scenario is a passive open on IPv4 at the fixed
 // MTU, the only shape of TCP wgft's agent terminates. The ICMP and UDP families follow.
 var Scenarios = []Scenario{
-	{Name: "handshake-options", Refs: "RFC 9293 3.5 and 3.7.1, RFC 7323 2.2 and 3.2, RFC 2018 2; packetimpact tcp_handshake_window_size", Run: handshakeOptions},
-	{Name: "handshake-bare", Refs: "RFC 9293 3.7.1 MUST-15 default send MSS 536, RFC 7323 2.2 and 3.2, RFC 2018 2", Run: handshakeBare},
-	{Name: "handshake-mss-floor", Refs: "RFC 9293 3.7.1; wgft's TUN-ingress floor of 536, packet-validation.md", Run: handshakeMSSFloor},
+	script("handshake-options"),
+	script("handshake-bare"),
+	script("handshake-mss-floor"),
 	{Name: "ooo-sack", Refs: "RFC 9293 3.10.7.4, RFC 2018 3 and 4, RFC 5681 4.2; gVisor e2e tcp_sack_test.go", Run: oooSACK},
 	{Name: "retransmit-rto", Refs: "RFC 6298 5; packetimpact tcp_retransmits", Run: retransmitRTO},
 	{Name: "newreno-recovery", Refs: "RFC 5681 3.2, RFC 6582 3.2; packetimpact tcp_rack for the RACK variant", Run: newRenoRecovery},
@@ -34,17 +34,17 @@ var Scenarios = []Scenario{
 	{Name: "paws", Refs: "RFC 7323 5.3; packetimpact tcp_paws_mechanism", Run: paws},
 	{Name: "zero-window-probe", Refs: "RFC 9293 3.8.6.1; packetimpact tcp_zero_window_probe, tcp_zero_window_probe_retransmit", Run: zeroWindowProbe},
 	{Name: "rfc5961", Refs: "RFC 5961 3.2 and 4.2, RFC 9293 3.10.7.4; packetimpact tcp_outside_the_window, tcp_unacc_seq_ack", Run: rfc5961},
-	{Name: "fin-passive-close", Refs: "RFC 9293 3.6 and 3.10.7.4 CLOSE-WAIT and LAST-ACK", Run: finPassiveClose},
-	{Name: "half-close", Refs: "RFC 9293 3.6, 3.8.1 and 3.10.7.4 FIN-WAIT-1, FIN-WAIT-2 and TIME-WAIT; packetimpact tcp_fin_retransmission", Run: halfClose},
-	{Name: "close-unread-rst", Refs: "RFC 9293 3.6, RFC 2525 2.17", Run: closeUnreadRST},
-	{Name: "active-close-fin-ack", Refs: "RFC 9293 3.6 and 3.10.7.4 FIN-WAIT-1, RFC 1122 4.2.3.2", Run: activeCloseFINACK},
-	{Name: "timewait-reuse", Refs: "RFC 6191 2 and 3, RFC 9293 3.10.7.4 TIME-WAIT; packetimpact tcp_timewait_reset", Run: timeWaitReuse},
+	script("fin-passive-close"),
+	script("half-close"),
+	script("close-unread-rst"),
+	script("active-close-fin-ack"),
+	script("timewait-reuse"),
 	{Name: "early-ack", Refs: "RFC 1122 4.2.3.2, RFC 9293 3.8.6.3; wgstack.md, the choices not yet checked against Linux: quickack, the window after the handshake, the IP ID", Run: earlyACK},
 	{Name: "ack-unsent", Refs: "RFC 9293 3.10.7.4, RFC 5961 5.2; packetimpact tcp_unacc_seq_ack", Run: ackUnsent},
 	{Name: "synrcvd-syn", Refs: "RFC 9293 3.10.7.4 SYN-RECEIVED, RFC 5961 4; packetimpact tcp_synrcvd_reset", Run: synRcvdSYN},
 	{Name: "close-ooo-only", Refs: "RFC 9293 3.6, RFC 2525 2.17; wgstack.md: Close with only out-of-order data", Run: closeOOOOnly},
 	{Name: "fin-zero-window", Refs: "RFC 9293 3.8.6.1; wgstack.md: the FIN while the window is 0", Run: finZeroWindow},
-	{Name: "listener-close", Refs: "RFC 9293 3.10.4 and 3.10.7.1; packetimpact tcp_noaccept_close_rst, tcp_listen_backlog", Run: listenerClose},
+	script("listener-close"),
 	{Name: "icmp-frag-needed", Refs: "RFC 1191, RFC 5927 4.1; wgstack.md, ICMP errors", Run: icmpFragNeeded},
 	{Name: "icmp-frag-needed-acked", Refs: "RFC 5927 4.1; wgstack.md, ICMP errors", Run: icmpFragNeededAcked},
 	{Name: "icmp-frag-needed-unsent", Refs: "RFC 5927 4.1; wgstack.md, ICMP errors", Run: icmpFragNeededUnsent},
@@ -74,6 +74,21 @@ var Scenarios = []Scenario{
 	{Name: "rcv-window-pacing", Refs: pacingRefs, Run: rcvWindowPacing(true), Performance: true},
 	{Name: "rcv-window-pacing-fixed", Refs: pacingRefs, Run: rcvWindowPacing(false)},
 	{Name: "rto-after-burst", Refs: "RFC 5681 3.1, RFC 6298 5; the band is the reference Linux's, tcp_enter_loss", Run: rtoAfterBurst},
+}
+
+// LegacyScenarios are the Go functions of the scenarios that moved to scripts, kept until every
+// scenario of the straight-line set has moved, so each script can be run side by side with the Go
+// function it replaces (docs/design/v2/test-tooling.md, section 1).
+var LegacyScenarios = []Scenario{
+	{Name: "handshake-options", Refs: "RFC 9293 3.5 and 3.7.1, RFC 7323 2.2 and 3.2, RFC 2018 2; packetimpact tcp_handshake_window_size", Run: handshakeOptions},
+	{Name: "handshake-bare", Refs: "RFC 9293 3.7.1 MUST-15 default send MSS 536, RFC 7323 2.2 and 3.2, RFC 2018 2", Run: handshakeBare},
+	{Name: "handshake-mss-floor", Refs: "RFC 9293 3.7.1; wgft's TUN-ingress floor of 536, packet-validation.md", Run: handshakeMSSFloor},
+	{Name: "fin-passive-close", Refs: "RFC 9293 3.6 and 3.10.7.4 CLOSE-WAIT and LAST-ACK", Run: finPassiveClose},
+	{Name: "half-close", Refs: "RFC 9293 3.6, 3.8.1 and 3.10.7.4 FIN-WAIT-1, FIN-WAIT-2 and TIME-WAIT; packetimpact tcp_fin_retransmission", Run: halfClose},
+	{Name: "close-unread-rst", Refs: "RFC 9293 3.6, RFC 2525 2.17", Run: closeUnreadRST},
+	{Name: "active-close-fin-ack", Refs: "RFC 9293 3.6 and 3.10.7.4 FIN-WAIT-1, RFC 1122 4.2.3.2", Run: activeCloseFINACK},
+	{Name: "timewait-reuse", Refs: "RFC 6191 2 and 3, RFC 9293 3.10.7.4 TIME-WAIT; packetimpact tcp_timewait_reset", Run: timeWaitReuse},
+	{Name: "listener-close", Refs: "RFC 9293 3.10.4 and 3.10.7.1; packetimpact tcp_noaccept_close_rst, tcp_listen_backlog", Run: listenerClose},
 }
 
 func pattern(n int, salt byte) []byte {
@@ -143,13 +158,20 @@ func alive(h *H, id string, p *Peer, c Conn) {
 // in-order segment, and returns them with the number of segments that repeated bytes already
 // received.
 func receive(p *Peer, n int, d time.Duration) ([]byte, int) {
+	got, dups, _ := receiveMax(p, n, d)
+	return got, dups
+}
+
+// receiveMax is receive, and it also returns the largest payload of any data segment it saw.
+func receiveMax(p *Peer, n int, d time.Duration) ([]byte, int, int) {
 	var got []byte
-	dups := 0
+	dups, maxLen := 0, 0
 	for len(got) < n {
 		s, ok := p.Await(d, isData)
 		if !ok {
 			break
 		}
+		maxLen = max(maxLen, len(s.Payload))
 		switch {
 		case s.Seq == p.RcvNxt:
 			got = append(got, s.Payload...)
@@ -159,7 +181,7 @@ func receive(p *Peer, n int, d time.Duration) ([]byte, int) {
 			dups++
 		}
 	}
-	return got, dups
+	return got, dups, maxLen
 }
 
 func handshakeOptions(h *H) {

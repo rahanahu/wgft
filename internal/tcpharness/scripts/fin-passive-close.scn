@@ -1,0 +1,50 @@
+# The testbench closes first: the DUT acknowledges the FIN, the application reads the data and
+# then EOF, may still send in CLOSE-WAIT, and its Close sends a FIN after that data.
+scenario fin-passive-close
+refs: RFC 9293 3.6 and 3.10.7.4 CLOSE-WAIT and LAST-ACK
+
+listen l 8011
+connect p l 8011 syn=opts_standard()
+send_fin p "bye"
+# RFC 9293 does not ask for an immediate ACK here, and Linux delays it by its delayed-ACK timer,
+# about 40 ms; RFC 1122 4.2.3.2 bounds a delayed ACK at 500 ms.
+await p 500ms match=acks(s, p.snd_nxt) -> a
+check fin.acked a.ok
+  what: the DUT acknowledges the data and the FIN within the 500 ms delayed-ACK bound
+  got: {seg_desc(a)}
+read p.conn 3 1s -> r
+check data-before-fin r.err == none && r.data == "bye"
+  what: the application reads the data that came with the FIN
+  got: {quote(r.data)}, error {err_kind(r.err)}
+read p.conn 1 1s -> r
+check eof err_kind(r.err) == "EOF"
+  what: the next read returns EOF
+  got: error {err_kind(r.err)}
+
+write p.conn "after" -> w
+await p 1s match=is_data(s) -> d
+check close-wait.sends w.err == none && d.ok && d.seq == p.rcv_nxt && d.payload == "after"
+  what: the application can still send in CLOSE-WAIT
+  got: write error {err_kind(w.err)}; {seg_desc(d)}
+if d.ok
+  set p.rcv_nxt = d.seq + d.len
+  send_ack p
+end
+close p.conn
+await p 1s match=is_fin(s) -> f
+check last-ack.fin f.ok && f.seq == p.rcv_nxt
+  what: Close sends a FIN after the data
+  got: {seg_desc(f)}
+let ack_ts = seq(0)
+if f.ok
+  set p.rcv_nxt = f.seq + f.seq_len
+  send_fresh_ack p -> ack_ts
+end
+# A FIN resent before the ACK got there, as a tail loss probe on a loaded machine, is passed over;
+# anything sent once the DUT had the ACK fails the check.
+quiet_since p 500ms ack_ts f p.conn -> q
+check closed.quiet q.quiet
+  what: nothing follows the ACK of the DUT's FIN
+  got: {q.desc}
+measure resent-before-the-ack q.stale
+delivered delivered p.conn

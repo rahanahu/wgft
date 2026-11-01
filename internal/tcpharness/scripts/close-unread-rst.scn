@@ -1,0 +1,25 @@
+# Close on a connection whose received data the application never read. RFC 9293 3.6 and Linux
+# end it with a RST, not a FIN, so the peer learns the data was lost.
+scenario close-unread-rst
+refs: RFC 9293 3.6, RFC 2525 2.17
+
+listen l 8013
+connect p l 8013 syn=opts_standard()
+send_data p pattern(100, 0x81)
+await p 1s match=acks(s, p.snd_nxt) -> a
+require data.acked a.ok
+  what: the DUT acknowledges the data
+  got: {seg_desc(a)}
+close p.conn
+await p 1s match=(is_rst(s) || is_fin(s)) -> r
+check rst-not-fin r.ok && is_rst(r) && !is_fin(r)
+  what: Close with unread data sends a RST and no FIN
+  got: {seg_desc(r)}
+check rst.seq r.ok && is_rst(r) && r.seq == p.rcv_nxt
+  what: the RST carries SND.NXT
+  got: {yes_no(r.ok && r.seq == p.rcv_nxt, "SND.NXT", "another number")}
+send_data p "x"
+await p 1s match=is_rst(s) -> r
+check after.rst r.ok
+  what: data for the reset connection draws a RST
+  got: {seg_desc(r)}

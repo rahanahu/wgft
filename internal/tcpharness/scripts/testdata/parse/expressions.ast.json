@@ -1,0 +1,239 @@
+{
+  "body": [
+    {
+      "args": [
+        {
+          "l": {
+            "l": {
+              "int": "1"
+            },
+            "op": "+",
+            "r": {
+              "l": {
+                "int": "2"
+              },
+              "op": "*",
+              "r": {
+                "int": "3"
+              }
+            }
+          },
+          "op": "-",
+          "r": {
+            "l": {
+              "op": "-",
+              "x": {
+                "int": "4"
+              }
+            },
+            "op": "%",
+            "r": {
+              "int": "5"
+            }
+          }
+        }
+      ],
+      "bind": "a",
+      "line": 6,
+      "verb": "let"
+    },
+    {
+      "args": [
+        {
+          "l": {
+            "op": "!",
+            "x": {
+              "name": "true"
+            }
+          },
+          "op": "||",
+          "r": {
+            "l": {
+              "name": "false"
+            },
+            "op": "\u0026\u0026",
+            "r": {
+              "l": {
+                "int": "1"
+              },
+              "op": "\u003c",
+              "r": {
+                "int": "2"
+              }
+            }
+          }
+        }
+      ],
+      "bind": "b",
+      "line": 7,
+      "verb": "let"
+    },
+    {
+      "args": [
+        {
+          "l": {
+            "name": "SYN"
+          },
+          "op": "|",
+          "r": {
+            "name": "ACK"
+          }
+        }
+      ],
+      "bind": "c",
+      "line": 8,
+      "verb": "let"
+    },
+    {
+      "args": [
+        {
+          "l": {
+            "l": {
+              "dur": "500000000"
+            },
+            "op": "+",
+            "r": {
+              "l": {
+                "dur": "2000000000"
+              },
+              "op": "/",
+              "r": {
+                "int": "2"
+              }
+            }
+          },
+          "op": "-",
+          "r": {
+            "dur": "10000"
+          }
+        }
+      ],
+      "bind": "d",
+      "line": 9,
+      "verb": "let"
+    },
+    {
+      "args": [
+        {
+          "hex": "7122756f74655c200a0900ff"
+        }
+      ],
+      "bind": "e",
+      "line": 10,
+      "verb": "let"
+    },
+    {
+      "args": [
+        {
+          "args": [
+            {
+              "args": [],
+              "call": "opts_standard"
+            }
+          ],
+          "call": "with",
+          "named": {
+            "mss": {
+              "int": "536"
+            },
+            "ts": {
+              "name": "none"
+            }
+          }
+        }
+      ],
+      "bind": "f",
+      "line": 11,
+      "verb": "let"
+    },
+    {
+      "args": [
+        {
+          "of": {
+            "name": "e"
+          },
+          "slice": [
+            {
+              "int": "1"
+            },
+            {
+              "int": "3"
+            }
+          ]
+        }
+      ],
+      "bind": "g",
+      "line": 12,
+      "verb": "let"
+    },
+    {
+      "args": [
+        {
+          "index": {
+            "int": "2"
+          },
+          "of": {
+            "name": "e"
+          }
+        }
+      ],
+      "bind": "h",
+      "line": 13,
+      "verb": "let"
+    },
+    {
+      "args": [
+        {
+          "of": {
+            "name": "e"
+          },
+          "slice": [
+            null,
+            {
+              "int": "2"
+            }
+          ]
+        }
+      ],
+      "bind": "i",
+      "line": 14,
+      "verb": "let"
+    },
+    {
+      "args": [
+        {
+          "l": {
+            "l": {
+              "int": "209"
+            },
+            "op": "==",
+            "r": {
+              "int": "209"
+            }
+          },
+          "op": "\u0026\u0026",
+          "r": {
+            "l": {
+              "name": "a"
+            },
+            "op": "!=",
+            "r": {
+              "name": "b"
+            }
+          }
+        }
+      ],
+      "bind": "j",
+      "line": 15,
+      "verb": "let"
+    }
+  ],
+  "linux": [
+    [
+      "net/ipv4/tcp_recovery",
+      "1"
+    ]
+  ],
+  "refs": "parser fixture",
+  "scenario": "expressions"
+}

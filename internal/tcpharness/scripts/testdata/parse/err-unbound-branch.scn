@@ -1,0 +1,9 @@
+# A name bound in only one branch of an if is not bound after it.
+scenario err-unbound-branch
+refs: parser fixture
+
+let x = 1
+if x == 1
+  let y = 2
+end
+let z = y

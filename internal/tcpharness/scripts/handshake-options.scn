@@ -1,0 +1,35 @@
+# The SYN-ACK answers a modern client's options, and a connection with timestamps keeps them on
+# every segment.
+scenario handshake-options
+refs: RFC 9293 3.5 and 3.7.1, RFC 7323 2.2 and 3.2, RFC 2018 2; packetimpact tcp_handshake_window_size
+
+listen l 8001
+connect p l 8001 syn=opts_standard()
+let sa = p.synack
+check synack.mss sa.mss != none && sa.mss == MTU - 40
+  what: an MSS option of MTU-40={MTU - 40}
+  got: {yes_no(sa.mss == none, "no MSS option", "MSS " + text(sa.mss))}
+check synack.sack-permitted sa.sack_permitted
+  what: SACK-permitted answered
+  got: {yes_no(sa.sack_permitted, "SACK-permitted", "no SACK-permitted")}
+check synack.wscale sa.ws >= 0 && sa.ws <= 14
+  what: a window scale of at most 14
+  got: window scale {sa.ws}
+let ts_ok = sa.ts != none && sa.ts.ecr == p.syn_ts_val
+check synack.timestamps ts_ok
+  what: timestamps answered with TSecr echoing the SYN's TSval
+  got: {yes_no(sa.ts == none, "no timestamps", yes_no(ts_ok, "TSecr echoes the SYN", "TSecr differs from the SYN's TSval"))}
+check synack.window sa.window > 0
+  what: a nonzero window in the SYN-ACK
+  got: {yes_no(sa.window > 0, "nonzero", "zero")}
+measure synack.window sa.window
+measure synack.wscale sa.ws
+measure synack.df sa.df
+measure synack.ttl sa.ttl
+alive established p p.conn
+# Every non-RST segment on a connection with timestamps carries the option, RFC 7323 3.2.
+write p.conn "ts" -> w
+await p 2s match=is_data(s) -> d
+check established.timestamps d.ok && d.ts != none
+  what: a data segment carries timestamps
+  got: {yes_no(d.ok, yes_no(d.ok && d.ts != none, "timestamps", "no timestamps"), "no data segment")}

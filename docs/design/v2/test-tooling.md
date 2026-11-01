@@ -86,8 +86,9 @@ arg     = expr | IDENT "=" expr
 attrs   = INDENT "what:" TEMPLATE NL INDENT "got:" TEMPLATE NL
 ```
 
-- 注釈:`#` から行末までです
+- 注釈:文字列の literal の外の `#` から行末までです。`what:` と `got:` の template の中でも同じです
 - 文:1 行に 1 つで、先頭の語が動詞です。結果を持つ文は `-> 名前` で結果を名前に結びます
+- 引数:引数は空白で区切ります。1 つの引数は括弧の外に空白を持たない式で、空白を含む式は括弧で包みます (`match=(is_fin(s) && s.seq == f.seq)`)。`名前=` は名前つきの引数で、`=` の前後に空白を置きません。`let`、`set`、`if`、`check`、`require`、`measure` は、行の残りを 1 つの式として読みます
 - 字下げ:意味を持つのは `check` と `require` の `what:` と `got:` の行だけです。`if` の中は `end` で閉じます
 - 分岐:`if`、`else`、`end` だけを持ち、繰り返しを持ちません。台本は `stop` で正常に終われます
 - 名前:台本全体で 1 つの名前空間です。同じ名前に結び直せ、`if` の中で結んだ名前は後でも見えます
@@ -189,11 +190,18 @@ list を受ける関数は、2 つ目の引数を要素ごとに `s` に結ん�
 | `seg_desc(a)` | `segDesc` | `FIN\|ACK len=0`、`no segment` |
 | `ack_desc(a, base)`、`sack_desc(a, base)` | `ackDesc`、`sackDesc` | `ACK of base+3000` など |
 | `synack_desc(p, a)` | `synackString` | |
-| `err_kind(e)` | `errKind` | `nil`、`timeout`、`EOF`、`closed`、`reset`、`error` |
+| `err_kind(e)`、`err_string(e)` | `errKind`、`errString` | `nil`、`timeout`、`EOF`、`closed`、`reset`、`error` と、誤りの文 |
 | `yes_no(c, a, b)` | `yesNo` | |
 | `echo_desc`、`reply_desc`、`pmtu_desc` | `echoDesc`、`replyDesc`、`pmtuDesc` | |
 | `quote(b)` | `%q` | Go の `strconv.Quote` と同じ |
 | `seconds_text(d, k)` | `%.kf` の秒 | 小数 k 桁、Go と同じ丸め |
+
+`seg_desc`、`ack_desc`、`sack_desc`、`synack_desc` は、最後の省略できる引数で捕捉の `ok` の代わりの bool を受けます。
+Go の台本が `segDesc(s, !quiet)` のように別の条件を渡す所に使います。
+`yes_no` と `clocked` は選んだ側の引数だけを評価します。
+template の中の値は、int と seq を 10 進、bool を `true` か `false`、bytes をそのまま書き、ほかの型は台本の誤りです。
+`text(x)` は同じ規則で bytes にし、bytes は `+` でつなげます。
+ほかに `seq(i)`、`int(q)`、`ms(d)`、`ts_val(P)` (相手の timestamp の時計の今の値)、`has(s, 旗)` を持ちます。
 
 `measure 名前 式` は `MEASURE` の行を出し、何も確かめません。
 `log template` はログに 1 行を書きます。
@@ -202,7 +210,7 @@ list を受ける関数は、2 つ目の引数を要素ごとに `s` に結ん�
 
 | 文 | 意味 | Go の対応 |
 | --- | --- | --- |
-| `listen L port` | 待ち受け。台本の終わりに閉じる | `H.Listen` |
+| `listen L port [-> err]` | 待ち受け。台本の終わりに閉じる。`-> err` があれば失敗を誤りの値で返し、無ければ台本を止める | `H.Listen`、`DUT.Listen` |
 | `connect P L port [syn=] [window=] [syn_window=] [ack_delay=]` | 握手と受け入れ。`P.synack` と `P.conn` を持つ | `H.ConnectWith` |
 | `handshake P port [...]` | 受け入れない握手 | `H.Handshake` |
 | `accept C L` | 2 s の内の受け入れ | `H.Accept` |
@@ -214,8 +222,8 @@ list を受ける関数は、2 つ目の引数を要素ごとに `s` に結ん�
 | `quiet P d -> q`、`quiet_since P d ts f C -> q` | d の間に何も出ないこと | `Peer.Quiet`、`Peer.QuietSince` |
 | `collect d -> l`、`collect_flow P d -> l` | d の間に出た segment の list | `H.Collect`、`Peer.Next` の繰り返し |
 | `await_ip d match= -> pkt` | IPv4 の packet を待つ | `H.Packet` |
-| `write C b -> w`、`read C n d -> r` | 書く、n byte を d の内に読む | `Conn.Write`、`readFull` |
-| `close X`、`close_write C`、`abort C` | 閉じる | |
+| `write C b [-> w]`、`read C n d -> r` | 書く、n byte を d の内に読む。`-> w` の無い `write` は誤りで台本を止める | `Conn.Write`、`readFull` |
+| `close X`、`close_write C`、`abort C` | 閉じる。`close_write` は誤りで台本を止める | |
 | `listen_udp U port`、`udp_read U d -> r`、`udp_write U b to= -> w` | UDP | `H.ListenUDP`、`readDatagram`、`WriteTo` |
 | `check`、`require`、`measure`、`log`、`stop` | 確かめと記録と終わり | |
 
@@ -233,7 +241,7 @@ Rust の runner は手で進める時計の DUT しか流さないので、実�
 | `echo ipid ident seq b [cuts=] -> m` | `echo` |
 | `await_datagram d match= -> r` | `udpLarge` の断片を集める繰り返し |
 
-packet を作る関数は `segment(P, 旗, seq, payload)` (`Peer.Segment`)、`syn(P, opts)`、`with(x, 欄=式, ...)` (欄を差し替えた写し)、`opts_standard()`、`opts_nosack()`、`opts_none()`、`udp(src, dst, id, b)`、`icmp_echo(...)`、`fragments(pkt, cuts...)`、`fragments_every(pkt, n)`、`frag(pkt, from, to)`、`frag_needed(from, 元の packet, mtu)`、`corrupt(pkt, off, xor)`、`set_bytes(pkt, off, b)`、`wire(x)` (packet の bytes)、`wire_len(x)` です。
+packet を作る関数は `segment(P, 旗, seq[, payload])` (`Peer.Segment`)、`syn(P, opts)` (ISS の SYN で窓は 65535)、`raw(P, 旗, seq)` (ほかの欄が Go の空の `Segment` と同じ segment。空の `Options` は窓の scale 0 を持つ)、`ts(val, ecr)`、`with(x, 欄=式, ...)` (欄を差し替えた写し)、`opts_standard()`、`opts_nosack()`、`opts_none()`、`udp(src, dst, id, b)`、`icmp_echo(...)`、`fragments(pkt, cuts...)`、`fragments_every(pkt, n)`、`frag(pkt, from, to)`、`frag_needed(from, 元の packet, mtu)`、`corrupt(pkt, off, xor)`、`set_bytes(pkt, off, b)`、`wire(x)` (packet の bytes)、`wire_len(x)` です。
 
 ### 例
 
@@ -322,9 +330,13 @@ delivered delivered p.conn
 このため、`Run`、期待した差の一覧、`gvisordut` の故障を入れた試験、`linuxdut` のラボでの実行は、表を使う形のまま変わりません。
 構文の誤りがある台本は、その名前の台本が誤りを報告して落ちる項目になり、ほかの台本と package の import を止めません。
 
-移す PR は、台本ごとに Go の関数と台本を同じ DUT と同じ種で流し、確かめの ID、結果、観察の文字列の列が一致することを確かめてから、Go の関数を消します。
-照らす DUT は `wgstackdut` (手で進める時計で、種ごとに決まった結果になる)、`gvisordut`、`linuxdut` (ラボの使い捨ての VM) です。
-`gvisordut` と `linuxdut` は実時間なので、期待した差の一覧で揺れると印した確かめは除いて照らします。
+移す PR は、台本ごとに Go の関数と台本を同じ DUT と同じ種で流し、確かめの ID、結果、観察の文字列の列が一致することを確かめます。
+移した Go の関数は、直線の台本をすべて移し終えるまで `tcpharness.LegacyScenarios` に残し、照らしの試験 (`TestScriptsMatchGoFunctions`) が毎回並べて流します。
+T1b が最後の台本を移した後に、Go の関数と照らしの試験を消します。
+
+- `wgstackdut`:手で進める時計で、種 1 から 5。`RecordTrace` が返すログの行 (送った segment、見た segment、確かめ、`MEASURE`、記録した失敗) を、行ごとの DUT の時刻を付けて 1 行ずつ比べます。待つ時間だけが違う台本も、時刻で違いが出ます
+- `gvisordut`:実時間で、種 1 と 2。segment の行は gVisor の乱数で変わるので、確かめの行と `MEASURE` の名前だけを比べます (`CheckLines`)。食い違った組は 3 回まで流し直します
+- `linuxdut`:ラボの使い捨ての VM で、`gvisordut` と同じ比べ方です
 
 ## 2. runner
 

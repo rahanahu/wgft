@@ -1,0 +1,6 @@
+# s is bound only inside a predicate; reading it outside one is an error.
+scenario err-shadow
+refs: parser fixture
+
+let first_s = first(none, s.ok)
+let t = s

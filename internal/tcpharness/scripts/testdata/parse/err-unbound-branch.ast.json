@@ -1,0 +1,6 @@
+{
+  "error": {
+    "line": 9,
+    "msg": "y is not bound on every path to here"
+  }
+}

@@ -1,0 +1,91 @@
+# New SYNs to a four-tuple in TIME-WAIT at the DUT. RFC 6191 accepts one whose timestamp is newer
+# than the old connection's, or, without timestamps, whose sequence number is beyond it; a SYN
+# that is older on both counts is not accepted. Each part first closes a connection from the
+# application, the testbench answering with its own FIN, so the DUT holds the four-tuple in
+# TIME-WAIT; the FIN is acknowledged first and the testbench's FIN follows, through FIN-WAIT-2.
+scenario timewait-reuse
+refs: RFC 6191 2 and 3, RFC 9293 3.10.7.4 TIME-WAIT; packetimpact tcp_timewait_reset
+
+listen l 8014
+
+connect old l 8014 syn=opts_standard()
+close old.conn
+await old 1s match=is_fin(s) -> f
+require close.fin f.ok && f.seq == old.rcv_nxt
+  what: Close sends a FIN
+  got: {seg_desc(f)}
+set old.rcv_nxt = f.seq + 1
+send_ack old
+send_fin old
+await old 1s match=acks(s, old.snd_nxt) -> a
+require time-wait.entered a.ok
+  what: the DUT acknowledges the testbench's FIN and enters TIME-WAIT
+  got: {seg_desc(a)}
+reincarnate n old iss=old.snd_nxt+100000
+let o = with(opts_standard(), ts=ts(ts_val(n), seq(0)))
+set n.ws = 7
+send n syn(n, o)
+await n 1s match=is_synack(s) -> sa
+let ok = sa.ok && sa.ack == n.iss + 1
+check newer.synack ok
+  what: a SYN with a newer timestamp and a larger ISN opens a new connection
+  got: {synack_desc(n, sa, ok)}
+if ok
+  adopt n o sa
+  send_ack n
+  accept c l
+  alive newer n c
+end
+
+# RFC 6191 2 takes a newer timestamp as enough, even with an ISN below the old connection's
+# RCV.NXT, where RFC 1122's sequence rule alone would refuse the SYN.
+connect old l 8014 syn=opts_standard()
+close old.conn
+await old 1s match=is_fin(s) -> f
+require close.fin f.ok && f.seq == old.rcv_nxt
+  what: Close sends a FIN
+  got: {seg_desc(f)}
+set old.rcv_nxt = f.seq + 1
+send_ack old
+send_fin old
+await old 1s match=acks(s, old.snd_nxt) -> a
+require time-wait.entered a.ok
+  what: the DUT acknowledges the testbench's FIN and enters TIME-WAIT
+  got: {seg_desc(a)}
+reincarnate m old iss=old.snd_nxt-100000
+let o = with(opts_standard(), ts=ts(ts_val(m), seq(0)))
+set m.ws = 7
+send m syn(m, o)
+await m 1s -> sa
+let ok = sa.ok && has(sa, SYN|ACK) && sa.ack == m.iss + 1
+check newer-ts-smaller-isn.synack ok
+  what: a SYN with a newer timestamp and a smaller ISN opens a new connection
+  got: {synack_desc(m, sa, ok)}
+measure newer-ts-smaller-isn.reply seg_desc(sa)
+if ok
+  adopt m o sa
+  send_ack m
+  accept c l
+  alive newer-ts-smaller-isn m c
+end
+
+connect old l 8014 syn=opts_standard()
+close old.conn
+await old 1s match=is_fin(s) -> f
+require close.fin f.ok && f.seq == old.rcv_nxt
+  what: Close sends a FIN
+  got: {seg_desc(f)}
+set old.rcv_nxt = f.seq + 1
+send_ack old
+send_fin old
+await old 1s match=acks(s, old.snd_nxt) -> a
+require time-wait.entered a.ok
+  what: the DUT acknowledges the testbench's FIN and enters TIME-WAIT
+  got: {seg_desc(a)}
+reincarnate q old iss=old.snd_nxt-100000 ts_base=ts_val(old)-100000
+send q syn(q, with(opts_standard(), ts=ts(ts_val(q), seq(0))))
+await q 1s -> r
+check older.no-synack !(r.ok && has(r, SYN|ACK))
+  what: a SYN older in timestamp and sequence does not open a connection
+  got: {seg_desc(r)}
+measure older.reply seg_desc(r)

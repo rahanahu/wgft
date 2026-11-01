@@ -1,0 +1,6 @@
+scenario err-template
+refs: parser fixture
+
+check a true
+  what: an { unclosed brace
+  got: x
