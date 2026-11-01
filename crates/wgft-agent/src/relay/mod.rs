@@ -124,6 +124,24 @@ struct ProbeEntry {
     shared: Arc<Shared>,
 }
 
+/// 試し接続の 1 周の宛先を順に写して渡す。閉包の `map` にしないのは、借用を持つ閉包を含む future の
+/// `Send` の判定が寿命について一般化できず、spawn する呼び手が通らないためである。
+struct EntryTargets<'a>(std::slice::Iter<'a, ProbeEntry>);
+
+impl Iterator for EntryTargets<'_> {
+    type Item = (Arc<str>, u16);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.0.next().map(|e| e.target.clone())
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
+}
+
+impl ExactSizeIterator for EntryTargets<'_> {}
+
 /// 試し接続の 1 周の結果。
 #[derive(Debug)]
 pub struct ProbeResults {
@@ -138,17 +156,10 @@ impl ProbeRound {
         self.entries.is_empty()
     }
 
-    /// 先の `n` 件だけを試す 1 周にする。
-    #[must_use]
-    fn limit(mut self, n: usize) -> Self {
-        self.entries.truncate(n);
-        self
-    }
-
-    /// 試し接続を走らせる。同時に 32 件まで、1 件 2 秒。
+    /// 試し接続を走らせる。同時に 32 件まで、1 件 2 秒。宛先の列は写さず、走らせる分だけを読む。
     pub async fn run(self) -> ProbeResults {
-        let list = self.entries.iter().map(|e| e.target.clone()).collect();
-        let results = self.targets.probe_all(list).await;
+        let list = EntryTargets(self.entries.iter());
+        let results = Arc::clone(&self.targets).probe_all(list).await;
         ProbeResults {
             entries: self.entries,
             results,
@@ -273,7 +284,7 @@ struct Listener {
     task: Option<Running>,
     /// 待ち受けを開けなかった理由。bind の失敗か、IP リテラルの宛先の拒否。[`Manager::retry`] が
     /// 開き直す。
-    bind_err: Option<String>,
+    bind_err: Option<Arc<str>>,
     /// フロー数の予算の枠。bind できるまで受け付けない。
     budget: Arc<flowpool::Listener>,
     shared: Arc<Shared>,
@@ -288,8 +299,9 @@ impl Listener {
         Some(task)
     }
 
-    /// 報告する誤り。待ち受けが無いので bind の失敗が先。
-    fn err(&self) -> Option<String> {
+    /// 報告する誤り。待ち受けが無いので bind の失敗が先。状態の読みが待ち受けの数だけ文を写さないよう、
+    /// 持っている値を分け合って返す。
+    fn err(&self) -> Option<Arc<str>> {
         self.bind_err
             .clone()
             .or_else(|| self.shared.target_err().map(|e| e.text))
@@ -315,7 +327,7 @@ pub struct ListenerStat {
     /// 拒否) で、真で `err` があれば待ち受けは開いていて宛先に届かない。
     pub listening: bool,
     /// 開けなかった理由か、開いている待ち受けの宛先の誤り。開けなかった理由が先。
-    pub err: Option<String>,
+    pub err: Option<Arc<str>>,
     /// 中継が持っている接続の数。TCP はトンネルの側と宛先の側の両方を数えるので、フロー数の上限の対象
     /// とは一致しない。UDP はセッションの数である。
     pub sessions: usize,
@@ -505,7 +517,11 @@ impl Manager {
             actions += 1;
         }
         self.open_listeners(&opened).await;
-        let done = self.probe_round(&opened).limit(APPLY_PROBES).run().await;
+        let round = self.probe_round(
+            opened.iter().filter_map(|k| self.listeners.get(k)),
+            APPLY_PROBES,
+        );
+        let done = round.run().await;
         self.finish_probes(done);
         actions
     }
@@ -523,30 +539,40 @@ impl Manager {
     /// agent の排他を放してから [`ProbeRound::run`] を走らせ、結果を [`Manager::finish_probes`] で書く。
     /// 試し接続の 1 周は宛先の数と応えない宛先で長くなるので、その間ハートビートと適用を止めないため。
     pub async fn retry_round(&mut self) -> ProbeRound {
+        self.reopen().await;
+        self.probe_round(self.listeners.values(), usize::MAX)
+    }
+
+    /// 開けなかったリスナーを開き直す。前の 1 周が走っている間の見回りは、次の 1 周を作らずにこれだけを
+    /// 行う。
+    pub async fn reopen(&mut self) {
         let closed: Vec<Key> = self
             .listeners
             .values()
             .filter(|l| l.task.is_none())
             .map(|l| l.key)
             .collect();
-        self.open_listeners(&closed).await;
-        let keys: Vec<Key> = self.listeners.keys().copied().collect();
-        self.probe_round(&keys)
+        if !closed.is_empty() {
+            self.open_listeners(&closed).await;
+        }
     }
 
-    /// 開いている TCP のリスナーのうち `keys` の宛先への試し接続の 1 周。
-    fn probe_round(&self, keys: &[Key]) -> ProbeRound {
-        let entries = keys
-            .iter()
-            .filter(|k| k.kind == Kind::Tcp)
-            .filter_map(|k| self.listeners.get(k))
-            .filter(|l| l.task.is_some())
-            .map(|l| ProbeEntry {
-                key: l.key,
-                target: l.target.clone(),
-                shared: Arc::clone(&l.shared),
-            })
-            .collect();
+    /// `ls` のうち開いている TCP のリスナーの、先の `limit` 件の宛先への試し接続の 1 周。項の列は件数
+    /// ちょうどの容量で作る。待ち受けごとの保持の項が 1 周の分を数えるので、列の容量を育てて 2 倍まで
+    /// 持たないためである。
+    fn probe_round<'a>(
+        &self,
+        ls: impl Iterator<Item = &'a Listener> + Clone,
+        limit: usize,
+    ) -> ProbeRound {
+        let probed = |l: &&Listener| l.key.kind == Kind::Tcp && l.task.is_some();
+        let n = ls.clone().filter(probed).take(limit).count();
+        let mut entries = Vec::with_capacity(n);
+        entries.extend(ls.filter(probed).take(limit).map(|l| ProbeEntry {
+            key: l.key,
+            target: l.target.clone(),
+            shared: Arc::clone(&l.shared),
+        }));
         ProbeRound {
             targets: Arc::clone(&self.targets),
             entries,
@@ -643,7 +669,7 @@ impl Manager {
                 }
                 Err(e) => {
                     logf!("listener {}: {e}", l.key);
-                    l.bind_err = Some(e);
+                    l.bind_err = Some(e.into());
                 }
             }
         }
