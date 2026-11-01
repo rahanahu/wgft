@@ -37,9 +37,10 @@ use super::pipe::BULK_ALIVE;
 use super::replies::{REPLIES, REPLY_SLOTS, UDP_BUF};
 use super::testpeer::{self, Outcome, Peer};
 use super::tests::{rule, targets, wait_for};
-use super::{BULK_BUF, BULK_KEEP, BULK_WAIT, Kind, Manager};
+use super::{BULK_BUF, BULK_KEEP, BULK_WAIT, Kind, Manager, ProbeResults, ProbeRound};
 use crate::flowpool::Limits;
 use crate::memory::{LISTENER_TCP, LISTENER_UDP, MemoryBound, TCP_RELAY_CONN, UDP_SESSION};
+use crate::targets::TargetError;
 
 /// 測りの誤差として認める量。実行環境と台本の通信路が測りの間に一時に持つもの (ログの行、チャネルの
 /// block、タイマー) のためで、流れの数に比例しない。
@@ -317,17 +318,53 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
 /// 待ち受けの項の試験で開く待ち受けの数。
 const N: u16 = 256;
 
-/// `rules` を適用して `N` の待ち受けを開いたときの、核の自分で数える分を除いた保持の育ち。測った後に閉じる。
-async fn listener_growth(rules: Vec<wgft_proto::AgentRule>, m: &mut Manager, peer: &Peer) -> usize {
+/// 試し接続の 1 周の結果を、待ち受けごとに別の、理由の長さの上限まで切った失敗の文で作る。宛先のホストと
+/// ポートを含む文 (期限切れなど) の最も長い形で、隣り合う待ち受けで分け合えない。結果の列は
+/// [`crate::targets::Targets::probe_all`] と同じく件数ちょうどの容量で作る。
+fn worst_results(round: ProbeRound) -> ProbeResults {
+    let mut results = Vec::with_capacity(round.entries.len());
+    for e in &round.entries {
+        // ポートを先に置き、長さの上限で切っても待ち受けごとに別の文になる
+        results.push(Err(TargetError::failed(format!(
+            "port {} of target {} did not answer within 2s",
+            e.key.port,
+            "h".repeat(wgft_proto::REASON_MAX_BYTES)
+        ))));
+    }
+    ProbeResults {
+        entries: round.entries,
+        results,
+    }
+}
+
+/// `rules` を適用して `N` の待ち受けを開いたときの、核の自分で数える分を除いた保持の育ち。TCP の待ち受けは
+/// 最も長い別々の失敗の文を持たせて測る。2 つ目の値は、さらに試し接続の 1 周の結果と状態の読みを
+/// 同時に持ったときの育ちで、書き戻す直前の 1 周の保持の最大に当たる。測った後に閉じる。
+async fn listener_growth(
+    rules: Vec<wgft_proto::AgentRule>,
+    m: &mut Manager,
+    peer: &Peer,
+) -> (usize, usize) {
     let before = settled().await;
     let core0 = core_bytes(peer).await;
     m.apply(&rules).await;
     assert_eq!(m.listening(), usize::from(N));
-    let after = settled().await;
-    let core = core_bytes(peer).await.saturating_sub(core0);
-    let growth = after.saturating_sub(before).saturating_sub(core);
+    let round = m.retry_round().await;
+    m.finish_probes(worst_results(round));
+    let growth = |now: usize, core: usize| {
+        now.saturating_sub(before)
+            .saturating_sub(core.saturating_sub(core0))
+    };
+    let held = growth(settled().await, core_bytes(peer).await);
+    // 次の 1 周の結果を書き戻す前に、制御のソケットの状態の読みとハートビートの状態が重なった場合
+    let round = m.retry_round().await;
+    let done = worst_results(round);
+    let stats = m.listener_stats();
+    let status = m.status_of(&stats);
+    let during = growth(settled().await, core_bytes(peer).await);
+    drop((done, stats, status));
     m.close().await;
-    growth
+    (held, during)
 }
 
 /// 待ち受け 1 つの保持が、メモリの上界の待ち受けの項に収まる。範囲のルールの待ち受けはルール ID と宛先の
@@ -395,19 +432,28 @@ async fn listeners_hold_what_their_term_counts() {
     .await;
     let n = usize::from(N);
     eprintln!(
-        "listeners: {n} TCP grew {tcp} bytes ({} each), with a long target host {tcp_named} ({} each); {n} UDP grew {udp} ({} each); the terms are {LISTENER_TCP} and {LISTENER_UDP}",
-        tcp / n,
-        tcp_named / n,
-        udp / n
+        "listeners: {n} TCP grew {} bytes ({} each) and {} ({} each) during a probe round; with a long target host {} ({} each) and {} ({} each); {n} UDP grew {} ({} each) and {} ({} each); the terms are {LISTENER_TCP} and {LISTENER_UDP}",
+        tcp.0,
+        tcp.0 / n,
+        tcp.1,
+        tcp.1 / n,
+        tcp_named.0,
+        tcp_named.0 / n,
+        tcp_named.1,
+        tcp_named.1 / n,
+        udp.0,
+        udp.0 / n,
+        udp.1,
+        udp.1 / n,
     );
     for (what, growth, term) in [
-        ("TCP", tcp, LISTENER_TCP),
-        ("TCP with a long host", tcp_named, LISTENER_TCP),
-        ("UDP", udp, LISTENER_UDP),
+        ("TCP", tcp.1, LISTENER_TCP),
+        ("TCP with a long host", tcp_named.1, LISTENER_TCP),
+        ("UDP", udp.1, LISTENER_UDP),
     ] {
         assert!(
             growth <= n * term + SLACK,
-            "{n} {what} listeners grew the heap by {growth} bytes, above {n} x {term}"
+            "{n} {what} listeners grew the heap by {growth} bytes during a probe round, above {n} x {term}"
         );
     }
 }

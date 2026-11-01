@@ -180,6 +180,13 @@ struct Url {
     fragment: Vec<u8>,
 }
 
+/// path はトークンを持つので、捨てるときに 0 で消す。
+impl Drop for Url {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.path);
+    }
+}
+
 /// Go の `url.Parse`。`ParseJoin` が見る scheme、host、path、fragment を、Go の文字列と同じく
 /// UTF-8 とは限らないバイト列で返す。Go が誤りにする入力は `None` にする。
 fn parse_url(raw: &str) -> Option<Url> {
@@ -412,7 +419,9 @@ enum Mode {
 /// Go の `unescape`。
 fn unescape(s: &str, mode: Mode) -> Option<Vec<u8>> {
     let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
+    // 入力はトークンと userinfo を含みうるので、途中で断ったときも書いた分を 0 で消す。容量を先に取るので
+    // 伸ばして前の領域を残すことはない
+    let mut out = zeroize::Zeroizing::new(Vec::with_capacity(b.len()));
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' {
@@ -438,7 +447,7 @@ fn unescape(s: &str, mode: Mode) -> Option<Vec<u8>> {
             i += 1;
         }
     }
-    Some(out)
+    Some(std::mem::take(&mut *out))
 }
 
 /// Go の `shouldEscape(c, encodeHost)` (encodeZone も同じ)。0x80 以上は常に真。
