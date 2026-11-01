@@ -1,1 +1,1 @@
-{"error":{"line":5,"msg":"a { without }"}}
+{"error":{"kind":"template","line":5}}

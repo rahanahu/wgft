@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
-	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -72,7 +72,10 @@ func TestScriptParseFixtures(t *testing.T) {
 			if !ok {
 				t.Fatalf("%s: error of type %T", f, perr)
 			}
-			v = map[string]any{"error": map[string]any{"line": se.Line, "msg": se.Msg}}
+			if se.Kind == "" {
+				t.Errorf("%s: error without a kind: %v", f, se)
+			}
+			v = map[string]any{"error": map[string]any{"line": se.Line, "kind": se.Kind}}
 		default:
 			v = ScriptAST(s)
 		}
@@ -118,25 +121,32 @@ func TestScriptsInTable(t *testing.T) {
 	}
 }
 
-// TestScriptRNGVectors writes the values the harness draws for a scenario's seed: the scenario
-// seed from the run seed and the name, the first port and each peer's ISS and timestamp base, in
-// the order NewPeer draws them. The Rust runner ports Go's PCG and checks itself against them.
+// TestScriptRNGVectors writes the values the harness draws for a scenario's seed, through newH
+// and NewPeer as a scenario draws them: the scenario seed from the run seed and the name, the
+// first peer's port and each peer's ISS and timestamp base. The Rust runner ports Go's PCG and
+// checks itself against them. 64-bit values are decimal strings, so a reader that parses JSON
+// numbers as floats keeps them.
 func TestScriptRNGVectors(t *testing.T) {
+	type peer struct {
+		Port   uint16 `json:"port"`
+		ISS    uint32 `json:"iss"`
+		TSBase uint32 `json:"ts_base"`
+	}
 	type vector struct {
-		RunSeed      uint64   `json:"run_seed"`
-		Scenario     string   `json:"scenario"`
-		ScenarioSeed uint64   `json:"scenario_seed"`
-		FirstPort    uint16   `json:"first_port"`
-		Draws        []uint32 `json:"draws"`
+		RunSeed      string `json:"run_seed"`
+		Scenario     string `json:"scenario"`
+		ScenarioSeed string `json:"scenario_seed"`
+		Peers        []peer `json:"peers"`
 	}
 	var out []vector
 	for _, run := range []uint64{0, 1, 5, 0x9e3779b97f4a7c15, 1<<64 - 1} {
 		for _, name := range []string{"fin-passive-close", "handshake-options", ""} {
 			seed := ScenarioSeed(run, name)
-			rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
-			v := vector{RunSeed: run, Scenario: name, ScenarioSeed: seed, FirstPort: uint16(40000 + rng.IntN(20000))}
-			for range 8 {
-				v.Draws = append(v.Draws, rng.Uint32())
+			h := newH(t, Engine{Name: "stub"}, name, &stubClocked{}, seed)
+			v := vector{RunSeed: strconv.FormatUint(run, 10), Scenario: name, ScenarioSeed: strconv.FormatUint(seed, 10)}
+			for range 4 {
+				p := h.NewPeer(8000)
+				v.Peers = append(v.Peers, peer{Port: p.Local.Port(), ISS: p.ISS, TSBase: p.tsBase})
 			}
 			out = append(out, v)
 		}
@@ -157,5 +167,50 @@ func TestScriptRuntimeError(t *testing.T) {
 	_, msgs := RecordFailures(t, e, sc, 1)
 	if len(msgs) != 1 || !strings.Contains(msgs[0], "bad.scn:5: int + bytes is not defined") {
 		t.Fatalf("failures %q; want one naming bad.scn:5", msgs)
+	}
+}
+
+// FuzzParseScript checks that the parser and the static checks never panic, and that a script
+// that parses has a canonical AST that encodes to JSON. The seeds are every scenario script and
+// parser fixture.
+func FuzzParseScript(f *testing.F) {
+	for _, pat := range []string{"scripts/*.scn", "scripts/testdata/parse/*.scn"} {
+		files, _ := filepath.Glob(pat)
+		for _, file := range files {
+			src, err := os.ReadFile(file)
+			if err != nil {
+				f.Fatal(err)
+			}
+			f.Add(string(src))
+		}
+	}
+	f.Fuzz(func(t *testing.T, src string) {
+		s, err := ParseScript("fuzz.scn", src)
+		if err != nil {
+			se, ok := err.(*ScriptError)
+			if !ok || se.Kind == "" {
+				t.Fatalf("error without a kind: %v", err)
+			}
+			return
+		}
+		if _, err := json.Marshal(ScriptAST(s)); err != nil {
+			t.Fatalf("the AST does not encode: %v", err)
+		}
+	})
+}
+
+// TestScriptPanicBecomesFailure checks that a Go panic under a script, here the stub DUT's nil
+// listener in Accept, fails the scenario with the script's file and line instead of crashing.
+func TestScriptPanicBecomesFailure(t *testing.T) {
+	src := "scenario bad\nrefs: test\n\nlisten l 8000\naccept c l\n"
+	s, err := ParseScript("bad.scn", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := Engine{Name: "stub", New: func(testing.TB, uint64) DUT { return &stubClocked{} }}
+	sc := Scenario{Name: "bad", Run: func(h *H) { runScript(h, "bad.scn", s) }}
+	_, msgs := RecordFailures(t, e, sc, 1)
+	if len(msgs) != 1 || !strings.Contains(msgs[0], "bad.scn:5: panic:") {
+		t.Fatalf("failures %q; want one naming bad.scn:5 and the panic", msgs)
 	}
 }

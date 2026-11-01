@@ -220,15 +220,16 @@ func RecordFailures(t *testing.T, e Engine, s Scenario, seed uint64) (map[string
 }
 
 // RecordTrace is Record, and it also returns every line the scenario logged, in order: the
-// segments sent and seen, the check and MEASURE lines and the recorded failures. On a ClockedDUT
-// each line starts with the DUT's time since the scenario began, so two scenarios that drive it
-// the same way give the same lines.
-func RecordTrace(t *testing.T, e Engine, s Scenario, seed uint64) (map[string][]string, []string) {
+// segments sent and seen, each wait with its bound, the check and MEASURE lines and the recorded
+// failures, and whether the run failed in any way, a Fatalf outside a check included. On a
+// ClockedDUT each line starts with the DUT's time since the scenario began, so two scenarios that
+// drive it the same way give the same lines.
+func RecordTrace(t *testing.T, e Engine, s Scenario, seed uint64) (outcome map[string][]string, lines []string, failed bool) {
 	a := attempt(t, e, s, seed)
 	if a.outcome == nil {
 		t.Fatalf("scenario %s did not start: %v", s.Name, a.msgs)
 	}
-	return a.outcome, a.lines
+	return a.outcome, a.lines, a.failed
 }
 
 // stallLimit and scenarioAttempts are Run's rule for running a failed scenario again. 10 ms is
@@ -284,7 +285,9 @@ func attempt(t testing.TB, e Engine, s Scenario, seed uint64) attemptResult {
 	}
 	rec.cleanup()
 	a.msgs, a.failed, a.skipped = rec.msgs, rec.failed, rec.skipped
-	a.lines = rec.lines
+	rec.mu.Lock()
+	a.lines = append([]string(nil), rec.lines...)
+	rec.mu.Unlock()
 	return a
 }
 
@@ -663,6 +666,12 @@ func (h *H) next(d time.Duration) ([]byte, bool) {
 // A packet larger than the MTU fails the scenario: the harness compares segments as TCP alone
 // cut them, with no offload in between.
 func (p *Peer) Next(d time.Duration) (Segment, bool) {
+	p.h.T.Logf("wait up to %v for a segment", d)
+	return p.next(d)
+}
+
+// next is Next without the log line of the wait, for the waits that log their own.
+func (p *Peer) next(d time.Duration) (Segment, bool) {
 	deadline := p.h.Now().Add(d)
 	for {
 		pkt, ok := p.h.next(max(deadline.Sub(p.h.Now()), 0))
@@ -716,9 +725,10 @@ func (h *H) Collect(d time.Duration) []Segment {
 // Await returns the first segment of this flow within d that match accepts, logging the
 // segments it passes over.
 func (p *Peer) Await(d time.Duration, match func(Segment) bool) (Segment, bool) {
+	p.h.T.Logf("wait up to %v for a matching segment", d)
 	deadline := p.h.Now().Add(d)
 	for {
-		s, ok := p.Next(max(deadline.Sub(p.h.Now()), 0))
+		s, ok := p.next(max(deadline.Sub(p.h.Now()), 0))
 		if !ok {
 			return Segment{}, false
 		}
@@ -772,6 +782,7 @@ func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time, 
 	if dl, ok := c.(Deliverer); ok && !clocked {
 		delivered = dl.Delivered
 	}
+	p.h.T.Logf("expect quiet for %v after the ACK", d)
 	settleBy := p.h.Now().Add(settleBudget)
 	var deadline time.Time // zero until the DUT has the ACK
 	for {
@@ -786,7 +797,7 @@ func (p *Peer) QuietSince(d time.Duration, ts uint32, f Segment, fAt time.Time, 
 		if !deadline.IsZero() {
 			wait = max(deadline.Sub(p.h.Now()), 0)
 		}
-		s, ok := p.Next(wait)
+		s, ok := p.next(wait)
 		if !ok {
 			// past the deadline, or the DUT closed its output and nothing more can come
 			if !deadline.IsZero() || p.h.closed {
@@ -827,7 +838,8 @@ const probeWindow = 250 * time.Millisecond
 
 // Quiet reports whether the DUT emits nothing on this flow for d.
 func (p *Peer) Quiet(d time.Duration) (Segment, bool) {
-	s, ok := p.Next(d)
+	p.h.T.Logf("expect quiet for %v", d)
+	s, ok := p.next(d)
 	return s, !ok
 }
 

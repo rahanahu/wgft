@@ -28,10 +28,10 @@ func TestScriptsMatchGoFunctions(t *testing.T) {
 				var d string
 				for k := range uint64(3) {
 					goSeed := seed + k*attemptSeedStride
-					wantOut, want := tcpharness.RecordTrace(t, Engine(Known), legacy, goSeed)
-					_, got := tcpharness.RecordTrace(t, Engine(Known), s, goSeed+pairSeedOffset)
+					wantOut, want, wantFailed := tcpharness.RecordTrace(t, Engine(Known), legacy, goSeed)
+					_, got, _ := tcpharness.RecordTrace(t, Engine(Known), s, goSeed+pairSeedOffset)
 					d = tcpharness.DiffLines(tcpharness.CheckLines(want), tcpharness.CheckLines(got))
-					if d == "" && !tcpharness.Passed(wantOut) {
+					if d == "" && !tcpharness.Passed(wantOut, wantFailed) {
 						d = "the Go function's run did not pass, so the pair shows nothing"
 					}
 					if d == "" {

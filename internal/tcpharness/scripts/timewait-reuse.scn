@@ -23,7 +23,7 @@ require time-wait.entered a.ok
   got: {seg_desc(a)}
 reincarnate n old iss=old.snd_nxt+100000
 let o = with(opts_standard(), ts=ts(ts_val(n), seq(0)))
-set n.ws = 7
+set n.ws = o.ws
 send n syn(n, o)
 await n 1s match=is_synack(s) -> sa
 let ok = sa.ok && sa.ack == n.iss + 1
@@ -54,7 +54,7 @@ require time-wait.entered a.ok
   got: {seg_desc(a)}
 reincarnate m old iss=old.snd_nxt-100000
 let o = with(opts_standard(), ts=ts(ts_val(m), seq(0)))
-set m.ws = 7
+set m.ws = o.ws
 send m syn(m, o)
 await m 1s -> sa
 let ok = sa.ok && has(sa, SYN|ACK) && sa.ack == m.iss + 1

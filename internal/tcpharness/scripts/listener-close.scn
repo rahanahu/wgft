@@ -19,7 +19,7 @@ await half 1s match=is_synack(s) -> sa
 require half-open.synack sa.ok
   what: the second SYN is answered
   got: {seg_desc(sa)}
-set half.ws = 7
+set half.ws = o.ws
 adopt half o sa
 
 # Both flows are watched together: await would drop the other flow's segments.

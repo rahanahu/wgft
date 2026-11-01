@@ -3,6 +3,7 @@ package tcpharness
 import (
 	"encoding/hex"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,12 +86,31 @@ var scriptConsts = map[string]bool{
 // predicateArg names, per function, the argument evaluated once per element with s bound.
 var predicateArg = map[string]int{"first": 1, "filter": 1, "any": 1, "max_of": 1, "sum_of": 1}
 
-// ScriptError is a parse or binding error with its line.
+// ScriptError is a parse or static-check error with its line and kind. The kind is stable and
+// language-neutral, so the fixtures compare the line and the kind, not the English message,
+// which the Go and Rust parsers may word differently.
 type ScriptError struct {
 	File string
 	Line int
+	Kind string
 	Msg  string
 }
+
+// The kinds of ScriptError.
+const (
+	KindLayout           = "layout"            // a tab, or a string literal left open at the end of a line
+	KindHeader           = "header"            // the scenario, refs: and linux: lines
+	KindBlock            = "block"             // if, else and end, and stop with something after it
+	KindTemplate         = "template"          // what: and got: lines and {expr} parts
+	KindSyntax           = "syntax"            // tokens and expressions
+	KindUnknownStatement = "unknown-statement" // a first word that is no statement
+	KindUnknownFunction  = "unknown-function"  // a call of no function
+	KindArity            = "arity"             // the number of positional arguments
+	KindNamedArgument    = "named-argument"    // a name= the statement or function does not take, or twice
+	KindBind             = "bind"              // -> where the statement has no result, or a first argument that is not a name
+	KindUnbound          = "unbound"           // a name not bound on every path to where it is read
+	KindUnreachable      = "unreachable"       // a statement after stop
+)
 
 func (e *ScriptError) Error() string { return fmt.Sprintf("%s:%d: %s", e.File, e.Line, e.Msg) }
 
@@ -102,6 +122,9 @@ func ParseScript(file, src string) (*Script, error) {
 	}
 	s, err := p.script()
 	if err != nil {
+		return nil, err
+	}
+	if err := checkStatic(file, s.Body); err != nil {
 		return nil, err
 	}
 	if err := checkBindings(file, s.Body); err != nil {
@@ -122,8 +145,8 @@ type parser struct {
 	i    int
 }
 
-func (p *parser) errf(line int, format string, args ...any) error {
-	return &ScriptError{File: p.file, Line: line, Msg: fmt.Sprintf(format, args...)}
+func (p *parser) errf(line int, kind, format string, args ...any) error {
+	return &ScriptError{File: p.file, Line: line, Kind: kind, Msg: fmt.Sprintf(format, args...)}
 }
 
 // lines splits src into non-empty lines without comments. A # outside a string literal starts
@@ -132,9 +155,12 @@ func (p *parser) lines(src string) error {
 	for i, raw := range strings.Split(src, "\n") {
 		raw = strings.TrimRight(raw, " \t\r")
 		if strings.ContainsRune(raw, '\t') {
-			return p.errf(i+1, "tab character; indent with spaces")
+			return p.errf(i+1, KindLayout, "tab character; indent with spaces")
 		}
-		text := stripComment(raw)
+		text, open := stripComment(raw)
+		if open {
+			return p.errf(i+1, KindLayout, "a string literal is not closed on this line; a \" in what: or got: text needs its pair")
+		}
 		trimmed := strings.TrimLeft(text, " ")
 		if strings.TrimSpace(trimmed) == "" {
 			continue
@@ -144,7 +170,9 @@ func (p *parser) lines(src string) error {
 	return nil
 }
 
-func stripComment(s string) string {
+// stripComment cuts s at a # outside a string literal and reports whether a literal was left
+// open at the end of the line.
+func stripComment(s string) (string, bool) {
 	in := false
 	for i := 0; i < len(s); i++ {
 		switch c := s[i]; {
@@ -153,31 +181,31 @@ func stripComment(s string) string {
 		case c == '"':
 			in = !in
 		case c == '#' && !in:
-			return s[:i]
+			return s[:i], false
 		}
 	}
-	return s
+	return s, in
 }
 
 func (p *parser) script() (*Script, error) {
 	s := &Script{}
 	if p.i >= len(p.ls) {
-		return nil, p.errf(1, "empty script")
+		return nil, p.errf(1, KindHeader, "empty script")
 	}
 	l := p.ls[p.i]
 	name, ok := strings.CutPrefix(l.text, "scenario ")
 	if !ok || strings.TrimSpace(name) == "" || strings.ContainsRune(strings.TrimSpace(name), ' ') {
-		return nil, p.errf(l.n, "the script starts with: scenario NAME")
+		return nil, p.errf(l.n, KindHeader, "the script starts with: scenario NAME")
 	}
 	s.Name = strings.TrimSpace(name)
 	p.i++
 	if p.i >= len(p.ls) {
-		return nil, p.errf(l.n, "a refs: line follows the scenario line")
+		return nil, p.errf(l.n, KindHeader, "a refs: line follows the scenario line")
 	}
 	l = p.ls[p.i]
 	refs, ok := strings.CutPrefix(l.text, "refs:")
 	if !ok {
-		return nil, p.errf(l.n, "a refs: line follows the scenario line")
+		return nil, p.errf(l.n, KindHeader, "a refs: line follows the scenario line")
 	}
 	s.Refs = strings.TrimSpace(refs)
 	p.i++
@@ -188,8 +216,9 @@ func (p *parser) script() (*Script, error) {
 			break
 		}
 		k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
 		if !ok || k == "" || v == "" {
-			return nil, p.errf(l.n, "a linux: line is linux: PATH=VALUE")
+			return nil, p.errf(l.n, KindHeader, "a linux: line is linux: PATH=VALUE")
 		}
 		s.Linux = append(s.Linux, [2]string{k, v})
 		p.i++
@@ -199,7 +228,7 @@ func (p *parser) script() (*Script, error) {
 		return nil, err
 	}
 	if end != "" {
-		return nil, p.errf(p.ls[p.i-1].n, "%s without if", end)
+		return nil, p.errf(p.ls[p.i-1].n, KindBlock, "%s without if", end)
 	}
 	s.Body = body
 	return s, nil
@@ -214,13 +243,13 @@ func (p *parser) block() ([]*Stmt, string, error) {
 		verb, rest, _ := strings.Cut(l.text, " ")
 		if verb == "else" || verb == "end" {
 			if strings.TrimSpace(rest) != "" {
-				return nil, "", p.errf(l.n, "%s takes nothing after it", verb)
+				return nil, "", p.errf(l.n, KindBlock, "%s takes nothing after it", verb)
 			}
 			p.i++
 			return out, verb, nil
 		}
 		if strings.HasPrefix(l.text, "what:") || strings.HasPrefix(l.text, "got:") {
-			return nil, "", p.errf(l.n, "a what: or got: line belongs right after check or require")
+			return nil, "", p.errf(l.n, KindTemplate, "a what: or got: line belongs right after check or require")
 		}
 		st, err := p.stmt(l)
 		if err != nil {
@@ -244,11 +273,11 @@ func (p *parser) block() ([]*Stmt, string, error) {
 					return nil, "", err
 				}
 				if end2 != "end" {
-					return nil, "", p.errf(l.n, "if without end")
+					return nil, "", p.errf(l.n, KindBlock, "if without end")
 				}
 				st.Else = els
 			} else if end != "end" {
-				return nil, "", p.errf(l.n, "if without end")
+				return nil, "", p.errf(l.n, KindBlock, "if without end")
 			}
 		}
 		out = append(out, st)
@@ -259,16 +288,16 @@ func (p *parser) block() ([]*Stmt, string, error) {
 func (p *parser) templates(st *Stmt, at srcLine) error {
 	for _, key := range []string{"what:", "got:"} {
 		if p.i >= len(p.ls) {
-			return p.errf(at.n, "%s needs a %s line", st.Verb, key)
+			return p.errf(at.n, KindTemplate, "%s needs a %s line", st.Verb, key)
 		}
 		l := p.ls[p.i]
 		text, ok := strings.CutPrefix(l.text, key)
 		if !ok || l.indent == 0 {
-			return p.errf(l.n, "%s needs an indented %s line", st.Verb, key)
+			return p.errf(l.n, KindTemplate, "%s needs an indented %s line", st.Verb, key)
 		}
 		t, err := parseTemplate(strings.TrimPrefix(text, " "))
 		if err != nil {
-			return p.errf(l.n, "%v", err)
+			return p.errf(l.n, KindTemplate, "%v", err)
 		}
 		if key == "what:" {
 			st.What = t
@@ -285,53 +314,53 @@ func (p *parser) stmt(l srcLine) (*Stmt, error) {
 	rest = strings.TrimLeft(rest, " ")
 	st := &Stmt{Line: l.n, Verb: verb}
 	if !scriptVerbs[verb] {
-		return nil, p.errf(l.n, "unknown statement %q", verb)
+		return nil, p.errf(l.n, KindUnknownStatement, "unknown statement %q", verb)
 	}
 	if idVerbs[verb] {
 		id, r, _ := strings.Cut(rest, " ")
 		if id == "" {
-			return nil, p.errf(l.n, "%s needs an ID", verb)
+			return nil, p.errf(l.n, KindSyntax, "%s needs an ID", verb)
 		}
 		st.ID, rest = id, strings.TrimLeft(r, " ")
 	}
 	switch verb {
 	case "stop":
 		if rest != "" {
-			return nil, p.errf(l.n, "stop takes nothing after it")
+			return nil, p.errf(l.n, KindSyntax, "stop takes nothing after it")
 		}
 		return st, nil
 	case "log":
 		t, err := parseTemplate(rest)
 		if err != nil {
-			return nil, p.errf(l.n, "%v", err)
+			return nil, p.errf(l.n, KindTemplate, "%v", err)
 		}
 		st.What = t
 		return st, nil
 	}
 	toks, err := lex(rest)
 	if err != nil {
-		return nil, p.errf(l.n, "%v", err)
+		return nil, p.errf(l.n, KindSyntax, "%v", err)
 	}
 	ep := &exprParser{toks: toks}
 	switch {
 	case verb == "let" || verb == "set":
 		target, err := ep.target(verb == "set")
 		if err != nil {
-			return nil, p.errf(l.n, "%v", err)
+			return nil, p.errf(l.n, KindSyntax, "%v", err)
 		}
 		if !ep.accept("=") {
-			return nil, p.errf(l.n, "%s %s needs = and an expression", verb, target)
+			return nil, p.errf(l.n, KindSyntax, "%s %s needs = and an expression", verb, target)
 		}
 		e, err := ep.full()
 		if err != nil {
-			return nil, p.errf(l.n, "%v", err)
+			return nil, p.errf(l.n, KindSyntax, "%v", err)
 		}
 		st.Bind, st.Args = target, []*Expr{e}
 		return st, nil
 	case exprVerbs[verb]:
 		e, err := ep.full()
 		if err != nil {
-			return nil, p.errf(l.n, "%v", err)
+			return nil, p.errf(l.n, KindSyntax, "%v", err)
 		}
 		st.Args = []*Expr{e}
 		return st, nil
@@ -340,37 +369,43 @@ func (p *parser) stmt(l srcLine) (*Stmt, error) {
 		if ep.namedAhead() {
 			name := ep.next().text
 			ep.next() // =
+			if ep.done() || ep.toks[ep.i].space {
+				return nil, p.errf(l.n, KindSyntax, "%s= is followed by its value with no space", name)
+			}
 			e, err := ep.atom()
 			if err != nil {
-				return nil, p.errf(l.n, "%v", err)
+				return nil, p.errf(l.n, KindSyntax, "%v", err)
 			}
 			if st.Named == nil {
 				st.Named = map[string]*Expr{}
 			}
 			if st.Named[name] != nil {
-				return nil, p.errf(l.n, "%s= given twice", name)
+				return nil, p.errf(l.n, KindNamedArgument, "%s= given twice", name)
 			}
 			st.Named[name] = e
 			continue
 		}
 		if len(st.Named) > 0 {
-			return nil, p.errf(l.n, "a positional argument after a named one")
+			return nil, p.errf(l.n, KindNamedArgument, "a positional argument after a named one")
 		}
 		e, err := ep.atom()
 		if err != nil {
-			return nil, p.errf(l.n, "%v", err)
+			return nil, p.errf(l.n, KindSyntax, "%v", err)
 		}
 		st.Args = append(st.Args, e)
 	}
 	if ep.accept("->") {
+		if ep.done() {
+			return nil, p.errf(l.n, KindBind, "-> is followed by one name")
+		}
 		t := ep.next()
 		if t.kind != tIdent || !ep.done() {
-			return nil, p.errf(l.n, "-> is followed by one name")
+			return nil, p.errf(l.n, KindBind, "-> is followed by one name")
 		}
 		st.Bind = t.text
 	}
 	if bindFirst[verb] && (len(st.Args) == 0 || st.Args[0].Kind != "name") {
-		return nil, p.errf(l.n, "%s binds its first argument, which is a name", verb)
+		return nil, p.errf(l.n, KindBind, "%s binds its first argument, which is a name", verb)
 	}
 	return st, nil
 }
@@ -489,6 +524,9 @@ func lex(s string) ([]token, error) {
 			t := token{kind: tInt, text: s[i:j], val: v, space: space}
 			for _, u := range durUnits {
 				if strings.HasPrefix(s[j:], u.name) && (j+len(u.name) == len(s) || !isIdentByte(s[j+len(u.name)])) {
+					if v > math.MaxInt64/u.ns {
+						return nil, fmt.Errorf("duration %s%s overflows", s[i:j], u.name)
+					}
 					t.kind, t.val = tDur, v*u.ns
 					j += len(u.name)
 					break
@@ -847,6 +885,12 @@ func (p *exprParser) primary() (*Expr, error) {
 			if p.namedAhead() {
 				name := p.next().text
 				p.next()
+				if p.done() || p.toks[p.i].space {
+					return nil, fmt.Errorf("%s= is followed by its value with no space", name)
+				}
+				if call.Named[name] != nil {
+					return nil, fmt.Errorf("%s= given twice in the call of %s", name, t.text)
+				}
 				e, err := p.or()
 				if err != nil {
 					return nil, err
@@ -895,11 +939,11 @@ func bindBlock(file string, body []*Stmt, bound map[string]bool) (map[string]boo
 	cur := copySet(bound)
 	for _, st := range body {
 		if cur == nil {
-			return nil, &ScriptError{File: file, Line: st.Line, Msg: "statement after stop is never reached"}
+			return nil, &ScriptError{File: file, Line: st.Line, Kind: KindUnreachable, Msg: "statement after stop is never reached"}
 		}
 		readErr := func(e *Expr, extra map[string]bool) error {
 			if name := unboundName(e, cur, extra); name != "" {
-				return &ScriptError{File: file, Line: st.Line, Msg: fmt.Sprintf("%s is not bound on every path to here", name)}
+				return &ScriptError{File: file, Line: st.Line, Kind: KindUnbound, Msg: fmt.Sprintf("%s is not bound on every path to here", name)}
 			}
 			return nil
 		}
@@ -910,7 +954,7 @@ func bindBlock(file string, body []*Stmt, bound map[string]bool) (map[string]boo
 		if st.Verb == "set" {
 			obj, _, _ := strings.Cut(st.Bind, ".")
 			if !cur[obj] {
-				return nil, &ScriptError{File: file, Line: st.Line, Msg: fmt.Sprintf("%s is not bound on every path to here", obj)}
+				return nil, &ScriptError{File: file, Line: st.Line, Kind: KindUnbound, Msg: fmt.Sprintf("%s is not bound on every path to here", obj)}
 			}
 		}
 		for _, a := range args {

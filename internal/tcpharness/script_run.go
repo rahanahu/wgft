@@ -58,11 +58,11 @@ func runScript(h *H, file string, s *Script) {
 	in := &interp{h: h, file: file, vars: map[string]any{}}
 	defer func() {
 		if r := recover(); r != nil {
-			f, ok := r.(scriptFail)
-			if !ok {
-				panic(r)
+			if f, ok := r.(scriptFail); ok {
+				h.T.Fatalf("script %s:%d: %s", file, in.line, f.msg)
 			}
-			h.T.Fatalf("script %s:%d: %s", file, in.line, f.msg)
+			// a panic in a helper or a Go value the script misused: end the scenario the same way
+			h.T.Fatalf("script %s:%d: panic: %v", file, in.line, r)
 		}
 	}()
 	in.block(s.Body)
@@ -105,7 +105,6 @@ func (in *interp) stmt(st *Stmt) bool {
 		}
 	}
 	first := func() string { return st.Args[0].Name }
-	in.checkNamed(st)
 	switch st.Verb {
 	case "stop":
 		return false
@@ -136,7 +135,7 @@ func (in *interp) stmt(st *Stmt) bool {
 		}
 		lv := &listenerv{l: l}
 		h.T.Cleanup(func() {
-			if !lv.closed {
+			if !lv.closed && l != nil {
 				l.Close()
 			}
 		})
@@ -225,7 +224,7 @@ func (in *interp) stmt(st *Stmt) bool {
 		}
 		bind(&recordv{name: "write", fields: map[string]any{"n": int64(n), "err": wrapErr(err)}})
 	case "read":
-		got, err := readFull(in.conn(arg(0)), int(in.int(arg(1))), in.dur(arg(2)))
+		got, err := readFull(in.conn(arg(0)), int(in.count(arg(1))), in.dur(arg(2)))
 		bind(&recordv{name: "read", fields: map[string]any{"data": got, "err": wrapErr(err)}})
 	case "close":
 		switch v := arg(0).(type) {
@@ -261,29 +260,12 @@ func (in *interp) stmt(st *Stmt) bool {
 	case "delivered":
 		delivered(h, st.ID, in.conn(arg(0)))
 	case "recv":
-		got, dups, maxLen := receiveMax(in.peer(arg(0)).p, int(in.int(arg(1))), in.dur(arg(2)))
+		got, dups, maxLen := receiveMax(in.peer(arg(0)).p, int(in.count(arg(1))), in.dur(arg(2)))
 		bind(&recordv{name: "recv", fields: map[string]any{"data": got, "dups": int64(dups), "max_len": int64(maxLen)}})
 	default:
 		in.failf("statement %s is not implemented", st.Verb)
 	}
 	return true
-}
-
-// checkNamed rejects named arguments a statement does not take.
-func (in *interp) checkNamed(st *Stmt) {
-	allowed := map[string][]string{
-		"connect": {"syn", "window", "syn_window", "ack_delay"}, "handshake": {"syn", "window", "syn_window", "ack_delay"},
-		"reincarnate": {"iss", "ts_base"}, "await": {"match"},
-	}
-	for k := range st.Named {
-		ok := false
-		for _, a := range allowed[st.Verb] {
-			ok = ok || a == k
-		}
-		if !ok {
-			in.failf("%s does not take %s=", st.Verb, k)
-		}
-	}
 }
 
 func (in *interp) dial(st *Stmt) Dial {
@@ -687,6 +669,23 @@ func (in *interp) field(x any, name string) any {
 		case "ecr":
 			return seqv(v.ecr)
 		}
+	case optsv:
+		switch name {
+		case "mss":
+			if v.o.MSS == nil {
+				return nil
+			}
+			return int64(*v.o.MSS)
+		case "ws":
+			return int64(v.o.WS)
+		case "sack_permitted":
+			return v.o.SACKPermitted
+		case "ts":
+			if v.o.TS == nil {
+				return nil
+			}
+			return &tsv{v.o.TS.Val, v.o.TS.Ecr}
+		}
 	case SACKBlock:
 		switch name {
 		case "left":
@@ -821,6 +820,15 @@ func (in *interp) int(v any) int64 {
 		in.failf("an int is expected, not %s", typeName(v))
 	}
 	return i
+}
+
+// count is an int that sizes something, so it is at least 0.
+func (in *interp) count(v any) int64 {
+	n := in.int(v)
+	if n < 0 {
+		in.failf("a count is at least 0; got %d", n)
+	}
+	return n
 }
 
 func (in *interp) seq(v any) seqv {

@@ -2,7 +2,7 @@
 
 この文書は、Rust に移る wgstack を確かめる試験の道具の設計を定めます。
 対象は、適合の台本をデータにする言語、台本を流す 2 つの runner、Rust の DUT を別のプロセスとして叩く標準入出力の口、凍結した Go の wgstack の記録との照合、qbench、fuzz、関門です。
-すべて未実装です。
+1 節の台本の言語と 2 節の Go の runner は実装済みで、ほかの節は未実装です。
 実装は 8 節の順に積んだ PR で行い、各 PR がこの文書の該当する節を実装に合わせて直します。
 
 Rust の wgstack そのもの (sans-IO の API、crate の分け方、bit の一致の条件、実装の PR の順) は、wgstack の Rust 版の設計 (`docs/design/v2/wgstack-rs.md`) が決めます。
@@ -71,8 +71,16 @@ JSON や YAML ではなく専用の形にした理由は次のとおりです。
 
 2 つの構文解析器のずれは、構文の fixture で捉えます。
 `scripts/testdata/parse/` の各 `.scn` に、正規化した構文木を JSON で書いた `.ast.json` を対にして置きます。
+`scripts/*.scn` の本物の台本の構文木は `scripts/testdata/ast/` に置きます。
 Go の試験は `-update` で対を作り直せ、Go と Rust の試験は両方とも、自分の構文解析器の出力が `.ast.json` と同じ JSON の値になることを確かめます。
-`scripts/*.scn` の本物の台本も、同じ正規化で 2 つの構文解析器の出力を照らします。
+JSON は差分を小さく保つため、空白の無い 1 行で書きます。
+整数は 10 進の文字列で書き、64 bit の値も JSON の数の精度に頼りません。
+空の `else` は構文木に出さず、`else` の無い `if` と同じ形になります。
+
+名前が `err-` で始まる fixture は誤りの例で、`.ast.json` は誤りの行と種類 (kind) だけを持ちます。
+英語の文は 2 つの構文解析器で違ってよく、比べません。
+種類は `layout` (tab と閉じない文字列)、`header`、`block` (`if`、`else`、`end`、`stop`)、`template`、`syntax`、`unknown-statement`、`unknown-function`、`arity`、`named-argument`、`bind`、`unbound`、`unreachable` です。
+Go の構文解析器は fuzz の対象 (`FuzzParseScript`) を持ち、台本と fixture を種にして、panic せず、誤りがどれも種類を持つことを確かめます。
 
 ### 文の形
 
@@ -92,8 +100,13 @@ attrs   = INDENT "what:" TEMPLATE NL INDENT "got:" TEMPLATE NL
 - 字下げ:意味を持つのは `check` と `require` の `what:` と `got:` の行だけです。`if` の中は `end` で閉じます
 - 分岐:`if`、`else`、`end` だけを持ち、繰り返しを持ちません。台本は `stop` で正常に終われます
 - 名前:台本全体で 1 つの名前空間です。同じ名前に結び直せ、`if` の中で結んだ名前は後でも見えます
-- 結びの静的な検査:構文解析の後、流す前に、どの名前もその読み取りに至るすべての経路で先に結ばれていることを確かめます。`if` で片方の枝だけが結ぶ名前を後で読む台本は、流す前に台本の誤りになります。この検査は 2 つの構文解析器が同じ規則で行い、構文の fixture に誤りの例を含めます
-- `linux:` の行:`tcpharness.Scenario.Linux` と同じく、参照の Linux がこの台本だけに使う sysctl です。今移す台本は使いません
+- 静的な検査:構文解析の後、流す前に次を確かめます。2 つの構文解析器は同じ規則と同じ種類で検査し、構文の fixture に誤りの例を含めます
+  - 文の位置の引数の数、受け付ける名前つきの引数、`->` を付けられること。`->` は結果を持つ文 (`listen`、`send_fresh_ack`、`await`、`quiet`、`quiet_since`、`collect`、`write`、`read`、`recv` と、T1b で足す IP の文) だけに付けられます
+  - 呼ぶ関数があること、その引数の数、名前つきの引数を `with` だけが取ること
+  - 結び:どの名前もその読み取りに至るすべての経路で先に結ばれていること。`if` で片方の枝だけが結ぶ名前を後で読む台本は誤りです。`stop` で終わる枝はすべての名前を結んだものと数えます
+- 名前つきの引数:同じ名前を 2 度渡すこと、`=` の後に空白を置くこと (`match= x`) は誤りです
+- 文字列:`what:` と `got:` の text の中の `"` は対で書きます。閉じない `"` は、行の終わりまでを文字列とみなす誤りを避けるため、`layout` の誤りです
+- `linux:` の行:`tcpharness.Scenario.Linux` と同じく、参照の Linux がこの台本だけに使う sysctl です。`=` の前後の空白は捨てます。今移す台本は使いません
 
 ### 式と型
 
@@ -114,7 +127,9 @@ attrs   = INDENT "what:" TEMPLATE NL INDENT "got:" TEMPLATE NL
 | none | `none` | 無い option。none の欄を読むと台本の誤り |
 
 型の合わない演算は台本の誤りです。
-Go の panic に当たる場面は、どちらの runner でも台本の誤りとして、その台本を落とします。
+Go の panic に当たる場面は、どちらの runner でも台本の誤りとして、ファイルと行を付けてその台本を落とします。
+Go の runner は、台本が呼んだ補助の関数の中の panic も同じく扱います。
+数を表す引数 (`pattern` の長さ、`read` の byte 数) は 0 以上です。
 
 ### 相手の模型
 
@@ -199,7 +214,8 @@ list を受ける関数は、2 つ目の引数を要素ごとに `s` に結ん�
 `seg_desc`、`ack_desc`、`sack_desc`、`synack_desc` は、最後の省略できる引数で捕捉の `ok` の代わりの bool を受けます。
 Go の台本が `segDesc(s, !quiet)` のように別の条件を渡す所に使います。
 `yes_no` と `clocked` は選んだ側の引数だけを評価します。
-template の中の値は、int と seq を 10 進、bool を `true` か `false`、bytes をそのまま書き、ほかの型は台本の誤りです。
+template は int と seq を 10 進で、bool を `true` か `false` で、bytes をそのまま書きます。
+ほかの型を埋め込むと台本の誤りです。
 `text(x)` は同じ規則で bytes にし、bytes は `+` でつなげます。
 ほかに `seq(i)`、`int(q)`、`ms(d)`、`ts_val(P)` (相手の timestamp の時計の今の値)、`has(s, 旗)` を持ちます。
 
@@ -216,16 +232,33 @@ template の中の値は、int と seq を 10 進、bool を `true` か `false`�
 | `accept C L` | 2 s の内の受け入れ | `H.Accept` |
 | `peer P port`、`reincarnate Q P iss= [ts_base=]`、`adopt P syn synack` | 相手を作る、同じ 4 つ組で作り直す、交渉を取り込む | `NewPeer`、`Reincarnate`、`adopt` |
 | `send P 式`、`send_data P b`、`send_ack P`、`send_fin P [b]`、`send_fresh_ack P -> ts` | segment を入れる | `Peer` の同名の操作 |
-| `inject_ip 式`、`inject_raw 式` | IPv4 の packet か list、生の bytes を入れる | `H.InjectIP`、`DUT.Inject` |
+| `inject_ip 式` (T1b) | IPv4 の packet か list を入れる | `H.InjectIP` |
 | `set P.欄 = 式`、`let 名前 = 式` | 相手の欄を書く、名前に値を結ぶ | |
 | `await P d [match=] -> a` | 上限 d の内に述語に合う segment を待つ | `Peer.Await`、`Peer.Next` |
 | `quiet P d -> q`、`quiet_since P d ts f C -> q` | d の間に何も出ないこと | `Peer.Quiet`、`Peer.QuietSince` |
-| `collect d -> l`、`collect_flow P d -> l` | d の間に出た segment の list | `H.Collect`、`Peer.Next` の繰り返し |
-| `await_ip d match= -> pkt` | IPv4 の packet を待つ | `H.Packet` |
+| `collect d -> l`、`collect_flow P d -> l` (T1b) | d の間に出た segment の list | `H.Collect`、`Peer.Next` の繰り返し |
+| `await_ip d match= -> pkt` (T1b) | IPv4 の packet を待つ | `H.Packet` |
 | `write C b [-> w]`、`read C n d -> r` | 書く、n byte を d の内に読む。`-> w` の無い `write` は誤りで台本を止める | `Conn.Write`、`readFull` |
 | `close X`、`close_write C`、`abort C` | 閉じる。`close_write` は誤りで台本を止める | |
-| `listen_udp U port`、`udp_read U d -> r`、`udp_write U b to= -> w` | UDP | `H.ListenUDP`、`readDatagram`、`WriteTo` |
+| `listen_udp U port`、`udp_read U d -> r`、`udp_write U b to= -> w` (T1b) | UDP | `H.ListenUDP`、`readDatagram`、`WriteTo` |
 | `check`、`require`、`measure`、`log`、`stop` | 確かめと記録と終わり | |
+
+(T1b) と印した文と関数は、T1b が残りの台本を移す時に足します。
+
+結果を持つ文が `->` で結ぶ値の欄は次のとおりです。
+待つ文の捕捉は、segment か packet の欄に加えて `ok` と `at` (返った時の時計) を持ちます。
+
+| 文 | 欄 |
+| --- | --- |
+| `await`、`quiet` の `seg` | 捕捉 (`ok`、`at`、segment の欄) |
+| `listen` | 誤り。成功なら none |
+| `send_fresh_ack` | 送った TSval (seq) |
+| `quiet` | `quiet`、`seg` |
+| `quiet_since` | `quiet`、`stale`、`timed_out`、`seg`、`desc` (Go の台本と同じ観察の文字列) |
+| `collect` | 捕捉の list |
+| `write` | `n`、`err` |
+| `read` | `data`、`err` |
+| `recv` | `data`、`dups`、`max_len` |
 
 組み込みの手順は、今の Go の台本の補助の関数を 1 つの文にしたものです。
 Go の runner はその関数を呼び、Rust の runner は手で進める時計の場合の意味だけを写します。
@@ -235,17 +268,17 @@ Rust の runner は手で進める時計の DUT しか流さないので、実�
 | --- | --- |
 | `alive ID P C` | `alive` |
 | `delivered ID C` | `delivered` (DUT が `Deliverer` を持つ場合だけ確かめる) |
-| `flight P C n salt -> f`、`burst P -> b` | `flight`、`burst` |
+| `flight P C n salt -> f`、`burst P -> b` (T1b) | `flight`、`burst` |
 | `recv P n d -> r` | `receive` (最大の segment の長さも返す) |
-| `at_once l -> l2` | `atOnce` |
-| `echo ipid ident seq b [cuts=] -> m` | `echo` |
-| `await_datagram d match= -> r` | `udpLarge` の断片を集める繰り返し |
+| `at_once l -> l2` (T1b) | `atOnce` |
+| `echo ipid ident seq b [cuts=] -> m` (T1b) | `echo` |
+| `await_datagram d match= -> r` (T1b) | `udpLarge` の断片を集める繰り返し |
 
-packet を作る関数は `segment(P, 旗, seq[, payload])` (`Peer.Segment`)、`syn(P, opts)` (ISS の SYN で窓は 65535)、`raw(P, 旗, seq)` (ほかの欄が Go の空の `Segment` と同じ segment。空の `Options` は窓の scale 0 を持つ)、`ts(val, ecr)`、`with(x, 欄=式, ...)` (欄を差し替えた写し)、`opts_standard()`、`opts_nosack()`、`opts_none()`、`udp(src, dst, id, b)`、`icmp_echo(...)`、`fragments(pkt, cuts...)`、`fragments_every(pkt, n)`、`frag(pkt, from, to)`、`frag_needed(from, 元の packet, mtu)`、`corrupt(pkt, off, xor)`、`set_bytes(pkt, off, b)`、`wire(x)` (packet の bytes)、`wire_len(x)` です。
+packet を作る関数は `segment(P, 旗, seq[, payload])` (`Peer.Segment`)、`syn(P, opts)` (ISS の SYN で窓は 65535)、`raw(P, 旗, seq)` (ほかの欄が Go の空の `Segment` と同じ segment。空の `Options` は窓の scale 0 を持つ)、`ts(val, ecr)`、`with(x, 欄=式, ...)` (欄を差し替えた写し)、`opts_standard()`、`opts_nosack()`、`opts_none()`、(T1b) `udp(src, dst, id, b)`、`icmp_echo(...)`、`fragments(pkt, cuts...)`、`fragments_every(pkt, n)`、`frag(pkt, from, to)`、`frag_needed(from, 元の packet, mtu)`、`corrupt(pkt, off, xor)`、`set_bytes(pkt, off, b)`、`wire(x)` (packet の bytes)、`wire_len(x)` です。
 
 ### 例
 
-`fin-passive-close` を台本の言語で書くと次のとおりです。
+`fin-passive-close` の台本 (`internal/tcpharness/scripts/fin-passive-close.scn`) を写します。
 台本の中の注釈と文言は、今の Go の台本と同じく英語で書きます。
 
 ```text
@@ -257,7 +290,8 @@ refs: RFC 9293 3.6 and 3.10.7.4 CLOSE-WAIT and LAST-ACK
 listen l 8011
 connect p l 8011 syn=opts_standard()
 send_fin p "bye"
-# RFC 1122 4.2.3.2 bounds a delayed ACK at 500 ms; Linux delays it about 40 ms.
+# RFC 9293 does not ask for an immediate ACK here, and Linux delays it by its delayed-ACK timer,
+# about 40 ms; RFC 1122 4.2.3.2 bounds a delayed ACK at 500 ms.
 await p 500ms match=acks(s, p.snd_nxt) -> a
 check fin.acked a.ok
   what: the DUT acknowledges the data and the FIN within the 500 ms delayed-ACK bound
@@ -285,12 +319,13 @@ await p 1s match=is_fin(s) -> f
 check last-ack.fin f.ok && f.seq == p.rcv_nxt
   what: Close sends a FIN after the data
   got: {seg_desc(f)}
-let ack_ts = 0
+let ack_ts = seq(0)
 if f.ok
   set p.rcv_nxt = f.seq + f.seq_len
   send_fresh_ack p -> ack_ts
 end
-# A FIN resent before the ACK got there is passed over on real time; QuietSince explains why.
+# A FIN resent before the ACK got there, as a tail loss probe on a loaded machine, is passed over;
+# anything sent once the DUT had the ACK fails the check.
 quiet_since p 500ms ack_ts f p.conn -> q
 check closed.quiet q.quiet
   what: nothing follows the ACK of the DUT's FIN
@@ -334,12 +369,28 @@ delivered delivered p.conn
 移した Go の関数は、直線の台本をすべて移し終えるまで `tcpharness.LegacyScenarios` に残し、照らしの試験 (`TestScriptsMatchGoFunctions`) が毎回並べて流します。
 T1b が最後の台本を移した後に、Go の関数と照らしの試験を消します。
 
-- `wgstackdut`:手で進める時計で、種 1 から 5。`RecordTrace` が返すログの行 (送った segment、見た segment、確かめ、`MEASURE`、記録した失敗) を、行ごとの DUT の時刻を付けて 1 行ずつ比べます。待つ時間だけが違う台本も、時刻で違いが出ます
+- `wgstackdut`:手で進める時計で、種 1 から 5。`RecordTrace` が返すログの行 (送った segment、見た segment、待ちとその上限、確かめ、`MEASURE`、記録した失敗) を、行ごとの DUT の時刻を付けて 1 行ずつ比べます
 - `gvisordut`:実時間で、種 1 と 2。segment の行は gVisor の乱数で変わるので、確かめの行と `MEASURE` の名前だけを比べます (`CheckLines`)。食い違った組は 3 回まで流し直します
-- `linuxdut`:ラボの使い捨ての VM で、`gvisordut` と同じ比べ方です。2 つの実行は 1 つの network namespace を共有するので、台本の側と流し直しには別の種を使います。同じ種だと、同じ 4 つ組が前の実行の TIME-WAIT に当たり、2 つの実行が同じように落ちます
+- `linuxdut`:ラボの使い捨ての VM で、`gvisordut` と同じ比べ方です。2 つの実行は 1 つの network namespace を共有するので、台本の側と流し直しには別の種を使います。同じ種だと、同じ 4 つ組が前の実行の TIME-WAIT に当たり、2 つの実行が同じように落ちます。T1b が照らしの試験を消すまで、`-test.run` を付けずに流す `linuxdut` のラボの試験は、適合の試験に加えて照らしの試験も流します
 
 どの DUT でも、Go の関数の実行が通らなかった組は一致の証拠にしません。
 2 つの実行が同じように落ちれば行は一致しますが、DUT の状態の誤りを見ているだけかもしれないためです。
+通らなかった実行には、確かめの失敗のほか、確かめの外の `Fatalf` (listen、write、`CloseWrite`、注入の失敗、台本の誤り、MTU を超える packet) も含めます。
+`CheckLines` も記録した失敗をすべて残します。
+
+`wgstackdut` の時刻つきのログが捉えるものと捉えないものを、台本を 1 か所ずつ変える試験で確かめました。
+`Peer.Await`、`Peer.Next`、`Peer.Quiet`、`Peer.QuietSince` は待ちの上限をログに書くので、上限を変えると、待ちが上限まで続かない場合も食い違いが出ます。
+
+| 台本の変更 | 結果 |
+| --- | --- |
+| 何も来ない `quiet` の上限を短くする | 捉えた |
+| segment が早く来る `await` の上限を広げる | 捉えた (上限のログの行) |
+| 文を 1 つ消す (`send_ack`) | 捉えた |
+| 同じ segment に合う範囲で述語を弱める (`acks(s, p.snd_nxt)` を `has(s, ACK)` に) | 見逃した |
+| 通る実行で結果の変わらない範囲で確かめの条件を弱める | 見逃した |
+
+述語と条件の弱まりは、通る DUT の上では同じ動きになるので、ログでは捉えられません。
+これらはレビューで台本を Go の関数と読み比べて確かめます。
 
 ## 2. runner
 
@@ -740,7 +791,7 @@ feature はワークスペースの中で統合され、別の crate の試験�
 | --- | --- | --- | --- | --- |
 | | `docs(v2): design the test tooling for the Rust wgstack` | この文書 | 文書だけ | |
 | T1a | `test(tcpharness): add the scenario script language and its Go runner` | 構文解析器、解釈器、組み込み、構文の fixture、台本の乱数の値の書き出し、handshake と close の族の台本、Go の関数との一致の確かめ | 約 2,000 行 | この文書 |
-| T1b | `test(tcpharness): move the ICMP, UDP and RFC 2525 scenarios to scripts` | 残りの台本、Linux での照らし、移した Go の関数を消す | 約 +900、-1,300 行 | T1a |
+| T1b | `test(tcpharness): move the ICMP, UDP and RFC 2525 scenarios to scripts` | 残りの台本と (T1b) の文と関数、3 つの DUT での照らし、移した Go の関数と照らしの試験を消す | 約 +900、-1,300 行 | T1a |
 | T2a | `test(tcpharness): add the DUT frames, a Go frame server and rustdut` | `internal/dutproto` と frame の付録、`internal/wgstack` の `dutserve` の形、`rustdut`、`wgstackdut` と `rustdut` で同じ結果になる確かめ | 約 1,500 行 | この文書 |
 | T2b | `test(wgstack): record the frozen Go wgstack for replay` | `testNet` の記録の包み、記録の手順、2 回作って同じになる確かめ、git に入れる記録 | 約 600 行と記録 | T2a |
 | T3a | `test(wgstack-rs): add the tcpharness crate` | 口の符号、packet の組み立て、台本の乱数の写し、`ProcessDut`、記録の読み込み | 約 1,500 行 | T2a |
@@ -761,7 +812,7 @@ Rust の wgstack を相手にするのは T3c からで、実装の 4 の API �
 - `dutserve` の待たない操作:`FuzzCore` の確かめ (`readable`、`room`、待ち受けの列) が、公開の操作が待たずに戻る条件と一致することはコードから読みましたが、試験で確かめていません。T2a で、確かめが真の時に操作が待たないことを試験にします
 - 記録の大きさ:git に入れる上限の 5 MiB は測る前の値です。T2b で測って直します
 - 乱数の写し:Go の PCG と `IntN` の写しと、Go の `%q` と `%.0f` の丸めの写しは、Go の試験が書き出した値との照合で確かめます。照合の値の数は T3b で決めます
-- 台本の観察の文字列:移した台本の観察の文字列が Go の関数と同じになることは、T1a と T1b の照らしの試験で確かめます。それまでは未確認です
+- 台本の観察の文字列:T1a で移した台本は、3 つの DUT の照らしの試験で Go の関数と同じ観察の文字列になることを確かめました。T1b で移す台本は、T1b の照らしの試験で確かめます
 - 実時間の Rust の DUT:`--clock real` の外側の層が製品の層と同じものになるかは、Rust の wgstack の外側の層の設計で決まります
 - qbench の Unix ソケットの 1 段:細い stream の遅れの p99 にどれだけ加わるかは未測定です
 - fuzz の速さ:cargo-fuzz の 1 秒あたりの実行回数は未測定で、関門の回数はその後に決めます

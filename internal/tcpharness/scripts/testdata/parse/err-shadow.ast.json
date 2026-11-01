@@ -1,1 +1,1 @@
-{"error":{"line":6,"msg":"s is not bound on every path to here"}}
+{"error":{"kind":"unbound","line":6}}

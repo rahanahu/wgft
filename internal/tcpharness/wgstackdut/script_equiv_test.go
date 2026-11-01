@@ -25,12 +25,12 @@ func TestScriptsMatchGoFunctions(t *testing.T) {
 				t.Errorf("refs differ:\nscript %q\n    Go %q", s.Refs, legacy.Refs)
 			}
 			for seed := uint64(1); seed <= 5; seed++ {
-				wantOut, want := tcpharness.RecordTrace(t, Engine(Known), legacy, seed)
-				_, got := tcpharness.RecordTrace(t, Engine(Known), s, seed)
+				wantOut, want, wantFailed := tcpharness.RecordTrace(t, Engine(Known), legacy, seed)
+				_, got, _ := tcpharness.RecordTrace(t, Engine(Known), s, seed)
 				if d := tcpharness.DiffLines(want, got); d != "" {
 					t.Errorf("seed %d: %s", seed, d)
 				}
-				if !tcpharness.Passed(wantOut) {
+				if !tcpharness.Passed(wantOut, wantFailed) {
 					t.Errorf("seed %d: the Go function's run did not pass, so the pair shows nothing", seed)
 				}
 			}

@@ -1,0 +1,4 @@
+scenario x
+refs: parser fixture
+
+let x = "\q"
