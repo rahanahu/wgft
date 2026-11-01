@@ -1401,6 +1401,8 @@ wgstack の口が前提と違えば、wgstack の上の agent と UDP の中継�
   BSD 系 (macOS を含む) の netmask は `sa_len` が `sockaddr_in` より短いことがあるので (`255.255.0.0` を 6 byte で表すなど)、`sa_len` と型の大きさの小さい方の byte だけを 0 で埋めた構造体へ写し、足りない byte は 0 とします。
   型の大きさの参照として読むと、確保の外を読んで帯の長さを誤るためです。
   `sa_len` を持たない Linux は族の大きさの sockaddr を返すので、型の大きさを写します。
+  BSD 系の `getifaddrs` は link-local の IPv6 のアドレス (`fe80::/10`) の 3 byte 目と 4 byte 目にインタフェースの番号を埋めるので (KAME の埋め込みの scope)、その 2 byte を 0 に戻します。
+  Go の `net.Interfaces` も経路のソケットの読みで同じ 2 byte を消すので、一覧のアドレスが Go と同じ形になります。
   macOS の build と試験は macOS の CI に任せ、手元では build していません
 
 ## 未確認の点
