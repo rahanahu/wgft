@@ -2,6 +2,21 @@
 
 use std::path::Path;
 
+/// Go の `*os.PathError` の文。Unix の `strerror` の文は Go の `syscall.Errno` の文と、先頭の大文字だけが
+/// 違う。Windows の文は Go も OS の文のままである。
+pub(super) fn go_style_path_error(op: &str, path: &Path, e: &std::io::Error) -> String {
+    let msg = super::dotenv::strip_os_error(e);
+    let msg = if cfg!(unix) {
+        let mut cs = msg.chars();
+        cs.next()
+            .map(|c| c.to_lowercase().chain(cs).collect())
+            .unwrap_or_default()
+    } else {
+        msg
+    };
+    format!("{op} {}: {msg}", path.display())
+}
+
 /// 設定ファイルを読めなかったときに、原因を見分けるための事実を 1 句で返す。読んだプロセスの実効 uid と
 /// gid、ファイルの持ち主とパーミッションを並べ、どちらの側に原因があるかは述べない。
 #[cfg(unix)]
@@ -24,18 +39,6 @@ pub(super) fn read_facts(path: &Path) -> String {
             go_style_path_error("stat", path, &e)
         ),
     }
-}
-
-/// Go の `*os.PathError` の文。`strerror` の文は Go の `syscall.Errno` の文と、先頭の大文字だけが違う。
-#[cfg(unix)]
-fn go_style_path_error(op: &str, path: &Path, e: &std::io::Error) -> String {
-    let msg = super::dotenv::strip_os_error(e);
-    let mut cs = msg.chars();
-    let lowered: String = cs
-        .next()
-        .map(|c| c.to_lowercase().chain(cs).collect())
-        .unwrap_or_default();
-    format!("{op} {}: {lowered}", path.display())
 }
 
 /// Windows では、読めるかを決める DACL を評価しない。

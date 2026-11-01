@@ -69,7 +69,17 @@ fn the_door_judges_values_like_the_spec() {
         );
         env.entry("WGFT_DATA_DIR".into())
             .or_insert_with(|| dir.path().join("data").display().to_string());
-        let (r, _) = door(&c.args, &env, c.goos.as_deref().unwrap_or("linux"));
+        let (r, early) = door(&c.args, &env, c.goos.as_deref().unwrap_or("linux"));
+        // 入口を通る前の警告は、接続文字列の構文の誤りの 1 行だけである
+        let join = c.env.get("WGFT_JOIN").filter(|j| !j.is_empty());
+        if r.is_ok() && join.is_some() {
+            assert!(
+                matches!(early.as_slice(), [LogLine::Stamped(w)] if w.starts_with("warning: WGFT_JOIN is malformed: ")),
+                "{early:?}"
+            );
+        } else if r.is_ok() {
+            assert!(early.is_empty(), "{early:?}");
+        }
         let label = format!("env {:?} args {:?} goos {:?}", c.env, c.args, c.goos);
         match (r, c.message) {
             (Ok(_), None) => {}
@@ -117,8 +127,21 @@ fn the_effective_config_block_matches_the_spec() {
             }
             other => panic!("{}: config {other}", c.name),
         }
-        let (r, _) = door(&args, &env, "linux");
+        // 推奨の配置。other が読めるファイルの警告は別の試験が確かめる
+        #[cfg(unix)]
+        if c.dotenv.is_some() {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let (r, early) = door(&args, &env, "linux");
         let p = r.unwrap_or_else(|e| panic!("{}: {e}", c.name));
+        assert!(
+            early
+                .iter()
+                .all(|l| matches!(l, LogLine::Stamped(w) if w.starts_with("warning: WGFT_JOIN is malformed"))),
+            "{}: {early:?}",
+            c.name
+        );
         let mut got = String::from("effective config:\n");
         for l in p.config.effective_lines() {
             got.push_str(&l);
@@ -136,6 +159,20 @@ fn the_effective_config_block_matches_the_spec() {
                 .map(|l| LogLine::Plain(l.to_owned()))
                 .collect::<Vec<_>>()[..],
             "{}",
+            c.name
+        );
+        // 続く行は、まだ効かせていない上限の知らせと、許可一覧の行で終わる
+        let tail: Vec<&LogLine> = lines[11..].iter().collect();
+        assert!(
+            matches!(tail[0], LogLine::Stamped(l) if l.starts_with("WGFT_MAX_UDP_FLOWS and WGFT_MAX_TCP_FLOWS: not enforced yet")),
+            "{}: {tail:?}",
+            c.name
+        );
+        let has_allow = c.args.iter().any(|a| a == "--agent-allow-targets");
+        assert_eq!(
+            matches!(tail.last(), Some(LogLine::Stamped(l)) if l.starts_with("no target allowlist")),
+            !has_allow,
+            "{}: {tail:?}",
             c.name
         );
     }

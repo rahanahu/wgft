@@ -47,58 +47,39 @@ pub struct Refusal {
 }
 
 impl Refusal {
-    /// 設定の値の誤り。
-    #[must_use]
-    pub fn config(subject: &str, reason: impl Into<String>) -> Self {
+    fn new(category: Category, subject: &str, reason: impl Into<String>) -> Self {
         Refusal {
-            category: Category::Config,
+            category,
             subject: subject.to_owned(),
             reason: reason.into(),
             context: None,
             hint: None,
             one_shot: false,
         }
+    }
+
+    /// 設定の値の誤り。
+    #[must_use]
+    pub fn config(subject: &str, reason: impl Into<String>) -> Self {
+        Self::new(Category::Config, subject, reason)
     }
 
     /// 環境の前提の不足。
     #[must_use]
     pub fn prerequisite(subject: &str, reason: impl Into<String>) -> Self {
-        Refusal {
-            category: Category::Prerequisite,
-            subject: subject.to_owned(),
-            reason: reason.into(),
-            context: None,
-            hint: None,
-            one_shot: false,
-        }
+        Self::new(Category::Prerequisite, subject, reason)
     }
 
     /// 他の状態との食い違い。
     #[must_use]
     pub fn conflict(subject: &str, reason: impl Into<String>) -> Self {
-        Refusal {
-            category: Category::Conflict,
-            subject: subject.to_owned(),
-            reason: reason.into(),
-            context: None,
-            hint: None,
-            one_shot: false,
-        }
+        Self::new(Category::Conflict, subject, reason)
     }
-}
 
-impl Refusal {
     /// 記録されたモードと動かすモードの食い違い。
     #[must_use]
     pub fn mode_gate(subject: &str, reason: impl Into<String>) -> Self {
-        Refusal {
-            category: Category::ModeGate,
-            subject: subject.to_owned(),
-            reason: reason.into(),
-            context: None,
-            hint: None,
-            one_shot: false,
-        }
+        Self::new(Category::ModeGate, subject, reason)
     }
 
     /// 直し方を足す。

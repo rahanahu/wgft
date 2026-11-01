@@ -8,7 +8,7 @@
 use std::ffi::OsString;
 
 use clap::error::ErrorKind;
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use wgft_agent::config::gostd;
 
 use crate::failure::Failure;
@@ -63,7 +63,7 @@ pub struct AgentGlobal {
         allow_hyphen_values = true,
         overrides_with = "config"
     )]
-    pub config: Option<String>,
+    pub config: Option<OsString>,
     /// data dir, env WGFT_DATA_DIR; holds agent.json
     #[arg(
         long = "data-dir",
@@ -71,7 +71,7 @@ pub struct AgentGlobal {
         allow_hyphen_values = true,
         overrides_with = "data_dir"
     )]
-    pub data_dir: Option<String>,
+    pub data_dir: Option<OsString>,
 }
 
 /// `wgft agent` の下のコマンド。
@@ -170,6 +170,35 @@ pub fn go_bool(s: &str) -> Result<bool, String> {
     gostd::parse_bool(s)
 }
 
+/// 既定の値を `--help` に出すコマンドの定義。既定はプロセスの起動の時に 1 回だけ決める。
+fn command() -> clap::Command {
+    use wgft_agent::config::{Defaults, ProcessEnv, agent::run_specs};
+    let defaults = Defaults::for_host(&ProcessEnv);
+    let with_default = |a: clap::Arg, d: &str| {
+        let help = a.get_help().map(ToString::to_string).unwrap_or_default();
+        a.help(format!("{help} [default: {d}]"))
+    };
+    let mut run_defaults = vec![];
+    for sp in run_specs(&defaults) {
+        if !sp.default.is_empty() && sp.flag != "data-dir" {
+            run_defaults.push((sp.flag.replace('-', "_"), sp.default));
+        }
+    }
+    let data_dir = defaults.data_dir.clone();
+    let config = defaults.config_path.display().to_string();
+    Cli::command().mut_subcommand("agent", move |agent| {
+        let agent = agent
+            .mut_arg("config", |a| with_default(a, &config))
+            .mut_arg("data_dir", |a| with_default(a, &data_dir));
+        agent.mut_subcommand("run", move |mut run| {
+            for (id, d) in run_defaults {
+                run = run.mut_arg(id, |a| with_default(a, &d));
+            }
+            run
+        })
+    })
+}
+
 /// 解釈した結果。
 #[derive(Debug)]
 pub enum Parsed {
@@ -191,7 +220,10 @@ pub enum Parsed {
 /// 引数を解釈する。誤りは `Error: <文>` の 1 行で、使い方は書かない。
 pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, Failure> {
     let args: Vec<OsString> = args.into_iter().collect();
-    let cli = match Cli::try_parse_from(&args) {
+    let cli = match command()
+        .try_get_matches_from(&args)
+        .and_then(|m| Cli::from_arg_matches(&m))
+    {
         Ok(c) => c,
         Err(e) => return classify(&e, &args),
     };
@@ -207,7 +239,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, Failure
                 cmd: AgentCmd::Run(run),
             })),
         ) => Ok(Parsed::AgentRun { global, run }),
-        (false, None) => Ok(Parsed::Print(help_text(&Cli::command()))),
+        (false, None) => Ok(Parsed::Print(help_text(&command()))),
     }
 }
 
@@ -312,7 +344,7 @@ mod tests {
             "--data-dir=/b",
         ]);
         assert_eq!(r.name.as_deref(), Some("second"));
-        assert_eq!(g.data_dir.as_deref(), Some("/b"));
+        assert_eq!(g.data_dir.as_deref(), Some(std::ffi::OsStr::new("/b")));
     }
 
     #[test]
@@ -321,9 +353,9 @@ mod tests {
         let Parsed::AgentRun { global: g, .. } = p else {
             panic!("not run")
         };
-        assert_eq!(g.data_dir.as_deref(), Some("/x"));
+        assert_eq!(g.data_dir.as_deref(), Some(std::ffi::OsStr::new("/x")));
         let (g, _) = run_flags(&["--config", ""]);
-        assert_eq!(g.config.as_deref(), Some(""));
+        assert_eq!(g.config.as_deref(), Some(std::ffi::OsStr::new("")));
     }
 
     #[test]
@@ -379,6 +411,21 @@ mod tests {
         assert!(matches!(parse(args(&["-v"])), Ok(Parsed::VersionFlag)));
         assert_eq!(error_of(&["--version", "extra"]).code, 1);
         assert_eq!(error_of(&["--version", "version"]).code, 1);
+    }
+
+    #[test]
+    fn help_shows_the_defaults() {
+        let Ok(Parsed::Print(h)) = parse(args(&["agent", "run", "--help"])) else {
+            panic!("no help");
+        };
+        assert!(h.contains("[default: wgft0]"), "{h}");
+        assert!(h.contains("[default: 8192]"), "{h}");
+        assert!(h.contains("[default: 2048]"), "{h}");
+        assert!(h.contains("--data-dir"), "{h}");
+        let Ok(Parsed::Print(h)) = parse(args(&["agent", "--help"])) else {
+            panic!("no help");
+        };
+        assert!(h.contains("[default: ") && h.contains("agent.env"), "{h}");
     }
 
     #[test]

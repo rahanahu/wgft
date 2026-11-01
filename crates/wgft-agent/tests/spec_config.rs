@@ -61,6 +61,7 @@ fn dotenv_reads_what_the_spec_reads() {
         let (_d, _p, r) = read_input(c.input.as_deref());
         let got: BTreeMap<String, String> = r
             .unwrap_or_else(|e| panic!("{}: {e:?}", c.name))
+            .values
             .into_iter()
             .collect();
         assert_eq!(got, c.want, "{}", c.name);

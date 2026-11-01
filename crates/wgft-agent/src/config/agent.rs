@@ -47,7 +47,7 @@ pub fn run_specs(d: &Defaults) -> Vec<Spec> {
 }
 
 /// 入口を通った設定の値。
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Settings {
     /// 認証情報ファイルを置くディレクトリ。値をそのまま使う。
     pub data_dir: String,
@@ -69,6 +69,31 @@ pub struct Settings {
     pub max_udp_flows: u32,
     /// 同時 TCP フローの上限。
     pub max_tcp_flows: u32,
+}
+
+// 接続文字列は秘密なので Debug に出さない
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("data_dir", &self.data_dir)
+            .field(
+                "join",
+                &if self.join.is_empty() {
+                    ""
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("name", &self.name)
+            .field("mode", &self.mode)
+            .field("wg_interface", &self.wg_interface)
+            .field("netstack", &self.netstack)
+            .field("batch_mib", &self.batch_mib)
+            .field("allow_targets", &self.allow_targets)
+            .field("max_udp_flows", &self.max_udp_flows)
+            .field("max_tcp_flows", &self.max_tcp_flows)
+            .finish()
+    }
 }
 
 /// `Config` から入口の検査を通す。`os` は Go の `runtime.GOOS` の名前 (`linux`、`windows`、`darwin`)。
@@ -151,14 +176,14 @@ fn flow_cap(c: &Config, env: &str) -> Result<u32, Refusal> {
 }
 
 /// 0 以上の 10 進の整数。`int64` を超える正の値は誤りにせず、最大に丸める。
+/// 解釈は Go の `strconv.ParseInt(v, 10, 64)` で、符号を外した後の走査の順も同じである。
 fn batch_mib(v: &str) -> Result<Option<i64>, Refusal> {
-    use std::num::IntErrorKind::PosOverflow;
     if v.is_empty() {
         return Ok(None);
     }
-    match v.parse::<i64>() {
+    match gostd::parse_int_base10(v) {
         Ok(n) if n >= 0 => Ok(Some(n)),
-        Err(e) if *e.kind() == PosOverflow => Ok(Some(i64::MAX)),
+        Err(gostd::IntError::Range) if !v.starts_with('-') => Ok(Some(i64::MAX)),
         _ => Err(Refusal::config(
             "WGFT_AGENT_BATCH_MIB",
             format!(
@@ -243,20 +268,13 @@ pub fn startup_lines(c: &Config, s: &Settings) -> Vec<LogLine> {
             "WGFT_AGENT_BATCH_MIB: not applied yet, since this build has no send batching; the setting is kept so the same agent.env works later".to_owned(),
         ));
     }
-    // フロー数の上限の予算は「宛先と予算」の段で入る
-    let unapplied: Vec<&str> = ["WGFT_MAX_UDP_FLOWS", "WGFT_MAX_TCP_FLOWS"]
-        .into_iter()
-        .filter(|e| c.source(e) != Source::Default)
-        .collect();
-    if !unapplied.is_empty() {
-        out.push(LogLine::Stamped(format!(
-            "{}: not enforced yet, since this build has no flow budget; the setting is kept so the same agent.env works later",
-            unapplied.join(" and ")
-        )));
-    }
+    // フロー数の上限の予算は「宛先と予算」の段で入る。入るまで、ユーザー空間モードでは毎回書く
+    out.push(LogLine::Stamped(
+        "WGFT_MAX_UDP_FLOWS and WGFT_MAX_TCP_FLOWS: not enforced yet, since this build has no flow budget; the settings are kept so the same agent.env works later".to_owned(),
+    ));
     if c.source("WGFT_AGENT_NETSTACK") != Source::Default {
         out.push(LogLine::Stamped(format!(
-            "WGFT_AGENT_NETSTACK={}: unused, since this build has one network stack, wgft's own; the setting is kept so the same agent.env works",
+            "WGFT_AGENT_NETSTACK={}: unused, since this build has no choice of network stack; the setting is kept so the same agent.env works",
             s.netstack
         )));
     }
@@ -300,4 +318,114 @@ pub fn unreadable_hint(path: &std::path::Path) -> String {
     format!(
         "It may hold WGFT_JOIN, so let the agent's group read it rather than every local user; with the provided agent.service, which runs the agent as the wgft user: chown root:wgft {p} && chmod 0640 {p}. If the file already has that owner, group and mode, the user that read it here is not the one the agent runs as"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+
+    use super::*;
+    use crate::config::dotenv::Map;
+
+    fn settings(env: &[(&str, &str)], file: &[(&str, &str)]) -> (Config, Settings) {
+        let d = Defaults {
+            data_dir: "/d".into(),
+            config_path: "/e".into(),
+        };
+        let env: HashMap<String, OsString> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), OsString::from(v)))
+            .collect();
+        let file = Map {
+            values: file
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            ..Map::default()
+        };
+        let c = Config::resolve(run_specs(&d), &HashMap::new(), &env, &file).unwrap();
+        let s = check_door(&c, "linux").unwrap();
+        (c, s)
+    }
+
+    fn stamped(lines: &[LogLine]) -> Vec<&str> {
+        lines
+            .iter()
+            .filter_map(|l| match l {
+                LogLine::Stamped(s) => Some(s.as_str()),
+                LogLine::Plain(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn defaults_write_the_block_the_flow_notice_and_the_allowlist_line() {
+        let (c, s) = settings(&[], &[]);
+        let lines = startup_lines(&c, &s);
+        assert_eq!(lines[0], LogLine::Plain("effective config:".into()));
+        let st = stamped(&lines);
+        assert_eq!(st.len(), 2, "{st:?}");
+        assert!(st[0].starts_with("WGFT_MAX_UDP_FLOWS and WGFT_MAX_TCP_FLOWS: not enforced yet"));
+        assert!(st[1].starts_with("no target allowlist: WGFT_AGENT_ALLOW_TARGETS is not set"));
+    }
+
+    #[test]
+    fn a_set_batch_netstack_and_flow_caps_each_get_their_notice() {
+        let (c, s) = settings(
+            &[
+                ("WGFT_AGENT_NETSTACK", "gvisor"),
+                ("WGFT_MAX_UDP_FLOWS", "100"),
+            ],
+            &[("WGFT_AGENT_BATCH_MIB", "4")],
+        );
+        let st = stamped(&startup_lines(&c, &s)).join("\n");
+        assert!(st.contains("WGFT_AGENT_BATCH_MIB: not applied yet"), "{st}");
+        assert!(st.contains("WGFT_MAX_UDP_FLOWS and WGFT_MAX_TCP_FLOWS: not enforced yet"));
+        assert!(
+            st.contains("WGFT_AGENT_NETSTACK=gvisor: unused, since this build has no choice of network stack;"),
+            "{st}"
+        );
+        // 空の値でも、出所が既定でなければ書く
+        let (c, s) = settings(&[("WGFT_AGENT_NETSTACK", "")], &[]);
+        assert!(
+            stamped(&startup_lines(&c, &s))
+                .iter()
+                .any(|l| l.starts_with("WGFT_AGENT_NETSTACK=: unused"))
+        );
+        let (c, s) = settings(&[], &[]);
+        assert!(
+            !stamped(&startup_lines(&c, &s))
+                .join("\n")
+                .contains("NETSTACK")
+        );
+    }
+
+    #[test]
+    fn join_warning_only_for_a_non_empty_malformed_string() {
+        let w = |j: &str| join_warning(&settings(&[("WGFT_JOIN", j)], &[]).1);
+        assert_eq!(w(""), None);
+        assert_eq!(
+            w(
+                "wgft://h:1/tok#sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            ),
+            None
+        );
+        let Some(LogLine::Stamped(m)) = w("not-a-join-string") else {
+            panic!("no warning");
+        };
+        assert!(
+            m.starts_with("warning: WGFT_JOIN is malformed: join string must look like"),
+            "{m}"
+        );
+        assert!(!m.contains("not-a-join-string"));
+    }
+
+    #[test]
+    fn debug_hides_the_join_string() {
+        let (c, s) = settings(&[("WGFT_JOIN", "wgft://h:1/secret#sha256:00")], &[]);
+        assert!(!format!("{s:?}").contains("secret"));
+        assert!(!format!("{c:?}").contains("secret"));
+        assert!(format!("{c:?}").contains("****"));
+    }
 }

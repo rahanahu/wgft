@@ -3,13 +3,33 @@
 //! systemd、Docker の `--env-file`、compose の `env_file` の解釈が一致する範囲だけを受ける。誤りの文面は
 //! 行の中身も値も出さない。行が `WGFT_JOIN` の接続文字列のような秘密を含みうるためである。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::error::Refusal;
 
-/// 読み取った対応表。同じキーが複数あれば最後の行が勝つ。
-pub type Map = HashMap<String, String>;
+/// 読み取った内容。同じキーが複数あれば最後の行が勝つ。
+///
+/// 仕様はバイト列を UTF-8 として扱う。Rust は値を `String` で持つので、UTF-8 でない値は別の値に化かさず、
+/// キーだけを覚える。そのキーをコマンドが読むなら、`Config::resolve` が拒否にする。
+/// コメントと空行は UTF-8 でなくてもよく、読まない名前の値も同じである。
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Map {
+    /// UTF-8 の値。
+    pub values: HashMap<String, String>,
+    /// 値が UTF-8 でないキー。
+    pub invalid: HashSet<String>,
+}
+
+// 値は秘密でありうるので、Debug にはキーだけを出す
+impl std::fmt::Debug for Map {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Map")
+            .field("keys", &self.values.keys().collect::<Vec<_>>())
+            .field("invalid", &self.invalid)
+            .finish()
+    }
+}
 
 /// 構文の誤り。最初に誤った行で止まる。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,39 +41,55 @@ pub struct SyntaxError {
 }
 
 /// 本文を読む。
-pub fn parse(text: &str) -> Result<Map, SyntaxError> {
-    let mut out = Map::new();
-    for (i, raw) in text.split('\n').enumerate() {
-        let line = raw.trim_end_matches('\r');
-        if line.is_empty() || line.starts_with('#') {
+pub fn parse(text: &[u8]) -> Result<Map, SyntaxError> {
+    let mut out = Map::default();
+    for (i, raw) in text.split(|&b| b == b'\n').enumerate() {
+        let mut line = raw;
+        while let [rest @ .., b'\r'] = line {
+            line = rest;
+        }
+        if line.is_empty() || line.starts_with(b"#") {
             continue;
         }
         let at = |reason: String| SyntaxError {
             line: i + 1,
             reason,
         };
-        let Some((key, val)) = line.split_once('=').filter(|(k, _)| !k.is_empty()) else {
+        let Some(eq) = line.iter().position(|&b| b == b'=').filter(|&p| p > 0) else {
             return Err(at(
                 "not in KEY=value form; the line is not shown, since it may hold a secret".into(),
             ));
         };
-        // 前後の Unicode の空白と、キーの中の空白とタブ。垂直タブなどが中にあるキーは通す
-        if key.trim() != key || key.contains([' ', '\t']) {
+        let (key, val) = (&line[..eq], &line[eq + 1..]);
+        // 前後の Unicode の空白と、キーの中の空白とタブ。垂直タブなどが中にあるキーは通す。
+        // UTF-8 でないバイトは空白でないので、置き換えた文字で判定してよい
+        let key_text = String::from_utf8_lossy(key);
+        if key_text.trim() != key_text || key.iter().any(|&b| b == b' ' || b == b'\t') {
             return Err(at("key name may not contain whitespace; the line is not shown, since it may hold a secret".into()));
         }
-        if val.starts_with(['"', '\'']) {
+        if val.starts_with(b"\"") || val.starts_with(b"'") {
             return Err(at(format!(
                 "do not quote the value of {}; Docker keeps quotes as part of the value",
-                key_label(key)
+                key_label(&key_text)
             )));
         }
-        if val.contains([' ', '\t']) {
+        if val.iter().any(|&b| b == b' ' || b == b'\t') {
             return Err(at(format!(
                 "the value of {} may not contain whitespace",
-                key_label(key)
+                key_label(&key_text)
             )));
         }
-        out.insert(key.to_owned(), val.to_owned());
+        // 読めないキーはどの設定にも当たらない
+        let Ok(key) = std::str::from_utf8(key) else {
+            continue;
+        };
+        if let Ok(v) = std::str::from_utf8(val) {
+            out.invalid.remove(key);
+            out.values.insert(key.to_owned(), v.to_owned());
+        } else {
+            out.values.remove(key);
+            out.invalid.insert(key.to_owned());
+        }
     }
     Ok(out)
 }
@@ -95,7 +131,7 @@ pub fn read(path: &Path) -> Result<Map, ReadError> {
     let shown = path.display().to_string();
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::default()),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             let os = os_error_text(&e);
             return Err(ReadError::Permission(Refusal::config(
@@ -104,20 +140,12 @@ pub fn read(path: &Path) -> Result<Map, ReadError> {
             )));
         }
         Err(e) => {
-            return Err(ReadError::Other(format!(
-                "read {shown}: {}",
-                strip_os_suffix(&e.to_string())
+            return Err(ReadError::Other(super::perms::go_style_path_error(
+                "read", path, &e,
             )));
         }
     };
-    // 仕様はバイト列を UTF-8 として扱う。UTF-8 でない設定は、黙って別の値に化かさず拒む (Go との差)
-    let Ok(text) = String::from_utf8(bytes) else {
-        return Err(ReadError::Syntax(Refusal::config(
-            &shown,
-            "is not valid UTF-8; the file is not shown, since it may hold a secret",
-        )));
-    };
-    parse(&text)
+    parse(&bytes)
         .map_err(|e| ReadError::Syntax(Refusal::config(&format!("{shown}:{}", e.line), e.reason)))
 }
 
@@ -151,23 +179,23 @@ mod tests {
 
     #[test]
     fn last_duplicate_wins_and_inner_equals_is_kept() {
-        let m = parse("A=1\nA=2\nB=x=y\n").unwrap();
-        assert_eq!(m["A"], "2");
-        assert_eq!(m["B"], "x=y");
+        let m = parse(b"A=1\nA=2\nB=x=y\n").unwrap();
+        assert_eq!(m.values["A"], "2");
+        assert_eq!(m.values["B"], "x=y");
     }
 
     #[test]
     fn unicode_whitespace_around_a_key_is_refused() {
         // 前後の Unicode の空白は拒む。中の垂直タブは通す (Go の TrimSpace と ContainsAny の差)
-        assert!(parse("\u{3000}A=1\n").is_err());
-        assert!(parse("A\u{b}=1\n").is_err());
-        assert!(parse("A\u{b}B=1\n").is_ok());
+        assert!(parse("\u{3000}A=1\n".as_bytes()).is_err());
+        assert!(parse("A\u{b}=1\n".as_bytes()).is_err());
+        assert!(parse("A\u{b}B=1\n".as_bytes()).is_ok());
     }
 
     #[test]
     fn missing_file_is_empty_and_directory_is_not() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(read(&dir.path().join("none.env")).unwrap().is_empty());
+        assert_eq!(read(&dir.path().join("none.env")).unwrap(), Map::default());
         assert!(matches!(read(dir.path()), Err(ReadError::Other(_))));
     }
 
@@ -180,14 +208,17 @@ mod tests {
     }
 
     #[test]
-    fn invalid_utf8_is_a_syntax_refusal_without_content() {
-        let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("a.env");
-        std::fs::write(&f, b"WGFT_JOIN=\xff\xfe\n").unwrap();
-        let Err(ReadError::Syntax(r)) = read(&f) else {
-            panic!("expected a syntax refusal");
-        };
-        assert!(!r.to_string().contains("WGFT_JOIN="));
+    fn invalid_utf8_is_kept_per_key_and_comments_may_hold_it() {
+        let m = parse(b"# \xff\xfe comment\nA=1\nWGFT_JOIN=\xff\nB=\xfe\nB=2\n\xff=3\n").unwrap();
+        assert_eq!(m.values["A"], "1");
+        assert_eq!(m.values["B"], "2");
+        assert!(!m.invalid.contains("B"));
+        assert!(m.invalid.contains("WGFT_JOIN"));
+        // 読めないキーは覚えない
+        assert_eq!(m.values.len(), 2);
+        // 構文の誤りは UTF-8 でない値でも同じ文面で、値を出さない
+        let e = parse(b"A=\xff \xfe\n").unwrap_err();
+        assert_eq!(e.reason, "the value of A may not contain whitespace");
     }
 
     #[cfg(unix)]

@@ -80,17 +80,37 @@ impl<S: std::hash::BuildHasher> Env for HashMap<String, OsString, S> {
 }
 
 /// 1 項目の解決結果。
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Resolved {
     value: String,
     source: Source,
 }
 
 /// 解決済みの設定。
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     specs: Vec<Spec>,
     vals: HashMap<&'static str, Resolved>,
+}
+
+// 秘密の項目の値は Debug に出さない
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut m = f.debug_map();
+        for sp in &self.specs {
+            let r = self.resolved(sp.env);
+            let shown = if sp.secret && !r.value.is_empty() {
+                "****"
+            } else {
+                r.value.as_str()
+            };
+            m.entry(
+                &sp.env,
+                &format_args!("{shown:?} from {}", r.source.as_str()),
+            );
+        }
+        m.finish()
+    }
 }
 
 impl Config {
@@ -109,7 +129,13 @@ impl Config {
                 value: sp.default.clone(),
                 source: Source::Default,
             };
-            if let Some(v) = file.get(sp.env) {
+            if file.invalid.contains(sp.env) {
+                return Err(Refusal::config(
+                    sp.env,
+                    "is not valid UTF-8 in the dotenv file",
+                ));
+            }
+            if let Some(v) = file.values.get(sp.env) {
                 r = Resolved {
                     value: v.clone(),
                     source: Source::File,
@@ -208,7 +234,7 @@ impl Defaults {
 /// dotenv のパスを決める。`--config`、`WGFT_CONFIG`、既定の順で、`WGFT_CONFIG` は環境変数でだけ受ける。
 /// 空のパスは存在しないファイルと同じに扱う。
 #[must_use]
-pub fn config_path(flag: Option<&str>, env: &dyn Env, default: &Path) -> PathBuf {
+pub fn config_path(flag: Option<&std::ffi::OsStr>, env: &dyn Env, default: &Path) -> PathBuf {
     if let Some(f) = flag {
         return PathBuf::from(f);
     }
@@ -232,5 +258,57 @@ impl LogLine {
             LogLine::Plain(s) => eprintln!("{s}"),
             LogLine::Stamped(s) => crate::logging::line(s),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::ffi::OsStringExt;
+
+    use super::*;
+
+    #[test]
+    fn a_non_utf8_environment_value_of_a_setting_is_refused_and_others_are_ignored() {
+        let spec = Spec {
+            env: "WGFT_NAME",
+            flag: "name",
+            default: String::new(),
+            secret: false,
+        };
+        let mut env: HashMap<String, OsString> = HashMap::new();
+        env.insert("WGFT_OTHER".into(), OsString::from_vec(vec![0xff]));
+        let ok = Config::resolve(
+            vec![spec.clone()],
+            &HashMap::new(),
+            &env,
+            &dotenv::Map::default(),
+        );
+        assert!(ok.is_ok());
+        env.insert("WGFT_NAME".into(), OsString::from_vec(vec![0xff]));
+        let e = Config::resolve(
+            vec![spec.clone()],
+            &HashMap::new(),
+            &env,
+            &dotenv::Map::default(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "refusing to start [config WGFT_NAME]: is not valid UTF-8"
+        );
+        // dotenv の値も、コマンドが読む名前のときだけ拒む
+        let mut file = dotenv::Map::default();
+        file.invalid.insert("WGFT_NAME".into());
+        let e = Config::resolve(vec![spec], &HashMap::new(), &HashMap::new(), &file).unwrap_err();
+        assert!(e.to_string().contains("WGFT_NAME"));
+        file.invalid.clear();
+        file.invalid.insert("WGFT_UNREAD".into());
+        let spec2 = Spec {
+            env: "WGFT_NAME",
+            flag: "name",
+            default: String::new(),
+            secret: false,
+        };
+        assert!(Config::resolve(vec![spec2], &HashMap::new(), &HashMap::new(), &file).is_ok());
     }
 }

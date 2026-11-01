@@ -14,14 +14,15 @@ pub mod failure;
 /// ```
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// ビルドした wgft の版。ビルドの時に環境変数 `WGFT_VERSION` で埋める。無ければ crate の版から作る。
+/// ビルドした wgft の版。ビルドの時に環境変数 `BUILD_RELEASE_VERSION` で埋める。無ければ crate の版から作る。
+/// この変数はビルドだけが読み、実行時の `WGFT_*` の設定とは関係がない。
 ///
 /// ```
-/// assert!(wgft::version().ends_with(wgft::VERSION) || std::env::var("WGFT_VERSION").is_ok());
+/// assert!(wgft::version().ends_with(wgft::VERSION) || option_env!("BUILD_RELEASE_VERSION").is_some());
 /// ```
 #[must_use]
 pub fn version() -> String {
-    option_env!("WGFT_VERSION")
+    option_env!("BUILD_RELEASE_VERSION")
         .filter(|v| !v.is_empty())
         .map_or_else(|| format!("dev-rust-{VERSION}"), str::to_owned)
 }

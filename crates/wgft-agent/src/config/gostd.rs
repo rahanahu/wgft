@@ -82,8 +82,18 @@ impl IntError {
 /// 64 bit の符号付き整数の絶対値の境目。
 const CUTOFF: u64 = 1 << 63;
 
-/// `strconv.ParseInt(s, 0, 64)`。`0x`、`0o`、`0b` の接頭辞、先頭の 0 による 8 進、桁の間の `_` を受ける。
+/// `strconv.ParseInt(s, 0, 64)`。
 pub fn parse_int(s: &str) -> Result<i64, IntError> {
+    parse_signed(s, 0)
+}
+
+/// `strconv.ParseInt(s, 10, 64)`。接頭辞と `_` を受けない。
+pub fn parse_int_base10(s: &str) -> Result<i64, IntError> {
+    parse_signed(s, 10)
+}
+
+/// `strconv.ParseInt(s, base, 64)`。`base` は 0 か 10。符号を外してから `ParseUint` に渡し、符号を見て範囲を決める。
+fn parse_signed(s: &str, base: u64) -> Result<i64, IntError> {
     if s.is_empty() {
         return Err(IntError::Syntax);
     }
@@ -92,17 +102,12 @@ pub fn parse_int(s: &str) -> Result<i64, IntError> {
         b'-' => (true, &s[1..]),
         _ => (false, s),
     };
-    let un = parse_uint(digits);
-    // 範囲の誤りは Go と同じく、符号を見てから決める
-    let un = match un {
+    let un = match parse_uint(digits, base) {
         Ok(n) => n,
         Err(IntError::Range) => u64::MAX,
         Err(e) => return Err(e),
     };
-    if !neg && un >= CUTOFF {
-        return Err(IntError::Range);
-    }
-    if neg && un > CUTOFF {
+    if (!neg && un >= CUTOFF) || (neg && un > CUTOFF) {
         return Err(IntError::Range);
     }
     // neg で un == CUTOFF のときは i64::MIN になる
@@ -113,31 +118,35 @@ pub fn parse_int(s: &str) -> Result<i64, IntError> {
     })
 }
 
-/// `strconv.ParseUint(s, 0, 64)`。
-fn parse_uint(s: &str) -> Result<u64, IntError> {
+/// `strconv.ParseUint(s, base, 64)`。`base` が 0 なら接頭辞と `_` を受ける。
+fn parse_uint(s: &str, base: u64) -> Result<u64, IntError> {
     let s0 = s.as_bytes();
     if s0.is_empty() {
         return Err(IntError::Syntax);
     }
+    let base0 = base == 0;
     let mut body = s0;
-    let mut base = 10u64;
-    if body[0] == b'0' {
-        match body.get(1).map(u8::to_ascii_lowercase) {
-            Some(b'b') if body.len() >= 3 => {
-                base = 2;
-                body = &body[2..];
-            }
-            Some(b'o') if body.len() >= 3 => {
-                base = 8;
-                body = &body[2..];
-            }
-            Some(b'x') if body.len() >= 3 => {
-                base = 16;
-                body = &body[2..];
-            }
-            _ => {
-                base = 8;
-                body = &body[1..];
+    let mut base = base;
+    if base0 {
+        base = 10;
+        if body[0] == b'0' {
+            match body.get(1).map(u8::to_ascii_lowercase) {
+                Some(b'b') if body.len() >= 3 => {
+                    base = 2;
+                    body = &body[2..];
+                }
+                Some(b'o') if body.len() >= 3 => {
+                    base = 8;
+                    body = &body[2..];
+                }
+                Some(b'x') if body.len() >= 3 => {
+                    base = 16;
+                    body = &body[2..];
+                }
+                _ => {
+                    base = 8;
+                    body = &body[1..];
+                }
             }
         }
     }
@@ -145,7 +154,7 @@ fn parse_uint(s: &str) -> Result<u64, IntError> {
     let mut n: u64 = 0;
     for &c in body {
         let d = match c {
-            b'_' => {
+            b'_' if base0 => {
                 underscores = true;
                 continue;
             }
@@ -283,6 +292,28 @@ mod tests {
         ] {
             assert_eq!(parse_int(s), Err(IntError::Range), "{s:?}");
         }
+    }
+
+    #[test]
+    fn base_10_has_no_prefix_or_underscore_and_scans_like_go() {
+        assert_eq!(parse_int_base10("+016"), Ok(16));
+        assert_eq!(parse_int_base10("-0"), Ok(0));
+        for s in ["0x10", "1_0", "", "+", "1.5", " 4", "4MiB"] {
+            assert_eq!(parse_int_base10(s), Err(IntError::Syntax), "{s:?}");
+        }
+        // 溢れが先に見つかれば範囲の誤り、後ろの誤りが先なら書き方の誤り
+        assert_eq!(
+            parse_int_base10("9223372036854775808"),
+            Err(IntError::Range)
+        );
+        assert_eq!(
+            parse_int_base10("9223372036854775808x"),
+            Err(IntError::Syntax)
+        );
+        assert_eq!(
+            parse_int_base10("99999999999999999999x"),
+            Err(IntError::Range)
+        );
     }
 
     #[test]

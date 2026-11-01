@@ -32,9 +32,16 @@ impl Prepared {
 fn flag_values(
     global: &AgentGlobal,
     run: &RunArgs,
-) -> std::collections::HashMap<&'static str, String> {
+) -> Result<std::collections::HashMap<&'static str, String>, AgentError> {
+    let data_dir =
+        match &global.data_dir {
+            Some(d) => Some(d.to_str().map(str::to_owned).ok_or_else(|| {
+                wgft_agent::Refusal::config("WGFT_DATA_DIR", "is not valid UTF-8")
+            })?),
+            None => None,
+        };
     let strings = [
-        ("WGFT_DATA_DIR", &global.data_dir),
+        ("WGFT_DATA_DIR", &data_dir),
         ("WGFT_JOIN", &run.join),
         ("WGFT_NAME", &run.name),
         ("WGFT_MODE", &run.mode),
@@ -55,7 +62,7 @@ fn flag_values(
             out.insert(k, n.to_string());
         }
     }
-    out
+    Ok(out)
 }
 
 /// 設定を読み、入口の検査を通す。この版が持たない機能の拒否 (`prepare`) より前の段である。
@@ -81,7 +88,7 @@ pub fn prepare_door(
     })?;
     let cfg = Config::resolve(
         agent::run_specs(&defaults),
-        &flag_values(global, run),
+        &flag_values(global, run)?,
         env,
         &file,
     )?;
@@ -119,4 +126,68 @@ pub fn prepare(
     let p = prepare_door(global, run, env, os, early)?;
     agent::check_supported(&p.settings)?;
     Ok(p)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+    use crate::cli::{self, Parsed};
+
+    /// 内容と権限を指定した dotenv で入口を通し、`early` の行を返す。
+    fn early_lines(content: &str, mode: u32, env: &[(&str, &str)]) -> Vec<LogLine> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent.env");
+        std::fs::write(&path, content).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let argv = ["wgft", "agent", "run", "--data-dir", "/d"].map(OsString::from);
+        let Ok(Parsed::AgentRun { mut global, run }) = cli::parse(argv) else {
+            panic!("parse");
+        };
+        global.config = Some(path.into_os_string());
+        let env: HashMap<String, OsString> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), OsString::from(v)))
+            .collect();
+        let mut early = Vec::new();
+        prepare_door(&global, &run, &env, "linux", &mut early).unwrap();
+        early
+    }
+
+    const JOIN: &str = "WGFT_JOIN=wgft://h:1/t#sha256:0000000000000000000000000000000000000000000000000000000000000000\n";
+
+    #[test]
+    fn a_world_readable_dotenv_with_a_join_string_warns() {
+        let e = early_lines(JOIN, 0o644, &[]);
+        assert_eq!(e.len(), 1, "{e:?}");
+        let LogLine::Plain(w) = &e[0] else {
+            panic!("{e:?}")
+        };
+        assert!(
+            w.starts_with("warning: ") && w.contains("holds a secret value, WGFT_JOIN;"),
+            "{w}"
+        );
+        assert!(!w.contains("sha256"), "{w}");
+        // other のビットが 1 つでもあれば警告する
+        assert_eq!(early_lines(JOIN, 0o601, &[]).len(), 1);
+    }
+
+    #[test]
+    fn the_shared_group_layout_and_other_sources_do_not_warn() {
+        // group が読める配置は意図した共有である
+        assert_eq!(early_lines(JOIN, 0o640, &[]), vec![]);
+        assert_eq!(early_lines(JOIN, 0o600, &[]), vec![]);
+        // 値が環境変数から来るなら、ファイルの値は使われない
+        let e = early_lines(JOIN, 0o644, &[("WGFT_JOIN", "x")]);
+        assert!(e.iter().all(|l| matches!(l, LogLine::Stamped(_))), "{e:?}");
+        let e = early_lines(JOIN, 0o644, &[("WGFT_JOIN", "")]);
+        assert!(e.is_empty(), "{e:?}");
+        // 空の値は秘密を持たない
+        assert_eq!(early_lines("WGFT_JOIN=\nWGFT_NAME=x\n", 0o644, &[]), vec![]);
+        // 秘密でない項目だけなら警告しない
+        assert_eq!(early_lines("WGFT_NAME=x\n", 0o644, &[]), vec![]);
+    }
 }

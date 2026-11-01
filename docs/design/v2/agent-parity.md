@@ -96,7 +96,7 @@ Go の v1 の agent と仕様に対して、今の Rust の agent に無いも�
 | 項目 | 仕様 | 今の Rust | 段 |
 | --- | --- | --- | --- |
 | コマンド | [cli-config.md のコマンド](../spec/cli-config.md#コマンド) | `agent run` と `version` | 「制御ソケット」と「agent doctor の骨組み」 |
-| `wgft version` | 2 行。版と `protocol range: v1-v1` | 2 行。版は `WGFT_VERSION` をビルドで埋め、無ければ `dev-rust-<crate の版>` | 済み |
+| `wgft version` | 2 行。版と `protocol range: v1-v1` | 2 行。版はビルドの時の環境変数 `BUILD_RELEASE_VERSION` で埋め (実行時の設定ではない)、無ければ `dev-rust-<crate の版>` | 済み |
 | `--version` と `-v` | 版の 1 行 | 版の 1 行 | 済み |
 | 優先順位 | フラグ、環境変数、dotenv、既定。出所を覚える | 出所を覚えて解決する。clap の `env` は使わない | 済み |
 | dotenv | [cli-config.md の dotenv の構文](../spec/cli-config.md#dotenv-の構文)。読み取りの誤りと権限の文面 | 仕様と fixture のとおり | 済み |
@@ -467,7 +467,8 @@ clap の derive でコマンドの構成とフラグの名前を書き、値の�
 - フラグの形:値を取るフラグは、次の語が `-` で始まっても値にし、同じフラグを繰り返せば最後の値が勝ちます。
   `--config` と `--data-dir` は `wgft agent` の global の引数です
 - UTF-8 でない値:Go はバイト列のまま受けます。
-  Rust は環境変数と dotenv の値を `String` で持つので、UTF-8 でない値は別の値に化かさず、種別 `config` の拒否にします。
+  Rust は値を `String` で持つので、環境変数の値と dotenv の値が UTF-8 でなければ、別の値に化かさず、その名前をコマンドが読むときだけ種別 `config` の拒否にします。
+  dotenv のコメントと空行と、読まない名前の値は UTF-8 でなくてかまいません。
   データディレクトリのパスを黙って変えないためです
 - 引用:`%q` の引用は Go の `strconv.Quote` を写します。
   印字できるかの判定は、一般カテゴリの表で行います。
@@ -477,14 +478,19 @@ clap の derive でコマンドの構成とフラグの名前を書き、値の�
   宛先の許可一覧は、判定が入るまで、値があれば種別 `prerequisite` で拒みます。
   黙って効かないと、防御の設定を利用者の意図より緩めるためです。
   どちらも入口の検査の後に判定するので、値の誤りが先に出ます。
-  フロー数の上限と送信の向きのバッチは、値を受けて、まだ効かせていない旨を 1 行出します。
+  フロー数の上限は、値を受けて、ユーザー空間モードでは毎回、まだ効かせていない旨を 1 行出します。
+  送信の向きのバッチは、値があるときだけ同じ旨を 1 行出します。
   どちらも対応する段が入るときに、この拒否と行を外します
+- 値を取るフラグ:`--config` と `--data-dir` は `OsString` で受けます。`--config` は空の値を許し、空のパスは存在しないファイルと同じです。
+  `--help` には、環境で決まる既定の値を `[default: ...]` で出します
 - 起動ログの順:許可一覧が無い旨の行は `agent starting` の行より前に書きます。
   後者を `wgft_agent::run` が書くためです。
   ログの順は保証の外です
 - データディレクトリ:作れなければ `data dir: <誤り>` で終了コード 1 です。
   `wgft agent` の説明と、`wgft` だけの呼び出しは、説明を標準出力に書いて終了コード 0 です。
   未知のサブコマンドは誤りで終了コード 1 です。
+  余分な引数と `--help` を一緒に書くと、Go は説明を書きますが、Rust は余分な引数の誤りを先に返します。保証の外なので合わせません
+  `agent doctor` の引数の誤りが終了コード 2 になる判定は、今は引数の語を走査します。`agent doctor` の段で、解釈したコマンドから決める形に置き換えます
   `wgft agent foo` を Go は説明で 0 にしますが、保証の外なので合わせません
 
 ### 既定のパス
@@ -534,7 +540,7 @@ Go と変える行は次のとおりです。
 
 - メモリ:`memory soft limit:` の行を書かず、[メモリの上界の行](#メモリの上界の行)を書きます。
   `GOMEMLIMIT` は読まず、行も書きません
-- netstack:`WGFT_AGENT_NETSTACK` の出所が既定でなければ、`WGFT_AGENT_NETSTACK=<値>: unused, since this build has one network stack, wgft's own; the setting is kept so the same agent.env works` を書きます。
+- netstack:`WGFT_AGENT_NETSTACK` の出所が既定でなければ、`WGFT_AGENT_NETSTACK=<値>: unused, since this build has no choice of network stack; the setting is kept so the same agent.env works`。試作はカーネルの TCP/IP で中継するためで、wgstack が入ったら文面を「netstack は 1 つ」に直す を書きます。
   値は `gvisor` も `wgstack` も受け付けますが、どちらも実装を選ばず、使いません。
   実験的の警告の行は書きません
 - 送信の向きのバッチ:受け付ける値と誤りの文面は仕様のとおりです。

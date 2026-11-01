@@ -294,10 +294,10 @@ server を乗っ取った者は、全体状態とトンネルの中の packet �
 
 `wgft agent run` は v1 と同じく `WGFT_*` の環境変数を受け、dotenv はそのファイルでの書き方、フラグはその別名です。
 優先順位、dotenv の構文、値の検査、有効な設定の行、終了コードは、仕様 [agent の CLI と設定](../spec/cli-config.md) のとおりで、作りは [Rust の agent が Go の agent を置き換えるための設計](agent-parity.md#設定の層)にあります。
-`WGFT_AGENT_NETSTACK` は `gvisor` と `wgstack` を受けて、使わない旨を 1 行出します。
+`WGFT_AGENT_NETSTACK` は `gvisor` と `wgstack` を受けて、使わない旨を 1 行出します。試作は TUN 越しにカーネルの TCP/IP で中継するので、netstack を選べないためです。
 `WGFT_WG_INTERFACE` は TUN の名前に使います ([トンネルと中継](#トンネルと中継-試作の形))。
 
-試作に無い機能は、値があれば黙って無視せずに設定の誤り (終了コード 3) で止めます。
+試作に無い機能は、値があれば黙って無視せずに、種別 `prerequisite` の拒否 (終了コード 3) で止めます。
 無視すると、許可一覧のような守りを利用者の意図より緩めるためです。
 
 - `WGFT_MODE=kernel`:カーネルモード
