@@ -1503,12 +1503,12 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   捨てるのは入れる datagram の分だけなので、1 つの datagram が 1 回しか捨てられない分の仕事です。
   外す操作を O(1) にするため、送信の FIFO は前の指しを持つ二重の list にし、endpoint の行は自分の送信の datagram の先頭と末尾を持ちます。
   どの外し方でも、外すのは持ち主の endpoint で最も古い datagram なので、endpoint の列は一方向で足ります。
-  `max_age_ms` が 0 でなければ、datagram は入れた時刻 (ms の下位 32 bit) と時間の上限を持ち、`poll_udp` が先頭を取り出す時に、送り始めていない datagram が上限を超えていれば捨てます。
+  `max_age_ms` が 0 でなければ、datagram は入れた時刻 (ns) と時間の上限を持ち、`poll_udp` が先頭を取り出す時に、送り始めていない datagram が上限を超えていれば捨てます。
   捨てた数は `udp_send_evicted` と `udp_send_expired` に数え、`LogKind::UdpSendDropped` の門 (1 分に 1 回まで) を通します。
   `send_to` は変わらないので、凍結した Go の recording の照合には影響せず、divergences.json に足す行はありません。
   待つ `send_to`、待ちの list の出入り、起こす経路は `cfg(test)` か `harness` の feature のときだけ作り、欄は残します。
   endpoint の列では、送り始めた先頭を飛ばした捨てが 2 番目を外すことがあり、`unlink_tx` はそれ以外の位置を会計の不整合 (`UdpFault::SendListBroken`) にします。
-  不変条件の `check_invariants` は、送信の FIFO の前の指しと、endpoint の列の長さが endpoint の送信の予算の件数に等しいことを確かめます
+  不変条件の `check_invariants` は、送信の FIFO の前の指しと入れた時刻の順、endpoint の列の datagram の世代と順、列の長さが endpoint の送信の予算の件数に等しいことを確かめます
 - 断片の数:`fragments_dropped` は、Go の `FragmentsDropped` と同じく、datagram を完成させなかった断片 (保持した断片、重なった断片、捨てた断片) を数えます
 - 再組み立ての表の掃除の期限:`poll_timeout` は、表が項目を持つ間だけ次の掃除の時刻を返します (Go の `nextDeadline`)。
   呼び手の待ちのたびに表の全体をたどらないよう、表は使っている項目の数を持ちます

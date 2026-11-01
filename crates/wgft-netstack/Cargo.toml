@@ -21,4 +21,17 @@ workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util", "io-util"] }
 wgft-alloc-count.workspace = true
-wgft-netstack = { path = ".", features = ["harness"] }
+
+# 待つ `send_to` を使う結合試験は harness の feature が要る。試験の道具の crate (wgft-wgstack-dut) が付けるので、
+# `--workspace` の試験では動く。`-p wgft-netstack` だけでは build されないので、`--features harness` を付ける
+[[test]]
+name = "netstack"
+required-features = ["harness"]
+
+[[test]]
+name = "alloc"
+required-features = ["harness"]
+
+[[test]]
+name = "alloc_calls"
+required-features = ["harness"]

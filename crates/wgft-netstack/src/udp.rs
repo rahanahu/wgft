@@ -9,9 +9,9 @@ use std::fmt;
 use std::future::poll_fn;
 use std::io;
 use std::net::SocketAddrV4;
-#[cfg(any(test, feature = "harness"))]
+#[cfg(feature = "harness")]
 use std::pin::pin;
-#[cfg(any(test, feature = "harness"))]
+#[cfg(feature = "harness")]
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -20,7 +20,7 @@ use wgft_wgstack::{Error, UdpId};
 
 use crate::Access;
 use crate::error::{io_error, poisoned};
-#[cfg(any(test, feature = "harness"))]
+#[cfg(feature = "harness")]
 use crate::wakers::UdpWrite;
 
 /// An unconnected UDP endpoint on the tunnel address. Dropping it closes the endpoint, returns
@@ -117,7 +117,7 @@ impl<A: Access> UdpSocket<A> {
     }
 
     /// Sends `data` as one datagram to `to`; see [`UdpSender::send_to`].
-    #[cfg(any(test, feature = "harness"))]
+    #[cfg(feature = "harness")]
     pub async fn send_to(&self, data: &[u8], to: SocketAddrV4) -> io::Result<usize> {
         send_to(&self.access, self.id, data, to).await
     }
@@ -146,7 +146,7 @@ impl<A: Access> Drop for UdpSocket<A> {
         };
         // 待っている送り手は試し直して、閉じた誤りを受けます。借用を返した後に起こします。製品の build には
         // 待つ送り手がいない
-        #[cfg(any(test, feature = "harness"))]
+        #[cfg(feature = "harness")]
         {
             let waiters = self.access.with(|ns| {
                 close(ns);
@@ -154,7 +154,7 @@ impl<A: Access> Drop for UdpSocket<A> {
             });
             waiters.0.notify_waiters();
         }
-        #[cfg(not(any(test, feature = "harness")))]
+        #[cfg(not(feature = "harness"))]
         self.access.with(close);
     }
 }
@@ -189,7 +189,7 @@ impl<A: Access> UdpSender<A> {
     ///
     /// Fails when the endpoint is closed, `to` or the length is invalid, UDP has stopped after an
     /// accounting fault, or the generation has ended.
-    #[cfg(any(test, feature = "harness"))]
+    #[cfg(feature = "harness")]
     pub async fn send_to(&self, data: &[u8], to: SocketAddrV4) -> io::Result<usize> {
         send_to(&self.access, self.id, data, to).await
     }
@@ -245,14 +245,14 @@ fn send_to_latest<A: Access>(
 }
 
 /// 1 回の試しの結果です。
-#[cfg(any(test, feature = "harness"))]
+#[cfg(feature = "harness")]
 enum Sent {
     Done(usize),
     Wait(Arc<UdpWrite>),
     Failed(Error),
 }
 
-#[cfg(any(test, feature = "harness"))]
+#[cfg(feature = "harness")]
 async fn send_to<A: Access>(
     access: &A,
     id: UdpId,

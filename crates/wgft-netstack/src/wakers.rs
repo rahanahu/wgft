@@ -87,7 +87,7 @@ pub(crate) struct Wakers {
     /// 待つ `send_to` の送り手の待ち手。製品の build は読まないが、欄は残して型の大きさと上界を試験の
     /// build と同じにする。
     #[cfg_attr(
-        not(any(test, feature = "harness")),
+        not(feature = "harness"),
         expect(dead_code, reason = "only the waiting send_to reads it")
     )]
     udp_write: Arc<UdpWrite>,
@@ -202,7 +202,7 @@ impl Wakers {
     }
 
     /// UDP の送りの待ち手が待つ [`Notify`] です。
-    #[cfg(any(test, feature = "harness"))]
+    #[cfg(feature = "harness")]
     pub(crate) fn udp_write(&self) -> Arc<UdpWrite> {
         Arc::clone(&self.udp_write)
     }
