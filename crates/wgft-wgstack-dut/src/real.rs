@@ -304,8 +304,10 @@ async fn answer(ns: &Ns, objs: &mut Vec<Obj>, req: &Msg) -> Result<Msg, Broken> 
 
 /// 接続と Unix ソケットの間を中継します。両方の向きが終われば接続を閉じ、誤りか `ABORT` で RST を送ります。
 async fn relay_conn(mut tun: TcpStream<Ns>, unix: UnixStream, abort: oneshot::Receiver<()>) {
+    // ABORT が中継の終わりと同時に届いたら、閉じる前に RST にする。tokio::select! は既定で枝を乱数の順に
+    // 試すので、biased で ABORT の枝を先に見る
     let r = tokio::select! {
-        r = pipe(&mut tun, unix) => r,
+        biased;
         a = abort => {
             if a.is_ok() {
                 tun.abort();
@@ -314,6 +316,7 @@ async fn relay_conn(mut tun: TcpStream<Ns>, unix: UnixStream, abort: oneshot::Re
             // ABORT を送る側が消えた (要求の task が終わった) ときは中継を続けない
             Err(io::ErrorKind::Interrupted.into())
         }
+        r = pipe(&mut tun, unix) => r,
     };
     match r {
         Ok(()) => drop(tun.close()),

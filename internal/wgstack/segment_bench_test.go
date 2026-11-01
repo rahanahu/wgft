@@ -250,7 +250,8 @@ func BenchmarkSegmentRigOverhead(b *testing.B) {
 }
 
 // TestSegmentRigMovesData checks the benchmark rig on both paths with and without SACK, and that
-// the sender's numbers survive the sequence wrap, as the Rust rig's tests do.
+// sending keeps one segment acknowledged per call over 4 MB, as the Rust rig's tests do. The core
+// picks its ISS, so the 4 MB need not cross the sequence wrap; the wrap is not what this checks.
 func TestSegmentRigMovesData(t *testing.T) {
 	for _, sack := range []bool{false, true} {
 		r := newSegRig(t, 4, sack)
@@ -267,6 +268,6 @@ func TestSegmentRigMovesData(t *testing.T) {
 	before := r.peers[0].rcv
 	r.sendOne(0)
 	if got := r.peers[0].rcv - before; got != segMSS {
-		t.Fatalf("one sendOne past the wrap acknowledged %d bytes, want %d", got, segMSS)
+		t.Fatalf("one sendOne after 4 MB acknowledged %d bytes, want %d", got, segMSS)
 	}
 }

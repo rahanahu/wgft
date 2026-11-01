@@ -1107,7 +1107,9 @@ func TestQBenchRoutine(t *testing.T) {
 		}
 		table = append(table, row(c, v, wg, gv, lx))
 	}
-	printTable([]string{subj, "gVisor", "Linux"}, table)
+	if judged {
+		printTable([]string{subj, "gVisor", "Linux"}, table)
+	}
 }
 
 // subject is the engine the verdicts judge, QBENCH_SUBJECT: the Go wgstack, "wgstack", by
