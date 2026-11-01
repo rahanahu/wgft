@@ -69,7 +69,8 @@ impl Stub {
         reason = "the shape of a factory of the layer above"
     )]
     fn from_init(UpperInit { mtu, budget, .. }: UpperInit<Budget>) -> Made {
-        assert_eq!(mtu, 1420);
+        // device の MTU は設定の 1420 を 16 の倍数に切り下げた値
+        assert_eq!(mtu, 1408);
         Ok(Self::new(budget))
     }
 

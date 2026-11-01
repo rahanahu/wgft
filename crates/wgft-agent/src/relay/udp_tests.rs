@@ -120,8 +120,9 @@ async fn a_datagram_larger_than_the_mtu_goes_both_ways() {
     let mut m = manager(&peer);
     m.apply(&udp("r_u", 2456, &target.to_string())).await;
     let mut a = peer.udp();
-    // トンネルの中の datagram は試験の相手が組み立てないので、MTU に収まる最大の大きさで確かめる
-    let big = vec![7u8; 1392];
+    // トンネルの中の datagram は試験の相手が組み立てないので、MTU に収まる最大の大きさで確かめる。
+    // device の MTU は設定の 1420 を 16 の倍数に切り下げた 1408 で、IPv4 と UDP のヘッダの 28 を引く
+    let big = vec![7u8; 1380];
     assert_eq!(round_trip(&mut a, 2456, &big).await.unwrap(), big);
 }
 
