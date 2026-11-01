@@ -84,8 +84,8 @@ func TestSpecTunnelRelayTiming(t *testing.T) {
 	}
 	specTunnelRead(t, "relay-timing.json", &f)
 	ms := func(n int64) time.Duration { return time.Duration(n) * time.Millisecond }
-	if targetDialTimeout != ms(f.TargetDialTimeoutMS) {
-		t.Errorf("target dial timeout = %v, want %v", targetDialTimeout, ms(f.TargetDialTimeoutMS))
+	if TargetDialTimeout != ms(f.TargetDialTimeoutMS) {
+		t.Errorf("target dial timeout = %v, want %v", TargetDialTimeout, ms(f.TargetDialTimeoutMS))
 	}
 	m := New(nil, Options{})
 	if m.dialTimeout != ms(f.TargetDialTimeoutMS) {
