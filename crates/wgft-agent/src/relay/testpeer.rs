@@ -114,8 +114,8 @@ impl Peer {
     /// Starts only the server device on loopback, for an agent the test starts itself with the
     /// returned private key.
     pub(crate) async fn server() -> (Peer, PrivateKey) {
-        let agent_key = PrivateKey::generate([0xa1; 32]);
-        let server_key = PrivateKey::generate([0xb2; 32]);
+        let agent_key = PrivateKey::generate(&[0xa1; 32]);
+        let server_key = PrivateKey::generate(&[0xb2; 32]);
         let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let endpoint = sock.local_addr().unwrap();
         let server = DeviceConfig {

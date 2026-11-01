@@ -732,7 +732,7 @@ async fn prepare(opts: &Options) -> Result<(Credentials, Zeroizing<String>), Age
         k
     } else {
         tunnel::public_key(&creds.wg_private_key).map_err(AgentError::Other)?;
-        Zeroizing::new(creds.wg_private_key.clone())
+        creds.wg_private_key.clone()
     };
     ensure_registered(&mut creds, opts).await?;
 
@@ -850,7 +850,8 @@ async fn ensure_registered(creds: &mut Credentials, opts: &Options) -> Result<()
 pub(crate) fn record(creds: &mut Credentials, j: &Join, token: &str, address: &str, name: &str) {
     name.clone_into(&mut creds.name);
     creds.endpoint.clone_from(&j.endpoint);
-    token.clone_into(&mut creds.permanent_token);
+    // 写し直すと前の値の領域を 0 で消さずに手放しうるので、新しい値に置き換えて前の値を落とす
+    creds.permanent_token = Zeroizing::new(token.to_owned());
     creds.cert_sha256 = j.pin_hex();
     creds.used_join_token_sha256 = token_hash(j);
     creds.tunnel_address = registered_tunnel_address(address);
@@ -1630,7 +1631,7 @@ mod tests {
         );
         assert!(state.start(), "the rotation never started");
         assert!(!dir.path().join("agent.json").exists());
-        assert_eq!(agent.lock().await.creds.wg_private_key, "");
+        assert_eq!(*agent.lock().await.creds.wg_private_key, "");
     }
 
     /// 鍵を保存した後のトンネルの作り直しの途中で止める合図が来れば、作り直しを落として止まり、新しい公開鍵を

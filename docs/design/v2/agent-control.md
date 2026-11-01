@@ -107,7 +107,14 @@ root が書き直すときは、前のファイルの持ち主と group を一�
 既にある `agent.json` が通常のファイルでなければ何も書きません。
 
 保存の rename の後は、Unix ではディレクトリも fsync します。
-メモリの上の WireGuard の秘密鍵と、鍵を作る乱数は、捨てるときに 0 で消します。
+メモリの上の秘密は、捨てるときに 0 で消します (`zeroize::Zeroizing`)。
+対象は、WireGuard の秘密鍵 (認証情報の `wg_private_key` と `previous_wg_private_key`、device の鍵、鍵を作る乱数)、恒久トークン、接続文字列の登録トークン、登録の要求と応答の本文、`agent.json` を読み書きするバッファです。
+`agent.json` は長さの分の容量を先に取ってから読み、保存は 8 KiB の 0 で消すバッファを通して一時ファイルへ書くので、途中で伸ばした前の領域を消さずに手放しません。
+鍵の型 (`PrivateKey::from_bytes` と `generate`) は鍵の byte を参照で受け、値渡しの写しを残しません。
+消せない写しもあります。
+`Authorization` の header の値、hyper と rustls と tungstenite の内部のバッファ、カーネルのソケットとファイルの頁、プロセスの環境変数とコマンドラインの `WGFT_JOIN` と `--join` の値です。
+このため、`agent run` の設定が持つ接続文字列 (`Options::join`) は普通の文字列のままにしました。
+同じ値がプロセスの環境変数かコマンドラインに残り、写しだけを消しても秘密を守る範囲が変わらないためです。
 認証情報とトークンを持つ型の `Debug` の出力は秘密を伏せ、stream の `Authorization` の header は秘密の値として扱います。
 
 二重起動は隣の `agent.json.lock` の排他ロックで防ぎます。

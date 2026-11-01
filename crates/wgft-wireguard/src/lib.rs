@@ -10,8 +10,8 @@
 //! use std::time::{Duration, Instant};
 //! use wgft_wireguard::{DeviceConfig, Device, PrivateKey, DEFAULT_KEEPALIVE};
 //!
-//! let agent_key = PrivateKey::generate([1; 32]);
-//! let server_key = PrivateKey::generate([2; 32]).public_key();
+//! let agent_key = PrivateKey::generate(&[1; 32]);
+//! let server_key = PrivateKey::generate(&[2; 32]).public_key();
 //! let config = DeviceConfig::agent(
 //!     agent_key,
 //!     server_key,

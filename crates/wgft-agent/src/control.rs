@@ -640,7 +640,7 @@ mod tests {
         seen.mark_unchanged();
         let saved = crate::credentials::Credentials::load(&d.path().join("agent.json")).unwrap();
         assert_eq!(tunnel::public_key(&saved.wg_private_key).unwrap(), public);
-        assert_eq!(*ctx.agent.lock().await.private_key, saved.wg_private_key);
+        assert_eq!(ctx.agent.lock().await.private_key, saved.wg_private_key);
 
         // 保存に失敗すれば、メモリの上の 2 つの鍵も元に戻す。1 つ前の鍵を移すのはカーネルモードの記録を
         // 持つときだけなので、その記録で確かめる
@@ -649,13 +649,13 @@ mod tests {
             let mut a = ctx.agent.lock().await;
             a.opts.data_dir = d.path().join("missing");
             a.creds.mode = "kernel".into();
-            a.creds.previous_wg_private_key = "PREVIOUS".into();
+            a.creds.previous_wg_private_key = String::from("PREVIOUS").into();
         }
         assert!(rotate(&ctx.agent).await.unwrap().is_err());
         let a = ctx.agent.lock().await;
         assert_eq!(a.creds.wg_private_key, before);
-        assert_eq!(a.creds.previous_wg_private_key, "PREVIOUS");
-        assert_eq!(*a.private_key, before);
+        assert_eq!(*a.creds.previous_wg_private_key, "PREVIOUS");
+        assert_eq!(a.private_key, before);
         drop(a);
         assert!(!seen.has_changed().unwrap());
     }
@@ -686,7 +686,7 @@ mod tests {
         assert!(!task.await.unwrap());
         assert!(rx.try_recv().is_err(), "no reply for an abandoned request");
         assert!(!d.path().join("agent.json").exists());
-        assert_eq!(ctx.agent.lock().await.creds.wg_private_key, "");
+        assert_eq!(*ctx.agent.lock().await.creds.wg_private_key, "");
     }
 
     #[test]

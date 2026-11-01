@@ -95,22 +95,25 @@ impl PrivateKey {
     /// Wraps the raw key bytes as they are stored, without clamping.
     ///
     /// X25519 clamps the scalar when it uses it, so stored keys that were not clamped still
-    /// work, as with wireguard-go and Linux.
+    /// work, as with wireguard-go and Linux. The key is copied from `bytes`, which the caller
+    /// zeroes when it owns them; taking them by reference leaves no copy behind on the way in.
     #[must_use]
-    pub fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
-        Self(Zeroizing::new(bytes))
+    pub fn from_bytes(bytes: &[u8; KEY_LEN]) -> Self {
+        let mut key = Zeroizing::new([0u8; KEY_LEN]);
+        key.copy_from_slice(bytes);
+        Self(key)
     }
 
     /// Makes a new key from 32 bytes of fresh entropy, clamped as `wg genkey` does.
     ///
     /// The caller supplies the entropy, from the operating system in production and from a
-    /// fixed seed in tests.
+    /// fixed seed in tests. The entropy is taken by reference, so no copy of it is left behind
+    /// unzeroed; the caller zeroes its own.
     #[must_use]
-    pub fn generate(mut entropy: [u8; KEY_LEN]) -> Self {
-        entropy[0] &= 0b1111_1000;
-        entropy[31] = (entropy[31] & 0b0111_1111) | 0b0100_0000;
-        let key = Self::from_bytes(entropy);
-        zeroize::Zeroize::zeroize(&mut entropy);
+    pub fn generate(entropy: &[u8; KEY_LEN]) -> Self {
+        let mut key = Self::from_bytes(entropy);
+        key.0[0] &= 0b1111_1000;
+        key.0[31] = (key.0[31] & 0b0111_1111) | 0b0100_0000;
         key
     }
 
@@ -126,7 +129,7 @@ impl PrivateKey {
     /// The standard base64 form. The returned string is zeroed when dropped.
     #[must_use]
     pub fn to_base64(&self) -> Zeroizing<String> {
-        Zeroizing::new(STANDARD.encode(*self.0))
+        Zeroizing::new(STANDARD.encode(&self.0[..]))
     }
 
     /// The raw key bytes.
@@ -178,14 +181,14 @@ mod tests {
 
     #[test]
     fn generate_clamps() {
-        let key = PrivateKey::generate([0xff; KEY_LEN]);
+        let key = PrivateKey::generate(&[0xff; KEY_LEN]);
         assert_eq!(key.as_bytes()[0] & 7, 0);
         assert_eq!(key.as_bytes()[31] & 0xc0, 0x40);
     }
 
     #[test]
     fn debug_hides_the_private_key() {
-        let key = PrivateKey::from_bytes([7; KEY_LEN]);
+        let key = PrivateKey::from_bytes(&[7; KEY_LEN]);
         assert_eq!(format!("{key:?}"), "PrivateKey(..)");
     }
 }

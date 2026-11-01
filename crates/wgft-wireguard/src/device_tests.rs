@@ -77,8 +77,8 @@ impl Net {
         edit_b: impl FnOnce(&mut DeviceConfig),
     ) -> Self {
         let base = Instant::now();
-        let a_key = PrivateKey::generate([0xa1; 32]);
-        let b_key = PrivateKey::generate([0xb2; 32]);
+        let a_key = PrivateKey::generate(&[0xa1; 32]);
+        let b_key = PrivateKey::generate(&[0xb2; 32]);
         let a_addr = addr("198.51.100.2:40000");
         let b_addr = addr("203.0.113.1:51820");
         let mut ca = agent_config(&a_key, b_key.public_key(), b_addr);
@@ -378,7 +378,7 @@ fn the_endpoint_follows_authenticated_traffic_from_a_new_address() {
 #[test]
 fn an_initiation_from_an_unknown_key_gets_no_answer() {
     let mut n = Net::new();
-    let stranger_key = PrivateKey::generate([0xcc; 32]);
+    let stranger_key = PrivateKey::generate(&[0xcc; 32]);
     let mut c = Device::with_seed(
         agent_config(&stranger_key, n.b_pub(), n.b_addr),
         Zeroizing::new([9; 32]),
@@ -672,8 +672,8 @@ fn same_seeds_give_the_same_bytes() {
 #[test]
 fn bad_configurations_are_refused() {
     use crate::config::ConfigError;
-    let key = PrivateKey::generate([1; 32]);
-    let peer = PrivateKey::generate([2; 32]).public_key();
+    let key = PrivateKey::generate(&[1; 32]);
+    let peer = PrivateKey::generate(&[2; 32]).public_key();
     let base = || DeviceConfig::agent(key.clone(), peer, None, SERVER_IP, KEEPALIVE);
     let now = Instant::now();
     let try_new =
@@ -762,8 +762,8 @@ fn padded_packets_are_held_at_their_own_size() {
 #[test]
 fn keepalives_and_timer_overrides_outside_their_bounds_are_refused() {
     use crate::config::ConfigError;
-    let key = PrivateKey::generate([1; 32]);
-    let peer = PrivateKey::generate([2; 32]).public_key();
+    let key = PrivateKey::generate(&[1; 32]);
+    let peer = PrivateKey::generate(&[2; 32]).public_key();
     let now = Instant::now();
     let make = |keepalive: Duration, timers: ProtocolTimers| {
         let mut c = DeviceConfig::agent(key.clone(), peer, None, SERVER_IP, keepalive);
@@ -940,8 +940,8 @@ fn the_agent_returns_to_the_configured_endpoint_when_the_server_expires() {
 
 #[test]
 fn production_devices_draw_their_seed_and_respect_the_unix_floor() {
-    let key = PrivateKey::generate([1; 32]);
-    let peer = PrivateKey::generate([2; 32]).public_key();
+    let key = PrivateKey::generate(&[1; 32]);
+    let peer = PrivateKey::generate(&[2; 32]).public_key();
     let cfg = || DeviceConfig::agent(key.clone(), peer, None, SERVER_IP, KEEPALIVE);
     let now = Instant::now();
     // 壁時計より先の床は、床の 1 秒後から印を付ける
@@ -973,8 +973,8 @@ fn debug_output_shows_counts_but_no_packet_bytes() {
 #[test]
 fn limits_above_their_bounds_are_refused() {
     use crate::config::{ConfigError, MAX_LIMIT_BYTES, MAX_LIMIT_PACKETS};
-    let key = PrivateKey::generate([1; 32]);
-    let peer = PrivateKey::generate([2; 32]).public_key();
+    let key = PrivateKey::generate(&[1; 32]);
+    let peer = PrivateKey::generate(&[2; 32]).public_key();
     let now = Instant::now();
     let make = |edit: &dyn Fn(&mut DeviceConfig)| {
         let mut c = DeviceConfig::agent(key.clone(), peer, None, SERVER_IP, KEEPALIVE);

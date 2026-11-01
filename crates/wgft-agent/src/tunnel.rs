@@ -151,7 +151,7 @@ pub fn generate_private_key() -> Result<Zeroizing<String>, String> {
     let mut b = Zeroizing::new([0u8; 32]);
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut b[..])
         .map_err(|_| "no randomness".to_owned())?;
-    Ok(wgft_wireguard::PrivateKey::generate(*b).to_base64())
+    Ok(wgft_wireguard::PrivateKey::generate(&b).to_base64())
 }
 
 /// 秘密鍵 (base64) から公開鍵 (base64)。

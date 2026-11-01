@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use wgft_proto::State;
+use zeroize::Zeroizing;
 
 /// 認証情報のファイル名。
 pub const FILE_NAME: &str = "agent.json";
@@ -33,24 +34,24 @@ pub struct Credentials {
     /// エージェント用 API の証明書の SHA-256 (hex)。
     #[serde(default)]
     pub cert_sha256: String,
-    /// 恒久トークン。
+    /// 恒久トークン。捨てるときに 0 で消す。
     #[serde(default)]
-    pub permanent_token: String,
+    pub permanent_token: Zeroizing<String>,
     /// 使用済みの登録トークンの SHA-256 (hex)。
     #[serde(default)]
     pub used_join_token_sha256: String,
-    /// WireGuard の秘密鍵 (base64)。
+    /// WireGuard の秘密鍵 (base64)。捨てるときに 0 で消す。
     #[serde(default)]
-    pub wg_private_key: String,
+    pub wg_private_key: Zeroizing<String>,
     /// 最後に処理した全体状態。Go は `null` も書く。
     #[serde(default)]
     pub last_state: Option<State>,
     /// 転送の方式の記録。空はユーザー空間モード。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mode: String,
-    /// カーネルモードの 1 つ前の秘密鍵。試作は使わず保存し直すだけ。
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub previous_wg_private_key: String,
+    /// カーネルモードの 1 つ前の秘密鍵。試作は使わず保存し直すだけ。捨てるときに 0 で消す。
+    #[serde(default, skip_serializing_if = "is_empty_secret")]
+    pub previous_wg_private_key: Zeroizing<String>,
     /// カーネルモードの記録。試作は使わず保存し直すだけ。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip_forward_enabled_at: Option<Value>,
@@ -66,6 +67,10 @@ pub struct Credentials {
     /// 知らないキー。保存し直す。
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+fn is_empty_secret(s: &Zeroizing<String>) -> bool {
+    s.is_empty()
 }
 
 // 恒久トークンと鍵を Debug に出さない
@@ -262,7 +267,7 @@ impl std::error::Error for ReadFileError {}
 /// # Errors
 ///
 /// 開けないか読めなければ誤りを返す。無ければ `NotFound` の [`ReadFileError::Io`] である。
-pub fn read_file(path: &Path) -> Result<(Vec<u8>, fs::Metadata), ReadFileError> {
+pub fn read_file(path: &Path) -> Result<(Zeroizing<Vec<u8>>, fs::Metadata), ReadFileError> {
     let (f, meta) = open_regular_read(path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::Other {
             ReadFileError::Refused(e.to_string())
@@ -277,7 +282,10 @@ pub fn read_file(path: &Path) -> Result<(Vec<u8>, fs::Metadata), ReadFileError> 
             meta.len()
         )));
     }
-    let mut b = Vec::new();
+    // 中身は秘密を含むので、捨てるときに 0 で消す
+    let mut b = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(meta.len()).unwrap_or(0).saturating_add(1),
+    ));
     f.take(MAX_FILE_SIZE + 1)
         .read_to_end(&mut b)
         .map_err(ReadFileError::Io)?;
@@ -378,7 +386,11 @@ impl Credentials {
         if meta.len() > MAX_FILE_SIZE {
             return Err(other(path, "is larger than wgft ever writes"));
         }
-        let mut b = Vec::new();
+        // 中身は秘密鍵と恒久トークンを含むので、捨てるときに 0 で消す。容量はファイルの長さから取り、
+        // 読む途中で伸ばして前の領域を消さずに手放さないようにする
+        let mut b = Zeroizing::new(Vec::with_capacity(
+            usize::try_from(meta.len()).unwrap_or(0).saturating_add(1),
+        ));
         f.take(MAX_FILE_SIZE + 1)
             .read_to_end(&mut b)
             .map_err(|e| other(path, e))?;
@@ -505,16 +517,9 @@ pub(crate) fn replace_private_file(
     };
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let (tmp_path, tmp) = create_temp(dir).map_err(|e| format!("create temp {what} file: {e}"))?;
-    let mut w = Capped {
-        inner: std::io::BufWriter::new(tmp),
-        left: max,
-    };
+    let mut w = Capped::new(tmp, max);
     let result = write(&mut w)
-        .and_then(|()| {
-            w.inner
-                .into_inner()
-                .map_err(std::io::IntoInnerError::into_error)
-        })
+        .and_then(|()| w.into_file())
         .and_then(|tmp| tmp.sync_all().map(|()| tmp))
         .and_then(|tmp| keep_owner(&tmp, old.as_ref()).map(|()| tmp))
         .and_then(|tmp| {
@@ -533,13 +538,35 @@ pub(crate) fn replace_private_file(
     Ok(())
 }
 
-/// 書いた長さが `left` を超えたら誤りにする書き手。
-struct Capped<W> {
-    inner: W,
+/// 一時ファイルへの書き手。小さいバッファに溜めてファイルへ書き、書いた長さが `left` を超えたら誤りに
+/// する。中身は秘密鍵と恒久トークンを含むので、バッファは捨てるときに 0 で消す (`BufWriter` の
+/// バッファは消さない)。
+struct Capped {
+    file: File,
+    buf: Zeroizing<Vec<u8>>,
     left: u64,
 }
 
-impl<W: Write> Write for Capped<W> {
+/// [`Capped`] のバッファの大きさ。
+const CAPPED_BUF: usize = 8 << 10;
+
+impl Capped {
+    fn new(file: File, left: u64) -> Self {
+        Capped {
+            file,
+            buf: Zeroizing::new(Vec::with_capacity(CAPPED_BUF)),
+            left,
+        }
+    }
+
+    /// 溜めた分を書き、ファイルを返す。
+    fn into_file(mut self) -> std::io::Result<File> {
+        self.flush()?;
+        Ok(self.file)
+    }
+}
+
+impl Write for Capped {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let n = u64::try_from(buf.len()).unwrap_or(u64::MAX);
         if n > self.left {
@@ -548,12 +575,22 @@ impl<W: Write> Write for Capped<W> {
             ));
         }
         self.left -= n;
-        self.inner.write_all(buf)?;
+        if self.buf.len() + buf.len() > CAPPED_BUF {
+            self.flush()?;
+        }
+        if buf.len() >= CAPPED_BUF {
+            self.file.write_all(buf)?;
+        } else {
+            // 容量の内なので伸びず、前の領域を消さずに手放すことは無い
+            self.buf.extend_from_slice(buf);
+        }
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
+        self.file.write_all(&self.buf)?;
+        zeroize::Zeroize::zeroize(&mut *self.buf);
+        Ok(())
     }
 }
 
@@ -824,6 +861,43 @@ fn tighten_existing(f: &File) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// 保存は一時ファイルへ小さいバッファを通して書き、`to_go_json` と同じ byte 列になる。バッファは
+    /// 書いた後に 0 で消える。
+    #[test]
+    fn a_save_writes_the_go_bytes_through_a_zeroed_buffer() {
+        let dir = tmpdir("capped");
+        let path = dir.join(FILE_NAME);
+        let rules = (0..2000)
+            .map(|i| wgft_proto::AgentRule {
+                id: format!("r_{i}"),
+                proto: wgft_proto::Proto::Tcp,
+                listen_port: "80".parse().unwrap(),
+                target: "nas.lan:80".into(),
+                enabled: true,
+            })
+            .collect();
+        let creds = Credentials {
+            wg_private_key: String::from("KEY").into(),
+            permanent_token: String::from("TOKEN").into(),
+            last_state: Some(State {
+                rules,
+                ..State::default()
+            }),
+            ..Credentials::default()
+        };
+        creds.save(&path).unwrap();
+        let want = creds.to_go_json().unwrap();
+        assert!(want.len() > 4 * CAPPED_BUF);
+        assert_eq!(fs::read(&path).unwrap(), want);
+
+        let file = File::create(dir.join("scratch")).unwrap();
+        let mut w = Capped::new(file, MAX_FILE_SIZE);
+        w.write_all(b"secret").unwrap();
+        w.flush().unwrap();
+        assert!(w.buf.is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     /// FIFO の `agent.json` は、開いた時点で止まらずに通常のファイルでないとして拒む。
     #[cfg(unix)]
     #[test]
@@ -931,7 +1005,10 @@ mod tests {
                 "{}",
                 p.display()
             );
-            assert!(!format!("{c:?}").contains(&c.permanent_token) || c.permanent_token.is_empty());
+            assert!(
+                !format!("{c:?}").contains(c.permanent_token.as_str())
+                    || c.permanent_token.is_empty()
+            );
             n += 1;
         }
         assert!(n > 0);

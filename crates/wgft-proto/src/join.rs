@@ -50,8 +50,8 @@ pub struct Join {
     pub host: String,
     /// `endpoint` のポート。
     pub port: u16,
-    /// 1 回限りの登録トークン。秘密。
-    pub token: String,
+    /// 1 回限りの登録トークン。秘密。捨てるときに 0 で消す。
+    pub token: zeroize::Zeroizing<String>,
     /// エージェント用 API の leaf の証明書の DER の SHA-256。
     pub pin: [u8; 32],
 }
@@ -107,7 +107,7 @@ impl Join {
             endpoint: utf8(&u.host)?,
             host: utf8(host)?,
             port,
-            token: utf8(tok)?,
+            token: zeroize::Zeroizing::new(utf8(tok)?),
             pin,
         })
     }
@@ -487,7 +487,7 @@ mod tests {
         assert_eq!(j.endpoint, "203.0.113.1:8443");
         assert_eq!(j.host, "203.0.113.1");
         assert_eq!(j.port, 8443);
-        assert_eq!(j.token, "tok_ABC-def");
+        assert_eq!(*j.token, "tok_ABC-def");
         assert_eq!(j.pin_hex(), PIN);
     }
 

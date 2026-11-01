@@ -331,7 +331,7 @@ mod tests {
         );
         let key = tunnel::generate_private_key().unwrap();
         let saved = Credentials {
-            wg_private_key: key.to_string(),
+            wg_private_key: key.clone(),
             ..Credentials::default()
         };
         saved.save(&p).unwrap();
@@ -350,7 +350,7 @@ mod tests {
         let e = rotate_key(&global(d.path()), &no_env(), &mut Vec::new()).unwrap_err();
         assert!(e.to_string().contains("does not exist"), "{e}");
         let f = Credentials {
-            wg_private_key: tunnel::generate_private_key().unwrap().to_string(),
+            wg_private_key: tunnel::generate_private_key().unwrap(),
             last_state: Some(wgft_proto::State::default()),
             mode: "kernel".into(),
             ..Credentials::default()

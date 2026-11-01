@@ -33,7 +33,7 @@ fn matches_go_parse_join() {
                 e.to_string() == "join string must look like wgft://host:port/token#sha256:HASH"
             }
             (Ok(j), "", None) => {
-                j.endpoint == c.endpoint && j.token == c.token && j.pin_hex() == c.pin
+                j.endpoint == c.endpoint && *j.token == c.token && j.pin_hex() == c.pin
             }
             (Err(e), want, _) if !want.is_empty() => e.to_string() == want,
             _ => false,
