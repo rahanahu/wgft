@@ -1,0 +1,3 @@
+# The scenario scripts and their fixtures are read byte for byte by the Go and the Rust parsers
+# and compared with golden files, so every checkout keeps LF line ends.
+internal/tcpharness/scripts/** text eol=lf

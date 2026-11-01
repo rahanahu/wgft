@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -29,6 +31,9 @@ func golden(t *testing.T, path string, data []byte) {
 	if err != nil {
 		t.Fatalf("%v; run go test ./internal/tcpharness -run %s -update", err, t.Name())
 	}
+	// a Windows checkout may write CRLF line ends; .gitattributes asks for LF, but a checkout made
+	// before it or with other settings may still have them
+	want = bytes.ReplaceAll(want, []byte("\r\n"), []byte("\n"))
 	if !bytes.Equal(want, data) {
 		t.Errorf("%s is out of date; run go test ./internal/tcpharness -run %s -update and review the diff", path, t.Name())
 	}
@@ -85,7 +90,8 @@ func TestScriptParseFixtures(t *testing.T) {
 
 // TestScriptASTs pins the canonical AST of every scenario script, for the Rust parser to match.
 func TestScriptASTs(t *testing.T) {
-	files, err := filepath.Glob("scripts/*.scn")
+	// the embedded files, whose names use / on every OS, as loadScript takes them
+	files, err := fs.Glob(scriptFiles, "scripts/*.scn")
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no scripts: %v", err)
 	}
@@ -95,7 +101,7 @@ func TestScriptASTs(t *testing.T) {
 			t.Errorf("%v", err)
 			continue
 		}
-		if want := strings.TrimSuffix(filepath.Base(f), ".scn"); s.Name != want {
+		if want := strings.TrimSuffix(path.Base(f), ".scn"); s.Name != want {
 			t.Errorf("%s names scenario %s", f, s.Name)
 		}
 		golden(t, filepath.Join("scripts/testdata/ast", s.Name+".ast.json"), astJSON(t, ScriptAST(s)))
