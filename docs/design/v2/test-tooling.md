@@ -1093,6 +1093,7 @@ Linux の TUN の上で Rust の engine を動かす確かめは、qbench でな
 | (無し) | 同じ所の `replay` (試験の担当) | 記録の要求の列 |
 | `internal/wgstack` の `FuzzParse` | 同じ所の `parse` (実装の担当) | Go の corpus の bytes をそのまま |
 | `FuzzAdversarialSender` | 同じ所の `adversarial_sender` (試験の担当) | u64 の種を 8 byte の little endian に |
+| (無し) | 同じ所の `raw_adversary` (実装の担当) | 無し。stable の試験は決まった種から作った入力を流します |
 | `internal/tcpharness` の `FuzzParseScript` | `crates/wgft-tcpharness/fuzz/` の `parse_script` (試験の担当) | 台本と構文の fixture の directory |
 | `proto`、`credentials`、`enroll`、`allowtargets`、`policy`、`vpsd` の fuzz | それぞれを移す crate の `fuzz/` | 1 つの引数の対象は bytes をそのまま、複数の引数の対象は対象ごとに決めた並び |
 
@@ -1108,6 +1109,14 @@ Go と違う所が 1 つあります。
 Go は書ける量が 1000 byte を超える時だけ書き、読める時だけ読みます。
 核の公開の API は書ける量と読めるかを返さないので、`core` は書き込みと読み取りをそのまま呼び、`WouldBlock` と一部だけの書き込みを受け入れます。
 各段の後に `check_invariants` と、保持が表の大きさと上界の内にあることを確かめ、最後に核を閉じて会計が 0 に戻ることを確かめます。
+
+`raw_adversary` は状態を持つ生の packet の敵で、Go に元の試験はありません。
+入力の byte を選択の列として読み、相手の番号を追いながら、option の端の値を持つ SYN、乱れた flag と番号と窓と timestamp と SACK の block、ICMP の frag-needed とほかの種類、UDP、順を混ぜて重ねた断片、アプリケーションの操作、25 日までの時刻の跳びを混ぜます。
+握手の途中の表を満たすので、SYN cookie の確かめも通ります。
+各段の後に `core` と同じ確かめをし、最後に核を閉じて会計が 0 に戻ることを確かめます。
+SYN cookie と同じ PR で実装の担当が書いたので、書き手の分離の外にあります。
+本体は公開の API だけを使います。
+PR の関門の fuzz の smoke にはまだ入れていません。
 
 `adversarial_sender` は Go の `runAudit` を公開の API で写します。
 入力の先頭の 8 byte を little endian の種として読み、短ければ 0 で埋めます。

@@ -982,6 +982,7 @@ Rust の単体の試験がそのファイルと照らし、Go の試験はファ
 | `FuzzCore` | `core` | 試験の担当 | `internal/wgstack/testdata/fuzz/FuzzCore` の corpus の値。`go test fuzz v1` の形式から試験の道具の設計の `tools/fuzzseed` が取り出します |
 | `FuzzAdversarialSender` | `adversarial_sender` | 試験の担当 | 64 bit の種 |
 | (無し) | `replay` | 試験の担当 | 記録の要求の列 |
+| (無し) | `raw_adversary` | 実装の担当 | 無し。stable の試験は決まった種から作った入力を流します |
 
 `parse` は、Go の `FuzzParse` の確かめ (checksum を定義どおりの和と照らし、IPv4 と TCP を解釈する) に加えて、UDP と ICMP の解釈と再組み立ての表を通します。
 再組み立ての表には、入力の全体を 1 つの断片として渡した後、入力を「印の 1 byte、長さの 2 byte、packet」の列として読んで順に渡します。
