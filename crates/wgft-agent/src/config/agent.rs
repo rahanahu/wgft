@@ -71,6 +71,23 @@ pub struct Settings {
     pub max_tcp_flows: u32,
 }
 
+impl Settings {
+    /// The flow caps.
+    #[must_use]
+    pub fn flow_caps(&self) -> crate::flowpool::Limits {
+        crate::flowpool::Limits {
+            udp: self.max_udp_flows as usize,
+            tcp: self.max_tcp_flows as usize,
+        }
+    }
+
+    /// The tunnel batching, derived from the flow caps.
+    #[must_use]
+    pub fn batching(&self) -> crate::batching::Batching {
+        crate::batching::Batching::derived(self.flow_caps())
+    }
+}
+
 // 接続文字列は秘密なので Debug に出さない
 impl std::fmt::Debug for Settings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -254,10 +271,7 @@ pub fn startup_lines(c: &Config, s: &Settings) -> Vec<LogLine> {
     let mut out = vec![LogLine::Plain("effective config:".to_owned())];
     out.extend(c.effective_lines().into_iter().map(LogLine::Plain));
     // Go の `memory soft limit:` の行の代わり。フロー数の上限から導く (agent-parity.md のメモリの上界の行)
-    let bound = crate::memory::MemoryBound::for_limits(crate::flowpool::Limits {
-        udp: s.max_udp_flows as usize,
-        tcp: s.max_tcp_flows as usize,
-    });
+    let bound = crate::memory::MemoryBound::for_limits(s.flow_caps(), s.batching());
     out.push(LogLine::Stamped(bound.line()));
     out.push(LogLine::Stamped(bound.terms_line()));
     // 送信の向きのバッチは、値から導く量が wgstack の送信の経路で決まるまで効かせない
@@ -365,7 +379,10 @@ mod tests {
         let lines = startup_lines(&c, &s);
         assert_eq!(lines[0], LogLine::Plain("effective config:".into()));
         let st = stamped(&lines);
-        let bound = crate::memory::MemoryBound::for_limits(crate::flowpool::Limits::default());
+        let bound = crate::memory::MemoryBound::for_limits(
+            crate::flowpool::Limits::default(),
+            crate::batching::Batching::derived(crate::flowpool::Limits::default()),
+        );
         let (line, terms) = (bound.line(), bound.terms_line());
         assert_eq!(
             st,
@@ -384,7 +401,10 @@ mod tests {
             &[],
         );
         assert_eq!(check_supported(&s), Ok(()));
-        let bound = crate::memory::MemoryBound::for_limits(crate::flowpool::Limits::default());
+        let bound = crate::memory::MemoryBound::for_limits(
+            crate::flowpool::Limits::default(),
+            crate::batching::Batching::derived(crate::flowpool::Limits::default()),
+        );
         let (line, terms) = (bound.line(), bound.terms_line());
         assert_eq!(
             stamped(&startup_lines(&c, &s)),

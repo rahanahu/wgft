@@ -14,8 +14,11 @@ use wgft_wireguard::{
     PublicKey, Roaming, Transmit,
 };
 
-use super::driver::{Outbox, Sink, pump};
+use super::batch::TxBatch;
+use super::batch::{RX_SLOT, RxBatch, RxMeta};
+use super::driver::{Outbox, Sink, Source, pump, receive_batch};
 use super::{Carry, Dataplane, Generations, Settings, Upper, UpperError, UpperInit, clock};
+use crate::batching::Batching;
 
 const AGENT_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 2);
 const SERVER_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 1);
@@ -212,6 +215,11 @@ async fn got(d: &Dataplane<Stub>) -> Vec<u32> {
 
 /// server の側と agent の側を立てる。agent の側の上の層は `n` 個の packet を最初から持つ。
 async fn pair(n: u32) -> (Dataplane<Stub>, Dataplane<Stub>) {
+    pair_with(n, loopback()).await
+}
+
+/// [`pair`] の agent の側を `agent` の設定で立てる。
+async fn pair_with(n: u32, agent: Settings) -> (Dataplane<Stub>, Dataplane<Stub>) {
     let (a_key, b_key) = keys();
     let b = Dataplane::start(
         server_config(&b_key, a_key.public_key()),
@@ -223,7 +231,7 @@ async fn pair(n: u32) -> (Dataplane<Stub>, Dataplane<Stub>) {
     .unwrap();
     let a = Dataplane::start(
         agent_config(&a_key, b_key.public_key(), b.local_addr()),
-        loopback(),
+        agent,
         Carry::first(Duration::ZERO),
         Stub::with_packets(n),
     )
@@ -300,7 +308,16 @@ async fn an_operation_wakes_the_driver_and_readiness_wakes_a_local_task() {
 #[tokio::test]
 async fn a_backlog_on_the_socket_lets_local_tasks_run_between_wake_ups() {
     const BURST: u32 = 400;
-    let (a, b) = pair(1).await;
+    // 送る側は 1 つずつ送る。GSO で送ると、ループバックは 1 つの GSO の packet を server の側に GRO の
+    // 1 つの枠として渡し、枠 1 つが最大 64 個の datagram を持つので、並びの長さが枠の数で決まらない
+    let (a, b) = pair_with(
+        1,
+        Settings {
+            batching: Batching::OFF,
+            ..loopback()
+        },
+    )
+    .await;
     wait_for("the first echo", async || got(&a).await.len() == 1).await;
     // server の側のスレッドに、packet を受けるたびに起こされて走った回数を数える task を置く。中継の
     // accept の task の代わりで、駆動の task が上限で止めた起床の間に順を譲れば、上限ごとに 1 回走る
@@ -352,7 +369,9 @@ async fn a_backlog_on_the_socket_lets_local_tasks_run_between_wake_ups() {
         .call(|l| l.with(|s| s.runs_at_packet[1..].to_vec()))
         .await
         .unwrap();
-    let cap = Settings::default().max_datagrams_per_wake;
+    // 起床は時間の予算で終わる。1 つの datagram の復号は 1 µs より長いので、1 回の起床は遅れの予算の
+    // 50 µs と、それを超える最後のバッチの分を読む。最後のバッチも、測った時間から予算に収まる大きさである
+    let cap = Settings::default().batching.slots();
     assert!(
         runs.len() > 2 * cap,
         "the socket held only {} datagrams of the burst",
@@ -611,27 +630,83 @@ async fn set_endpoint_moves_the_peer() {
     a.stop().await;
 }
 
-/// 送った datagram を記録する先。`block` の間は `WouldBlock` を、`fail` の間は他の誤りを返す。
+/// 送った datagram を記録する先。`block` の間は `WouldBlock` を、`fail` の間は他の誤りを返す。`budget` が
+/// あれば、その数の datagram を送った後は書けなくなる。`gso` なら message の形も記録する。
 #[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each switch is one way a socket can answer"
+)]
 struct Recorder {
     sent: Vec<Transmit>,
+    /// GSO の message ごとの datagram の数。
+    messages: Vec<usize>,
     block: bool,
     fail: bool,
+    budget: Option<usize>,
+    gso: bool,
+    /// GSO の message を `EIO` で拒む。
+    refuse_gso: bool,
 }
 
 impl Sink for Recorder {
     fn send(&mut self, to: SocketAddr, payload: &[u8]) -> io::Result<()> {
-        if self.block {
+        if self.block || self.budget == Some(0) {
             return Err(io::ErrorKind::WouldBlock.into());
         }
         if self.fail {
             return Err(io::ErrorKind::ConnectionRefused.into());
         }
+        if let Some(b) = &mut self.budget {
+            *b -= 1;
+        }
         self.sent.push(Transmit {
             to,
             payload: payload.to_vec(),
         });
+        self.messages.push(1);
         Ok(())
+    }
+
+    fn send_batch(&mut self, tx: &mut TxBatch) -> io::Result<usize> {
+        let mut sent = 0;
+        for k in tx.next..tx.n_msgs {
+            let m = tx.msgs[k];
+            let count = usize::from(m.count);
+            let refused = count > 1 && self.refuse_gso;
+            let room = !self.block && self.budget.is_none_or(|b| b >= count);
+            if refused || !room || self.fail {
+                if sent > 0 {
+                    break;
+                }
+                if refused {
+                    // EIO は Linux と macOS で 5
+                    return Err(io::Error::from_raw_os_error(5));
+                }
+                if self.fail {
+                    return Err(io::ErrorKind::ConnectionRefused.into());
+                }
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            for j in 0..count {
+                let (to, payload) = tx.datagram(usize::from(m.first) + j);
+                assert!(j + 1 == count || payload.len() == m.seg as usize);
+                self.sent.push(Transmit {
+                    to,
+                    payload: payload.to_vec(),
+                });
+            }
+            if let Some(b) = &mut self.budget {
+                *b -= count;
+            }
+            self.messages.push(count);
+            sent += 1;
+        }
+        Ok(sent)
+    }
+
+    fn gso(&self) -> bool {
+        self.gso
     }
 }
 
@@ -667,7 +742,7 @@ impl Bench {
         let mut stub = Stub::new(None);
         stub.out
             .extend((0..packets).map(|i| packet(AGENT_IP, SERVER_IP, i)));
-        let outbox = Outbox::new(a.mtu(), a.max_transmit_len());
+        let outbox = Outbox::new(Batching::default(), a.mtu(), a.max_transmit_len());
         Self {
             a,
             b,
@@ -690,18 +765,24 @@ impl Bench {
         )
     }
 
-    /// 記録した datagram を B に渡し、B の答えを A に返す。
-    fn deliver(&mut self) {
+    /// 記録した datagram を B に渡し、B の答えを A に返す。B が受けた packet を返す。
+    fn deliver(&mut self) -> Vec<Vec<u8>> {
         let now = clock::now();
         let mut plain = vec![0u8; usize::from(u16::MAX)];
+        let mut got = Vec::new();
         for t in self.sink.sent.drain(..) {
-            self.b
-                .handle_datagram(now, A_ADDR.parse().unwrap(), &t.payload, &mut plain);
+            if let Some(n) =
+                self.b
+                    .handle_datagram(now, A_ADDR.parse().unwrap(), &t.payload, &mut plain)
+            {
+                got.push(plain[..n].to_vec());
+            }
         }
         while let Some(t) = self.b.poll_transmit() {
             self.a
                 .handle_datagram(now, B_ADDR.parse().unwrap(), &t.payload, &mut plain);
         }
+        got
     }
 
     fn connect(&mut self) {
@@ -709,6 +790,23 @@ impl Bench {
         self.deliver();
         assert!(self.a.has_session(&self.b_pub, clock::now()));
     }
+
+    /// セッションを作り、確認の keepalive を送り、記録を空にする。
+    fn connected(&mut self) {
+        self.connect();
+        assert!(!self.pump(64));
+        self.deliver();
+        self.sink.messages.clear();
+    }
+}
+
+/// 番号を持つ TCP の packet。中身の長さで datagram の長さを決める。
+fn tcp_packet(seq: u32, len: usize) -> Vec<u8> {
+    let mut p = packet(AGENT_IP, SERVER_IP, seq);
+    p.resize(len, 0);
+    p[2..4].copy_from_slice(&u16::try_from(len).unwrap().to_be_bytes());
+    p[9] = 6;
+    p
 }
 
 #[test]
@@ -732,46 +830,110 @@ fn without_a_session_nothing_is_pulled_and_a_handshake_starts() {
 }
 
 #[test]
-fn a_full_socket_stops_the_pulling_and_keeps_the_datagram() {
+fn a_full_socket_stops_the_pulling_and_keeps_the_batch() {
     let mut t = Bench::new(5);
     t.connect();
     // 確認の keepalive が device の待ち行列に残っている
     t.sink.block = true;
     assert!(!t.pump(64));
     assert_eq!(t.stub.pulls, 0, "the device queue was not empty");
-    assert!(t.outbox.pending.is_some());
+    assert!(t.outbox.is_blocked());
     t.sink.block = false;
     assert!(!t.pump(64));
     assert_eq!(t.stub.pulls, 6, "five packets and the empty pull");
-    // 空の待ち行列で 1 つ引いた後に書けなくなれば、次を引かない
+    // 空の待ち行列で引いたバッチが書けなければ、バッチを持ったまま次を引かない
     t.stub.out.extend([
         packet(AGENT_IP, SERVER_IP, 9),
         packet(AGENT_IP, SERVER_IP, 10),
     ]);
+    t.sink.sent.clear();
     t.sink.block = true;
     assert!(!t.pump(64));
-    assert_eq!(t.stub.pulls, 7);
-    assert_eq!(t.stub.out.len(), 1);
-    assert!(t.outbox.pending.is_some());
+    assert_eq!(t.stub.pulls, 9);
+    assert!(t.outbox.is_blocked());
+    t.stub.out.push_back(packet(AGENT_IP, SERVER_IP, 11));
+    assert!(!t.pump(64));
+    assert_eq!(t.stub.pulls, 9, "nothing is pulled while the batch waits");
     assert_eq!(t.a.held().transmit_packets, 0);
-    // 書けるようになったら、控えた packet 9 がそのまま先に出て、その後に packet 10 が出る。B が復号する
+    // 書けるようになれば、持っていたバッチを同じ中身と順で送ってから次を引く
     t.sink.block = false;
     assert!(!t.pump(64));
-    assert!(t.outbox.pending.is_none());
-    assert!(t.stub.out.is_empty());
-    let mut plain = vec![0u8; usize::from(u16::MAX)];
-    let mut got = Vec::new();
-    for d in t.sink.sent.drain(..) {
-        if let Some(len) = t.b.handle_datagram(
-            clock::now(),
-            A_ADDR.parse().unwrap(),
-            &d.payload,
-            &mut plain,
-        ) {
-            got.push(seq(&plain[..len]));
-        }
-    }
-    assert_eq!(got, [0, 1, 2, 3, 4, 9, 10]);
+    let got: Vec<u32> = t.deliver().iter().map(|p| seq(p)).collect();
+    assert_eq!(got, vec![9, 10, 11]);
+}
+
+#[test]
+fn a_batch_cut_by_a_full_socket_resumes_where_it_stopped() {
+    let mut t = Bench::new(0);
+    t.connected();
+    t.sink.sent.clear();
+    t.sink.messages.clear();
+    t.stub.out.extend((0..10).map(|i| tcp_packet(i, 1408)));
+    t.sink.gso = true;
+    t.sink.budget = Some(0);
+    // 書けないままでは何も送らない
+    assert!(!t.pump(64));
+    assert!(t.outbox.is_blocked());
+    let held: Vec<Vec<u8>> = (0..t.outbox.tx.n_sealed)
+        .map(|j| t.outbox.tx.datagram(j).1.to_vec())
+        .collect();
+    assert_eq!(held.len(), 10);
+    // 1 つの GSO の message は 10 個を持ち、4 個の余地では送れない
+    t.sink.budget = Some(4);
+    assert!(!t.pump(64));
+    assert_eq!(t.sink.sent.len(), 0);
+    t.sink.budget = None;
+    assert!(!t.pump(64));
+    assert_eq!(t.sink.messages, vec![10]);
+    let sent: Vec<Vec<u8>> = t.sink.sent.iter().map(|s| s.payload.clone()).collect();
+    assert_eq!(sent, held, "the batch went out unchanged");
+    let got: Vec<u32> = t.deliver().iter().map(|p| seq(p)).collect();
+    assert_eq!(got, (0..10).collect::<Vec<_>>());
+}
+
+#[test]
+fn udp_goes_out_before_the_tcp_of_its_batch_and_runs_share_a_message() {
+    let mut t = Bench::new(0);
+    t.connected();
+    t.sink.sent.clear();
+    t.sink.messages.clear();
+    t.sink.gso = true;
+    t.stub.out.extend([
+        tcp_packet(0, 1408),
+        tcp_packet(1, 1408),
+        packet(AGENT_IP, SERVER_IP, 100),
+        tcp_packet(2, 1408),
+        tcp_packet(3, 600),
+        tcp_packet(4, 1408),
+    ]);
+    assert!(!t.pump(64));
+    // UDP が先で、同じ長さの TCP の並びは短い 1 つで終わる 1 つの message になる
+    assert_eq!(t.sink.messages, vec![1, 4, 1]);
+    let got: Vec<u32> = t.deliver().iter().map(|p| seq(p)).collect();
+    assert_eq!(got, vec![100, 0, 1, 2, 3, 4]);
+}
+
+/// GSO の拒否は Unix の errno で判定する。GSO を使うのは Linux だけである
+#[cfg(unix)]
+#[test]
+fn a_refused_gso_send_goes_out_one_by_one() {
+    let mut t = Bench::new(0);
+    t.connected();
+    t.sink.sent.clear();
+    t.sink.messages.clear();
+    t.sink.gso = true;
+    t.sink.refuse_gso = true;
+    t.stub.out.extend((0..5).map(|i| tcp_packet(i, 1408)));
+    assert!(!t.pump(64));
+    assert_eq!(t.sink.messages, vec![1; 5]);
+    assert_eq!(t.outbox.send_errors, 0);
+    // 以後このソケットでは GSO を使わない
+    t.sink.messages.clear();
+    t.stub.out.extend((5..8).map(|i| tcp_packet(i, 1408)));
+    assert!(!t.pump(64));
+    assert_eq!(t.sink.messages, vec![1; 3]);
+    let got: Vec<u32> = t.deliver().iter().map(|p| seq(p)).collect();
+    assert_eq!(got, (0..8).collect::<Vec<_>>());
 }
 
 #[test]
@@ -794,5 +956,67 @@ fn send_errors_are_counted_and_skipped() {
     assert!(!t.pump(64));
     assert!(t.stub.out.is_empty());
     assert!(t.outbox.send_errors >= 2);
-    assert!(t.outbox.pending.is_none());
+    assert!(!t.outbox.is_blocked());
+}
+
+/// 決まった datagram の列を読ませる受信の元。
+struct Feed(VecDeque<(SocketAddr, Vec<u8>)>);
+
+impl Source for Feed {
+    fn recv(&mut self, rx: &mut RxBatch, vlen: usize) -> io::Result<usize> {
+        if self.0.is_empty() {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        let n = vlen.min(rx.slots()).min(self.0.len());
+        for i in 0..n {
+            let (from, d) = self.0.pop_front().unwrap();
+            rx.data[i * RX_SLOT..i * RX_SLOT + d.len()].copy_from_slice(&d);
+            rx.meta[i] = RxMeta {
+                from: Some(from),
+                len: u32::try_from(d.len()).unwrap(),
+                seg: 0,
+            };
+        }
+        Ok(n)
+    }
+}
+
+#[tokio::test]
+async fn a_receive_batch_hands_udp_first_and_keeps_the_tcp_order() {
+    let mut t = Bench::new(0);
+    t.connected();
+    // server の側が agent に送る packet。TCP と UDP が交互に並ぶ
+    let now = clock::now();
+    let mut feed = Feed(VecDeque::new());
+    let mut sealed = vec![0u8; t.b.max_transmit_len()];
+    for (seq, udp) in [(0, false), (100, true), (1, false), (101, true), (2, false)] {
+        let mut p = packet(SERVER_IP, AGENT_IP, seq);
+        if !udp {
+            p[9] = 6;
+        }
+        let out = t.b.handle_packet(now, &p, &mut sealed).unwrap();
+        feed.0
+            .push_back((B_ADDR.parse().unwrap(), sealed[..out.len].to_vec()));
+    }
+    let local = super::Local(std::rc::Rc::new(super::Shared {
+        inner: std::cell::RefCell::new(super::Inner {
+            device: t.a,
+            upper: Stub::new(None),
+        }),
+        poisoned: std::cell::Cell::new(false),
+        wake: super::Wake::default(),
+    }));
+    // 密な部分を枠の全体にして、枠 i が data の i × RX_SLOT から始まるようにする
+    let mut rx = RxBatch::new(8, false, RX_SLOT);
+    let (mut errors, mut wakers) = (0, Vec::new());
+    let (n, _) = receive_batch(&local, &mut feed, &mut rx, now, 8, &mut errors, &mut wakers)
+        .await
+        .unwrap();
+    assert_eq!((n, errors), (5, 0));
+    let got: Vec<u32> = local.with(|s| s.got.iter().map(|p| seq(p)).collect());
+    assert_eq!(
+        got,
+        vec![100, 101, 0, 1, 2],
+        "UDP first, TCP in the order read"
+    );
 }

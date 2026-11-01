@@ -13,6 +13,7 @@ use std::task::Waker;
 use wgft_netstack::{LanSockets, Netstack};
 use wgft_wgstack::{Bound, Limits as CoreLimits, MAX_MTU};
 
+use crate::batching::Batching;
 use crate::flowpool;
 use crate::relay::{BULK_BUF, BULK_KEEP, LanConn, REPLY_SLOTS, UDP_BUF};
 use crate::targets::resolve::{ENDPOINT_PERMITS, TARGET_PERMITS};
@@ -108,8 +109,8 @@ pub const RESOLVER_THREAD: usize = (2 << 20) + (64 << 10);
 
 /// The WireGuard device's queues at the largest MTU, for the agent's one peer: staged packets,
 /// datagrams to send (handshake messages and the packets that waited for a handshake) with a vector
-/// header per queued item, and the events. The buffers the data plane passes to the device are
-/// counted apart ([`data_plane_buffers`]).
+/// header per queued item, and the events. The buffers the data plane passes to the device are the
+/// batch store's ([`Batching::bytes`]).
 pub(crate) fn device_bytes() -> usize {
     let l = wgft_wireguard::Limits::default();
     let item = size_of::<Vec<u8>>() + size_of::<std::net::SocketAddr>();
@@ -117,25 +118,6 @@ pub(crate) fn device_bytes() -> usize {
         + l.transmit_bytes
         + l.transmit_packets * item
         + l.events * 64
-}
-
-/// The buffers the data plane allocates once for the device and uses for every packet, at the
-/// largest MTU: the datagram it receives (`UDP_BUF`), the plaintext the device decrypts into
-/// (`UDP_BUF`, the largest datagram), the packet the core writes to send (one MTU) and the datagram
-/// the device encrypts it into (one MTU and the 32 bytes of header and tag). Nothing else is
-/// allocated per packet. With batching these become the batch's buffers and move to
-/// [`batch_bytes`].
-pub(crate) const fn data_plane_buffers() -> usize {
-    2 * UDP_BUF + MAX_MTU + MAX_MTU + wgft_wireguard::DATA_OVERHEAD
-}
-
-/// The tunnel batching's buffers: what one receive batch and one send batch of the WireGuard socket
-/// hold (`recvmmsg` and `sendmmsg`, UDP GRO and GSO) beyond the data plane's one receive buffer and
-/// one send buffer, which [`MemoryBound::device`] counts. The data plane reads and writes one
-/// datagram at a time, so the term is 0; batching fills it in the same change that adds the buffers
-/// (`docs/design/v2/agent-parity.md`, the memory bound line).
-pub(crate) const fn batch_bytes() -> usize {
-    0
 }
 
 /// The memory bound and its terms, in bytes.
@@ -155,9 +137,11 @@ pub struct MemoryBound {
     pub tables: usize,
     /// The data plane driver's list of wakers to wake, at most twice the table's rows.
     pub driver: usize,
-    /// The WireGuard device's queues and the data plane's buffers.
+    /// The WireGuard device's queues.
     pub device: usize,
-    /// The tunnel batching's buffers ([`batch_bytes`]).
+    /// The tunnel's batch store ([`Batching::bytes`]): the receive and send slots, their packet
+    /// buffers and their system call headers. The data plane passes its slots to the device, so no
+    /// other buffer carries a packet.
     pub batch: usize,
     /// The TCP relay without its bulk buffers: per connection its task and socket.
     pub tcp: usize,
@@ -179,17 +163,21 @@ pub struct MemoryBound {
 }
 
 impl MemoryBound {
-    /// The bound for the flow caps `limits`, with the core's tables that `WGFT_MAX_TCP_FLOWS`
-    /// makes.
+    /// The bound for the flow caps `limits` and the tunnel batching `batching`, with the core's
+    /// tables that `WGFT_MAX_TCP_FLOWS` makes.
     #[must_use]
-    pub fn for_limits(limits: flowpool::Limits) -> Self {
-        Self::with_core(limits, CoreLimits::with_max_flows(limits.tcp))
+    pub fn for_limits(limits: flowpool::Limits, batching: Batching) -> Self {
+        Self::with_core(limits, CoreLimits::with_max_flows(limits.tcp), batching)
     }
 
     /// The bound for the flow caps `limits` over a core with the tables `core_limits`, at the
     /// largest MTU. Tests use it with their small cores.
     #[must_use]
-    pub fn with_core(limits: flowpool::Limits, core_limits: CoreLimits) -> Self {
+    pub fn with_core(
+        limits: flowpool::Limits,
+        core_limits: CoreLimits,
+        batching: Batching,
+    ) -> Self {
         let conns = core_limits.conns();
         let core_bound = Bound::for_limits(&core_limits, MAX_MTU);
         let core = usize::try_from(core_bound.total).unwrap_or(usize::MAX);
@@ -198,9 +186,9 @@ impl MemoryBound {
         let tables = Netstack::<wgft_wgstack::NoHook>::waker_bound(conns)
             + LanSockets::<LanConn>::table_bytes(conns);
         let driver = 2 * Netstack::<wgft_wgstack::NoHook>::waker_slots(conns) * size_of::<Waker>();
-        // device の層のキューと、データプレーンが device に渡す使い回しのバッファ
-        let device = device_bytes() + data_plane_buffers();
-        let batch = batch_bytes();
+        // device の層のキュー。データプレーンが device に渡す buffer はバッチの置き場の枠である
+        let device = device_bytes();
+        let batch = batching.bytes();
         // 接続ごとの項と、データプレーンのスレッドが使い回しのために残す大きいバッファ
         let tcp = limits.tcp.saturating_mul(tcp_relay_conn());
         let tcp_bulk = limits

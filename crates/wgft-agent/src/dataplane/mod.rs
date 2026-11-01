@@ -14,14 +14,9 @@
 //!   上の層の `Budget` を [`Carry`] で返す。[`Generations`] はそれを次の世代に渡し、スレッドがどの理由で
 //!   終わっても [`Generations::exited`] で知らせる
 
+pub(crate) mod batch;
 pub(crate) mod clock;
 mod driver;
-
-/// 駆動が起動の時に確保する、device に渡す buffer の長さの和。メモリの上界の項の試験が、項の値と比べる。
-#[cfg(test)]
-pub(crate) fn driver_buffer_bytes(mtu: usize, max_datagram: usize) -> usize {
-    2 * driver::DATAGRAM_BUF + driver::Outbox::new(mtu, max_datagram).buffer_bytes()
-}
 mod socket;
 pub(crate) mod stack;
 #[cfg(test)]
@@ -42,6 +37,8 @@ use tokio::sync::{mpsc, oneshot};
 use wgft_wireguard::{Device, DeviceConfig, Drops, Event, Held, PeerStatus};
 
 pub(crate) use socket::{REQUIRED, SocketBuffers};
+
+use crate::batching::Batching;
 
 /// The layer above the WireGuard device: the TCP/IP core that ends the tunnel's traffic.
 ///
@@ -125,18 +122,17 @@ impl<B> Carry<B> {
 pub struct Settings {
     /// The local address of the WireGuard UDP socket.
     pub listen: SocketAddr,
-    /// The most packets taken from the layer above in one wake-up.
-    pub max_packets_per_wake: usize,
-    /// The most datagrams read from the socket in one wake-up.
-    pub max_datagrams_per_wake: usize,
+    /// How the tunnel batches its socket's receive and send. One wake-up's work ends at the
+    /// latency budget, an internal constant (`docs/design/v2/agent-throughput.md`).
+    pub batching: Batching,
 }
 
 impl Default for Settings {
+    /// Any port on every IPv4 address, and the batching derived from the default flow caps.
     fn default() -> Self {
         Self {
             listen: SocketAddr::from(([0, 0, 0, 0], 0)),
-            max_packets_per_wake: 64,
-            max_datagrams_per_wake: 64,
+            batching: Batching::derived(crate::flowpool::Limits::default()),
         }
     }
 }
@@ -758,18 +754,28 @@ where
     });
     let _ = ready.send(Ok(()));
     let tasks = tokio::task::LocalSet::new();
-    let ended = tasks.block_on(
-        &runtime,
-        driver::drive(
-            Local(Rc::clone(&shared)),
-            socket,
-            commands,
-            events,
-            &high_water,
-            settings,
-            buffers,
-        ),
+    // 駆動は LocalSet の中の task として動かす。block_on の future のままだと、順を譲るたびに実行環境へ戻り、
+    // I/O の driver を park する (epoll_wait)。task なら、順を譲っても LocalSet の 1 回の tick の中で中継の
+    // task と交互に走り、driver を見るのは tick ごと (最大 61 の task の poll ごと) になる。駆動の task の中の
+    // panic は、今までどおりスレッドを巻き戻す
+    let drive = driver::drive(
+        Local(Rc::clone(&shared)),
+        socket,
+        commands,
+        events,
+        Arc::clone(&high_water),
+        settings,
+        buffers,
     );
+    let ended = tasks.block_on(&runtime, async move {
+        match tokio::task::spawn_local(drive).await {
+            Ok(ended) => ended,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => Err(io::Error::other(format!(
+                "the data plane driver was cancelled: {e}"
+            ))),
+        }
+    });
     let rest = match ended {
         Ok(rest) => Some(rest),
         Err(e) => {

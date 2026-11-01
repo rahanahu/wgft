@@ -124,10 +124,14 @@ pub(crate) fn platform(input: &Input) -> Check {
         SAME_PRINCIPAL_NEXT.clone_into(&mut c.next);
         return c;
     }
-    let bound = wgft_agent::memory::MemoryBound::for_limits(wgft_agent::flowpool::Limits {
+    let caps = wgft_agent::flowpool::Limits {
         udp: input.max_udp_flows as usize,
         tcp: input.max_tcp_flows as usize,
-    });
+    };
+    let bound = wgft_agent::memory::MemoryBound::for_limits(
+        caps,
+        wgft_agent::batching::Batching::derived(caps),
+    );
     c.detail = format!(
         "{head}; the memory bound would be {} MiB, computed here from the flow caps {} UDP and {} TCP, not read from the running agent",
         bound.mib(),

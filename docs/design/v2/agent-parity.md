@@ -44,6 +44,7 @@ Rust の agent は次を持ちます。
 | `wgft-proto` | wire の版 1 の型、接続文字列、登録の要求と応答、理由の整形、仕様の fixture との照合 |
 | `wgft-wireguard` | sanstun の上の sans-IO の WireGuard の device |
 | `wgft-wgstack` と `wgft-netstack` | Rust の wgstack の sans-IO の核と、その上の非同期の handle |
+| `wgft-udp-batch` | トンネルのバッチの置き場と、Linux の `recvmmsg`、`sendmmsg`、UDP の GRO と GSO の system call の包み ([バッチの作り](agent-throughput.md#バッチの作り)) |
 | `wgft-agent` | 登録、認証情報、stream、全体状態の適用、ハートビート、トンネルの監視と作り直し、データプレーンのスレッド、wgstack の上の TCP と UDP の中継、メモリの上界の行 (module `memory`)、制御ソケット、設定の層 (module `config`) |
 | `wgft` | `wgft agent` のコマンドと `wgft version`。clap への接続と、設定を読んで入口を通す手順 |
 
@@ -381,7 +382,7 @@ Go の recording を使う `send_to` の振る舞いは変えないので、dive
   核の出力は操作の結果として増えるので、ソケットの準備やタイマーを待たずに引くためです。
   知らせは同じスレッドの中だけで使うので、`tokio::sync::Notify` でなく、印の `Cell<bool>` と駆動の task の waker の `Cell` で作り、錠を取りません。
   待つ者がいない間の知らせは印として残り、次の待ちがすぐに解けます
-- 上界:1 回の起床で作る packet の数には上限を置きます ([送り出しと受信の値](#送り出しと受信の値))
+- 上界:1 回の起床の仕事は時間の上限 (遅れの予算) で区切ります ([送り出しと受信の値](#送り出しと受信の値))
 - 時計:device と核に渡す時刻の時計は同じものにします ([時計](#時計))
 
 この節は `crates/wgft-agent/src/dataplane` が実装します。
@@ -427,12 +428,12 @@ Go の recording を使う `send_to` の振る舞いは変えないので、dive
 
 ### 送り出しと受信の値
 
-- 1 回の起床の上限:核から引く packet と、ソケットから読む datagram は、どちらも 1 回の起床で 64 までにします。
+- 1 回の起床の上限:受信と送信のバッチは、起床の始めから遅れの予算 (50 µs) が経つまでにします ([バッチの作り](agent-throughput.md#バッチの作り))。
+  バッチの前は、核から引く packet とソケットから読む datagram を、どちらも 1 回の起床で 64 までにしていました。
   上限で止まったときは他の task に順を譲ってからすぐに起きます。
   譲るのは待つ前で、待つ所の選択の中では譲りません。
   ソケットが読める間は選択が読める準備をすぐに選び、駆動の task は tokio の coop の予算を使い切るまで起床を繰り返すためです。
   その間は同じスレッドの中継の task が accept できず、核の accept の待ち行列が溢れて握手の最後の ACK を捨てます。
-  値は仮の値で、`WGFT_AGENT_BATCH_MIB` から導く式と一緒に送信の経路を測ってから決めます
 - 書けない datagram:ソケットが `WouldBlock` で拒んだ datagram は 1 つだけ持ち、書けるようになるまで何も引きません。
   ほかの送信の誤りは数えて捨てます
 - 受信の誤り:数えて読み続けます。
@@ -672,8 +673,8 @@ Go の `memory soft limit:` の行の代わりで、ラボの `lifecycle.sh` の
 - データプレーンの駆動:1 回の起床で起こす waker を移す `Vec` です。
   waker の表の行の数で頭を打ちます
 - WireGuard の device:[device のキューと上界](wireguard-device.md#キューと上界) の値です
-- トンネルのバッチ:WireGuard のソケットの受信と送信のバッチが持つバッファです。
-  データプレーンは datagram を 1 つずつ読み書きするので、今は 0 です (下の実装の項を参照)
+- トンネルのバッチ:WireGuard のソケットの受信と送信のバッチの置き場です。
+  データプレーンが device の層に渡す buffer は、この置き場の枠です (下の実装の項を参照)
 - TCP の中継:接続 1 本の固定の大きさと、データが流れる間だけ借りる写しのバッファ (向きごとに 32 KiB、Go の `internal/netpipe` と同じ) の和 × `WGFT_MAX_TCP_FLOWS` と、置き場に残す 16 × 32 KiB の和です
 - UDP の中継:応答のバッファの枠の 64 × 65535 byte と、セッション 1 つの固定の大きさ × `WGFT_MAX_UDP_FLOWS` です
 - 待ち受け:待ち受け 1 つの固定の大きさ × 開いた待ち受けの数です。
@@ -701,16 +702,17 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
   後者は作成の時に接続の枠の数だけ確保し、育ちません
 - データプレーンの駆動:waker を移す `Vec` は表の行の数 (`Netstack::waker_slots`) まで育ち、容量はその 2 倍までなので、2 × 行の数 × `Waker` の大きさです
 - WireGuard の device:device のキューの上限の件数とバイト数 (ハンドシェイクを待つ packet、device が積む送る datagram、event) に、件数ごとの `Vec` の頭を足します。
-  それに、データプレーンが起動の時に 1 回だけ確保して device に渡す、4 つの使い回しのバッファを足します。
-  受ける datagram の buffer と復号の行き先 (どちらも最大の datagram の長さ 65535 byte)、核が書く packet の buffer (MTU)、device が暗号化して書く datagram の buffer (MTU と header と tag の 32 byte) です。
-  データの packet は、この 4 つの buffer を通るだけで、packet ごとに確保も写しもしません。
-  device の層は、受けた packet の待ち行列を持ちません
-- トンネルのバッチ:`batch_bytes` の項で、今は 0 です。
-  バッチを入れる変更は、1 回の受信と送信のバッチが持つバッファ (`recvmmsg` と `sendmmsg` の datagram の配列、GRO と GSO でまとめた datagram、`WGFT_AGENT_BATCH_MIB` の送信の向きの予算) をこの項に数え、同じ変更で[上界の表](agent-bound.md)を作り直します。
-  device の層の使い回しのバッファの数え方は、[バッチの作りの規則](agent-throughput.md#バッチの作りの規則)が決めます。
-  バッチの段の最初の段階 (確保をやめ、まだ 1 packet ずつ送受信する間) は、上の 4 つの buffer を `device` の項に数えます。
-  バッチの段が入った後は、これらの buffer を `device` の項から `batch` の項に移し、1 つずつの buffer を連続した配列にします。
-  バッチのバッファは起動の時に確保するので、ラボの check 5 と 5b の洪水が満たせる項に `batch` を加えます
+  device の層は、受けた packet の待ち行列を持ちません。
+  データプレーンが device の層に渡す buffer は、次のバッチの置き場の枠で、この項には入りません
+- トンネルのバッチ:`batch` の項で、バッチの置き場 ([バッチの作り](agent-throughput.md#バッチの作り)) の大きさ (`Batching::bytes`) です。
+  向きごとの枠の数を、受信の枠 1 つ (受ける datagram と復号の行き先、どちらも最大の datagram の長さ 65535 byte と、枠の記録) と送信の枠 1 つ (核が書く packet の MTU、device が暗号化して書く datagram の MTU と header と tag の 32 byte、それぞれの記録) の和に掛けます。
+  Linux でバッチを使うときは、枠ごとの `mmsghdr`、2 つの `iovec`、宛先の名前、制御の領域を足します。
+  枠が 2 つ以上なら、受信の枠の 2 つの部分にまたがる datagram を写す作業の領域 (65535 byte) を 1 つ足します。
+  MTU は最大の 9216 で数えます。
+  データの packet は、この枠を通るだけで、packet ごとに確保も写しもしません。
+  バッチの段の最初の段階 (確保をやめ、まだ 1 packet ずつ送受信する間) は、データプレーンの 4 つの buffer を `device` の項に数えていました。
+  試験 (`wgft-udp-batch` の `the_store_is_what_store_bytes_counts` と、`dataplane::batch` の `the_running_store_is_what_the_bound_counts`) が、置き場の確保した長さとこの項が一致することを確かめます。
+  置き場は起動の時に確保するので、ラボの check 5 と 5b の洪水が満たせる項に `batch` を加えます
 - TCP の中継:接続 1 本につき、中継の task の future、tokio の task と I/O の登録の余裕 (各 512 byte)、両方の向きの大きいバッファ (32 KiB ずつ) です。
   データプレーンのスレッドが使い回しに残す大きいバッファ 16 個を足します。
   下の項の行では、接続ごとの task と登録の部分と、大きいバッファの部分を分けて書きます

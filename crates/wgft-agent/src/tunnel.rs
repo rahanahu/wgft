@@ -6,6 +6,7 @@
 //! 世代を立て、keepalive の ping とハンドシェイクの監視を行い、状態を読む。中継は核の待ち受けと接続を
 //! データプレーンのスレッドで動かす (`relay`)。
 
+use crate::batching::Batching;
 use crate::dataplane::stack::StackSettings;
 use crate::dataplane::{self, Dataplane, Handle, Local, Settings};
 use crate::logf;
@@ -221,6 +222,7 @@ impl Tunnel {
         cfg: Config,
         generations: &mut Generations,
         limits: Limits,
+        batching: Batching,
         clock: Option<&Path>,
         dead: Arc<tokio::sync::Notify>,
     ) -> Result<Tunnel, String> {
@@ -257,9 +259,14 @@ impl Tunnel {
         .validate()
         .map_err(|e| format!("TCP/IP settings: {e}"))?;
         generations
-            .start(dc, Settings::default(), move |init| {
-                dataplane::stack::make(stack, init)
-            })
+            .start(
+                dc,
+                Settings {
+                    batching,
+                    ..Settings::default()
+                },
+                move |init| dataplane::stack::make(stack, init),
+            )
             .await
             .map_err(|e| format!("start the tunnel data plane: {e}"))?;
         let dataplane = generations
