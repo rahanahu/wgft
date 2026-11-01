@@ -622,7 +622,10 @@ UDP の `ReadFrom` と `WriteTo` は、`rustdut` が覚えている `Close` の�
 
 `rustdut` 自身の確かめは `TestSameAsWgstackdut` です。
 すべての台本を、同じ種で `wgstackdut` と `rustdut` で `dutserve` に流し、`tcpharness.RecordChecks` が返す確かめの ID、結果、観察の文字列、`MEASURE` の値、失敗の文の列が一致することを求めます。
-別の goroutine で読み書きする台本は、`MEASURE` の値を除いて照らします。
+別の goroutine で読み書きしない台本は、台本が log に書いた行の列 (送った segment と見た segment、待ち、確かめの行) も、DUT の時刻を頭に付けて照らします。
+`rustdut` だけが書く行 (DUT のプロセスの標準エラーの `dut:` の行) は除きます。
+`rustdut` の DUT は時刻を `CachedNow` で読ませ、log の行に時刻を付けるために engine に要求を送りません。
+別の goroutine で読み書きする台本は、`MEASURE` の値と log の行を除いて照らします。
 その値は goroutine の進み方で変わるためです (例:`window-scale` の受信の窓の最大)。
 この試験と `TestTranscriptRepeats` は、`WGFT_TEST_WGSTACK_DUT` が `dutserve` を指す時だけ流れます。
 

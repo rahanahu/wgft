@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -92,6 +93,7 @@ type DUT struct {
 	cache   map[string]dutproto.Msg
 	now     time.Duration
 	nowSet  bool
+	nowSeen atomic.Int64 // now, for CachedNow from any goroutine
 	broken  error
 	closed  bool
 	hooked  bool // some connection registered a boost hook
@@ -255,6 +257,7 @@ func (d *DUT) ask(req dutproto.Msg) (dutproto.Msg, <-chan struct{}, error) {
 	}
 	if t, ok := resp.(*dutproto.Time); ok {
 		d.now, d.nowSet = t.Now, true
+		d.nowSeen.Store(int64(t.Now))
 	}
 	if req.Kind() == dutproto.KindHello {
 		return resp, d.changed, nil
@@ -365,6 +368,11 @@ func (d *DUT) Now() time.Time {
 	defer d.mu.Unlock()
 	return epoch.Add(d.now)
 }
+
+// CachedNow is the engine's clock as the last NOW or ADVANCE answered it, without asking the
+// engine: the harness stamps its log lines with it from any goroutine, including the one that
+// relays the DUT's standard error while a request waits for its answer.
+func (d *DUT) CachedNow() time.Time { return epoch.Add(time.Duration(d.nowSeen.Load())) }
 
 // Advance moves the engine's clock and runs the timers that fall due.
 func (d *DUT) Advance(dt time.Duration) { d.do(&dutproto.Advance{D: dt}) }
@@ -793,6 +801,7 @@ func (u *udpConn) SetWriteDeadline(t time.Time) error {
 // by type assertion.
 var (
 	_ tcpharness.ClockedDUT     = (*DUT)(nil)
+	_ tcpharness.CachedClock    = (*DUT)(nil)
 	_ tcpharness.Listener       = (*listener)(nil)
 	_ tcpharness.Conn           = (*conn)(nil)
 	_ tcpharness.Deliverer      = (*conn)(nil)

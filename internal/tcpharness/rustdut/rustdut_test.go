@@ -140,8 +140,10 @@ func runSeed(t *testing.T) uint64 {
 // TestSameAsWgstackdut checks rustdut itself (test-tooling.md section 3): every scenario run on
 // the Go wgstack through rustdut and dutserve gives the same checks, outcomes, observations and
 // measurements as the same scenario run on the Go wgstack in this process through wgstackdut, from
-// the same seed. Both engines get the same name and no expected-difference list, so a known
-// difference is a failure on both and the failure messages compare too. A scenario
+// the same seed, and, for a scenario without goroutines of its own, the same logged lines: the
+// segments sent and seen and the waits, each stamped with the DUT's time. Both engines get the
+// same name and no expected-difference list, so a known difference is a failure on both and the
+// failure messages compare too. A scenario
 // that reads or writes from a goroutine of its own compares without its measurements, which
 // depend on when that goroutine runs (test-tooling.md section 2).
 func TestSameAsWgstackdut(t *testing.T) {
@@ -157,9 +159,15 @@ func TestSameAsWgstackdut(t *testing.T) {
 				got := tcpharness.RecordChecks(t, remote, s, seed)
 				if concurrentScenarios[s.Name] {
 					want.Checks, got.Checks = withoutMeasures(want.Checks), withoutMeasures(got.Checks)
+					want.Lines, got.Lines = nil, nil
+				} else {
+					want.Lines, got.Lines = engineLines(want.Lines), engineLines(got.Lines)
 				}
 				if d := traceDiff(want, got); d != "" {
 					t.Errorf("scenario seed %d: rustdut over dutserve differs from wgstackdut:\n%s", seed, d)
+				}
+				if !concurrentScenarios[s.Name] && len(want.Lines) == 0 {
+					t.Errorf("wgstackdut logged no line; the line comparison shows nothing")
 				}
 				if len(want.Checks) == 0 && !want.Skipped {
 					t.Errorf("wgstackdut ran no check; the comparison shows nothing")
@@ -167,6 +175,19 @@ func TestSameAsWgstackdut(t *testing.T) {
 			})
 		}
 	}
+}
+
+// engineLines drops the lines only rustdut has: the DUT process's standard error, where dutserve
+// logs what the in-process Go wgstack logs to the test's standard error.
+func engineLines(lines []string) []string {
+	var out []string
+	for _, l := range lines {
+		if _, rest, ok := strings.Cut(l, " "); ok && strings.HasPrefix(rest, "dut: ") {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
 }
 
 func withoutMeasures(cs []tcpharness.CheckRecord) []tcpharness.CheckRecord {
@@ -205,6 +226,19 @@ func traceDiff(want, got tcpharness.CheckTrace) string {
 		}
 		if w != g {
 			fmt.Fprintf(&b, "failure %d: wgstackdut %q\n               rustdut    %q\n", i, w, g)
+			break
+		}
+	}
+	for i := range max(len(want.Lines), len(got.Lines)) {
+		var w, g string
+		if i < len(want.Lines) {
+			w = want.Lines[i]
+		}
+		if i < len(got.Lines) {
+			g = got.Lines[i]
+		}
+		if w != g {
+			fmt.Fprintf(&b, "line %d: wgstackdut %q\n            rustdut    %q\n", i, w, g)
 			break
 		}
 	}
