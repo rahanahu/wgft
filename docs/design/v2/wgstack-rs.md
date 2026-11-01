@@ -7,6 +7,7 @@ agent のユーザー空間モードは、トンネルの中の TCP、UDP、ICMP
 段を踏んで実装しています。
 PR 6 の範囲 (受動の open、閉じる手順と TIME_WAIT、アプリケーションの操作と知らせ、データの送受信、RTO、窓の probe、SACK による回復と D-SACK、RACK-TLP、不要な再送の取り消し、CUBIC と NewReno、boost の取得と回収、UDP の endpoint と予算、echo と ping、ICMP の誤りと PMTU、断片の入口) まで実装しました。
 核の上の非同期の handle の層 (`wgft-netstack`) は PR 7 で実装しました。
+qbench の `wgstack-rs` の engine と判定の切り替えは PR 8 で実装し、qbench の関門の cell の正しさの判定は凍結した Go の wgstack と同じでした ([PR 8 の測定](#pr-8-の測定))。
 構造、境目、メモリ、作業の順をここで決め、値と細部は[実装の時に決めること](#実装の時に決めること)に残します。
 
 ## この文書の読み方
@@ -785,6 +786,8 @@ wgstack はそれらを自分で扱うので、[トンネルの中の約束](../
 置き換えの後に測り、性能の段階として追います。
 Linux の `sendmmsg` と UDP の GSO のような system call のまとめも、置き換えの後に回します。
 
+qbench の条件は 2026-11-01 に関門の表で確かめました ([PR 8 の測定](#pr-8-の測定))。
+
 Go の wgstack の記録がすべて一致することは、ラボの一式で置き換えを判定する前の条件です ([Go の wgstack の記録との bit の一致](#go-の-wgstack-の記録との-bit-の一致))。
 
 ## 検証
@@ -1353,6 +1356,181 @@ segment ごとの経路の criterion の組 (`recv_segment`、`send_segment` と
 核の作成の手間は既定の表の大きさの配列の確保と初期化が大部分で、ポートの表が小さくなった分だけ減りました。
 作成の手順は変えていません。
 
+### PR 8 で決めたこと
+
+PR 8 は qbench に `wgstack-rs` の engine を足し、判定する engine を切り替えられるようにしました。
+口の細部 (`--clock real`、`ACCEPT`、`CONN_SOCKET`、`RTO_AT`、CPU の数え方、中継の 1 段の測り方) は[試験の道具の設計の段 8 で決めたこと](test-tooling.md#段-8-で決めたこと)にあります。
+
+- 判定の切り替え:`QBENCH_SUBJECT=wgstack-rs` で Rust の wgstack を判定します。
+  関門は凍結した Go の wgstack も同じ seed で測り、同じ規則の判定を `QBENCH-BESIDE` の行に出します。
+  Go の wgstack の判定は表の判定に入れず、Rust の判定と比べるためだけに出します
+- segment ごとのベンチの Go の組:`internal/wgstack/segment_bench_test.go` に、`crates/wgft-wgstack-bench` と同じ形のベンチ (`BenchmarkSegmentRecv`、`BenchmarkSegmentSend`、それぞれの SACK の組、`BenchmarkSegmentRigOverhead`) を置きました。
+  MTU と MSS、接続の数 (1、64、1024)、1 回ごとに 10 µs 進めてタイマーを回すこと、相手の packet を 1 つの buffer に組み立てて checksum を計算することを Rust の道具と同じにしました。
+  Go の wgstack は手で進める時計で動かし、アプリケーションは Go の agent の中継と同じく `Conn` で読み書きします
+
+#### PR 8 の測定
+
+2026-11-01 に、E コアの車線 (`wgft-heavy --class tool --timing`、Core Ultra 7 270K Plus の E コア 8 個) で測りました。
+ホストは Fedora の kernel 7.2.13 で、Linux の engine と Linux の client はユーザーとネットワークの名前空間の中で動きます。
+参照の Linux (ラボの Debian 13 と kernel 7.2.11) ではありません。
+`wgstack-dut` は release の build で、qbench は関門の表 (`TestQBenchGate`、cell ごとに 9 回、線から 5% 以内の cell は 18 回、8 回ずつ同時) です。
+経路は片道 25 ms、20 Mbit/s、200 packet の列、中身で決める損失の模型です。
+
+正しさ:関門の表のすべての cell (判定しない gVisor の client の cell を含みます) で、どの engine のどの実行も、byte の列の一致と誤りの無い終わりを通りました。
+判定する cell で、Rust の wgstack は `recv/loss5%/linux-client` と `thin-recv/loss5%/linux-client` が UNDETERMINED で、残りが PASS でした。
+同じ実行の Go の wgstack に同じ規則を当てると、同じ 2 つの cell が UNDETERMINED で、残りが PASS でした。
+UNDETERMINED の 2 つは、どちらの wgstack も値が線の近くにあり、区間が線をまたいだためです。
+このため、[置き換えの判定](#置き換えの判定)の qbench の条件は満たしました。
+
+判定する cell の値は次のとおりです。
+bulk の cell は Mbit/s の中央値と最小から最大、途絶の cell は回復の時間 (ms) の中央値と最小から最大、細い stream の cell は全実行を合わせた p99 (ms) と run を単位にした bootstrap の 95% の区間です。
+
+| cell | wgstack-rs | wgstack | gVisor | Linux |
+| --- | --- | --- | --- | --- |
+| `send/loss0%` | 18.71 (18.49 から 18.76) | 18.70 (18.64 から 18.75) | 18.69 (18.67 から 18.71) | 18.76 (18.53 から 18.77) |
+| `send/loss1%` | 3.59 (2.48 から 5.64) | 3.76 (2.63 から 5.68) | 3.70 (2.87 から 5.74) | 3.74 (2.47 から 5.94) |
+| `send/loss5%` | 1.13 (0.92 から 2.01) | 1.13 (0.98 から 1.94) | 1.54 (1.19 から 2.30) | 1.02 (0.82 から 1.89) |
+| `send/reorder` | 18.74 (8.81 から 18.86) | 18.71 (18.58 から 18.82) | 9.34 (6.29 から 13.46) | 18.75 (18.68 から 18.82) |
+| `send/outage2s` | 482 (474 から 496) | 503 (476 から 579) | 1322 (1315 から 1347) | 616 (395 から 641) |
+| `thin-send/loss1%` | 96 (77.8 から 96.6) | 97 (78.2 から 97.4) | 97 (77.7 から 97.6) | 87 (77.8 から 97.1) |
+| `thin-send/loss0%` | 29 (28.8 から 29.2) | 30 (29.8 から 30.6) | 29 (28.4 から 28.7) | 29 (28.6 から 29.3) |
+| `thin-send/loss5%` | 118 (103.0 から 123.5) | 118 (100.1 から 122.5) | 5259 (117.3 から 5612.6) | 348 (160.8 から 635.7) |
+| `thin-send/outage2s` | 1998 (1997.0 から 1998.4) | 1996 (1994.6 から 1995.5) | 9760 (9760.0 から 9760.0) | 2042 (2033.2 から 2050.7) |
+| `recv/loss0%/linux-client` | 18.87 (18.86 から 18.88) | 18.88 (18.86 から 18.90) | 18.88 (18.86 から 18.89) | 18.87 (18.80 から 18.88) |
+| `recv/loss1%/linux-client` | 3.24 (2.01 から 5.29) | 3.27 (2.03 から 5.33) | 3.25 (2.00 から 5.33) | 3.19 (1.92 から 5.30) |
+| `recv/loss5%/linux-client` | 1.00 (0.84 から 1.56) | 0.99 (0.82 から 1.67) | 1.02 (0.85 から 1.68) | 0.95 (0.82 から 1.66) |
+| `recv/reorder/linux-client` | 18.85 (18.79 から 18.87) | 18.86 (18.84 から 18.88) | 18.86 (18.80 から 18.87) | 18.86 (18.80 から 18.88) |
+| `recv/outage2s/linux-client` | 982 (975 から 985) | 831 (765 から 1019) | 999 (783 から 1014) | 964 (963 から 1024) |
+| `thin-recv/loss0%/linux-client` | 28 (27.6 から 28.2) | 27 (27.1 から 27.3) | 27 (27.2 から 27.4) | 27 (27.3 から 27.4) |
+| `thin-recv/loss1%/linux-client` | 97 (78.5 から 97.6) | 97 (77.9 から 97.3) | 97 (78.0 から 97.4) | 97 (78.4 から 97.7) |
+| `thin-recv/loss5%/linux-client` | 539 (191.4 から 777.6) | 537 (189.7 から 773.6) | 526 (195.3 から 770.7) | 409 (168.2 から 773.0) |
+| `thin-recv/outage2s/linux-client` | 2060 (2044.7 から 2061.1) | 2041 (2039.2 から 2055.7) | 2059 (2046.5 から 2061.4) | 2030 (2026.6 から 2045.9) |
+
+Rust の wgstack と Go の wgstack は、ほとんどの cell で揺れの内で同じ値でした。
+判定する bulk の cell の seed ごとの比 (Rust / Go の Mbit/s) の中央値は 0.98 から 1.01 でした。
+はっきり違ったのは次の点です。
+
+- `send/reorder`:Rust の wgstack は 18 回のうち 5 回が 17.5 Mbit/s を下回り、最も遅い回は 8.81 Mbit/s でした。
+  Go の wgstack は 18 回とも 18.58 Mbit/s 以上でした。
+  1 回ずつ流し直しても (`QBENCH_PARALLEL=1`、18 回)、Rust は 1 回が 11.51 Mbit/s で、Go は 18 回とも link を満たしました。
+  遅い回の packet の記録では、最初の窓の先頭の segment が並べ替えで 3 ms 遅れ、5 つの重複の ACK で不要な再送をした後、窓が slow start に戻らずに数秒かけて育っていました。
+  同じ seed の Go の記録も同じ時刻に同じ不要な再送をしましたが、次の 200 ms で link を満たしました。
+  Rust の統計は不要な再送の取り消し (`spurious_undos=1`) と、約 270 ms の 2 回目の回復を示します。
+  核は記録の照合で Go と同じ出力を返すので、違いは実時間の入力 (ACK の届く間隔と、駆動が 1 回の起床でまとめて渡す packet) から生まれたと考えます。
+  核の誤りかどうかは確かめていません。
+  packet の記録を手で進める時計の台本に写して Go と Rust に与えると分けられます
+- 判定しない gVisor の client の cell:`recv/loss1%` と `recv/loss5%` で、Rust の wgstack は seed ごとに Go の 1.18 倍から 1.49 倍速く、ACK の数が data の packet あたり約 0.76 で、Go の約 0.63 より多くありました。
+  別のプロセスの駆動が packet ごとに早く起き、ACK をまとめる機会が少ないためと考えます。
+  Linux の client では差が無いので、gVisor の送り手が ACK の数に応じて窓を育てる差です
+
+byte あたりの CPU:Rust の wgstack の子のプロセスの CPU を、受け手が読んだ byte で割った値です。
+握手、駆動、`wgstack-dut` の要求の処理、中継の 1 段、socketpair と Unix ソケットの system call を含みます。
+
+| cell | ns/byte の中央値 (最小から最大) |
+| --- | --- |
+| `send/loss0%` | 7.3 (6.8 から 8.9) |
+| `recv/loss0%/linux-client` | 7.7 (7.4 から 8.1) |
+| `send/loss1%`、`recv/loss1%/linux-client` | 15.0、17.5 |
+| `send/loss5%`、`recv/loss5%/linux-client` | 27.7、33.3 |
+| `send/outage2s`、`recv/outage2s/linux-client` | 6.4、12.2 |
+| 細い stream の cell | 350 から 790 |
+
+20 Mbit/s の経路では、packet ごとの起床と system call の固定の費用が大部分です。
+同じ車線で経路の速さを外すと (`QBENCH_RATE_MBIT=0`、損失なし、1 回ずつ 5 回)、Rust の wgstack は送る向きで 226 Mbit/s、受ける向きで 486 Mbit/s (gVisor の client) と 151 Mbit/s (Linux の client) で、byte あたりの CPU は 1.0 から 1.1 ns でした。
+Go の wgstack は 216、497、117 Mbit/s でした。
+Rust の子のプロセスはこの速さで 1 つのコアの数 % しか使わないので、この速さは Rust の wgstack の CPU で決まる上限ではありません ([qbench の値で比べられるもの](#qbench-の値で比べられるもの))。
+細い stream の cell は 20 ms ごとに 200 byte なので、値はタイマーと起床の費用です。
+
+中継の 1 段 (`TestQBenchRelayStage`、5 回):中継は 256 MiB の写しで 0.093 から 0.097 ns/byte で、子のプロセスの CPU の 2% 未満です。
+細い stream の遅れの p50 は直の Unix ソケットの 0.54 から 0.61 ms に対して 0.67 から 0.71 ms で、p99 は 1.05 から 2.31 ms に対して 1.13 から 1.26 ms でした。
+qbench の `thin-recv/loss0%/linux-client` で Rust の wgstack の p99 が Go より約 0.6 ms 長いのは、中継の 1 段と socketpair のプロセスの境目の分と考えます。
+`thin-send/loss0%` では逆に Rust が約 1.5 ms 短くありました。
+
+segment ごとの費用:Go の組は `-count 6 -benchtime 2s` の 6 回の中央値で、Rust の組は criterion を 3 回流した中央の推定の中央値です。
+どちらの組も 1 回の確保もしません (Go の `-benchmem` で 0 allocs/op)。
+
+| ベンチ | Go (ns) | Rust (ns) | Go / Rust |
+| --- | ---: | ---: | ---: |
+| recv `/1` | 1105.0 | 661.7 | 1.67 |
+| recv `/64` | 1178.5 | 703.7 | 1.67 |
+| recv `/1024` | 1185.5 | 705.3 | 1.68 |
+| recv SACK `/1` | 1121.5 | 668.2 | 1.68 |
+| recv SACK `/64` | 1190.5 | 707.6 | 1.68 |
+| recv SACK `/1024` | 1201.0 | 714.4 | 1.68 |
+| send `/1` | 857.9 | 617.9 | 1.39 |
+| send `/64` | 884.9 | 631.9 | 1.40 |
+| send `/1024` | 934.2 | 677.9 | 1.38 |
+| send SACK `/1` | 887.3 | 622.6 | 1.43 |
+| send SACK `/64` | 932.3 | 639.8 | 1.46 |
+| send SACK `/1024` | 1053.5 | 661.5 | 1.59 |
+| 道具だけ (`rig_overhead`) | 383.6 | 96.1 | 3.99 |
+
+最小と最大の差は、Go の 6 回で中央値の 1% から 9%、Rust の 3 回で 1% から 6% でした。
+`rig_overhead` は受信の組の相手の packet (1380 byte の中身と checksum) の費用で、受信の組から引くと核の費用の目安は Go が 722 から 817 ns、Rust が 566 から 618 ns です。
+送信の組の相手は 40 byte の ACK を作るだけなので、`rig_overhead` を引くと核の費用を少なく見積もります。
+道具の差 (約 4 倍) は同じ形の 1 の補数の和の loop の差で、Go の profile では道具の和 (`ones` と `binary.BigEndian.Uint16`) が受信の組の約 30% でした。
+Rust が同じ loop を速く回す理由 (vector の命令にするか) は確かめていません。
+
+差の内訳は、Go の `pprof` (1024 本の組) と Rust の `perf record` (E コアの `cycles:u`、`--profile-time 5`) で分けました。
+
+- 16 KiB の chunk を返す時の 0 埋め:Go の `chunkPool.put` は受信で 22%、送信で 27% (約 260 ns) で、Rust の `memset` は受信と送信で 37% (約 260 ns) でした。
+  ほぼ同じ時間で、どちらの核も segment ごとに 1 つの chunk を埋めています。
+  ベンチは segment を 1 つずつ読み終えるか確認を受けるので、そのたびに輪が空になります。
+  輪の `trim` は生きている範囲に掛からない chunk を返すので、空の輪は持つ chunk を置き場に返して埋め、次の segment で取り直します
+- checksum:Go の核の `checksum` は受信で 8% (約 95 ns)、送信で 12% (約 110 ns) で、Rust の `wire::checksum` は受信で 20% (約 140 ns)、送信で 21% (約 145 ns) でした。
+  この部分は Rust の方が遅くなっています
+- 残り:0 埋め、checksum、道具を除いた核の部分は、受信の 1024 本で Go が約 450 ns、Rust が約 210 ns でした。
+  Go の側には、手で進める時計の atomic の読み (`ManualClock.Now` が約 5%)、`Device.Poll` と `chunkPool` の mutex、`Conn` の読み書きの錠と条件の待ちが入ります。
+  GC は確保が無いので動きません
+
+最適化の候補 (この PR では核を変えません):
+
+- chunk の 0 埋め:輪が空になっても最後の chunk を持ち続けるか、書いた範囲だけを埋めます。
+  上の内訳では segment ごとの時間の 4 割近くで、受信の核の費用の目安 (約 600 ns) の 4 割余りに当たります。
+  0 埋めは次の接続に前の中身を残さないための規則なので、書いた範囲を覚える形でも同じ約束を保てます
+- checksum:Go の核の実装より約 1.4 倍遅い 1 の補数の和を、64 bit の加算か vector の命令にします。
+  受信と送信の両方の 1 segment ごとに約 140 ns です
+- qbench の起床の費用:20 Mbit/s の経路の byte あたりの CPU (約 7.5 ns) は、速さを外した経路 (約 1 ns) の 7 倍で、packet ごとの起床と system call の固定の費用です。
+  製品のデータプレーンでも packet ごとに起きるので、`sendmmsg` と `recvmmsg` のまとめ ([後の段](#後の段)) で減る見込みです。
+  製品のデータプレーンの起床の費用は測っていません
+- 並べ替えの直後の窓 (`send/reorder`):上の違いの原因を分けてから決めます
+
+#### qbench の値で比べられるもの
+
+qbench の速さは、20 Mbit/s の経路では経路で、速さを外した経路では窓と試験の道具で決まります。
+2026-11-01 に同じ車線で、engine を 1 つずつ、速さを外して損失なしで 3 回ずつ流し、試験のプロセスの CPU を Go の `pprof` で分けました (`QBENCH_RATE_MBIT=0`、`QBENCH_DELAY_MS`)。
+
+| 片道の遅れ | 向き | wgstack-rs | wgstack | gVisor | Linux |
+| --- | --- | --- | --- | --- | --- |
+| 25 ms | 送る (gVisor の client) | 209 から 240 | 215 から 232 | 299 から 300 | 213 から 302 |
+| 25 ms | 受ける (Linux の client) | 130 から 143 | 97 から 117 | 169 から 206 | 106 から 146 |
+| 1 ms | 送る (gVisor の client) | 4206 から 4244 | 4058 から 4539 | 3044 から 3066 | 3544 から 4248 |
+| 1 ms | 受ける (Linux の client) | 3092 から 3518 | 2096 から 2250 | 4250 から 5262 | 2985 から 3340 |
+
+値は Mbit/s の最小から最大です。
+遅れを 25 ms から 1 ms に縮めると、どの engine も 10 倍から 30 倍速くなります。
+このため 25 ms の経路の速さは、CPU ではなく往復の時間あたりの窓 (受信と送信のバッファ) で決まります。
+1 ms の経路では、Rust の wgstack の子のプロセスは送る向きで 1 つのコアの約 47%、受ける向きで約 27% しか使いません (0.89 から 0.91 と 0.65 から 0.66 ns/byte)。
+試験のプロセスは 3.5 から 7.4 ns/byte (この速さで 1 から 3 コア分) を使い、その内訳は gVisor の client (送る向きで約 2.2 ns/byte)、送り手の stream の生成と受け手の照合 (1.1 から 1.6 ns/byte)、tun と socketpair の読み書き、Link です。
+Rust の wgstack が 1 つのコアを使い切らずに止まるので、1 ms の経路の速さは試験の道具の側 (client、生成と照合の goroutine、Link) で止まると考えます。
+どの goroutine が止めるかは分けていません。
+この速さは engine の差を示しません。
+
+比べ方の区別は次のとおりです。
+
+- stack の公平な比べ:segment ごとの費用 (Go と Rust の同じ形のベンチ) と、Rust の wgstack の byte あたりの CPU (子のプロセスの CPU)。
+  前者は同じ入力を同じ形で与え、後者は試験の道具の CPU を含みません
+- 正しさと TCP の振る舞いの比べ:20 Mbit/s の経路の関門の表。
+  経路が速さを決めるので、値は回復、窓の育ち方、遅れの比べで、CPU の速さの比べではありません
+- 試験の道具で止まる値:速さを外した経路の Mbit/s。
+  25 ms では窓で、1 ms では試験の道具で止まるので、engine の速さの比べには使いません
+
+agent の水準の比べ (提案、未実施):ラボの `lab/tcpquality.sh` と `lab/tcpquality-cpu.sh` は、WireGuard を通した agent の転送の速さ、回復、byte あたりの CPU (プロセスごとの cgroup) を測ります。
+`WGFT_LAB_AGENT_IMPL` を `go` と `rust` にして、同じ VM、同じ server (kernel と userspace の両方のモード) で交互に流すと、Rust の agent と Go の agent を同じ経路で比べられます。
+経路は `tcpquality-cpu.sh` の `fast` (netem なし、1 GiB) と `rate` (片道 25 ms、20 Mbit/s) で、`DIRECTION=up` と既定の down の両方です。
+細い stream の遅れは今の `tcpquality.sh` が測らないので、qbench の `runThin` と同じ 20 ms ごとの 200 byte の流れを足すことを提案します。
+`fast` の速さは VM の vCPU の数と WireGuard の暗号に左右されるので、CPU の数を固定し (`wgft-heavy` の車線)、byte あたりの CPU を主な値にします。
+
 ### 後の段
 
 agent の置き換えが終わった後に、次の段を順に決めます。
@@ -1375,7 +1553,8 @@ agent の置き換えが終わった後に、次の段を順に決めます。
 
 ## 未確認の点
 
-- Rust の核の byte あたりの CPU と、Go の wgstack と gVisor との比は測っていません
+- Rust の wgstack の byte あたりの CPU は qbench の子のプロセスとして測りましたが、Go の wgstack と gVisor は試験と同じプロセスで動くので、qbench の中での比は測っていません。segment ごとの費用は Go の wgstack と比べました ([PR 8 の測定](#pr-8-の測定))
+- qbench の `send/reorder` で Rust の wgstack だけが時々 link を満たさない原因 (核か、実時間の入力の違いか) は確かめていません
 - 1 つのスレッドのデータプレーンが、Windows と macOS の時計の分解能とスケジューラの下で、遅延 ACK と RTO の規則を保てるかは確かめていません
 - FMA を使わない build で作った記録の浮動小数点の値に、Rust が同じ値で並べるかは、記録を作るまで分かりません
 - 確保の数えで測る保持と RSS の比は、Rust の agent では測っていません

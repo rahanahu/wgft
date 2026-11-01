@@ -1370,8 +1370,8 @@ Rust の wgstack を相手にするのは T3c からで、実装の 4 の API �
   `IntN` の棄却の枝は、最初の値が棄却される状態と 2^63 に近い上限で Go の試験が書いた `rng-intn.json` の値と一致しました。
   Go の `strconv.Quote` と `strconv.FormatFloat` の写しは、T3b で Go の試験が書き出した値 (`vectors.json`) と一致しました
 - `wgft-tcpharness` の JSON:crate は標準ライブラリだけに依るため、Go の書いた例と一覧を読む小さな読み手 (`gojson::parse`) を持ちます。整数でない数は読みません
-- 実時間の Rust の DUT:`--clock real` の外側の層が製品の層と同じものになるかは、Rust の wgstack の外側の層の設計で決まります
-- qbench の Unix ソケットの 1 段:細い stream の遅れの p99 にどれだけ加わるかは未測定です
+- qbench の Unix ソケットの 1 段:段 8 で `TestQBenchRelayStage` が測りました。細い stream の遅れの p50 に約 0.1 ms が加わり、CPU は約 0.1 ns/byte です ([wgstack の Rust 版の設計の PR 8 の測定](wgstack-rs.md#pr-8-の測定))
+- 実時間の Rust の DUT:`--clock real` の外側の層は、製品と同じ `wgft-netstack` の handle と、agent のデータプレーンと同じ順の駆動の写しです。駆動は agent の `dataplane::driver` を共有せず、`wgstack-dut` の中に同じ順で書きました。agent の駆動は WireGuard の device の層と UDP のソケットを持つためです
 - fuzz の速さ:6 節の表のとおり測り、関門の回数を決めました。
   `core` と `replay` の 1 回の時間の多くは `check_invariants` です。
   確かめを軽くできるか (使っていない範囲を飛ばすなど) は、実装の担当の判断で、未確認です
