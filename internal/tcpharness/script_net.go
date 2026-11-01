@@ -213,7 +213,7 @@ func (in *interp) netCall(e *Expr, arg func(int) any) (any, bool) {
 		if !ok {
 			in.failf("with_port takes an address and port")
 		}
-		return netip.AddrPortFrom(ap.Addr(), uint16(in.int(arg(1)))), true
+		return netip.AddrPortFrom(ap.Addr(), in.port(arg(1))), true
 	case "seg_size":
 		return int64(segSize(in.peer(arg(0)).p)), true
 	case "wire":
@@ -241,11 +241,19 @@ func (in *interp) netCall(e *Expr, arg func(int) any) (any, bool) {
 		if n < 1 {
 			in.failf("fragments takes a packet and cuts")
 		}
+		p := in.ip(arg(0)).p
 		var cuts []int
+		prev := 0
 		for i := 1; i < n; i++ {
-			cuts = append(cuts, int(in.int(arg(i))))
+			c := int(in.int(arg(i)))
+			// a fragment offset counts in 8-byte units, and the cuts split the payload in order
+			if c%8 != 0 || c <= prev || c >= len(p.Payload) {
+				in.failf("fragments: cut %d is not a multiple of 8 between %d and %d", c, prev, len(p.Payload))
+			}
+			cuts = append(cuts, c)
+			prev = c
 		}
-		return ipList(Fragments(in.ip(arg(0)).p, cuts...)), true
+		return ipList(Fragments(p, cuts...)), true
 	case "fragments_every":
 		p := in.ip(arg(0)).p
 		step := int(in.int(arg(1)))

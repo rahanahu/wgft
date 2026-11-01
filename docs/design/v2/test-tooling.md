@@ -283,7 +283,7 @@ Rust の runner は手で進める時計の DUT しか流さないので、実�
 | `await_datagram d match= -> r` | `udpLarge` の断片を集める繰り返し |
 
 packet を作る関数は `segment(P, 旗, seq[, payload])` (`Peer.Segment`)、`syn(P, opts)` (ISS の SYN で窓は 65535)、`raw(P, 旗, seq)` (ほかの欄が Go の空の `Segment` と同じ segment。空の `Options` は窓の scale 0 を持つ)、`ts(val, ecr)`、`with(x, 欄=式, ...)` (欄を差し替えた写し)、`opts_standard()`、`opts_nosack()`、`opts_none()`、`udp(src, dst, id, b)`、`icmp(src, dst, id, type, code, rest, body)`、`fragments(pkt, cuts...)`、`fragments_every(pkt, n)`、`frag(pkt, from, to)`、`frag_needed(from, 元の packet, mtu)`、`corrupt(pkt, off, xor)`、`set_bytes(pkt, off, b)`、`wire(x)` (packet の bytes)、`wire_len(x)` です。
-受けた packet を読む関数は `to_peer(pkt)`、`icmp_type(pkt)` (ICMP でなければ -1)、`parse_udp(pkt)`、`parse_icmp(pkt)`、`parse_quote(b)` です。
+受けた packet を読む関数は `to_peer(pkt)`、`icmp_type(pkt)` (ICMP でないか ICMP として読めなければ -1)、`parse_udp(pkt)`、`parse_icmp(pkt)`、`parse_quote(b)` です。
 読めない packet にも、Go の `ParseUDP` などと同じく空の値と誤りか `ok` の偽を返すので、台本は Go の台本と同じ順で条件を書けます。
 
 ### 例
@@ -377,13 +377,13 @@ delivered delivered p.conn
 
 移した PR (T1a と T1b) は、台本ごとに Go の関数と台本を同じ DUT と同じ種で流し、確かめの ID、結果、観察の文字列の列が一致することを確かめました。
 移した Go の関数は、直線の台本をすべて移し終えるまで `tcpharness.LegacyScenarios` に残し、照らしの試験 (`TestScriptsMatchGoFunctions`) が並べて流しました。
-T1b が最後の台本を移し、3 つの DUT で照らした後に、Go の関数、照らしの試験と、そのためだけの補助 (`RecordTrace`、`CheckLines`、`Passed`) を消しました。
+T1b が最後の台本を移し、3 つの DUT で照らした後に、Go の関数、照らしの試験と、そのためだけの補助 (`RecordTrace`、`CheckLines`、`DiffLines`、`Passed`) を消しました。
 照らしの結果は T1a と T1b の PR にあります。
 照らし方は次のとおりでした。
 
-- `wgstackdut`:手で進める時計で、種 1 から 5。`RecordTrace` が返すログの行 (送った segment、見た segment、待ちとその上限、確かめ、`MEASURE`、記録した失敗) を、行ごとの DUT の時刻を付けて 1 行ずつ比べます
-- `gvisordut`:実時間で、種 1 と 2。segment の行は gVisor の乱数で変わるので、確かめの行と `MEASURE` の名前だけを比べます (`CheckLines`)。通った確かめの観察の文字列は、実時間の実行が測った値 (burst の segment の数、Time Exceeded までの秒) を含みうるので比べず、通らなかった確かめの観察の文字列だけを比べます。期待した差の一覧が照らすのは後者です。食い違った組は 3 回まで流し直します
-- `linuxdut`:ラボの使い捨ての VM で、`gvisordut` と同じ比べ方です。Go の関数の側と台本の側は、それぞれ新しい user と network namespace を持つ別のプロセスで、種 1 で流します。1 つの namespace を共有すると、前の実行が残した TIME-WAIT の 4 つ組、台本の決まった IP ID で決まる再組み立ての列、ICMP の送る量の制限に後の実行が当たり、台本の違いでない食い違いが出たためです。食い違った台本だけを、新しい namespace で 3 回まで流し直します
+- `wgstackdut`:手で進める時計で、種 1 から 5。`RecordTrace` が返したログの行 (送った segment、見た segment、待ちとその上限、確かめ、`MEASURE`、記録した失敗) を、行ごとの DUT の時刻を付けて 1 行ずつ比べました
+- `gvisordut`:実時間で、種 1 と 2。segment の行は gVisor の乱数で変わるので、確かめの行と `MEASURE` の名前だけを比べました (`CheckLines`)。通った確かめの観察の文字列は、実時間の実行が測った値 (burst の segment の数、Time Exceeded までの秒) を含みうるので比べず、通らなかった確かめの観察の文字列だけを比べました。期待した差の一覧が照らすのは後者です。食い違った組は 3 回まで流し直しました
+- `linuxdut`:ラボの使い捨ての VM で、`gvisordut` と同じ比べ方でした。Go の関数の側と台本の側は、それぞれ新しい user と network namespace を持つ別のプロセスで、種 1 で流しました。1 つの namespace を共有した最初の実行では、後の実行が前の実行の残した状態に当たり、台本の違いでない食い違いが出たためです。当たった状態は、TIME-WAIT の 4 つ組、台本が決まった IP ID で入れた断片の再組み立ての列、ICMP の誤りを送る頻度の制限でした。食い違った台本だけを、新しい namespace で 3 回まで流し直しました
 
 どの DUT でも、Go の関数の実行が通らなかった組は一致の証拠にしませんでした。
 2 つの実行が同じように落ちれば行は一致しますが、DUT の状態の誤りを見ているだけかもしれないためです。

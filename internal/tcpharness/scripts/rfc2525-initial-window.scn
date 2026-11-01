@@ -7,8 +7,11 @@ refs: RFC 2525 2.1 and 2.3, RFC 6928
 
 listen l 8301
 
-connect p l 8301 syn=with(opts_standard(),mss=1380)
-write p.conn pattern(30*1380, 0xd1)
+# the MSS for wgft's MTU, as a modern client sends it; the IDs below name its value, 1380, so the
+# expected-difference lists keep their keys
+let mss = MTU - 40
+connect p l 8301 syn=with(opts_standard(),mss=mss)
+write p.conn pattern(30*mss, 0xd1)
 burst p -> b
 at_once b.segs -> segs
 let sent = sum_of(segs, s.len)
@@ -19,10 +22,10 @@ check mss1380.one-probe-at-most later <= 1 && len(b.segs) <= 11
   what: after the first window, at most one more new segment comes before any ACK: a tail loss probe
   got: {later} later segments, {len(b.segs)} in all
 let largest = max_of(segs, s.len)
-check mss1380.at-most-iw10 len(segs) <= 10 && sent <= 10 * 1380
-  what: RFC 2525 2.1 and 2.3: the first burst is at most ten segments of at most 1380 bytes
+check mss1380.at-most-iw10 len(segs) <= 10 && sent <= 10 * mss
+  what: RFC 2525 2.1 and 2.3: the first burst is at most ten segments of at most {mss} bytes
   got: {len(segs)} segments, {sent} bytes, the largest {largest}
-check mss1380.segment-size largest <= 1380
+check mss1380.segment-size largest <= mss
   what: no segment carries more than the peer's MSS
   got: the largest {largest} bytes
 measure mss1380-initial-segments len(segs)
