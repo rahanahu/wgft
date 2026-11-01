@@ -56,9 +56,9 @@ if ((!measure)); then
     head_bin=$(cd "$root" && cargo metadata --format-version 1 --no-deps | python3 -I -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')/release/wgft-agent-perf
   fi
   if [[ -n $base && -z $base_bin ]]; then
-    wt=$cache/base-wt
     mkdir -p "$cache"
-    git -C "$root" worktree remove --force "$wt" 2>/dev/null || true
+    tmp=$(mktemp -d "$cache/run.XXXXXX")
+    wt=$tmp/wt
     git -C "$root" worktree add --detach "$wt" "$base" >&2
     trap 'git -C "$root" worktree remove --force "$wt" >/dev/null 2>&1 || true' EXIT
     if git -C "$root" cat-file -e "$base:crates/wgft-agent-perf/Cargo.toml" 2>/dev/null; then
@@ -69,7 +69,13 @@ if ((!measure)); then
       cp -r "$root/crates/wgft-agent-perf" "$wt/crates/wgft-agent-perf"
     fi
     (cd "$wt" && CARGO_TARGET_DIR=$cache/base-target cargo build --release -p wgft-agent-perf >&2)
-    base_bin=$cache/base-target/release/wgft-agent-perf
+    # Copy the binary out, so that a concurrent run sharing the target directory cannot replace it,
+    # and drop the worktree now: phase 2 replaces this shell with exec, so no EXIT trap would run.
+    cp "$cache/base-target/release/wgft-agent-perf" "$tmp/base-bin"
+    base_bin=$tmp/base-bin
+    git -C "$root" worktree remove --force "$wt" >&2
+    trap - EXIT
+    export WGFT_PERF_TMP=$tmp
   fi
   args=(--measure --rounds "$rounds" --packets "$packets" --burst "$burst" --modes "$modes" --sizes "$sizes" --head-bin "$head_bin")
   [[ -n $base_bin ]] && args+=(--base "${base:-base}" --base-bin "$base_bin")
@@ -97,10 +103,24 @@ else
   pmu=cpu
   events="cycles,instructions,cache-misses,L1-dcache-load-misses"
 fi
-perf stat -e "$events" -- true >/dev/null 2>&1 || { echo "agent-perf-stat: perf stat cannot count $events here; run it by hand to see why" >&2; exit 1; }
-
 work=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/wgft-agent-perf-run.XXXXXX")
-trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "$work" ${WGFT_PERF_TMP:+"$WGFT_PERF_TMP"}' EXIT
+
+# Preflight on the measured CPU: all four events must count.
+need_events="cache-misses L1-dcache-load-misses instructions cycles"
+check_events() {
+  local file=$1 ev
+  for ev in $need_events; do
+    awk -F, -v want="$ev" '
+      /^#/ || NF < 3 { next }
+      { e = $3; sub(/^cpu_[a-z]+\//, "", e); sub(/\/u*$/, "", e); sub(/:[a-zA-Z]+$/, "", e)
+        if (e == "mem_load_uops_retired.l1_miss") e = "L1-dcache-load-misses"
+        if (e == want && $1 ~ /^[0-9]+$/) found = 1 }
+      END { exit !found }' "$file" || { echo "agent-perf-stat: event $ev is missing, not counted or not supported on CPU $cpu_main (events: $events)" >&2; return 1; }
+  done
+}
+taskset -c "$cpu_main" perf stat -x, --no-inherit -e "$events" -o "$work/pre.csv" -- true >/dev/null 2>&1 || true
+check_events "$work/pre.csv" || exit 1
 rows=$work/rows.tsv
 
 # run_one ARM BIN MODE SIZE: one perf stat run; appends "arm mode size metric value" rows.
@@ -110,6 +130,7 @@ run_one() {
     "$bin" --mode "$mode" --size "$size" --packets "$packets" --burst "$burst" \
     --cpu-main "$cpu_main" --cpu-peer "$cpu_peer" >"$work/tool.out" 2>"$work/tool.err" \
     || { echo "agent-perf-stat: $arm $mode $size failed: $(cat "$work/tool.err")" >&2; exit 1; }
+  check_events "$work/perf.csv" || exit 1
   awk -F, -v arm="$arm" -v mode="$mode" -v size="$size" '
     FNR == NR {
       n = split($0, words, " ")
@@ -118,7 +139,7 @@ run_one() {
     }
     /^#/ || NF < 3 { next }
     {
-      ev = $3; sub(/^cpu_[a-z]+\//, "", ev); sub(/\/u+$/, "", ev); sub(/\/$/, "", ev)
+      ev = $3; sub(/^cpu_[a-z]+\//, "", ev); sub(/\/u*$/, "", ev); sub(/:[a-zA-Z]+$/, "", ev)
       if (ev == "mem_load_uops_retired.l1_miss") ev = "L1-dcache-load-misses"
       v[ev] = $1
     }

@@ -547,6 +547,13 @@ E コアの車線は `L1-dcache-load-misses` を数えないので、そこで�
   そのためバッチの段の `sendmmsg` と `recvmmsg` の効果は、前者の 2 つより後者の 2 つに現れます
 - ソケットのバッファは、`CAP_NET_ADMIN` の要る `FORCE` の指定を使わないので、新しい network namespace の `net.core.rmem_max` で頭打ちになります。burst の大きさはそれに収まる値にしてあります
 - loopback は送り手の `sendto` の中で受け手のキューに入れるので、`send` の CPU の時間に受信側のキューへの積みが入ります。ラボの veth の経路が送った後の softirq を数えるのと同じ形です
+- 道具の socket の loop は、データプレーンの経路の写しです。`dataplane::socket` は `pub(crate)` で tokio を使うので、道具から呼べません。前と後の値は、道具の loop と本物の device の層を合わせたものを測ります。PR には、どちらが変わったかを書きます
+- `--base` は、道具を持たない base に head の道具を重ねます。device の層の API が base と head で違えば build に失敗するので、道具の差し替えが要る API の変更は、比べる base より前の commit に分けます
+- ゆらぎ:同じ commit の base と head を比べた結果は、L1 の miss と `cache-misses` の比が 0.97 から 1.32 まで揺れ、命令の数、system call の数、byte あたりの CPU の時間は約 1% で収まりました。L1 と `cache-misses` の差は、出力の範囲より大きいときだけ読みます
+- E コアの車線の `L1-dcache-load-misses` は `mem_load_uops_retired.l1_miss` なので、P コアの値とは比べられません。比べるのは同じ車線の base と head だけです
+- `syscalls/packet` が数えるのは `sendto` と `recvfrom` (最後の `WouldBlock` を含みます) と burst ごとの `poll` 1 回で、futex、`clock_gettime`、`getrusage` を含みません
+- 準備 (握手と thread の起動) は `perf stat` の数えに入りますが、packet と byte の数には入りません。定数で小さい分です
+- burst ごとの `clock_gettime` と `getrusage` の費用は `cpu-ns/byte` に入るので、64 byte の packet では比を少し 1 に近づけます
 
 ### 判定の手順
 
