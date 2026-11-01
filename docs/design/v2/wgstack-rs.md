@@ -452,9 +452,12 @@ CPU の目標は置き換えの条件に入れないので ([置き換えの判�
 
 ワークスペースは release の build でも panic を巻き戻します。
 配布のために panic でプロセスを止める設定を選んだ場合は、この作り直しは起きず、プロセスが終わります。
+データプレーンのスレッドがどの理由で終わっても、作り直しを管理する task はそれを知り、トンネルを作り直します。
+device の層のハンドシェイクの時刻の高い水位 (`Device::unix_high_water`) も、同じ受け渡しで次の世代に渡します。
 
-核 (`wgft-wgstack`) と WireGuard の device (`wgft-wireguard`) は、release の build でも整数の桁あふれを検査します (`Cargo.toml` の `[profile.release.package.*]` の `overflow-checks = true`)。
-どちらも相手が送る packet を読む crate で、桁あふれは相手が届かせうる誤りです。
+核 (`wgft-wgstack`)、WireGuard の device (`wgft-wireguard`) と、その下の WireGuard の protocol の crate (`sanstun`) は、release の build でも整数の桁あふれを検査します (`Cargo.toml` の `[profile.release.package.*]` の `overflow-checks = true`)。
+どれも相手が送る packet を読む crate で、桁あふれは相手が届かせうる誤りです。
+`sanstun` への指定は build の profile の設定で、依存のソースは変えません。
 検査が無いと値が黙って回り込み、表の添字や長さの誤りとして先へ進みます。
 検査があれば panic になり、上のとおり世代を終えてトンネルを作り直すので、結果の範囲が決まります。
 このため、panic を巻き戻す設定 (`panic = "unwind"`) と組で保ちます。
@@ -470,10 +473,21 @@ segment ごとの経路の費用は、criterion の `recv_segment`、`send_segme
 | `rig_overhead` (道具だけ) | +0.2% (差なし) | | |
 
 変化は -3.3% から +2.9% で、同じコードを流し直したときの揺れ (5% ほど) の内でした。
-後の測定の途中から、同じホストの普通の CPU でラボの一式を走らせていました。
-device の層は criterion のベンチを持たないので、検査の費用は測っていません。
-データプレーンのスレッドがどの理由で終わっても、作り直しを管理する task はそれを知り、トンネルを作り直します。
-device の層のハンドシェイクの時刻の高い水位 (`Device::unix_high_water`) も、同じ受け渡しで次の世代に渡します。
+device の層 (`wgft-wireguard`) は criterion のベンチを持たないので、検査の費用は測っていません。
+
+`sanstun` の費用は、`sanstun` 0.1.0 の criterion のベンチ `data_path` で、検査を入れない build を基準に 2 回ずつ測りました (開発機、測定用の CPU の車線、中央の推定の変化)。
+
+| 段 | 64 byte | 1280 byte |
+| --- | --- | --- |
+| `begin_encapsulate` | +0.6%、+0.1% | -0.3%、+0.4% |
+| `encrypt` | +0.1%、-0.4% | -1.2%、+0.2% |
+| `receive` | +0.1%、+0.8% | +0.8%、+0.4% |
+| `begin_decapsulate` | +1.0%、+3.1% | +1.2%、-0.3% |
+| `decrypt` | -0.7%、+0.1% | +0.8%、+0.4% |
+| `commit_decapsulate` | -8.7%、+1.1% | -4.8%、+1.3% |
+| `poll_event` | +0.3%、+2.9% | 0.0%、-1.1% |
+
+1 つの packet の費用の大半を占める `encrypt` と `decrypt` の変化は ±1.3% の内で、ほかの段の変化も 2 回の間の揺れより小さいか同じ程度でした。
 
 ## メモリ
 
