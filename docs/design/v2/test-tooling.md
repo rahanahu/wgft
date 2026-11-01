@@ -1102,8 +1102,9 @@ Linux の TUN の上で Rust の engine を動かす確かめは、qbench でな
 - `RTO_AT`:Rust の核は RTO の経過を知らせないので、分からないと答えます。
   qbench の回復の判定の線は Linux の回復の時間と Linux の RTO から作るので、判定は変わりません。
   表の Rust の wgstack の RTO は -1 です
-- CPU:`wait4` の rusage ではなく、`Stats` を読む時に `/proc/<pid>/task/*/schedstat` の和を読みます。
-  qbench は rig を閉じる前に `Stats` を読み、schedstat は ns の単位で数えるためです。
+- CPU:`wait4` の rusage ではなく、DUT の `CPU` の関数が `/proc/<pid>/task/*/schedstat` の和を読みます。
+  qbench は転送の後、rig を閉じる前に `Stats` に続けて `CPU` を読みます。
+  プロセスはまだ終わっていないので rusage は使えず、schedstat は ns の単位で数えるためです。
   値は握手と中継の 1 段を含みます。
   Go の wgstack、gVisor、Linux は試験と同じプロセスかカーネルの中で動くので、qbench は CPU を分けて測りません
 - 判定の切り替え:`QBENCH_SUBJECT` は `wgstack` (既定) か `wgstack-rs` です。
