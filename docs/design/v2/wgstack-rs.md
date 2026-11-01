@@ -22,9 +22,9 @@ Go の文書の規則をここに写しません。
 Go の文書と食い違う点は、この文書が理由と共に挙げたものだけです。
 
 関わる設計は次のとおりです。
-どちらもまだ `feat/v2-rust` に入っていないので、道で示します。
+agent の置き換えの設計はまだ `feat/v2-rust` に入っていないので、道で示します。
 
-- 試験の道具 (#682、`docs/design/v2/test-tooling.md`):台本の言語、2 つの runner、DUT の口、記録の照合、qbench、fuzz、関門の細部を持ちます。
+- [試験の道具の設計](test-tooling.md):台本の言語、2 つの runner、DUT の口、記録の照合、qbench、fuzz、関門の細部を持ちます。
   この文書の[検証](#検証)は、その設計の決定を前提にして要点だけを書きます
 - agent の置き換え (#680、`docs/design/v2/agent-parity.md`):device の殻、データプレーンの駆動の実装、中継、UDP の中継、制御ソケットを持ちます。
   データプレーンの駆動の規則の正本はこの文書の[データプレーンの駆動](#データプレーンの駆動)で、#680 はそれを実装します
@@ -375,9 +375,11 @@ CPU の目標は置き換えの条件に入れないので ([置き換えの判�
 4. 新しい世代のスレッドに `Budget` を渡して核を作ります
 
 `Budget` は、作り直しが失敗して再試行の待ちに入る間も、作り直しを管理する task が持ち続けます。
-データプレーンのスレッドが panic で終わり `Budget` を取り出せないときは、新しい `Budget` を作ります。
-古い `Budget` は panic の巻き戻しで解放されているので、集まりはプロセスで 1 つのままです。
-release の build は panic でプロセスを止める設定なので、この場合は試験と debug の build でだけ起きます。
+データプレーンで panic が起きると、巻き戻しでスレッドが終わり、`Budget` は取り出せません。
+このとき agent は新しい `Budget` を作ってトンネルを作り直します。
+古い `Budget` は巻き戻しで解放されているので、集まりはプロセスで 1 つのままです。
+ワークスペースは release の build でも panic を巻き戻します。
+配布のために panic でプロセスを止める設定を選んだ場合は、この作り直しは起きず、プロセスが終わります。
 データプレーンのスレッドがどの理由で終わっても、作り直しを管理する task はそれを知り、トンネルを作り直します。
 device の層のハンドシェイクの時刻の高い水位 (`Device::unix_high_water`) も、同じ受け渡しで次の世代に渡します。
 
@@ -546,12 +548,12 @@ Go の wgstack の記録がすべて一致することは、ラボの一式で�
 
 ## 検証
 
-試験の道具の細部は、試験の道具の設計 (#682、`docs/design/v2/test-tooling.md`) が決めます。
+試験の道具の細部は、[試験の道具の設計](test-tooling.md)が決めます。
 この文書は、その決定のうち核の設計に関わるものを採ります。
 
 ### 試験の道具の決定
 
-#682 の次の選択を採ります。
+試験の道具の設計の次の選択を採ります。
 
 - 台本の形式:行を単位にした専用の形式 (`.scn`) で、`internal/tcpharness/scripts/` に置き、Go の runner は `go:embed` で読みます
 - 時刻の確かめ:今の Go の台本と同じ絶対の時間の範囲で書き、手で進める時計でだけ効く確かめは `clocked()` で分けます
@@ -577,7 +579,7 @@ Go の wgstack の記録がすべて一致することは、ラボの一式で�
 ### Go の wgstack の記録との bit の一致
 
 決定に従い、移行の間は凍結した Go の wgstack の記録と照らします。
-記録の作り方、形式、印による段ごとの照合、意図した違いの一覧は #682 の 4 節に従います。
+記録の作り方、形式、印による段ごとの照合、意図した違いの一覧は[試験の道具の設計の記録](test-tooling.md#4-go-の-wgstack-の記録)に従います。
 この文書が決めるのは、Rust の核が守る条件と、照らす範囲です。
 
 - 比べる応答:引き取った packet の bytes と順序、アプリケーションの操作の結果、受け入れの結果、時刻です。
@@ -614,7 +616,7 @@ Go の wgstack の記録がすべて一致することは、ラボの一式で�
 | Go | Rust の target | 書き手 | 種 |
 | --- | --- | --- | --- |
 | `FuzzParse` | `parse` | 実装の担当 | Go の `FuzzParse` が `f.Add` で渡す値。repo に corpus のファイルはありません |
-| `FuzzCore` | `core` | 試験の担当 | `internal/wgstack/testdata/fuzz/FuzzCore` の corpus の値。`go test fuzz v1` の形式から #682 の `tools/fuzzseed` が取り出します |
+| `FuzzCore` | `core` | 試験の担当 | `internal/wgstack/testdata/fuzz/FuzzCore` の corpus の値。`go test fuzz v1` の形式から試験の道具の設計の `tools/fuzzseed` が取り出します |
 | `FuzzAdversarialSender` | `adversarial_sender` | 試験の担当 | 64 bit の種 |
 | (無し) | `replay` | 試験の担当 | 記録の要求の列 |
 
@@ -643,14 +645,15 @@ Go の `-race` の競合の試験は、核が錠を持たないので移しま�
 
 ### 関門と CI
 
-#682 の関門と CI の選択を採ります。
+[試験の道具の設計の関門と CI](test-tooling.md#7-関門と-ci)の選択を採ります。
 
 - PR の関門:今の `scripts/wgstack-gate.sh` に Rust の段 (台本と記録の照合、`rustdut` の適合の台本、fuzz の smoke) を足します。
   別の script にはしません
-- CI:cargo と Go の両方を要する照合の段を、新しい job `rust-harness` にします。
-  この job は Go の試験を流すので、ラボの一式を省ける Rust だけの job には当たりません
-- [テストの規範](../../development/testing.md)の変更:job を足す PR で、B 類の表に `rust-harness` の行 (B16) を足し、契機の表に `crates/**`、`internal/tcpharness/**`、`internal/dutproto/**`、`tools/dutserve/**`、`internal/wgstack/**` を対象にする組を足します。
-  CI が流す job の一覧の文にも B16 を足します
+- CI:cargo と Go の両方を要する照合の段を、新しい job `harness-rust-go` にします。
+  この job は Go の試験を流すので、ラボの一式を省ける Rust だけの job には当たりません。
+  テストの規範は Rust の job を `rust-*` の名前で数えてラボの一式を省くので、`rust-` で始めない名前にしています
+- [テストの規範](../../development/testing.md)の変更:job を足す PR が、同じ PR で B 類の表と振り分けに `harness-rust-go` を足し、この job を変える PR がラボの一式を省けないことを書きます。
+  job は `crates/**`、`internal/tcpharness/**`、`internal/dutproto/**`、`internal/wgstack/**` を変えた PR で流します
 
 ラボの一式は、所有者の規則どおり、ラボが動かすものを変えない Rust だけの変更では流しません。
 Rust の agent が製品の経路で wgstack を使い始めた後は、[置き換えの判定](#置き換えの判定)のとおり、server の両方のモードでラボの一式を流します。
@@ -663,7 +666,7 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
 device の殻、駆動の実装、中継、UDP の中継は #680 の段が持ちます。
 サイズは試験を含む行数の目安で、Go の wgstack の大きさから見積もった推定です。
 担当の列の A は実装の担当、T は試験の担当です。
-T の段の中身と大きさは #682 の 8 節のとおりです。
+T の段の中身と大きさは[試験の道具の設計の段階の計画](test-tooling.md#8-段階の計画)のとおりです。
 
 | 順 | PR | 担当 | 中身 | サイズの目安 | 前提 |
 | --- | --- | --- | --- | --- | --- |
@@ -675,11 +678,11 @@ T の段の中身と大きさは #682 の 8 節のとおりです。
 | 5 | `feat(wgstack-rs): SACK, RACK-TLP and CUBIC` | A | SACK の scoreboard と回復と PRR、受け手の SACK と D-SACK、RACK-TLP、CUBIC と HyStart++、不要な再送の取り消し、boost の取得と回収と取り消し | 約 4,500 行 | 4b |
 | 6 | `feat(wgstack-rs): UDP, ICMP and the ping endpoints` | A | UDP の endpoint と予算と会計の不整合、送信の断片化、echo と ping、ICMP の誤り、断片の入口の結合 | 約 2,500 行 | 4a |
 | 7 | `feat(wgstack-rs): async handles over the core` | A | `wgft-netstack`:TCP、UDP、ping の非同期の handle、waker の表、操作の知らせ、hook の LAN 側のソケットの表 | 約 1,500 行 | 4b と 6 |
-| T1a、T1b | 台本の言語と Go の runner、残りの台本の移し替え | T | #682 の 8 節 | 約 2,000 行、約 +900 と -1,300 行 | 1 |
-| T2a、T2b | DUT の frame と `dutserve` と `rustdut`、Go の wgstack の記録 | T | #682 の 8 節 | 約 1,500 行、約 600 行と記録 | 1 |
-| T3a、T3b | `wgft-tcpharness` の crate、Rust の runner と `rust-harness` の job | T | #682 の 8 節 | 約 1,500 行、約 2,000 行 | T2a、T1b |
-| T3c | `wgstack-dut` と記録の照合 | T | #682 の 8 節 | 約 1,200 行 | T2b、T3b、4a |
-| T4 | fuzz の target と敵対的な保持の試験 | T | #682 の 8 節。故障の一覧を含みます | 約 3,000 行。段ごとに分けます | 3 から。4a から 6 に合わせて足します |
+| T1a、T1b | 台本の言語と Go の runner、残りの台本の移し替え | T | 段階の計画のとおり | 約 2,000 行、約 +900 と -1,300 行 | 1 |
+| T2a、T2b | DUT の frame と `dutserve` と `rustdut`、Go の wgstack の記録 | T | 段階の計画のとおり | 約 1,500 行、約 600 行と記録 | 1 |
+| T3a、T3b | `wgft-tcpharness` の crate、Rust の runner と `harness-rust-go` の job | T | 段階の計画のとおり | 約 1,500 行、約 2,000 行 | T2a、T1b |
+| T3c | `wgstack-dut` と記録の照合 | T | 段階の計画のとおり | 約 1,200 行 | T2b、T3b、4a |
+| T4 | fuzz の target と敵対的な保持の試験 | T | 段階の計画のとおり。故障の一覧を含みます | 約 3,000 行。段ごとに分けます | 3 から。4a から 6 に合わせて足します |
 | 8 | qbench の `wgstack-rs` の engine | T と A | `wgstack-dut` の実時間の形、socketpair の `tun.Device`、判定の切り替え | 約 1,000 行 | 5 と 7 |
 
 PR 4b と PR 5 が大きくなれば、実装の担当がレビューの単位に分けてよいとします。
@@ -706,7 +709,7 @@ Go の試験を変える PR は、規則どおり wgstack の関門を流しま�
 
 ### 試験の担当の仕事
 
-#682 の 8 節の段に加えて、次のことを受け持ちます。
+試験の道具の設計の段階の計画の段に加えて、次のことを受け持ちます。
 
 - 故障の一覧を書き、実装の担当が書いた故障の点で台本の検出力を確かめます
 - 期待した差の一覧と意図した違いの一覧に行を足すときは、理由を書きます
