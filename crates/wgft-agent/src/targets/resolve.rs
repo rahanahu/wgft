@@ -231,6 +231,21 @@ impl Resolver {
     }
 }
 
+/// 非同期の実行環境の外から、宛先の名前と同じ規則 (RFC 6724 の順、重複の除去、誤りの文) で名前を引く。
+/// CLI の `agent doctor` の名前の解決の検査が使う。`timeout` を過ぎれば結果を待たずに誤りを返す。
+///
+/// # Errors
+///
+/// 引けないか期限までに戻らなければ、`lookup <名前>: ` で始まる誤りの文を返す。
+pub fn lookup_host_blocking(host: &str, timeout: std::time::Duration) -> Outcome {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .map_err(|e| format!("lookup {host}: {e}"))?;
+    // 引くスレッドは実行環境の外の OS のスレッドなので、期限で去った後に実行環境を落としても待たない
+    rt.block_on(Resolver::shared().lookup_target(host, Instant::now() + timeout))
+}
+
 /// `std` の `getaddrinfo` の誤りは `failed to lookup address information: ` で始まるので、その前置きを
 /// 落とす。
 fn lookup_error_text(e: &std::io::Error) -> String {

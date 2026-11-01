@@ -24,10 +24,7 @@ const AGENT_COMMANDS: &[&str] = &[
 ///
 /// 試験は実際の差の集合とこの表が一致することを求める。新しい差が出れば落ち、段が入って差が消えたのに
 /// この表に残っていても落ちる。段を入れたら該当する行を消す。
-const EXPECTED_DIFFERENCES: &[&str] = &[
-    // agent doctor の骨組みの段で入る
-    "missing command: agent doctor",
-];
+const EXPECTED_DIFFERENCES: &[&str] = &[];
 
 #[derive(Debug, PartialEq, Eq)]
 struct Flag {

@@ -48,6 +48,9 @@ fn execute() -> Result<(), Failure> {
             &ProcessEnv,
             &mut std::io::stdout(),
         )?),
+        Parsed::AgentDoctor { global, args } => {
+            wgft::doctor::command::run(&global, &args, &ProcessEnv, &mut std::io::stdout())
+        }
         Parsed::AgentTeardown { global, args } => Ok(agent_keys::teardown(
             &global,
             &args,
