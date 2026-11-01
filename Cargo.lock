@@ -1278,6 +1278,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wgft-wgstack"
+version = "0.1.0"
+
+[[package]]
 name = "wgft-wireguard"
 version = "0.1.0"
 dependencies = [

@@ -126,14 +126,20 @@ device の層と核を組み、UDP のソケットとタイマーを回す駆動
 
 - 依存:`wgft-wgstack` の `[dependencies]` は空にします。
   `[dev-dependencies]` にも試験の道具の crate を入れません。
-  CI の検査が `cargo tree` の通常の依存の辺で、この crate が何にも依らないことを確かめます
-- sans-IO と伸びる collection:`wgft-wgstack` の clippy の設定の `disallowed-methods`、`disallowed-types`、`disallowed-macros` で、`Instant::now`、`SystemTime::now`、スレッドの作成、`std::net` のソケット、OS の乱数の読み取りと、容量を自動で伸ばす操作 ([確保の規則](#確保の規則)) を禁じます。
-  crate ごとの clippy の設定がワークスペースの中で効かなければ、同じ一覧で source を走査する試験を置きます。
-  効くかは最初の PR で確かめます (未確認)
+  crate の試験 (`src/scan_tests.rs`) が manifest を読み、依存の表が空であることを確かめます。
+  CI の job を足さずに `rust-check` の中で流れるためです
+- sans-IO と伸びる collection:`wgft-wgstack` の clippy の設定の `disallowed-methods`、`disallowed-types`、`disallowed-macros` で、`Instant::now`、`SystemTime::now`、スレッドの作成、`std::net` のソケット、ファイル (`std::fs`)、環境変数 (`std::env`)、プロセス (`std::process`)、標準入出力、OS の乱数の読み取りと、容量を自動で伸ばす操作 (`Box`、`Rc`、`Arc` の型と文字列を作る操作を含みます) ([確保の規則](#確保の規則)) を禁じます。
+  設定は `crates/wgft-wgstack/clippy.toml` に置きます。
+  clippy は crate の manifest の directory から上へ設定を探すので、この一覧はこの crate だけに効きます。
+  PR 2 で、禁じた呼び出しを置いた build が警告になり、ほかの crate は警告にならないことを確かめました
+- source の走査:clippy の一覧に加えて、同じ禁止の語で source を走査する試験を置きます。
+  clippy が見ない cfg (`fuzzing` と故障の注入) の中のコードを確かめ、clippy の一覧から項目が消えていないことも確かめます。
+  文字列の照合なので、注釈と試験の module は見ません
 - unsafe:`wgft-wgstack` は `#![forbid(unsafe_code)]` にします。
-  checksum も `chunks_exact` と `u64::from_be_bytes` の安全なコードで書きます
-- 製品の木:CI の検査が、`wgft` のバイナリの依存の木に `wgft-tcpharness` と `wgft-wgstack-dut` が無いこと、測定用の feature が有効でないことを確かめます
-- I7 の隔離:後で作る agent のカーネルモードの crate が、推移的にも `wgft-wgstack` に依らないことを同じ `cargo tree` の検査で確かめます。
+  checksum も `as_chunks` と `u64::from_be_bytes` の安全なコードで書きます
+- 製品の木:CI の `cargo tree` の検査が、`wgft` のバイナリの依存の木に `wgft-tcpharness` と `wgft-wgstack-dut` が無いこと、測定用の feature が有効でないことを確かめます。
+  この検査は、試験の道具の crate を足す段で足します
+- I7 の隔離:後で作る agent のカーネルモードの crate が、推移的にも `wgft-wgstack` に依らないことを、製品の木と同じ `cargo tree` の検査で確かめます。
   カーネルモードの agent は wgstack を作りません
 
 `no_std` で sans-IO を構造で強いる案は採りません。
@@ -249,6 +255,7 @@ boost の変化は知らせに入れず、hook だけで伝えます ([boost の
 
 - 時刻:核の時刻は `Time` で、任意の起点からの単調な ns の符号なしの整数です。
   Go の核の時刻 (起点からの int64 の ns) と同じ値を持てるので、記録の時刻をそのまま渡せます。
+  `Time` と `Duration` の足し算と、`Time` どうしの引き算は飽和します。核の中で panic を起こさないためです。
   駆動の層は、作成の時の `Instant` からの経過を ns にして渡します。
   時刻が前の値より戻ったときは、前の値を使います
 - 停止の間の時計:駆動の層は、device の層に渡すものと同じ時刻を核に渡します。
@@ -257,7 +264,9 @@ boost の変化は知らせに入れず、hook だけで伝えます ([boost の
   Go と同じく、先頭の 16 byte を ISN の鍵、次の 16 byte を表の hash の鍵、残りの 32 byte を ChaCha8 の種にし、timestamp の鍵、IP の ID の始めの値、challenge ACK の揺らぎ、区間の treap の優先度は ChaCha8 から引きます。
   製品は OS の乱数から種を作り、試験は固定の種を渡します
 - ChaCha8:bit の一致のため、Go の `math/rand/v2` の `ChaCha8` と同じ列を出す生成器を wgft の中で書きます。
-  この生成器は C2SP の `chacha8rand` の仕様に従うと読めるので、仕様から書き、Go が出す列と固定の値の試験で照らします (未確認)
+  C2SP の `chacha8rand` の仕様から書き、Go のコードは写しません。
+  Go が出す列と一致することを、いくつかの種でそれぞれ種の作り直しを 2 回越える数の値を照らす試験で確かめました。
+  種の配分 (ISN の鍵、表の鍵、timestamp の鍵、IP の ID の始めの値) と、その後の範囲を決めた乱数も同じ試験で照らします
 
 ### boost の hook
 
@@ -416,6 +425,10 @@ I1 から I7 の不変条件もそのまま守ります ([不変条件](../users
   boost の取得の時に確保が失敗する場合が無くなります
 - chunk:16 KiB の固定の配列で、予約の内側でだけ確保します。
   返した chunk は 0 で埋めて置き場に置き、置き場の上限 (Go と同じ 64 個) を超えた分は解放します
+- 再組み立ての表:管理領域 (表、項目、断片の枠、Go の `Sweep` が返す知らせの写し) は、Go の linux/amd64 の型の大きさで数えます。
+  保持 byte の上限に近いときの追い出しの時機が管理領域の大きさで変わり、移行の間は Go と同じ出力を求めるためです。
+  Rust の型がその大きさ以下であることは compile の時に確かめるので、数えた値は実際の保持の上界です。
+  Rust の表は知らせを写しの配列で返さず、`sweep_next` で 1 つずつ返しますが、写しの分も Go と同じく数えます
 - 割り当て器の丸め:割り当て器は、要求の大きさを自分の大きさの区分に切り上げて持ちます。
   提案として、`Bound` は要求の大きさで数え、使う割り当て器ごとに丸めの係数を測って公開します。
   係数を掛けた値をプロセスの上界の式に使います
@@ -436,7 +449,9 @@ Go の測った値 (c_conn、記録 1 件、区間 1 つ) は Rust の型の大�
   中身は `try_reserve_exact` で取った `Vec` で、`into_boxed_slice` には変えません。
   `try_reserve_exact` は要求より大きな容量を返すことがあり、`into_boxed_slice` はそのとき縮めるために再確保するためです。
   `Bound` と会計は `capacity()` の実際の値で数えます。
-  禁止の一覧の例外は `FixedVec` 自身の実装だけで、そこにだけ `#[expect(clippy::disallowed_methods, reason = "...")]` を付けます
+  禁止の一覧には `Vec` の型そのものも入れます。
+  製品のコードの例外は `FixedVec` 自身の実装だけで、その module にだけ `#[expect(clippy::disallowed_types, clippy::disallowed_methods, reason = "...")]` を付けます。
+  試験の module も同じ `#[expect]` で例外にします
 - 伸びる API の禁止:`Vec::push`、`Vec::extend`、`Vec::insert`、`Vec::resize`、`vec!`、`VecDeque`、`HashMap`、`BTreeMap`、`String` への追加のように容量を自動で伸ばす API を、[依存と隔離の検査](#依存と隔離の検査)の禁止の一覧に入れます
 - 0 で埋める:置き場に返す chunk は 0 で埋めます ([使い回しと古い byte](../userspace/wgstack-buffers.md#使い回しと古い-byte))
 
@@ -620,8 +635,16 @@ Go の wgstack の記録がすべて一致することは、ラボの一式で�
   Rust は `mul_add` を使わず、コンパイラも積和をまとめません
 - 3 乗根:Go の `math.Cbrt` と同じ値を返す実装が要ります。
   Rust の `f64::cbrt` は OS の数学ライブラリを呼ぶので、値が最後の桁で違いうるためです
+- 再組み立ての表の追い出し:管理領域を Go の型の大きさで数えます ([上界の式の写し方](#上界の式の写し方))
 - 浮動小数点の比べと変換:Go の `min` と `max` の NaN と -0 の扱いと、浮動小数点から符号なしの整数への変換を、Rust の既定の挙動に頼らずに明示して写します。
   Rust の `as` は範囲の外の値を飽和させますが、Go の変換の結果は target に依るので、linux/amd64 の結果を写すか、範囲の外の値が来ないことを試験で示します
+
+部品の単位で照らせる値 (SipHash、ChaCha8 の列と種の配分、TCP の header と option の組み立て、IPv4 の header の書き直し、IPv4 と TCP の解釈、再組み立ての表) は、記録を待たずに照らします。
+解釈は、`FuzzParse` の種と組み立ての試験の segment を決まった乱数で壊した入力の結果を照らします。
+再組み立ての表は、決まった乱数の断片と掃除の列への結果と保持の量を、手順ごとに照らします。
+Go の試験 `TestRustGolden` が凍結した Go の wgstack のコードで値を作り、`crates/wgft-wgstack/testdata/go-golden.txt` に書き出します。
+Rust の単体の試験がそのファイルと照らし、Go の試験はファイルが Go の値と同じであることを確かめます。
+作り直すときは `go test ./internal/wgstack -run TestRustGolden -update-rust-golden` を流します。
 
 一致を求める期間が終わった後は、この節の制約を外し、Rust に合った形 (例えば接続の表の形) を選べます。
 
@@ -633,6 +656,17 @@ Go の wgstack の記録がすべて一致することは、ラボの一式で�
 | `FuzzCore` | `core` | 試験の担当 | `internal/wgstack/testdata/fuzz/FuzzCore` の corpus の値。`go test fuzz v1` の形式から試験の道具の設計の `tools/fuzzseed` が取り出します |
 | `FuzzAdversarialSender` | `adversarial_sender` | 試験の担当 | 64 bit の種 |
 | (無し) | `replay` | 試験の担当 | 記録の要求の列 |
+
+`parse` は、Go の `FuzzParse` の確かめ (checksum を定義どおりの和と照らし、IPv4 と TCP を解釈する) に加えて、UDP と ICMP の解釈と再組み立ての表を通します。
+再組み立ての表には、入力の全体を 1 つの断片として渡した後、入力を「印の 1 byte、長さの 2 byte、packet」の列として読んで順に渡します。
+印の bit 0 は IPv4 の header の checksum を直す印で、残りの bit は時刻を進めます。
+変異で checksum が壊れただけの入力が入口で落ちるのを避けるためです。
+種は `TestRustGolden` が Go の `FuzzParse` と同じ値を `fuzz/corpus/parse/` に書き出します。
+見つけた落ちる入力は `fuzz/regressions/parse/` に置き、corpus と共に stable の単体の試験が流します。
+`cargo fuzz run` は新しい入力を最初に渡した corpus の directory に書くので、手元で流すときは別の directory を先に渡します。
+target は crate の `#[cfg(fuzzing)]` の `fuzz` module を呼び、この module は製品の build にありません。
+fuzz の crate が依る `libfuzzer-sys` の license は `(MIT OR Apache-2.0) AND NCSA` です。
+NCSA は寛容な license ですが `deny.toml` の許可の一覧に無く、fuzz の crate はワークスペースの外にあるので `cargo deny check` の対象に入りません。
 
 `core` は、Go の `FuzzCore` の op の解釈と相手の TCP の模型を、同じ byte が同じ op になるように写します。
 各段の後に `check_invariants` を呼び、最後に核を閉じて会計が 0 に戻ることを確かめます。
@@ -652,7 +686,10 @@ Go の `-race` の競合の試験は、核が錠を持たないので移しま�
 
 - 選び方:`RUSTFLAGS` で `--cfg wgstack_fault="<名前>"` と `--cfg wgstack_sentinel` を渡します。
   feature はワークスペースの中で合わさり、製品の build に漏れうるためです
-- 宣言:`wgft-wgstack` の `[lints.rust]` の `unexpected_cfgs` の `check-cfg` に 2 つの cfg を宣言し、綴りの誤りを lint で捉えます
+- 宣言:ワークスペースの `[workspace.lints.rust]` の `unexpected_cfgs` の `check-cfg` に 2 つの cfg を宣言し、綴りの誤りを lint で捉えます。
+  cargo は crate の `[lints]` に `workspace = true` とほかの項目を併せて書けないので、crate ごとには宣言しません。
+  名前が `wgstack_` で始まるので、ほかの crate に宣言が効いても害はありません。
+  cargo-fuzz が付ける `fuzzing` も同じ所で宣言します
 - 製品:リリースの build と B13 の通常の build はこの cfg を渡しません。
   `wgft` のバイナリの依存の木の検査 ([依存と隔離の検査](#依存と隔離の検査)) と合わせ、製品にどちらも入らないことを CI で確かめます
 - 目印の確かめ:目印の build で、目印が読み取り、送る segment、記録と区間の欄の値に現れないことを、stream の一致の試験、敵対的な送り手の試験、`core` の fuzz で確かめます
@@ -685,8 +722,8 @@ T の段の中身と大きさは[試験の道具の設計の段階の計画](tes
 | 順 | PR | 担当 | 中身 | サイズの目安 | 前提 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | この文書 | | 設計 | | |
-| 2 | `feat(wgstack-rs): packets, checksums and reassembly` | A | crate の骨組み、依存と sans-IO の検査、`wire`、checksum、`frag`、`siphash`、ChaCha8、`Time`。fuzz の `parse` | 約 2,500 行 | 1 |
-| 3 | `feat(wgstack-rs): tables, buffers and the bound` | A | `FixedVec`、接続の枠、hash の表、握手の途中の表、TIME_WAIT の表、待ち受けと UDP の endpoint の表、タイマーの輪、出力の list と制御の輪、知らせの list、chunk の置き場、送受信の輪、区間の treap、送信の記録、`Budget`、`Bound` と生成した表、`check_invariants`、確保の数えの試験の道具 | 約 3,000 行 | 2 |
+| 2 | `feat(wgstack-rs): packets, checksums and reassembly` | A | crate の骨組み、依存と sans-IO の検査、`FixedVec`、`wire`、checksum、`frag`、`siphash`、ChaCha8、`Time`。fuzz の `parse` | 約 2,500 行 | 1 |
+| 3 | `feat(wgstack-rs): tables, buffers and the bound` | A | 接続の枠、hash の表、握手の途中の表、TIME_WAIT の表、待ち受けと UDP の endpoint の表、タイマーの輪、出力の list と制御の輪、知らせの list、chunk の置き場、送受信の輪、区間の treap、送信の記録、`Budget`、`Bound` と生成した表、`check_invariants`、確保の数えの試験の道具 | 約 3,000 行 | 2 |
 | 4a | `feat(wgstack-rs): passive open, close and the application API` | A | 受動の open と確立の入口、accept の待ち行列、FIN と TIME_WAIT、`close` と `abort`、古い handle、アプリケーションの操作と知らせ、出力の組 | 約 2,500 行 | 3 |
 | 4b | `feat(wgstack-rs): the data path to the completion level` | A | データの送受信、受け手の ACK と quickack の規則、受信の窓の自動調整、遅延 ACK、窓と persist、RTO、NewReno、RFC 5961 と RFC 7323、MSS と PMTU | 約 3,000 行 | 4a |
 | 5 | `feat(wgstack-rs): SACK, RACK-TLP and CUBIC` | A | SACK の scoreboard と回復と PRR、受け手の SACK と D-SACK、RACK-TLP、CUBIC と HyStart++、不要な再送の取り消し、boost の取得と回収と取り消し | 約 4,500 行 | 4b |
@@ -747,20 +784,19 @@ agent の置き換えが終わった後に、次の段を順に決めます。
 
 - 写さずに読み書きする口:`read_slices` と `write_slices` を足すか。CPU を測ってから決めます
 - device の層との受け渡し:`Device::poll_packet` と `Device::poll_transmit` が packet ごとに確保する形を、呼び手の buffer に書く形に替えるか
-- ChaCha8 と 3 乗根:Go の `ChaCha8` と `math.Cbrt` と同じ値を出す実装を wgft の中で書くか、条件に合う crate を使うか。
-  Go の実装を写す場合は Go の license の通知が要ります
+- 3 乗根:Go の `math.Cbrt` と同じ値を出す実装を wgft の中で書くか、条件に合う crate を使うか。
+  Go の実装を写す場合は Go の license の通知が要ります。
+  CUBIC を入れる PR 5 で決めます。
+  ChaCha8 は仕様から wgft の中で書きました ([時刻と乱数](#時刻と乱数))
 - 待ち受けと UDP の endpoint の表:行の大きさと、受け付けるアドレスが増えたときの持ち方
 - 1 回の起床の上限:1 回に作る packet の数と、`WGFT_AGENT_BATCH_MIB` から導く式
 - 割り当て器:OS の標準と mimalloc のどちらにするか (測ってから)。選んだ割り当て器の丸めの係数
 - TUN の殻:ラボの一式が Rust の agent で通った後に消すか
-- crate ごとの clippy の設定:禁止の一覧が `wgft-wgstack` だけに効く形で置けるか。
-  効かなければ source を走査する試験で行います
 
 ## 未確認の点
 
 - Rust の核の byte あたりの CPU と、Go の wgstack と gVisor との比は測っていません
 - 1 つのスレッドのデータプレーンが、Windows と macOS の時計の分解能とスケジューラの下で、遅延 ACK と RTO の規則を保てるかは確かめていません
-- Go の `ChaCha8` が C2SP の `chacha8rand` と同じ列を出すことは、仕様を読んだ範囲の判断で、試験では確かめていません
 - FMA を使わない build で作った記録の浮動小数点の値に、Rust が同じ値で並べるかは、記録を作るまで分かりません
 - 確保の数えで測る保持と RSS の比は、Rust の agent では測っていません
 - 待ち受けと UDP の endpoint の表をポートの数で持つ費用は、行の大きさを決めるまで分かりません

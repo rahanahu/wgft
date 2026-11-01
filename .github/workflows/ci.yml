@@ -397,6 +397,17 @@ jobs:
       # nextest does not run doctests.
       - name: doctests
         run: cargo test --workspace --doc --locked
+      # The fuzz targets build these crates with code that the normal build leaves out:
+      # wgft-wgstack under --cfg fuzzing, wgft-wireguard with its fuzzing and deterministic
+      # features. The fuzz crates need nightly, so check that code here on the pinned stable.
+      # A separate target directory keeps the RUSTFLAGS build from invalidating the cache.
+      - name: fuzz-only code
+        env:
+          RUSTFLAGS: --cfg fuzzing -D warnings
+          CARGO_TARGET_DIR: target/fuzz-check
+        run: |
+          cargo check -p wgft-wgstack --locked
+          cargo check -p wgft-wireguard --features fuzzing,deterministic --locked
 
   rust-deny:
     # B15. cargo-deny: licence allowlist, RustSec advisories, duplicate versions, and
