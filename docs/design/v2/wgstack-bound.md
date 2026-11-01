@@ -3,7 +3,7 @@
 この文書は、[wgstack の Rust 版](wgstack-rs.md)の上界の式の値を、代表の K の値で示します。
 表は `crates/wgft-wgstack` の試験 `bound::tests::bound_table_is_up_to_date` が生成し、印の間だけを書き直します。
 手で直さず、`WGFT_UPDATE_GOLDEN=1 cargo nextest run -p wgft-wgstack bound_table` で作り直します。
-印を付けずに流すと、試験は表が計算と違うときに失敗します。
+`WGFT_UPDATE_GOLDEN=1` を付けずに流すと、試験は表が計算と違うときに失敗します。
 
 値は byte で、括弧の中は MiB です。
 MTU は 1420 で、K のほかの表の大きさは既定の値です。
