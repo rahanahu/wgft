@@ -13,11 +13,11 @@ use std::time::{Duration, Instant};
 use socket2::{Domain, Protocol, Socket, Type};
 
 /// The receive and send buffer the data plane asks for, as wireguard-go does: 7 MiB.
-pub const REQUESTED: usize = 7 << 20;
+pub(crate) const REQUESTED: usize = 7 << 20;
 
 /// The effective buffer a socket that got [`REQUESTED`] reports on Linux, which doubles the
 /// request: the requirement of userspace mode.
-pub const REQUIRED: usize = 2 * REQUESTED;
+pub(crate) const REQUIRED: usize = 2 * REQUESTED;
 
 /// One measurement of the WireGuard UDP socket's buffers.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -123,7 +123,7 @@ impl Conn<'_> {
         self.s.signal(self.id, EV_WRITE);
     }
 
-    /// 握手の途中の行 `r` と最後の ACK から接続を確立します。dial の側を足す段では、交渉した値の組から作る
+    /// 握手の途中の行 `r` と最後の ACK から接続を確立します。dial の側を足すときは、交渉した値の組から作る
     /// 入口に分けます (wgstack-rs.md の「dial の側を足す継ぎ目」)。
     pub(crate) fn establish(&mut self, r: &SynRow, seg: &Segment<'_>, now: i64) {
         let generation = self.t.generation;
@@ -173,7 +173,8 @@ impl Conn<'_> {
             && let Some((ts_val, ts_ecr)) = seg.opt.ts
         {
             (self.t.ts_recent, self.t.ts_recent_at) = (ts_val, now);
-            if ts_ecr != 0 {
+            // cookie の TSval は下位の bit に option を入れたので、RTT の標本にしません。
+            if ts_ecr != 0 && !r.cookie {
                 self.ts_rtt_sample(ts_ecr, now);
             }
         } else if !r.rtx && r.sent_at.as_nanos() != 0 {

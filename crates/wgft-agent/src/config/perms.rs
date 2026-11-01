@@ -5,12 +5,9 @@ use std::path::Path;
 /// Go の `*os.PathError` の文。Unix の `strerror` の文は Go の `syscall.Errno` の文と、先頭の大文字だけが
 /// 違う。Windows の文は Go も OS の文のままである。
 pub fn go_style_path_error(op: &str, path: &Path, e: &std::io::Error) -> String {
-    let msg = super::dotenv::strip_os_error(e);
+    let msg = crate::oserror::os_text(e);
     let msg = if cfg!(unix) {
-        let mut cs = msg.chars();
-        cs.next()
-            .map(|c| c.to_lowercase().chain(cs).collect())
-            .unwrap_or_default()
+        crate::oserror::lower_first(&msg)
     } else {
         msg
     };

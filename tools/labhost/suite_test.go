@@ -35,7 +35,7 @@ func TestRepoManifestIsValid(t *testing.T) {
 			heavy++
 		}
 	}
-	// 既定の一式は、両モードの e2e と ipv6 と rates と lifecycle の 19 個の確認、
+	// 既定の一式は、両モードの e2e と ipv6 と rates と lifecycle の確認、
 	// それに split-merge、import-export、connlimit、両モードの agentkernel の組と agentdoctor と usage、
 	// exhaustion の確認のうち、そのモードに当てはまるもの
 	want := []string{
@@ -50,7 +50,7 @@ func TestRepoManifestIsValid(t *testing.T) {
 		"exhaustion.sh kernel acceptq", "exhaustion.sh kernel ackflood", "exhaustion.sh userspace wgstall",
 	}
 	for _, mode := range []string{"kernel", "userspace"} {
-		for _, c := range []string{"1", "2", "3", "3b", "4", "5", "5b", "5c", "5d", "5e", "5f", "5g", "6", "7", "8", "9", "10", "11", "12"} {
+		for _, c := range []string{"1", "2", "3", "3b", "4", "5", "5b", "5c", "5d", "5e", "5f", "5g", "6", "7", "8", "9", "10", "11", "12", "13"} {
 			want = append(want, "lifecycle.sh "+mode+" "+c)
 		}
 	}
