@@ -34,10 +34,9 @@ fn round(v: &mut [u64; 4]) {
 impl SipKey {
     /// 鍵を 16 byte の little endian の 2 語から作ります。
     pub(crate) fn from_le_bytes(b: [u8; 16]) -> Self {
-        let (lo, hi) = b.split_at(8);
         Self {
-            k0: u64::from_le_bytes(lo.try_into().unwrap_or_default()),
-            k1: u64::from_le_bytes(hi.try_into().unwrap_or_default()),
+            k0: b.first_chunk::<8>().map_or(0, |c| u64::from_le_bytes(*c)),
+            k1: b.last_chunk::<8>().map_or(0, |c| u64::from_le_bytes(*c)),
         }
     }
 

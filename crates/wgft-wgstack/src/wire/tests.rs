@@ -158,6 +158,26 @@ fn parse_options_malformed() {
     let o = parse_options(&five, false); // 5 つ目の block は持ちません
     assert_eq!(o.nsack, 4);
     assert_eq!(o.sack_blocks().len(), 4);
+    // 2 つの SACK の option は合わせて 4 つまでの block を足します (Go の parseOptions と同じ)。
+    let mut two = [0u8; 2 * (2 + 8 * 3)];
+    for (i, half) in two
+        .as_chunks_mut::<{ 2 + 8 * 3 }>()
+        .0
+        .iter_mut()
+        .enumerate()
+    {
+        half[0] = 5;
+        half[1] = 2 + 8 * 3;
+        for (j, blk) in half[2..].as_chunks_mut::<8>().0.iter_mut().enumerate() {
+            blk[3] = u8::try_from(i * 3 + j).unwrap();
+        }
+    }
+    let o = parse_options(&two, false);
+    assert_eq!(o.nsack, 4);
+    assert_eq!(
+        o.sack_blocks().iter().map(|b| b.left).collect::<Vec<_>>(),
+        [0, 1, 2, 3]
+    );
 }
 
 #[test]

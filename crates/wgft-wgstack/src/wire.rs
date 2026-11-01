@@ -24,7 +24,7 @@ pub(crate) const MAX_OPTION_LEN: usize = 40;
 pub(crate) const DEFAULT_TTL: u8 = 64;
 
 #[inline]
-fn be16(b: &[u8], at: usize) -> u16 {
+pub(crate) fn be16(b: &[u8], at: usize) -> u16 {
     u16::from_be_bytes([b[at], b[at + 1]])
 }
 
@@ -44,9 +44,14 @@ fn put32(b: &mut [u8], at: usize, v: u32) {
 }
 
 /// 長さを 16 bit の欄に書く値にします。呼び手は 65535 以下の長さだけを渡します。
+/// 超える値は Go の `uint16(n)` と同じく下位の 16 bit にします。
 #[inline]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "matches Go's uint16 conversion"
+)]
 fn len16(n: usize) -> u16 {
-    u16::try_from(n).unwrap_or(u16::MAX)
+    n as u16
 }
 
 /// 接続の 4 つ組です。`laddr` と `lport` は wgstack の側、`raddr` と `rport` は相手の側です。
@@ -222,7 +227,8 @@ pub(crate) fn parse_options(mut b: &[u8], syn: bool) -> TcpOptions {
             3 if size == 3 && syn => o.wscale = Some(body[0].min(14)), // RFC 7323 2.3
             4 if size == 2 && syn => o.sack_ok = true,
             5 if (size - 2).is_multiple_of(8) && !syn => {
-                for blk in body.as_chunks::<8>().0.iter().take(o.sack.len()) {
+                // Go と同じく、続く SACK の option も 4 つの枠が埋まるまで足します。
+                for blk in body.as_chunks::<8>().0.iter().take(o.sack.len() - o.nsack) {
                     o.sack[o.nsack] = SackBlock {
                         left: be32(blk, 0),
                         right: be32(blk, 4),

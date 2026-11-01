@@ -9,10 +9,14 @@
 //! 管理領域の大きさは、Go の linux/amd64 の型の大きさ (`*_CHARGE`) で数えます。
 //! 追い出しの時機が管理領域の大きさで変わり、移行の間は Go と同じ出力を求めるためです。
 //! Rust の型はそれ以下の大きさであることを試験で確かめるので、数えた値は実際の保持の上界です。
+//!
+//! Go の表との違いは 2 つです。Go の `Close` の後の `Closed` の状態はありません。核の `close` が表ごと消費する
+//! ので、閉じた表に断片が届くことが無いためです。表を空にするのは [`Table::clear`] です。また、上限で断る
+//! [`Outcome::Capacity`] は知らせを持ちません。Go の wgstack はその知らせを使わずに捨てるためです。
 
 use crate::fixed_vec::{AllocError, FixedVec};
 use crate::time::Time;
-use crate::wire::{IP_HEADER_LEN, ipv4_header_ok, set_ipv4_checksum};
+use crate::wire::{IP_HEADER_LEN, be16, ipv4_header_ok, set_ipv4_checksum};
 use core::mem::size_of;
 
 /// Go の `ipv4frag.Table` の linux/amd64 での大きさです。
@@ -192,10 +196,6 @@ impl core::fmt::Debug for Table {
             .field("evicted", &self.evicted)
             .finish_non_exhaustive()
     }
-}
-
-fn be16(b: &[u8], at: usize) -> u16 {
-    u16::from_be_bytes([b[at], b[at + 1]])
 }
 
 /// 写す option (copied の bit が立った option) を、詰め物を除いて返します。最初でない断片は写す option

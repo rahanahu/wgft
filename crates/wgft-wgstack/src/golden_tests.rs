@@ -8,11 +8,13 @@
     reason = "tests may hold growing collections"
 )]
 
+use crate::frag::{self, Notice};
 use crate::rng::{ChaCha8, Seeds};
 use crate::siphash::SipKey;
+use crate::time::Time;
 use crate::wire::{
-    OptWriter, SackBlock, TcpHeader, Tuple, clear_df, finish_tcp, set_frag_field,
-    write_ipv4_header, write_tcp,
+    Ipv4Drop, OptWriter, PROTO_TCP, PayloadDrop, SackBlock, TcpHeader, Tuple, clear_df, finish_tcp,
+    parse_ipv4, parse_tcp, set_frag_field, write_ipv4_header, write_tcp,
 };
 
 const GOLDEN: &str = include_str!("../testdata/go-golden.txt");
@@ -219,16 +221,147 @@ fn ipv4_header_matches_go() {
         let mut h = [0u8; 20];
         write_ipv4_header(
             &mut h,
-            1500,
-            0x1234,
-            crate::wire::PROTO_UDP,
-            0x0a09_0001,
-            0x0a09_0002,
+            dec(f[0]),
+            dec(f[1]),
+            dec(f[2]),
+            h32(f[3]),
+            h32(f[4]),
         );
-        assert_eq!(h[..], unhex(f[0])[..]);
+        assert_eq!(h[..], unhex(f[6])[..], "{f:?}");
         clear_df(&mut h);
-        assert_eq!(h[..], unhex(f[1])[..]);
-        set_frag_field(&mut h, 0x2000 | 0xb9);
-        assert_eq!(h[..], unhex(f[2])[..]);
+        assert_eq!(h[..], unhex(f[7])[..], "{f:?}");
+        set_frag_field(&mut h, dec(f[5]));
+        assert_eq!(h[..], unhex(f[8])[..], "{f:?}");
     }
+}
+
+/// Go の rustgolden_test.go の describeParse と同じ文字列を作ります。
+fn describe_parse(pkt: &[u8]) -> String {
+    let ip = match parse_ipv4(pkt) {
+        Ok(ip) => ip,
+        Err(Ipv4Drop::Malformed) => return "ip=malformed".into(),
+        Err(Ipv4Drop::BadChecksum) => return "ip=badsum".into(),
+    };
+    let s = format!(
+        "ip=ok src={:08x} dst={:08x} proto={} hlen={} frag={} len={}",
+        ip.src,
+        ip.dst,
+        ip.proto,
+        ip.hlen,
+        ip.fragment,
+        ip.payload().len()
+    );
+    if ip.proto != PROTO_TCP {
+        return s;
+    }
+    let seg = match parse_tcp(&ip) {
+        Ok(seg) => seg,
+        Err(PayloadDrop::Malformed) => return s + " tcp=malformed",
+        Err(PayloadDrop::BadChecksum) => return s + " tcp=badsum",
+    };
+    let o = seg.opt;
+    let sack = if o.nsack == 0 {
+        "-".to_owned()
+    } else {
+        o.sack_blocks()
+            .iter()
+            .map(|b| format!("{}-{}", b.left, b.right))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let (ts_val, ts_ecr) = o.ts.unwrap_or((0, 0));
+    s + &format!(
+        " tcp=ok lport={} rport={} seq={} ack={} flags={} wnd={} mss={}/{} ws={}/{} sackok={} ts={}/{}/{} sack={} malformed={} pay={}",
+        seg.tup.lport,
+        seg.tup.rport,
+        seg.seq,
+        seg.ack,
+        seg.flags,
+        seg.wnd,
+        o.mss.unwrap_or(0),
+        o.mss.is_some(),
+        o.wscale.unwrap_or(0),
+        o.wscale.is_some(),
+        o.sack_ok,
+        ts_val,
+        ts_ecr,
+        o.ts.is_some(),
+        sack,
+        o.malformed,
+        seg.payload.len()
+    )
+}
+
+/// Go が決まった乱数で壊した入力に対する解釈の結果と照らします。
+#[test]
+fn parse_matches_go() {
+    for f in lines("parse") {
+        let pkt = unhex(f[0]);
+        assert_eq!(describe_parse(&pkt), f[1..].join(" "), "packet {}", f[0]);
+    }
+}
+
+fn hex(b: &[u8]) -> String {
+    use core::fmt::Write;
+    b.iter().fold(String::new(), |mut s, x| {
+        let _ = write!(s, "{x:02x}");
+        s
+    })
+}
+
+fn describe_notice(n: &Notice, offending: &[u8]) -> String {
+    let local = [10, 1, 1, 2];
+    let tq = n.timeout_quote(local).is_some();
+    let (pp, pp_ok) = n
+        .param_problem_ok(offending, local)
+        .map_or((0, false), |h| (h, true));
+    let quote = hex(&n.quote[..usize::from(n.quote_len)]);
+    format!(
+        "reason={} ptr={} first={} quote={quote} tq={tq} pp={pp}/{pp_ok}",
+        n.reason as u8, n.pointer, n.has_first
+    )
+}
+
+/// Go の再組み立ての表に与えた断片と掃除の列を、Rust の表に同じ順で与えて照らします。
+#[test]
+fn reassembly_matches_go() {
+    let limits = frag::Limits {
+        entries: 4,
+        fragments: 8,
+        bytes: 120 + 4 * 264 + 8 * 56 + 4 * 72 + 60,
+        lifetime: 2_000_000_000,
+    };
+    let mut t = frag::Table::new(limits).unwrap();
+    let mut steps = 0;
+    for l in GOLDEN.lines() {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        match f.first() {
+            Some(&"fragsweep") => {
+                let now = Time::from_nanos(dec(f[1]));
+                let mut got = Vec::new();
+                while let Some(n) = t.sweep_next(now) {
+                    got.push(describe_notice(&n, &[]));
+                }
+                assert_eq!(got.len(), dec::<usize>(f[2]), "{l}");
+                assert_eq!(got.join(";"), f[3..].join(" "), "{l}");
+            }
+            Some(&"frag") => {
+                let now = Time::from_nanos(dec(f[1]));
+                let pkt = unhex(f[2]);
+                let out = match t.process(&pkt, now) {
+                    frag::Outcome::Held => "held".to_owned(),
+                    frag::Outcome::Complete(p) => format!("complete {}", hex(&p)),
+                    frag::Outcome::Duplicate => "duplicate".to_owned(),
+                    frag::Outcome::Rejected(n) => format!("rejected {}", describe_notice(&n, &pkt)),
+                    frag::Outcome::Capacity => "capacity".to_owned(),
+                };
+                let (used, entries, pieces) = t.usage();
+                assert_eq!(format!("{used}/{entries}/{pieces}"), f[3], "{l}");
+                assert_eq!(out, f[4..].join(" "), "{l}");
+            }
+            _ => continue,
+        }
+        steps += 1;
+    }
+    assert!(steps > 100, "the golden file holds the reassembly trace");
 }

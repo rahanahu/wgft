@@ -2,6 +2,7 @@ package wgstack
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -11,6 +12,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/rahanahu/wgft/internal/ipv4frag"
 )
 
 // Rust の wgstack (crates/wgft-wgstack) は、移行の間この package と同じ入力に同じ packet を返す
@@ -29,6 +33,8 @@ func TestRustGolden(t *testing.T) {
 	writeSipGolden(&b)
 	writeChaChaGolden(t, &b)
 	writeTCPGolden(&b)
+	writeParseGolden(&b)
+	writeFragGolden(&b)
 	compareOrUpdate(t, filepath.Join(rustCrate, "testdata", "go-golden.txt"), []byte(b.String()), true)
 	for i, seed := range fuzzParseSeeds() {
 		compareOrUpdate(t, filepath.Join(rustCrate, "fuzz", "corpus", "parse", fmt.Sprintf("go-seed-%d", i)), seed, false)
@@ -170,13 +176,242 @@ func writeTCPGolden(b *strings.Builder) {
 	o.pad()
 	fmt.Fprintf(b, "opts ts:3:4,sack4 %d %x\n", n, o.b[:o.n])
 	// 断片の欄を書き直した IPv4 の header
-	h := make([]byte, ipHeaderLen)
-	writeIPv4Header(h, 1500, 0x1234, protoUDP, 0x0a090001, 0x0a090002)
-	fmt.Fprintf(b, "ipv4 %x", h)
-	clearDF(h)
-	fmt.Fprintf(b, " %x", h)
-	setFragField(h, 0x2000|185)
-	fmt.Fprintf(b, " %x\n", h)
+	for _, c := range []struct {
+		total    int
+		id       uint16
+		proto    uint8
+		src, dst uint32
+		field    uint16
+	}{{1500, 0x1234, protoUDP, 0x0a090001, 0x0a090002, 0x2000 | 185}, {20, 0, protoICMP, 0xffffffff, 0, 0x1fff}, {65535, 0xffff, protoTCP, 0xc0000201, 0x0a090001, 0x3fff}} {
+		h := make([]byte, ipHeaderLen)
+		writeIPv4Header(h, c.total, c.id, c.proto, c.src, c.dst)
+		fmt.Fprintf(b, "ipv4 %d %d %d %08x %08x %d %x", c.total, c.id, c.proto, c.src, c.dst, c.field, h)
+		clearDF(h)
+		fmt.Fprintf(b, " %x", h)
+		setFragField(h, c.field)
+		fmt.Fprintf(b, " %x\n", h)
+	}
+}
+
+// hexOrDash は空の bytes を "-" にした 16 進の文字列を返す。行を空白で分ける読み手のためである。
+func hexOrDash(p []byte) string {
+	if len(p) == 0 {
+		return "-"
+	}
+	return hex.EncodeToString(p)
+}
+
+// describeParse は parseIPv4 と parseTCP の結果を、Rust の試験が同じ形で作る文字列にする。
+func describeParse(pkt []byte) string {
+	ip, d := parseIPv4(pkt)
+	switch d {
+	case ipv4Malformed:
+		return "ip=malformed"
+	case ipv4BadChecksum:
+		return "ip=badsum"
+	}
+	s := fmt.Sprintf("ip=ok src=%08x dst=%08x proto=%d hlen=%d frag=%t len=%d", ip.src, ip.dst, ip.proto, ip.hlen, ip.fragment, len(ip.payload))
+	if ip.proto != protoTCP {
+		return s
+	}
+	seg, td := parseTCP(&ip)
+	switch td {
+	case tcpMalformed:
+		return s + " tcp=malformed"
+	case tcpBadChecksum:
+		return s + " tcp=badsum"
+	}
+	o := seg.opt
+	sack := "-"
+	if o.nsack > 0 {
+		var parts []string
+		for _, x := range o.sack[:o.nsack] {
+			parts = append(parts, fmt.Sprintf("%d-%d", x.left, x.right))
+		}
+		sack = strings.Join(parts, ",")
+	}
+	return s + fmt.Sprintf(" tcp=ok lport=%d rport=%d seq=%d ack=%d flags=%d wnd=%d mss=%d/%t ws=%d/%t sackok=%t ts=%d/%d/%t sack=%s malformed=%t pay=%d",
+		seg.tup.lport, seg.tup.rport, seg.seq, seg.ack, seg.flags, seg.wnd, o.mss, o.hasMSS, o.wscale, o.hasWS, o.sackOK, o.tsVal, o.tsEcr, o.hasTS, sack, o.malformed, len(seg.payload))
+}
+
+// fixIPChecksum は header の長さが収まるとき、IPv4 の header の checksum を書き直す。
+func fixIPChecksum(b []byte) {
+	if len(b) < ipHeaderLen {
+		return
+	}
+	if hlen := int(b[0]&0x0f) * 4; hlen >= ipHeaderLen && hlen <= len(b) {
+		b[10], b[11] = 0, 0
+		binary.BigEndian.PutUint16(b[10:12], ^checksum(0, b[:hlen]))
+	}
+}
+
+// fixTCPChecksum は IPv4 として読めて TCP の header が収まるとき、TCP の checksum を書き直す。
+func fixTCPChecksum(b []byte) {
+	ip, d := parseIPv4(b)
+	if d != ipv4OK || ip.proto != protoTCP || len(ip.payload) < tcpHeaderLen {
+		return
+	}
+	t := b[ip.hlen : ip.hlen+len(ip.payload)]
+	t[16], t[17] = 0, 0
+	binary.BigEndian.PutUint16(t[16:18], ^checksum(pseudoSum(ip.src, ip.dst, protoTCP, len(t)), t))
+}
+
+// writeParseGolden は FuzzParse の種と組み立てを照らす segment を決まった乱数で壊し、Go の解釈の結果を書き出す。
+// 壊した後に checksum を直す入力も混ぜ、option と中身の解釈まで届くようにする。
+func writeParseGolden(b *strings.Builder) {
+	r := rand.New(rand.NewPCG(7, 8))
+	seeds := fuzzParseSeeds()
+	for _, s := range goldenSegs {
+		seeds = append(seeds, buildPeer(s))
+	}
+	for _, seed := range seeds {
+		fmt.Fprintf(b, "parse %s %s\n", hexOrDash(seed), describeParse(seed))
+		for range 60 {
+			p := bytes.Clone(seed)
+			for range 1 + r.IntN(4) {
+				switch r.IntN(6) {
+				case 0:
+					if len(p) > 0 {
+						p[r.IntN(len(p))] ^= byte(1 << r.IntN(8))
+					}
+				case 1:
+					if len(p) > 0 {
+						p[r.IntN(len(p))] = byte(r.Uint32())
+					}
+				case 2:
+					p = p[:r.IntN(len(p)+1)]
+				case 3:
+					p = append(p, byte(r.Uint32()))
+				case 4:
+					// TCP の option の範囲
+					if len(p) > 40 {
+						p[40+r.IntN(min(40, len(p)-40))] = byte(r.IntN(10))
+					}
+				default:
+					// header の長さの欄
+					if len(p) > 32 {
+						p[32] = byte(r.IntN(16)) << 4
+					}
+				}
+			}
+			switch r.IntN(3) {
+			case 1:
+				fixIPChecksum(p)
+			case 2:
+				fixIPChecksum(p)
+				fixTCPChecksum(p)
+			}
+			fmt.Fprintf(b, "parse %s %s\n", hexOrDash(p), describeParse(p))
+		}
+	}
+}
+
+// goldenFragment は再組み立ての表の照らしに使う断片を作る。断片は id ごとの datagram の計画 (plans) の 1 片で、
+// 同じ片は同じ中身になるので、重複と完成が起きる。計画を時々変えるので矛盾と重なりも起きる。
+func goldenFragment(r *rand.Rand, plans *[7][2]int) []byte {
+	id := 1 + r.IntN(5)
+	if r.IntN(15) == 0 {
+		plans[id] = [2]int{1 + r.IntN(4), 1 + r.IntN(8)}
+	}
+	k, tail := plans[id][0], plans[id][1]
+	piece := r.IntN(k + 1)
+	more := piece < k
+	n := tail
+	if more {
+		n = 8
+	}
+	if r.IntN(25) == 0 {
+		// 計画の片と重なる長い片
+		more, n = true, 16
+	}
+	var opts []byte
+	switch r.IntN(10) {
+	case 0:
+		opts = []byte{0x82, 4, 7, 8}
+	case 1:
+		opts = []byte{0x44, 4, 1, 2}
+	}
+	hlen := ipHeaderLen + len(opts)
+	p := make([]byte, hlen+n)
+	p[0] = 0x40 | byte(hlen/4)
+	p[1] = byte(r.IntN(4))
+	binary.BigEndian.PutUint16(p[2:], uint16(len(p)))
+	binary.BigEndian.PutUint16(p[4:], uint16(id))
+	flags := uint16(piece)
+	if more {
+		flags |= 0x2000
+	}
+	if r.IntN(30) == 0 {
+		flags |= 0x4000
+	}
+	binary.BigEndian.PutUint16(p[6:], flags)
+	p[8], p[9] = 64, 17
+	copy(p[12:16], []byte{10, 1, 1, 1})
+	copy(p[16:20], []byte{10, 1, 1, byte(2 + r.IntN(20)/19)})
+	copy(p[ipHeaderLen:], opts)
+	for i := range n {
+		p[hlen+i] = byte(id*31 + piece*8 + i%8)
+	}
+	ipv4frag.SetChecksum(p[:hlen])
+	if r.IntN(30) == 0 {
+		p[10] ^= 1
+	}
+	return p
+}
+
+func describeNotice(n ipv4frag.Notice, offending []byte) string {
+	local := [4]byte{10, 1, 1, 2}
+	_, tq := n.TimeoutQuote(local)
+	pp, ppOK := n.ParamProblemOK(offending, local)
+	return fmt.Sprintf("reason=%d ptr=%d first=%t quote=%x tq=%t pp=%d/%t", n.Reason, n.Pointer, n.HasFirst, n.Quote[:n.QuoteLen], tq, pp, ppOK)
+}
+
+// writeFragGolden は再組み立ての表に決まった乱数の断片と掃除の列を与え、Go の表の結果を書き出す。
+// 上限は項目 4、断片の枠 8 で、保持 byte は管理領域の後に少しの余地だけを残し、上限で断る場合も起こす。
+func writeFragGolden(b *strings.Builder) {
+	r := rand.New(rand.NewPCG(9, 10))
+	t, err := ipv4frag.New(ipv4frag.Limits{Entries: 4, Fragments: 8, Bytes: 120 + 4*264 + 8*56 + 4*72 + 60, Lifetime: 2 * time.Second})
+	if err != nil {
+		panic(err)
+	}
+	now := int64(time.Second)
+	var plans [7][2]int
+	for i := range plans {
+		plans[i] = [2]int{1 + r.IntN(4), 1 + r.IntN(8)}
+	}
+	for range 400 {
+		now += int64(r.IntN(200)) * int64(time.Millisecond)
+		if r.IntN(20) == 0 {
+			now += int64(2 * time.Second)
+		}
+		if r.IntN(10) == 0 {
+			var parts []string
+			for _, n := range t.Sweep(time.Unix(0, now)) {
+				parts = append(parts, describeNotice(n, nil))
+			}
+			fmt.Fprintf(b, "fragsweep %d %d %s\n", now, len(parts), strings.Join(parts, ";"))
+			continue
+		}
+		p := goldenFragment(r, &plans)
+		res := t.Process(p, time.Unix(0, now))
+		var out string
+		switch res.Status {
+		case ipv4frag.Held:
+			out = "held"
+		case ipv4frag.Complete:
+			out = fmt.Sprintf("complete %x", res.Packet)
+		case ipv4frag.Duplicate:
+			out = "duplicate"
+		case ipv4frag.Rejected:
+			out = "rejected " + describeNotice(res.Notice, p)
+		case ipv4frag.Capacity:
+			out = "capacity"
+		default:
+			out = "closed"
+		}
+		used, entries, pieces := t.Usage()
+		fmt.Fprintf(b, "frag %d %x %d/%d/%d %s\n", now, p, used, entries, pieces, out)
+	}
 }
 
 // fuzzParseSeeds は FuzzParse が f.Add で渡す値。

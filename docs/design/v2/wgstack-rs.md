@@ -128,7 +128,7 @@ device の層と核を組み、UDP のソケットとタイマーを回す駆動
   `[dev-dependencies]` にも試験の道具の crate を入れません。
   crate の試験 (`src/scan_tests.rs`) が manifest を読み、依存の表が空であることを確かめます。
   CI の job を足さずに `rust-check` の中で流れるためです
-- sans-IO と伸びる collection:`wgft-wgstack` の clippy の設定の `disallowed-methods`、`disallowed-types`、`disallowed-macros` で、`Instant::now`、`SystemTime::now`、スレッドの作成、`std::net` のソケット、OS の乱数の読み取りと、容量を自動で伸ばす操作 ([確保の規則](#確保の規則)) を禁じます。
+- sans-IO と伸びる collection:`wgft-wgstack` の clippy の設定の `disallowed-methods`、`disallowed-types`、`disallowed-macros` で、`Instant::now`、`SystemTime::now`、スレッドの作成、`std::net` のソケット、ファイル (`std::fs`)、環境変数 (`std::env`)、プロセス (`std::process`)、標準入出力、OS の乱数の読み取りと、容量を自動で伸ばす操作 (`Box`、`Rc`、`Arc` の型と文字列を作る操作を含みます) ([確保の規則](#確保の規則)) を禁じます。
   設定は `crates/wgft-wgstack/clippy.toml` に置きます。
   clippy は crate の manifest の directory から上へ設定を探すので、この一覧はこの crate だけに効きます。
   PR 2 で、禁じた呼び出しを置いた build が警告になり、ほかの crate は警告にならないことを確かめました
@@ -137,8 +137,9 @@ device の層と核を組み、UDP のソケットとタイマーを回す駆動
   文字列の照合なので、注釈と試験の module は見ません
 - unsafe:`wgft-wgstack` は `#![forbid(unsafe_code)]` にします。
   checksum も `as_chunks` と `u64::from_be_bytes` の安全なコードで書きます
-- 製品の木:CI の検査が、`wgft` のバイナリの依存の木に `wgft-tcpharness` と `wgft-wgstack-dut` が無いこと、測定用の feature が有効でないことを確かめます
-- I7 の隔離:後で作る agent のカーネルモードの crate が、推移的にも `wgft-wgstack` に依らないことを同じ `cargo tree` の検査で確かめます。
+- 製品の木:CI の `cargo tree` の検査が、`wgft` のバイナリの依存の木に `wgft-tcpharness` と `wgft-wgstack-dut` が無いこと、測定用の feature が有効でないことを確かめます。
+  この検査は、試験の道具の crate を足す段で足します
+- I7 の隔離:後で作る agent のカーネルモードの crate が、推移的にも `wgft-wgstack` に依らないことを、製品の木と同じ `cargo tree` の検査で確かめます。
   カーネルモードの agent は wgstack を作りません
 
 `no_std` で sans-IO を構造で強いる案は採りません。
@@ -264,7 +265,7 @@ boost の変化は知らせに入れず、hook だけで伝えます ([boost の
   製品は OS の乱数から種を作り、試験は固定の種を渡します
 - ChaCha8:bit の一致のため、Go の `math/rand/v2` の `ChaCha8` と同じ列を出す生成器を wgft の中で書きます。
   C2SP の `chacha8rand` の仕様から書き、Go のコードは写しません。
-  Go が出す列と一致することを、3 つの種でそれぞれ種の作り直しを 2 回越える数の値を照らす試験で確かめました。
+  Go が出す列と一致することを、いくつかの種でそれぞれ種の作り直しを 2 回越える数の値を照らす試験で確かめました。
   種の配分 (ISN の鍵、表の鍵、timestamp の鍵、IP の ID の始めの値) と、その後の範囲を決めた乱数も同じ試験で照らします
 
 ### boost の hook
@@ -638,7 +639,9 @@ Go の wgstack の記録がすべて一致することは、ラボの一式で�
 - 浮動小数点の比べと変換:Go の `min` と `max` の NaN と -0 の扱いと、浮動小数点から符号なしの整数への変換を、Rust の既定の挙動に頼らずに明示して写します。
   Rust の `as` は範囲の外の値を飽和させますが、Go の変換の結果は target に依るので、linux/amd64 の結果を写すか、範囲の外の値が来ないことを試験で示します
 
-部品の単位で照らせる値 (SipHash、ChaCha8 の列と種の配分、TCP の header と option の組み立て) は、記録を待たずに照らします。
+部品の単位で照らせる値 (SipHash、ChaCha8 の列と種の配分、TCP の header と option の組み立て、IPv4 の header の書き直し、IPv4 と TCP の解釈、再組み立ての表) は、記録を待たずに照らします。
+解釈は、`FuzzParse` の種と組み立ての試験の segment を決まった乱数で壊した入力の結果を照らします。
+再組み立ての表は、決まった乱数の断片と掃除の列への結果と保持の量を、手順ごとに照らします。
 Go の試験 `TestRustGolden` が凍結した Go の wgstack のコードで値を作り、`crates/wgft-wgstack/testdata/go-golden.txt` に書き出します。
 Rust の単体の試験がそのファイルと照らし、Go の試験はファイルが Go の値と同じであることを確かめます。
 作り直すときは `go test ./internal/wgstack -run TestRustGolden -update-rust-golden` を流します。
@@ -659,6 +662,7 @@ Rust の単体の試験がそのファイルと照らし、Go の試験はファ
 印の bit 0 は IPv4 の header の checksum を直す印で、残りの bit は時刻を進めます。
 変異で checksum が壊れただけの入力が入口で落ちるのを避けるためです。
 種は `TestRustGolden` が Go の `FuzzParse` と同じ値を `fuzz/corpus/parse/` に書き出します。
+見つけた落ちる入力は `fuzz/regressions/parse/` に置き、corpus と共に stable の単体の試験が流します。
 `cargo fuzz run` は新しい入力を最初に渡した corpus の directory に書くので、手元で流すときは別の directory を先に渡します。
 target は crate の `#[cfg(fuzzing)]` の `fuzz` module を呼び、この module は製品の build にありません。
 fuzz の crate が依る `libfuzzer-sys` の license は `(MIT OR Apache-2.0) AND NCSA` です。
@@ -718,8 +722,8 @@ T の段の中身と大きさは[試験の道具の設計の段階の計画](tes
 | 順 | PR | 担当 | 中身 | サイズの目安 | 前提 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | この文書 | | 設計 | | |
-| 2 | `feat(wgstack-rs): packets, checksums and reassembly` | A | crate の骨組み、依存と sans-IO の検査、`wire`、checksum、`frag`、`siphash`、ChaCha8、`Time`。fuzz の `parse` | 約 2,500 行 | 1 |
-| 3 | `feat(wgstack-rs): tables, buffers and the bound` | A | `FixedVec`、接続の枠、hash の表、握手の途中の表、TIME_WAIT の表、待ち受けと UDP の endpoint の表、タイマーの輪、出力の list と制御の輪、知らせの list、chunk の置き場、送受信の輪、区間の treap、送信の記録、`Budget`、`Bound` と生成した表、`check_invariants`、確保の数えの試験の道具 | 約 3,000 行 | 2 |
+| 2 | `feat(wgstack-rs): packets, checksums and reassembly` | A | crate の骨組み、依存と sans-IO の検査、`FixedVec`、`wire`、checksum、`frag`、`siphash`、ChaCha8、`Time`。fuzz の `parse` | 約 2,500 行 | 1 |
+| 3 | `feat(wgstack-rs): tables, buffers and the bound` | A | 接続の枠、hash の表、握手の途中の表、TIME_WAIT の表、待ち受けと UDP の endpoint の表、タイマーの輪、出力の list と制御の輪、知らせの list、chunk の置き場、送受信の輪、区間の treap、送信の記録、`Budget`、`Bound` と生成した表、`check_invariants`、確保の数えの試験の道具 | 約 3,000 行 | 2 |
 | 4a | `feat(wgstack-rs): passive open, close and the application API` | A | 受動の open と確立の入口、accept の待ち行列、FIN と TIME_WAIT、`close` と `abort`、古い handle、アプリケーションの操作と知らせ、出力の組 | 約 2,500 行 | 3 |
 | 4b | `feat(wgstack-rs): the data path to the completion level` | A | データの送受信、受け手の ACK と quickack の規則、受信の窓の自動調整、遅延 ACK、窓と persist、RTO、NewReno、RFC 5961 と RFC 7323、MSS と PMTU | 約 3,000 行 | 4a |
 | 5 | `feat(wgstack-rs): SACK, RACK-TLP and CUBIC` | A | SACK の scoreboard と回復と PRR、受け手の SACK と D-SACK、RACK-TLP、CUBIC と HyStart++、不要な再送の取り消し、boost の取得と回収と取り消し | 約 4,500 行 | 4b |

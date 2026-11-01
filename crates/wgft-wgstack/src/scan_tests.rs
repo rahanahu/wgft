@@ -19,7 +19,7 @@ fn crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// 核の source で使わない語と、その理由です。`fixed_vec.rs` だけが `Vec` を持ちます。
+/// 核の source で使わない語と、その理由です。`fixed_vec.rs` は `FIXED_VEC_ONLY` の語を使えます。
 const FORBIDDEN: &[(&str, &str)] = &[
     ("Instant", "the core is sans-IO: the caller passes the time"),
     (
@@ -30,6 +30,10 @@ const FORBIDDEN: &[(&str, &str)] = &[
     ("std::net", "the core owns no sockets"),
     ("UdpSocket", "the core owns no sockets"),
     ("TcpStream", "the core owns no sockets"),
+    ("std::fs", "the core touches no files"),
+    ("std::env", "the core reads no environment"),
+    ("std::process", "the core starts no processes"),
+    ("std::io::std", "the core writes no standard streams"),
     ("RandomState", "the core reads no OS randomness"),
     ("getrandom", "the core reads no OS randomness"),
     ("HashMap", "grows; use the fixed tables"),
@@ -39,13 +43,18 @@ const FORBIDDEN: &[(&str, &str)] = &[
     ("VecDeque", "grows; use a fixed ring"),
     ("BinaryHeap", "grows; use the timer wheel"),
     ("LinkedList", "allocates per node"),
+    ("Rc<", "allocates and aborts on failure"),
+    ("Arc<", "allocates and aborts on failure"),
+    ("Box<", "allocates and aborts on failure"),
+    ("Box::", "allocates and aborts on failure"),
     ("vec!", "allocates and aborts on failure"),
     (".push(", "grows the capacity"),
     (".extend(", "grows the capacity"),
-    (".collect(", "allocates and grows"),
+    (".collect", "allocates and grows"),
     (".to_vec(", "allocates and aborts on failure"),
     (".to_owned(", "allocates and aborts on failure"),
-    ("Box::new", "aborts on allocation failure"),
+    (".to_string(", "allocates and aborts on failure"),
+    (".into_owned(", "allocates and aborts on failure"),
     ("String", "the core builds no strings"),
     ("format!", "the core builds no strings"),
     ("println!", "the core writes no logs"),
@@ -53,6 +62,9 @@ const FORBIDDEN: &[(&str, &str)] = &[
     ("extern crate", "edition 2024 needs no extern crate"),
     ("unsafe", "the crate forbids unsafe code"),
 ];
+
+/// `fixed_vec.rs` だけが使える語です。
+const FIXED_VEC_ONLY: &[&str] = &[".push(", "Box<", "Box::"];
 
 /// 一覧の項目のうち、clippy の設定に無ければならないものです。
 const CLIPPY_REQUIRED: &[&str] = &[
@@ -67,7 +79,20 @@ const CLIPPY_REQUIRED: &[&str] = &[
     "std::iter::Extend::extend",
     "std::boxed::Box::new",
     "slice::to_vec",
+    "alloc::string::ToString::to_string",
+    "std::borrow::Cow::into_owned",
+    "std::io::stdin",
+    "std::io::stdout",
+    "std::io::stderr",
+    "std::env::var",
+    "std::process::exit",
+    "std::fs::read",
     "std::vec::Vec\"",
+    "std::boxed::Box\"",
+    "std::rc::Rc\"",
+    "std::sync::Arc\"",
+    "std::fs::File\"",
+    "std::process::Command\"",
     "std::collections::HashMap",
     "std::collections::VecDeque",
     "std::net::UdpSocket",
@@ -87,12 +112,32 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// 試験の module を除いた、注釈を外した行を返します。
-fn product_lines(text: &str) -> impl Iterator<Item = (usize, &str)> {
-    text.lines()
-        .enumerate()
-        .take_while(|(_, l)| l.trim() != "#[cfg(test)]")
-        .map(|(i, l)| (i + 1, l.split_once("//").map_or(l, |(code, _)| code)))
+/// 試験の module を除いた、注釈を外した行を返します。`#[cfg(test)]` の次の行が `mod` で始まるところで止めます。
+fn product_lines(text: &str) -> Vec<(usize, &str)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let next_is_mod = lines.get(i + 1).is_some_and(|n| {
+            let n = n.trim_start();
+            n.starts_with("mod ") || n.starts_with("pub(crate) mod ")
+        });
+        if l.trim() == "#[cfg(test)]" && next_is_mod {
+            break;
+        }
+        out.push((i + 1, l.split_once("//").map_or(*l, |(code, _)| code)));
+    }
+    out
+}
+
+/// `FixedVec` の一部でない `Vec<` か `Vec::` があるかを返します。
+fn bare_vec(line: &str) -> bool {
+    ["Vec<", "Vec::"].iter().any(|pat| {
+        line.match_indices(pat).any(|(i, _)| {
+            let before = &line[..i];
+            !before.ends_with("Fixed")
+                && !before.ends_with(|c: char| c.is_alphanumeric() || c == '_')
+        })
+    })
 }
 
 #[test]
@@ -109,9 +154,9 @@ fn product_source_uses_no_forbidden_names() {
         let text = std::fs::read_to_string(f).unwrap();
         for (n, line) in product_lines(&text) {
             for (word, why) in FORBIDDEN {
-                // forbid(unsafe_code) の宣言と、FixedVec の実装の中の Vec への追加は許します。
+                // forbid(unsafe_code) の宣言と、FixedVec の実装の中の確保は許します。
                 if (*word == "unsafe" && line.contains("forbid(unsafe_code)"))
-                    || (name == "fixed_vec.rs" && *word == ".push(")
+                    || (name == "fixed_vec.rs" && FIXED_VEC_ONLY.contains(word))
                 {
                     continue;
                 }
@@ -119,10 +164,7 @@ fn product_source_uses_no_forbidden_names() {
                     bad.push(format!("{}:{n}: {word}: {why}", f.display()));
                 }
             }
-            if name != "fixed_vec.rs"
-                && (line.contains("Vec<") || line.contains("Vec::"))
-                && !line.contains("FixedVec")
-            {
+            if name != "fixed_vec.rs" && bare_vec(line) {
                 bad.push(format!(
                     "{}:{n}: Vec: variable-length holdings use FixedVec",
                     f.display()
@@ -135,6 +177,21 @@ fn product_source_uses_no_forbidden_names() {
         "forbidden names in the core:\n{}",
         bad.join("\n")
     );
+}
+
+#[test]
+fn scanner_rules() {
+    assert!(bare_vec("let v: Vec<u8>"));
+    assert!(bare_vec("(Vec::new())"));
+    assert!(!bare_vec("FixedVec<u8> and FixedVec::new()"));
+    assert!(bare_vec("FixedVec<u8>, Vec<u8>"));
+    assert!(!bare_vec("MyVec<u8>"));
+    let text = "a\n#[cfg(test)]\nfn helper() {}\nb // c\n#[cfg(test)]\nmod tests;\nd\n";
+    let lines: Vec<_> = product_lines(text)
+        .into_iter()
+        .map(|(_, l)| l.trim())
+        .collect();
+    assert_eq!(lines, ["a", "#[cfg(test)]", "fn helper() {}", "b"]);
 }
 
 #[test]
