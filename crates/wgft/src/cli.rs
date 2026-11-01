@@ -172,14 +172,20 @@ pub fn go_bool(s: &str) -> Result<bool, String> {
 
 /// 既定の値を `--help` に出すコマンドの定義。既定はプロセスの起動の時に 1 回だけ決める。
 fn command() -> clap::Command {
-    use wgft_agent::config::{Defaults, ProcessEnv, agent::run_specs};
-    let defaults = Defaults::for_host(&ProcessEnv);
+    use wgft_agent::config::{Defaults, ProcessEnv};
+    command_with(&Defaults::for_host(&ProcessEnv))
+}
+
+/// 既定の値を呼び手が渡すコマンドの定義。`docs/cli.md` との照合の試験が環境に依らない既定で呼ぶ。
+#[must_use]
+pub fn command_with(defaults: &wgft_agent::config::Defaults) -> clap::Command {
+    use wgft_agent::config::agent::run_specs;
     let with_default = |a: clap::Arg, d: &str| {
         let help = a.get_help().map(ToString::to_string).unwrap_or_default();
         a.help(format!("{help} [default: {d}]"))
     };
     let mut run_defaults = vec![];
-    for sp in run_specs(&defaults) {
+    for sp in run_specs(defaults) {
         if !sp.default.is_empty() && sp.flag != "data-dir" {
             run_defaults.push((sp.flag.replace('-', "_"), sp.default));
         }

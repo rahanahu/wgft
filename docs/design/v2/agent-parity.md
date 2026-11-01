@@ -651,6 +651,11 @@ Rust の側は、agent のホストのコマンドのフラグが Go と同じ�
 - 説明の置き場:Go の `cmd/wgft/helptext.go` に当たる module を `crates/wgft` に置きます。
   clap のコマンドの定義には 1 行の `about` だけを置きます
 - 使用例:実行できるコマンドに使用例があることを、Go の `TestHelpTextsCoverCommands` と同じく確かめます
+- 比べる範囲:コマンドの 1 行の説明は `docs/cli.md` の冒頭の表にある葉のコマンドだけを比べます。
+  `wgft` と `wgft agent` の節には 1 行の説明が無いので比べません。
+  型は `string`、`int`、真偽値に分け、既定の値は `docs/cli.md` の `(default ...)` と clap の説明の `[default: ...]` から読みます
+- 差の一覧:Rust のビルドがまだ持たないコマンドとフラグは、試験の `EXPECTED_DIFFERENCES` の 1 か所に書きます。
+  実際の差の集合と一覧が一致しなければ落ちるので、新しい差は気づかれ、段が入って差が消えたら一覧から消します
 - OS:既定のパスが OS で変わるので、Go と同じく Linux でだけ比べます
 - v2.0.0 の後:Go の試験を消し、Rust の試験が `WGFT_UPDATE_CLI_DOC=1` で `docs/cli.md` 全体を書き直す形に替えます
 
