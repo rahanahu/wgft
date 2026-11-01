@@ -392,6 +392,10 @@ async fn listeners_hold_what_their_term_counts() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
     };
+    // 範囲のルールは宛先のポートを待ち受けの順にずらし、65535 を越える宛先の待ち受けは開かない。OS が
+    // 割り当てるポートは 65535 に近いことがある (Windows は 49152 から) ので、最後の待ち受けが閉じた
+    // ポートを指すように始めを下げる
+    let first = closed.saturating_sub(N - 1).max(1);
     let id = "r".repeat(4000);
     let host = format!("{}.invalid", "h".repeat(4000));
     let last = 20000 + N - 1;
@@ -400,7 +404,7 @@ async fn listeners_hold_what_their_term_counts() {
             &id,
             Proto::Tcp,
             &format!("20000-{last}"),
-            &format!("127.0.0.1:{closed}"),
+            &format!("127.0.0.1:{first}"),
             true,
         )],
         &mut m,
