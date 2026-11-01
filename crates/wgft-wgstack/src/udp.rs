@@ -190,8 +190,8 @@ struct Dgram {
     ep_next: u16,
     /// 送信で、この datagram が待てる最長の時間 (ms) です。0 は無制限です。送り始める前に超えたら捨てます。
     max_age_ms: u16,
-    /// 送信の FIFO に入れた時刻 (ms) の下位 32 bit です。
-    queued_ms: u32,
+    /// 送信の FIFO に入れた時刻 (ns) です。核の時刻は戻らないので、FIFO の中で単調に増えます。
+    queued_ns: i64,
     ip_id: u16,
     csum: u16,
     /// 送信で、断片に分けて送った UDP の byte (header を含む) です。
@@ -214,7 +214,7 @@ impl Default for Dgram {
             prev: NIL16,
             ep_next: NIL16,
             max_age_ms: 0,
-            queued_ms: 0,
+            queued_ns: 0,
             ip_id: 0,
             csum: 0,
             sent: 0,
@@ -674,15 +674,15 @@ impl Udp {
         ep.rx_tail = id;
     }
 
-    /// 送信の datagram `id` を送信の FIFO の末尾と、持ち主の endpoint の列の末尾に入れます。`now_ms` は入れた時刻、
+    /// 送信の datagram `id` を送信の FIFO の末尾と、持ち主の endpoint の列の末尾に入れます。`now_ns` は入れた時刻、
     /// `max_age_ms` は待てる最長の時間で、0 は無制限です。
-    fn push_tx(&mut self, id: u16, now_ms: u32, max_age_ms: u16) {
+    fn push_tx(&mut self, id: u16, now_ns: i64, max_age_ms: u16) {
         let tail = self.tx_tail;
         let g = &mut self.dg[TX][usize::from(id)];
         g.prev = tail;
         g.next = NIL16;
         g.ep_next = NIL16;
-        g.queued_ms = now_ms;
+        g.queued_ns = now_ns;
         g.max_age_ms = max_age_ms;
         let (port, generation) = (g.ep_port, g.ep_gen);
         if tail == NIL16 {
@@ -834,13 +834,7 @@ impl Udp {
                 return Err("the UDP send FIFO is broken");
             }
             // 入れた順に並ぶので、時刻は戻らない
-            if prev != NIL16
-                && self.dg[TX][usize::from(prev)]
-                    .queued_ms
-                    .wrapping_sub(g.queued_ms)
-                    < 1 << 31
-                && self.dg[TX][usize::from(prev)].queued_ms != g.queued_ms
-            {
+            if prev != NIL16 && self.dg[TX][usize::from(prev)].queued_ns > g.queued_ns {
                 return Err("the UDP send FIFO is out of order");
             }
             prev = id;
@@ -887,12 +881,7 @@ impl Udp {
                     || g.ep_port != port
                     || g.ep_gen != self.eps.generation(port)
                     || tk > self.dg[TX].len()
-                    || (last != NIL16
-                        && self.dg[TX][usize::from(last)]
-                            .queued_ms
-                            .wrapping_sub(g.queued_ms)
-                            < 1 << 31
-                        && self.dg[TX][usize::from(last)].queued_ms != g.queued_ms)
+                    || (last != NIL16 && self.dg[TX][usize::from(last)].queued_ns > g.queued_ns)
                 {
                     bad = Some("an endpoint send list is broken");
                     return;
@@ -936,11 +925,6 @@ impl Udp {
         }
         Ok(())
     }
-}
-
-/// 核の時刻 (ns) の ms の下位 32 bit です。差は `wrapping_sub` で取ります。
-fn ms_of(now: i64) -> u32 {
-    u32::try_from((now / 1_000_000).rem_euclid(1 << 32)).unwrap_or(0)
 }
 
 impl Shared {
@@ -1037,7 +1021,7 @@ impl Shared {
     /// 送信の FIFO の先頭の datagram の次の断片を `b` に作り、長さを返します。datagram を送り終えたら予約を
     /// 返します (Go の `pollUDP`)。DF は立てません。
     pub(crate) fn poll_udp(&mut self, b: &mut [u8]) -> usize {
-        let now_ms = ms_of(self.now);
+        let now = self.now;
         // 待てる最長の時間を超えた先頭の datagram は、送り始める前に捨てます。捨てるのは取り出す時の一度だけで、
         // 先頭が新しければ止まるので、時計も走査も要りません。
         let id = loop {
@@ -1048,7 +1032,7 @@ impl Shared {
             let g = &self.udp.dg[TX][usize::from(id)];
             let stale = g.max_age_ms != 0
                 && g.sent == 0
-                && now_ms.wrapping_sub(g.queued_ms) > u32::from(g.max_age_ms);
+                && now.saturating_sub(g.queued_ns) > i64::from(g.max_age_ms) * 1_000_000;
             if !stale {
                 break id;
             }
@@ -1243,7 +1227,7 @@ impl<H: Hook> Stack<H> {
         let g = &mut s.udp.dg[TX][usize::from(gid)];
         g.ip_id = ip_id;
         g.csum = csum;
-        s.udp.push_tx(gid, ms_of(s.now), latest.unwrap_or(0));
+        s.udp.push_tx(gid, s.now, latest.unwrap_or(0));
         s.out.udp_queued += 1;
         Ok(data.len())
     }

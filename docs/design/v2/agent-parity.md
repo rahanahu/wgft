@@ -352,12 +352,12 @@ Go は `WriteTo` が予約できるまで待ち、セッションが戻ると溜
 このため、トンネルが流せない間のデータプレーンの CPU は、宛先の送る速さに比例して増えます。上限は宛先の送る速さだけで、予算の大きさでは決まりません。
 予算の中にある間は、取り出す時の比べが 1 回増えるだけです。
 
-核に追加した項目は、datagram ごとに前の指し (2 byte)、endpoint の次の指し (2 byte)、入れた時刻 (4 byte)、時間の上限 (2 byte) と、endpoint の行に先頭と末尾の指し (4 byte) です。
-受信の datagram も同じ型なので、受信の 4096 件の分として約 32 KiB 増えます。
+核に追加した項目は、datagram ごとに前の指し (2 byte)、endpoint の次の指し (2 byte)、入れた時刻 (ns、8 byte。ms の 32 bit にすると 49 日で一周して古い datagram が新しく見えるので使いません)、時間の上限 (2 byte) と、endpoint の行に先頭と末尾の指し (4 byte) です。
+受信の datagram も同じ型なので、受信の 4096 件の分として約 64 KiB 増えます。
 `Stats` と門の分も増えます。
 上界の表 ([wgstack の Rust 版の上界の表](wgstack-bound.md)) はこれを含みます。
 agent の `udp relay` の項は、応答の task が待ちの future を持たなくなった分だけ小さくなります。
-agent の `total` は、最大の流れの数の列で 0.2 MiB 減り、ほかの列では 0.0 から 0.3 MiB 増えます。
+agent の `total` は、最大の流れの数の列で 0.2 MiB 減り、ほかの列では 0.0 から 0.4 MiB 増えます。
 
 待つ `send_to` と待ちの list を起こす経路は、試験と Go の recording の照合だけが使うので、製品の build に入れません。
 `cfg(test)` か `harness` の feature のときだけ作ります (核の `Stack::send_to` と、`wgft-netstack` の `UdpSocket::send_to` と `UdpSender::send_to`)。
