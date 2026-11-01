@@ -345,7 +345,7 @@ agent は、同時に中継するフローの数を 3 段で抑えます ([フ�
 - 許可一覧:`WGFT_AGENT_ALLOW_TARGETS` があれば、一覧に入らない宛先へ接続しません。
   構文は [cli-config.md](cli-config.md)、判定の規則は[宛先の許可一覧](../userspace/targets.md#宛先の許可一覧)にあります。
   許可一覧はルールの宛先だけに効き、全体状態の `wg.endpoint` (WireGuard のエンドポイント) には効きません。
-  server は `wg.endpoint` で agent の WireGuard の UDP の送り先を任意のアドレスとポートにできます。
+  server は `wg.endpoint` で agent の WireGuard の UDP の送り先を任意の IPv4 のアドレスとポートにできます。
   v1 の agent と同じです
 - ユニキャストだけ:ブロードキャストとマルチキャストのアドレスへは、許可一覧の有無によらず転送しません ([ブロードキャストとマルチキャストの宛先](../userspace/targets.md#ブロードキャストとマルチキャストの宛先))
 - 判定の時機:IP リテラルの宛先は適用のときに判定し、拒めばそのポートの待ち受けを開かずにルールを `error` にします。
