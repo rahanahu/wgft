@@ -413,8 +413,7 @@ fn raise_send_buffer(s: &LanSocket) {
 #[cfg(not(target_os = "macos"))]
 fn raise_send_buffer(_: &LanSocket) {}
 
-/// 応答の task の future の大きさ。メモリの上界の試験が使う。
-#[cfg(test)]
+/// 応答の task の future の大きさ。メモリの上界が使う。
 pub(super) fn reply_future_size() -> usize {
     fn output_size<A, F: Future>(_: impl FnOnce(A) -> F) -> usize {
         size_of::<F>()
@@ -423,7 +422,6 @@ pub(super) fn reply_future_size() -> usize {
 }
 
 /// セッション 1 つが表と別の確保で持つバイト。表の容量の余裕を含む。
-#[cfg(test)]
 pub(super) fn session_entry_bytes() -> usize {
     // 容量は数の 4 倍までで、bucket は容量の 8/7 倍なので、項 5 つ分を数える
     5 * (size_of::<(SocketAddrV4, Conn)>() + 1)

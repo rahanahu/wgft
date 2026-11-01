@@ -189,13 +189,14 @@ agent_limit_text() {
 # agent_flood_terms <agent log>: the terms of the Rust agent's memory bound that check 5's floods can
 # fill, in MiB, summed, from its "memory bound terms:" start line; empty when a term is missing. The
 # floods hold idle TCP connections and send one-byte datagrams, so they fill the relays' per-flow
-# parts, the reply buffers and the queues the traffic passes, and touch the tables the core and the
-# netstack made at start; they carry no bulk data, so the TCP relays' bulk buffers and the core's
-# per-connection send and receive parts stay empty and are left out.
+# parts, the reply buffers and the queues the traffic passes, touch the tables the core and the
+# netstack made at start, and make the core's connection slots allocate the arrays a slot keeps from
+# its first use ("core arrays"); they carry no bulk data, so the TCP relays' bulk buffers and the
+# core's per-connection send and receive buffers stay empty and are left out.
 agent_flood_terms() {
   local line; line=$(grep -m1 'memory bound terms:' "$1" 2>/dev/null)
   local sum=0 term v
-  for term in 'core fixed' tables driver device 'tcp relay' 'udp relay'; do
+  for term in 'core fixed' 'core arrays' tables driver device 'tcp relay' 'udp relay'; do
     v=$(grep -oE "$term [0-9]+ MiB" <<< "$line" | grep -oE '[0-9]+')
     [ -n "$v" ] || return 0
     sum=$((sum + v))

@@ -33,6 +33,9 @@ pub struct Bound {
     pub fix: u64,
     /// N_c × (f_s + f_r + r_f + h_f) です。
     pub floor_conn: u64,
+    /// `floor_conn` のうち、floor の送信の記録の輪と区間の表の N_c × (r_f + h_f) です。枠を初めて使う時に確保し、
+    /// 枠と共に持つので、データを運ばない接続も持ちます。`floor_conn` の内訳で、`total` に重ねて足しません。
+    pub floor_arrays: u64,
     /// B × (d_s + d_r + d_rec + d_h) と枠の管理です。d_rec と d_h は boost の輪と表の全体で、`Budget` が作成の
     /// 時に確保します。floor の輪と表は枠に残るので `floor_conn` が数えます。
     pub boost: u64,
@@ -119,9 +122,12 @@ fn b(n: usize) -> u64 {
 
 /// 接続の枠 1 つの floor の項 f_s + f_r + r_f + h_f です。
 pub(crate) fn floor_per_conn() -> u64 {
-    SEND_FLOOR
-        + RECV_FLOOR
-        + b(FLOOR_RECORDS * size_of::<Record>() + FLOOR_INTERVALS * size_of::<Interval>())
+    SEND_FLOOR + RECV_FLOOR + floor_arrays_per_conn()
+}
+
+/// 接続の枠 1 つの floor の配列の項 r_f + h_f です。
+fn floor_arrays_per_conn() -> u64 {
+    b(FLOOR_RECORDS * size_of::<Record>() + FLOOR_INTERVALS * size_of::<Interval>())
 }
 
 /// boost の枠 1 つの項 d_s + d_r + d_rec + d_h です。
@@ -172,6 +178,7 @@ impl Bound {
     pub(crate) fn with_stack_size(l: &Limits, mtu: usize, stack_size: usize) -> Self {
         let fix = fix_parts(l, mtu, stack_size).sum();
         let floor_conn = b(l.conns()) * floor_per_conn();
+        let floor_arrays = b(l.conns()) * floor_arrays_per_conn();
         let boost = b(BOOST_SLOTS) * boost_per_slot() + b(Budget::slot_bytes());
         let frag = b(frag::LIMITS.bytes);
         let ck = b(udp::CHUNKS * Udp::chunk_rec_size());
@@ -181,6 +188,7 @@ impl Bound {
         Self {
             fix,
             floor_conn,
+            floor_arrays,
             boost,
             frag,
             udp_rx,

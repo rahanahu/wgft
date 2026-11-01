@@ -33,17 +33,33 @@ pub const TASK_OVERHEAD: usize = 512;
 /// pair, and the handle).
 pub const IO_OVERHEAD: usize = 512;
 
-/// The future of one TCP relay task: two idle buffers inline and the state of both directions.
-/// A test checks the real size stays below it.
-pub const TCP_RELAY_FUTURE: usize = 8 << 10;
+/// The size of one per-flow allocation as the bound counts it: rounded up to 64 bytes. The
+/// allocator's size classes are no finer, and the rounding keeps the term the same in the test and
+/// the release build, whose futures the compiler can lay out a few bytes apart.
+const fn per_flow(bytes: usize) -> usize {
+    bytes.next_multiple_of(64)
+}
 
-/// The future of one UDP session's reply task. A test checks the real size stays below it.
-pub const UDP_REPLY_FUTURE: usize = 1 << 10;
+/// The future of one TCP relay task: two idle buffers inline and the state of both directions,
+/// read from the future's type.
+#[must_use]
+pub fn tcp_relay_future() -> usize {
+    per_flow(crate::relay::future_sizes().0)
+}
+
+/// The future of one UDP session's reply task, read from the future's type.
+#[must_use]
+pub fn udp_reply_future() -> usize {
+    per_flow(crate::relay::future_sizes().1)
+}
 
 /// One UDP session's entry in its listener's table, with the table's spare capacity (the table
 /// keeps at most four times its sessions plus a small slack), and its shared socket and clock
-/// cells. A test checks the real size stays below it.
-pub const UDP_SESSION_ENTRY: usize = 512;
+/// cells, read from their types.
+#[must_use]
+pub fn udp_session_entry() -> usize {
+    per_flow(crate::relay::udp_session_bytes())
+}
 
 /// One TCP listener: its entry in the relay's table, its state shared with its relays, its budget
 /// entry, its accept task and its netstack registration, and the failure text of its last probe,
@@ -61,10 +77,16 @@ pub const LISTENER_TCP: usize = 5 << 9;
 pub const LISTENER_UDP: usize = UDP_BUF + (4 << 10);
 
 /// One TCP relay's term without its bulk buffers: its task and its socket's registration.
-pub const TCP_RELAY_CONN: usize = TCP_RELAY_FUTURE + TASK_OVERHEAD + IO_OVERHEAD;
+#[must_use]
+pub fn tcp_relay_conn() -> usize {
+    tcp_relay_future() + TASK_OVERHEAD + IO_OVERHEAD
+}
 
 /// One UDP session's term: its table entry, its socket's registration and its reply task.
-pub const UDP_SESSION: usize = UDP_SESSION_ENTRY + UDP_REPLY_FUTURE + TASK_OVERHEAD + IO_OVERHEAD;
+#[must_use]
+pub fn udp_session() -> usize {
+    udp_session_entry() + udp_reply_future() + TASK_OVERHEAD + IO_OVERHEAD
+}
 
 /// How many decoded full states the agent holds at once at most: the applied one (`last_state`),
 /// the one kept for a rebuild retry, the copy of `last_state` a tunnel rebuild or a key rotation
@@ -98,6 +120,15 @@ pub(crate) fn device_bytes() -> usize {
         + UDP_BUF
 }
 
+/// The tunnel batching's buffers: what one receive batch and one send batch of the WireGuard socket
+/// hold (`recvmmsg` and `sendmmsg`, UDP GRO and GSO) beyond the data plane's one receive buffer and
+/// one send buffer, which [`MemoryBound::device`] counts. The data plane reads and writes one
+/// datagram at a time, so the term is 0; batching fills it in the same change that adds the buffers
+/// (`docs/design/v2/agent-parity.md`, the memory bound line).
+pub(crate) const fn batch_bytes() -> usize {
+    0
+}
+
 /// The memory bound and its terms, in bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemoryBound {
@@ -108,12 +139,17 @@ pub struct MemoryBound {
     /// The part of [`Self::core`] the core makes when it is created and keeps whatever the flows
     /// do: its structure, connection slots and tables (`Bound::fix`).
     pub core_fixed: usize,
+    /// The part of [`Self::core`] every connection slot holds from its first use on, data or not:
+    /// its floor send record ring and interval table (`Bound::floor_arrays`).
+    pub core_arrays: usize,
     /// The netstack's waker table and the LAN socket table the core's hook keeps.
     pub tables: usize,
     /// The data plane driver's list of wakers to wake, at most twice the table's rows.
     pub driver: usize,
     /// The WireGuard device's queues and the data plane's buffers.
     pub device: usize,
+    /// The tunnel batching's buffers ([`batch_bytes`]).
+    pub batch: usize,
     /// The TCP relay without its bulk buffers: per connection its task and socket.
     pub tcp: usize,
     /// The TCP relay's bulk buffers: both directions' per connection, and the ones the data plane
@@ -149,29 +185,33 @@ impl MemoryBound {
         let core_bound = Bound::for_limits(&core_limits, MAX_MTU);
         let core = usize::try_from(core_bound.total).unwrap_or(usize::MAX);
         let core_fixed = usize::try_from(core_bound.fix).unwrap_or(usize::MAX);
+        let core_arrays = usize::try_from(core_bound.floor_arrays).unwrap_or(usize::MAX);
         let tables = Netstack::<wgft_wgstack::NoHook>::waker_bound(conns)
             + LanSockets::<LanConn>::table_bytes(conns);
         let driver = 2 * Netstack::<wgft_wgstack::NoHook>::waker_slots(conns) * size_of::<Waker>();
         // データプレーンの受信のバッファと、MTU の長さの送り出しのバッファ
         let device = device_bytes() + UDP_BUF + MAX_MTU;
+        let batch = batch_bytes();
         // 接続ごとの項と、データプレーンのスレッドが使い回しのために残す大きいバッファ
-        let tcp = limits.tcp.saturating_mul(TCP_RELAY_CONN);
+        let tcp = limits.tcp.saturating_mul(tcp_relay_conn());
         let tcp_bulk = limits
             .tcp
             .saturating_mul(2 * BULK_BUF)
             .saturating_add(BULK_KEEP * BULK_BUF);
-        let udp = REPLY_SLOTS * UDP_BUF + limits.udp.saturating_mul(UDP_SESSION);
+        let udp = REPLY_SLOTS * UDP_BUF + limits.udp.saturating_mul(udp_session());
         let resolver = (TARGET_PERMITS + ENDPOINT_PERMITS) * RESOLVER_THREAD;
         let parts = [
-            BASE, core, tables, driver, device, tcp, tcp_bulk, udp, resolver, STATE,
+            BASE, core, tables, driver, device, batch, tcp, tcp_bulk, udp, resolver, STATE,
         ];
         Self {
             base: BASE,
             core,
             core_fixed,
+            core_arrays,
             tables,
             driver,
             device,
+            batch,
             tcp,
             tcp_bulk,
             udp,
@@ -202,26 +242,44 @@ impl MemoryBound {
         self.total.div_ceil(1 << 20)
     }
 
+    /// The terms in the order of the terms line, with their names there.
+    #[must_use]
+    pub fn terms(&self) -> [(&'static str, usize); 13] {
+        [
+            ("base", self.base),
+            ("core fixed", self.core_fixed),
+            ("core arrays", self.core_arrays),
+            (
+                "core flows",
+                self.core
+                    .saturating_sub(self.core_fixed)
+                    .saturating_sub(self.core_arrays),
+            ),
+            ("tables", self.tables),
+            ("driver", self.driver),
+            ("device", self.device),
+            ("batch", self.batch),
+            ("tcp relay", self.tcp),
+            ("tcp bulk", self.tcp_bulk),
+            ("udp relay", self.udp),
+            ("resolver", self.resolver),
+            ("state", self.state),
+        ]
+    }
+
     /// The second start line, with the terms in MiB rounded up. The core's term is split into
-    /// its fixed part and the rest, and the TCP relay's into its per-connection part and its bulk
-    /// buffers, so that the lab can compare the RSS growth under a flood of idle connections and
-    /// small datagrams with the terms such a flood can fill. Its form is not guaranteed.
+    /// its fixed part, the arrays every used connection slot keeps and the rest, and the TCP
+    /// relay's into its per-connection part and its bulk buffers, so that the lab can compare the
+    /// RSS growth under a flood of idle connections and small datagrams with the terms such a flood
+    /// can fill. Its form is not guaranteed.
     #[must_use]
     pub fn terms_line(&self) -> String {
-        let m = |b: usize| b.div_ceil(1 << 20);
+        let terms = self
+            .terms()
+            .map(|(name, b)| format!("{name} {} MiB", b.div_ceil(1 << 20)))
+            .join(", ");
         format!(
-            "memory bound terms: base {} MiB, core fixed {} MiB, core flows {} MiB, tables {} MiB, driver {} MiB, device {} MiB, tcp relay {} MiB, tcp bulk {} MiB, udp relay {} MiB, resolver {} MiB, state {} MiB; per listener, not in the line: tcp {} KiB, udp {} KiB",
-            m(self.base),
-            m(self.core_fixed),
-            m(self.core.saturating_sub(self.core_fixed)),
-            m(self.tables),
-            m(self.driver),
-            m(self.device),
-            m(self.tcp),
-            m(self.tcp_bulk),
-            m(self.udp),
-            m(self.resolver),
-            m(self.state),
+            "memory bound terms: {terms}; per listener, not in the line: tcp {} KiB, udp {} KiB",
             LISTENER_TCP.div_ceil(1 << 10),
             LISTENER_UDP.div_ceil(1 << 10)
         )
@@ -247,59 +305,4 @@ impl MemoryBound {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_line_has_the_lab_s_form_and_grows_with_the_caps() {
-        let small = MemoryBound::for_limits(flowpool::Limits {
-            udp: 4096,
-            tcp: 1024,
-        });
-        let big = MemoryBound::for_limits(flowpool::Limits::default());
-        assert!(small.line().starts_with("memory bound: "));
-        assert!(
-            small
-                .line()
-                .contains(&format!("{} MiB, derived from the flow caps", small.mib()))
-        );
-        assert!(big.total > small.total);
-        assert_eq!(
-            small.total,
-            small.base
-                + small.core
-                + small.tables
-                + small.driver
-                + small.device
-                + small.tcp
-                + small.tcp_bulk
-                + small.udp
-                + small.resolver
-                + small.state
-        );
-        let open = small.with_listeners(3, 2);
-        assert_eq!(
-            open.total,
-            small.total + 3 * LISTENER_TCP + 2 * LISTENER_UDP
-        );
-        assert_eq!(open.with_listeners(0, 0), small);
-    }
-
-    #[test]
-    fn the_relay_futures_fit_their_terms() {
-        let (tcp, udp) = crate::relay::future_sizes();
-        assert!(
-            tcp <= TCP_RELAY_FUTURE,
-            "the TCP relay future is {tcp} bytes"
-        );
-        assert!(
-            udp <= UDP_REPLY_FUTURE,
-            "the UDP reply future is {udp} bytes"
-        );
-        let entry = crate::relay::udp_session_bytes();
-        assert!(
-            entry <= UDP_SESSION_ENTRY,
-            "a UDP session entry is {entry} bytes"
-        );
-    }
-}
+mod tests;

@@ -40,7 +40,7 @@ use super::testpeer::{self, Outcome, Peer};
 use super::tests::{rule, targets, wait_for};
 use super::{BULK_BUF, BULK_KEEP, Kind, Manager, ProbeResults, ProbeRound};
 use crate::flowpool::Limits;
-use crate::memory::{LISTENER_TCP, LISTENER_UDP, MemoryBound, TCP_RELAY_CONN, UDP_SESSION};
+use crate::memory::{LISTENER_TCP, LISTENER_UDP, MemoryBound, tcp_relay_conn, udp_session};
 use crate::targets::TargetError;
 
 /// 測りの誤差として認める量。実行環境と台本の通信路が測りの間に一時に持つもの (ログの行、チャネルの
@@ -240,7 +240,7 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
     let udp_growth = after_udp
         .saturating_sub(after_replies)
         .saturating_sub(udp_core);
-    let udp_allowed = n_udp * UDP_SESSION + SLACK;
+    let udp_allowed = n_udp * udp_session() + SLACK;
     eprintln!(
         "udp: {n_udp} sessions grew the relay by {udp_growth} bytes against {udp_allowed}, the core by {udp_core}; the scripted sources held {udp_test_side}"
     );
@@ -289,7 +289,7 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
         .saturating_sub(udp_closed)
         .saturating_sub(n_tcp * echo_conn)
         .saturating_sub(tcp_core);
-    let tcp_allowed = n_tcp * TCP_RELAY_CONN + bulk * BULK_BUF + SLACK;
+    let tcp_allowed = n_tcp * tcp_relay_conn() + bulk * BULK_BUF + SLACK;
     eprintln!(
         "tcp: {n_tcp} relays grew the relay by {tcp_growth} bytes with {bulk} bulk buffers alive against {tcp_allowed}, the core by {tcp_core}; the scripted clients and the echo connections held {tcp_test_side}"
     );

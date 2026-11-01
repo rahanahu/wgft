@@ -1,6 +1,8 @@
 # エージェントとホストのメモリの条件
 
 エージェントとホストに要るメモリは、フロー数に加えて、accept の待ち行列、待ち受け、OS の保持を数えます。
+この文書のエージェントの値は、Go の v1 のエージェントの値です。
+v2 の Rust のエージェント(ユーザー空間モード)のプロセスの上界は、[メモリの上界の行](../v2/agent-parity.md#メモリの上界の行)の式と、その式から生成した[上界の表](../v2/agent-bound.md)にあります。
 同じカーネルを使うプロセスの受信予算は、ホストの TCP メモリを共有します。
 
 
@@ -164,6 +166,8 @@ K と U を設定できる最小の 16 にしても、`vpsd` のホストに要�
 K に比例しない項のうち生きているヒープが大きいのは、TCP の boost(約 0.35 GiB)、エージェント用 API の認証前の接続(約 0.17 GiB)、エージェントごとのハートビートの保存と stream の受信(約 0.15 GiB)、エージェントごとの wireguard-go のキュー(約 0.13 GiB)、中身の無い ACK の処理待ちの boost の分(約 0.11 GiB)です。
 
 <a id="wgstack-を使うエージェントの上界"></a>
+この節は Go のエージェントで Go の wgstack を選んだ場合の値です。
+Rust のエージェントの値は[上界の表](../v2/agent-bound.md)にあります。
 エージェントの netstack に wgstack を選んだ場合(`WGFT_AGENT_NETSTACK=wgstack`)の上界は、前述の式の gVisor の項を wgstack の `Bound` の項に置き換えて数えます([上界の式](wgstack.md#上界の式))。
 置き換える gVisor の項は、TCP のフローの gVisor の分(送信の側、確認を待つ segment、受信の側)、TCP の boost、中身の無い ACK の処理待ち、閉じた後の netstack の TCP の接続、accept の待ち行列、netstack の出力のキュー、UDP の受信の会計、IPv4 の再組み立ての表です。
 wgstack は、接続の枠(K + 512 本)、floor と boost の予約、握手の途中の表、TIME_WAIT の表、制御の出力の輪、UDP の予算、再組み立ての表を `Bound` の 1 つの和で数えます。
