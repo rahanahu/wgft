@@ -193,12 +193,20 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_is_empty_and_directory_is_not() {
+    fn missing_file_is_empty() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(read(&dir.path().join("none.env")).unwrap(), Map::default());
+    }
+
+    // Windows は、ディレクトリを開くことも、ファイルを通り抜けることも、別の OS の誤りで返す
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_is_an_ordinary_error() {
+        let dir = tempfile::tempdir().unwrap();
         assert!(matches!(read(dir.path()), Err(ReadError::Other(_))));
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_path_through_a_file_is_an_ordinary_error() {
         let dir = tempfile::tempdir().unwrap();
