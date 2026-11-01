@@ -193,7 +193,7 @@ fn spoofed(i: u32, flags: u8) -> Segment {
 }
 
 /// 偽の送信元からの SYN の洪水:握手の途中の表が止まり、接続の枠とバッファを使いません。待ち受け 1 つの行は
-/// 表の全体の半分までです (`Limits` の約束)。
+/// 表の全体の半分までです (`Limits` の約束)。表が満ちた後の SYN には、行を作らずに SYN cookie で応えます。
 fn syn_flood() {
     let mut h = Hold::new(small_limits());
     let _l = h.listen(80);
@@ -216,8 +216,8 @@ fn syn_flood() {
         "the listener's share of the table is full"
     );
     assert!(
-        h.n.stack().stats().syn_table_full > 0,
-        "the dropped SYNs are counted"
+        h.n.stack().stats().syn_cookies_sent > 0,
+        "the SYNs past the table are answered with cookies and counted"
     );
     for _ in 0..300 {
         h.advance(Duration::from_secs(1));

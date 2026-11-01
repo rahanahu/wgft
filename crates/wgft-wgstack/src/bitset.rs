@@ -45,20 +45,52 @@ impl BitSet {
 
     /// 印の付いた数です。
     pub(crate) fn count(&self) -> usize {
-        self.words.iter().map(|w| w.count_ones() as usize).sum()
+        let ones = |ws: &[u64]| ws.iter().map(|w| w.count_ones() as usize).sum::<usize>();
+        let (blocks, rest) = self.words.as_chunks::<BLOCK>();
+        blocks
+            .iter()
+            .filter(|b| any_set(b))
+            .map(|b| ones(b))
+            .sum::<usize>()
+            + ones(rest)
     }
 
     /// 印の付いた番号を小さい順に渡します。
     pub(crate) fn for_each(&self, mut f: impl FnMut(u32)) {
         let mut base = 0u32;
-        for &w in self.words.iter() {
-            let mut w = w;
-            while w != 0 {
-                f(base | w.trailing_zeros());
-                w &= w - 1;
+        let (blocks, rest) = self.words.as_chunks::<BLOCK>();
+        for b in blocks {
+            if any_set(b) {
+                walk(b, base, &mut f);
             }
-            base = base.wrapping_add(64);
+            base = base.wrapping_add(BLOCK_BITS);
         }
+        walk(rest, base, &mut f);
+    }
+}
+
+/// 印の無い語を飛ばす塊の語の数です。
+///
+/// ポートの表のような大きくて印の少ない集合では、ほとんどの語が 0 です。塊の語の OR は分岐の無い vector の
+/// 命令になるので、塊ごとに 1 回だけ分岐して印の無い塊を飛ばします。x86-64 の既定の命令の集合は popcount の命令を
+/// 持たず、1 語の数え上げが 10 命令ほどになるので、数え上げも印のある塊だけにします。
+const BLOCK: usize = 8;
+#[expect(clippy::cast_possible_truncation, reason = "512 bits")]
+const BLOCK_BITS: u32 = (BLOCK * 64) as u32;
+
+fn any_set(b: &[u64; BLOCK]) -> bool {
+    b.iter().fold(0, |a, &w| a | w) != 0
+}
+
+/// 語の列 `ws` の印を、最初の語の番号を `base` として小さい順に渡します。
+fn walk(ws: &[u64], mut base: u32, f: &mut impl FnMut(u32)) {
+    for &w in ws {
+        let mut w = w;
+        while w != 0 {
+            f(base | w.trailing_zeros());
+            w &= w - 1;
+        }
+        base = base.wrapping_add(64);
     }
 }
 
@@ -84,5 +116,25 @@ mod tests {
             n += 1;
         });
         assert_eq!(seen, [63, 64, 129]);
+    }
+
+    #[test]
+    fn bit_set_counts_and_walks_across_blocks_and_the_rest() {
+        // 塊 2 つと端の語 3 つです。印の無い塊、印のある塊、端の語のどれも数えてたどります。
+        let n = 2 * 64 * BLOCK + 3 * 64;
+        let mut b = BitSet::new(n).unwrap();
+        assert_eq!(b.count(), 0);
+        let marks = [700u32, 1023, 1024, u32::try_from(n - 1).unwrap()];
+        for i in marks {
+            b.set(i);
+        }
+        assert_eq!(b.count(), marks.len());
+        let mut seen = [0u32; 4];
+        let mut k = 0;
+        b.for_each(|i| {
+            seen[k] = i;
+            k += 1;
+        });
+        assert_eq!((k, seen), (marks.len(), marks));
     }
 }

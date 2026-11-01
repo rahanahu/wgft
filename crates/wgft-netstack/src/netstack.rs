@@ -190,6 +190,9 @@ impl<H: Hook> Netstack<H> {
                 "wgstack: dropped TCP handshakes that advertise an MSS below {MIN_MSS}; {n} dropped since the tunnel was built; peers that advertise a smaller MSS cannot connect through this tunnel"
             ),
             LogKind::SynFull => refused("dropped SYNs because the half-open table was full"),
+            LogKind::SynCookies => refused(
+                "answered SYNs with SYN cookies because the half-open table was full; a SYN flood may be under way",
+            ),
             LogKind::AcceptOverflow => refused(
                 "dropped final handshake ACKs because the accept queue or the connection table was full",
             ),
@@ -274,6 +277,7 @@ mod tests {
         let kinds = [
             LogKind::MssFloor,
             LogKind::SynFull,
+            LogKind::SynCookies,
             LogKind::AcceptOverflow,
             LogKind::TwEvicted,
             LogKind::CtlDropped,
