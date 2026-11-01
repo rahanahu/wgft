@@ -9,7 +9,8 @@
 //! 位置で同じ応答に食い違った記録は、既知の違いとして通します。
 //!
 //! 環境変数 `WGFT_WGSTACK_REPLAY_DIR` で、git の集まりの代わりに手元の cache の集まりを照らせます。Go の
-//! `TestRecordingsReplay` と同じ変数です。
+//! `TestRecordingsReplay` と同じ変数です。`WGFT_WGSTACK_REPLAY_SHARD=i/n` (0 ≤ i < n) は、名前の順の記録の
+//! うち番号を n で割った余りが i のものだけを照らします。大きな集まりを関門の段に分けるためです。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,6 +23,24 @@ use wgft_wgstack_dut::rec::{self, Divergence, Stages, TagFilter};
 
 /// 手元の cache の集まりの directory の環境変数です。Go の `TestRecordingsReplay` と同じです。
 const DIR_ENV: &str = "WGFT_WGSTACK_REPLAY_DIR";
+
+/// 照らす記録を分ける `i/n` の環境変数です。
+const SHARD_ENV: &str = "WGFT_WGSTACK_REPLAY_SHARD";
+
+/// `i/n` を読みます。無ければ `(0, 1)` です。
+fn shard() -> (usize, usize) {
+    let Some(v) = env::var_os(SHARD_ENV) else {
+        return (0, 1);
+    };
+    let v = v.to_string_lossy();
+    let parsed = v
+        .split_once('/')
+        .and_then(|(i, n)| Some((i.parse::<usize>().ok()?, n.parse::<usize>().ok()?)));
+    match parsed {
+        Some((i, n)) if i < n => (i, n),
+        _ => panic!("{SHARD_ENV}={v:?} is not i/n with 0 <= i < n"),
+    }
+}
 
 fn repo() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -73,7 +92,13 @@ fn main() {
 
     let mut skipped: BTreeMap<String, usize> = BTreeMap::new();
     let mut trials = Vec::new();
-    let paths = recordings(&dir);
+    let (part, parts) = shard();
+    let paths: Vec<PathBuf> = recordings(&dir)
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| i % parts == part)
+        .map(|(_, p)| p)
+        .collect();
     let total = paths.len();
     // 空の directory を照らして通る実行を防ぐ
     assert!(total > 0, "no recordings under {}", dir.display());
