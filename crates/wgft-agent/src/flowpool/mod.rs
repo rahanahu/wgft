@@ -489,6 +489,23 @@ impl Pool {
         self.lock().refusals.clone()
     }
 
+    /// この pool の待ち受けそれぞれが保持しているフローの数を、1 回の排他で読む。範囲のルールは待ち受けが
+    /// 多いので、待ち受けごとに排他を取らない。
+    #[must_use]
+    pub fn flows_of<'a>(&self, listeners: impl IntoIterator<Item = &'a Listener>) -> Vec<usize> {
+        let g = self.lock();
+        listeners
+            .into_iter()
+            .map(|l| {
+                debug_assert!(
+                    Arc::ptr_eq(&l.pool.inner, &self.inner),
+                    "a listener of another pool"
+                );
+                g.lis(l.id).flows
+            })
+            .collect()
+    }
+
     /// `agent doctor` に示す値を 1 回の排他で読む。
     #[must_use]
     pub fn reading(&self) -> Reading {

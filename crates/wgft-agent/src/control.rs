@@ -8,6 +8,7 @@
 //! 落ちた状態のまま動き続けるより、プロセスが落ちて同梱の unit が立て直すほうがよいためである (Go の v1 と
 //! 同じ判断)。受け口が待つのを諦めた要求は処理しない。
 
+use std::collections::HashMap;
 use std::sync::PoisonError;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -21,7 +22,7 @@ use crate::controlapi::{
 use crate::ctlserver::{DoctorRequest, RotateKeyRequest, RotateState};
 use crate::flowpool;
 use crate::logf;
-use crate::relay::ListenerStat;
+use crate::relay::{ListenerStat, Manager};
 use crate::run::{Agent, Shared};
 use crate::stream::{SharedObs, StreamObs};
 use crate::tunnel;
@@ -173,7 +174,7 @@ fn stream(obs: &SharedObs) -> DoctorStream {
 /// 実行時の状態を 1 回に読む。トンネルの状態はハートビートと同じ値で、doctor のための 2 つ目の判定を
 /// 持たない。
 async fn runtime_state(a: &Agent) -> DoctorRuntimeState {
-    let hb = a.heartbeat().await;
+    let ts = a.tunnel_status().await;
     let mut st = DoctorRuntimeState {
         generation: a.generation,
         agent_disabled: a
@@ -185,10 +186,10 @@ async fn runtime_state(a: &Agent) -> DoctorRuntimeState {
     };
     st.tunnel = DoctorTunnel {
         present: a.tunnel.is_some(),
-        state: hb.tunnel.state.clone(),
-        reason: clip_text(&hb.tunnel.reason),
-        endpoint: hb.tunnel.endpoint.clone(),
-        last_handshake: hb.tunnel.last_handshake,
+        state: ts.state,
+        reason: clip_text(&ts.reason),
+        endpoint: ts.endpoint,
+        last_handshake: ts.last_handshake,
         watchdog: DoctorWatchdog {
             rebuild_interval: nanos(a.rebuild_after),
             retry_at: go_time(a.retry_at.map(wall)),
@@ -202,17 +203,22 @@ async fn runtime_state(a: &Agent) -> DoctorRuntimeState {
         st.tunnel.started_at = GoTime::from_system(wall(t.started_at()));
     }
     if let Some(relay) = &a.relay {
-        // ルールの状態とリスナーの集計は同じ 1 回の読みから作る (Go の `usermode.Read`)
-        let stats = relay.listener_stats();
-        st.rules = rules(&relay.status_of(&stats), &stats);
-        // 中継とトンネルは一緒に作り直されるので、拒否の累計の起点はトンネルを立てた時刻である
-        st.refusals_since = st.tunnel.started_at;
-        st.budgets = vec![
-            budget("tcp", relay.tcp_pool().reading()),
-            budget("udp", relay.udp_pool().reading()),
-        ];
+        relay_state(&mut st, relay);
     }
     st
+}
+
+/// 中継の値を載せる。ルールの状態とリスナーの集計は、リスナーの 1 回の読みから作る (Go の
+/// `usermode.Read`)。ハートビートと同じ判定 ([`Manager::status_of`]) を使い、リスナーを 2 度読まない。
+fn relay_state(st: &mut DoctorRuntimeState, relay: &Manager) {
+    let stats = relay.listener_stats();
+    st.rules = rules(&relay.status_of(&stats), &stats);
+    // 中継とトンネルは一緒に作り直されるので、拒否の累計の起点はトンネルを立てた時刻である
+    st.refusals_since = st.tunnel.started_at;
+    st.budgets = vec![
+        budget("tcp", relay.tcp_pool().reading()),
+        budget("udp", relay.udp_pool().reading()),
+    ];
 }
 
 fn count(n: usize) -> i64 {
@@ -252,8 +258,14 @@ fn rules(states: &[wgft_proto::RuleStatus], listeners: &[ListenerStat]) -> Vec<D
             ..DoctorRule::default()
         })
         .collect();
+    // 範囲のルールはリスナーが多いので、ルールを ID の表で引く
+    let at: HashMap<&str, usize> = states
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.id.as_str(), i))
+        .collect();
     for l in listeners {
-        let Some(r) = out.iter_mut().find(|r| r.id == l.rule_id) else {
+        let Some(r) = at.get(l.rule_id.as_str()).map(|&i| &mut out[i]) else {
             continue;
         };
         "tcp".clone_into(&mut r.proto);
@@ -267,14 +279,14 @@ fn rules(states: &[wgft_proto::RuleStatus], listeners: &[ListenerStat]) -> Vec<D
                 if r.bind_error.is_empty()
                     && let Some(e) = err
                 {
-                    r.bind_error = clip_text(&format!("{}: {e}", l.key));
+                    r.bind_error = clip_text(&format!("{}: {e}", l.key()));
                 }
             }
             (Some(e), true) => {
                 r.listening += 1;
                 r.target_errors += 1;
                 if r.target_error.is_empty() {
-                    r.target_error = clip_text(&format!("{}: {e}", l.key));
+                    r.target_error = clip_text(&format!("{}: {e}", l.key()));
                 }
             }
             (None, true) => r.listening += 1,
@@ -287,10 +299,10 @@ fn rules(states: &[wgft_proto::RuleStatus], listeners: &[ListenerStat]) -> Vec<D
 mod tests {
     use super::*;
 
-    fn stat(rule: &str, key: &str, listening: bool, err: Option<&str>) -> ListenerStat {
+    fn stat(rule: &str, port: u16, listening: bool, err: Option<&str>) -> ListenerStat {
         ListenerStat {
             rule_id: rule.into(),
-            key: key.into(),
+            port,
             listening,
             err: err.map(Into::into),
             ..ListenerStat::default()
@@ -315,13 +327,13 @@ mod tests {
             ListenerStat {
                 sessions: 2,
                 flows: 1,
-                ..stat("r_a", "tcp/1", true, None)
+                ..stat("r_a", 1, true, None)
             },
-            stat("r_b", "tcp/2", false, Some("bind tcp 10.0.0.2:2: in use")),
+            stat("r_b", 2, false, Some("bind tcp 10.0.0.2:2: in use")),
             ListenerStat {
                 sessions: 3,
                 flows: 2,
-                ..stat("r_b", "tcp/3", true, None)
+                ..stat("r_b", 3, true, None)
             },
         ];
         let got = rules(&states, &ls);
@@ -341,12 +353,7 @@ mod tests {
 
         // 後の開けなかったリスナーは、最初の理由を上書きしない
         let mut more = ls.clone();
-        more.push(stat(
-            "r_b",
-            "tcp/4",
-            false,
-            Some("bind tcp 10.0.0.2:4: other"),
-        ));
+        more.push(stat("r_b", 4, false, Some("bind tcp 10.0.0.2:4: other")));
         let got = rules(&states, &more);
         assert_eq!(got[1].bind_errors, 2);
         assert_eq!(got[1].bind_error, "tcp/2: bind tcp 10.0.0.2:2: in use");
@@ -361,12 +368,12 @@ mod tests {
             reason: "tcp/5: bind tcp 10.0.0.2:5: in use".into(),
         }];
         let ls = vec![
-            stat("r_a", "tcp/5", false, Some("bind tcp 10.0.0.2:5: in use")),
-            stat("r_a", "tcp/6", true, Some("dial tcp 192.0.2.1:80: refused")),
-            stat("r_a", "tcp/7", true, Some("dial tcp 192.0.2.1:81: refused")),
-            stat("r_a", "tcp/8", true, None),
+            stat("r_a", 5, false, Some("bind tcp 10.0.0.2:5: in use")),
+            stat("r_a", 6, true, Some("dial tcp 192.0.2.1:80: refused")),
+            stat("r_a", 7, true, Some("dial tcp 192.0.2.1:81: refused")),
+            stat("r_a", 8, true, None),
             // 属するルールが状態に無いリスナーは数えない
-            stat("r_gone", "tcp/9", true, Some("x")),
+            stat("r_gone", 9, true, Some("x")),
         ];
         let got = rules(&states, &ls);
         assert_eq!(got.len(), 1);
@@ -377,7 +384,7 @@ mod tests {
         assert_eq!(r.target_error, "tcp/6: dial tcp 192.0.2.1:80: refused");
         // 長い理由は応答の上限で切る
         let long = "x".repeat(600);
-        let got = rules(&states, &[stat("r_a", "tcp/6", true, Some(&long))]);
+        let got = rules(&states, &[stat("r_a", 6, true, Some(&long))]);
         assert!(got[0].target_error.len() <= crate::controlapi::DOCTOR_TEXT_MAX_BYTES + 16);
         assert!(got[0].target_error.starts_with("tcp/6: xxx"));
     }
@@ -514,6 +521,26 @@ mod tests {
         // トンネルが無い試験の agent では、起点は時刻のゼロ値である
         assert_eq!(st.refusals_since, GoTime::ZERO);
         drop(taken);
+    }
+
+    /// 拒否の累計の起点は、中継と一緒に作り直すトンネルを立てた時刻である。
+    #[test]
+    fn refusals_since_is_the_tunnel_s_start() {
+        let m = Manager::new(
+            std::net::Ipv4Addr::LOCALHOST,
+            std::net::Ipv4Addr::LOCALHOST,
+            None,
+            crate::relay::OpenPorts::default(),
+            std::sync::Arc::new(crate::targets::Targets::new(None)),
+            flowpool::Limits::default(),
+        );
+        let mut st = DoctorRuntimeState::default();
+        st.tunnel.started_at =
+            GoTime::from_system(SystemTime::UNIX_EPOCH + Duration::from_hours(500_000));
+        relay_state(&mut st, &m);
+        assert_ne!(st.refusals_since, GoTime::ZERO);
+        assert_eq!(st.refusals_since, st.tunnel.started_at);
+        assert_eq!(st.budgets.len(), 2);
     }
 
     #[tokio::test]

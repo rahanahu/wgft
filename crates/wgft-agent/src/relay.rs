@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use socket2::SockRef;
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
 use tokio::task::{JoinHandle, JoinSet};
 use wgft_proto::{AgentRule, Proto, RuleStatus, STATUS_ERROR, STATUS_OK};
 
@@ -108,6 +109,12 @@ struct Shared {
     sessions: AtomicUsize,
 }
 
+/// 中継の接続 1 本が終わるまで持つもの。落とすと、予算の枠とトンネルの側の接続の数えが同時に戻る。
+struct Held {
+    _lease: flowpool::Lease,
+    _session: Session,
+}
+
 /// 中継が持つ接続 1 本の数え。作ると数に足し、落とすと引く。接続を持つタスクが止められても、タスクと
 /// 一緒に落ちて数が戻る。
 struct Session(Arc<Shared>);
@@ -167,6 +174,8 @@ struct Listener {
     port: u16,
     target: (String, u16),
     task: Option<JoinHandle<()>>,
+    /// 受け付けのタスクに止めるよう知らせる口。[`Listener::close`] が使う。
+    stop: Option<oneshot::Sender<()>>,
     /// 待ち受けを開けなかった理由。bind の失敗か、IP リテラルの宛先の拒否。[`Manager::retry`] が
     /// 開き直す。
     bind_err: Option<String>,
@@ -177,10 +186,13 @@ struct Listener {
 
 impl Listener {
     /// 受け付けのタスクを止めて、待ち受けのソケットとすべての中継の接続が閉じるまで待ち、予算の枠を
-    /// 外す。
+    /// 外す。受け付けのタスクは知らせを受けると中継の接続のタスクを止め、それらが終わるまで待ってから
+    /// 終わる。止めた中継の接続は、トンネルの側に RST を送って閉じる。
     async fn close(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
         if let Some(t) = self.task.take() {
-            t.abort();
             let _ = t.await;
         }
         self.budget.close();
@@ -207,8 +219,8 @@ impl Drop for Listener {
 pub struct ListenerStat {
     /// 属するルールの ID。
     pub rule_id: String,
-    /// `tcp/<port>` の形の名前。
-    pub key: String,
+    /// 待ち受けのポート。名前は [`ListenerStat::key`]。
+    pub port: u16,
     /// 待ち受けを開けているか。偽なら `err` は開けなかった理由 (bind の失敗か、IP リテラルの宛先の
     /// 拒否) で、真で `err` があれば待ち受けは開いていて宛先に届かない。
     pub listening: bool,
@@ -219,6 +231,32 @@ pub struct ListenerStat {
     pub sessions: usize,
     /// この待ち受けがフロー数の予算から取っている枠の数。上限の判定の対象の数である。
     pub flows: usize,
+}
+
+impl ListenerStat {
+    /// `tcp/<port>` の形の名前 (Go の `Key.String`)。
+    #[must_use]
+    pub fn key(&self) -> String {
+        format!("tcp/{}", self.port)
+    }
+}
+
+/// Go の `Key.String` の文字列の順。プロトコルが同じなら、ポートの 10 進の文字列の順である。文字列を
+/// 作らずに比べる。
+fn go_key_order(a: u16, b: u16) -> std::cmp::Ordering {
+    fn decimal(mut n: u16, buf: &mut [u8; 5]) -> &[u8] {
+        let mut i = buf.len();
+        loop {
+            i -= 1;
+            buf[i] = b'0' + u8::try_from(n % 10).unwrap_or(0);
+            n /= 10;
+            if n == 0 {
+                return &buf[i..];
+            }
+        }
+    }
+    let (mut x, mut y) = ([0u8; 5], [0u8; 5]);
+    decimal(a, &mut x).cmp(decimal(b, &mut y))
 }
 
 /// 中継の全体。トンネルと一緒に作り、一緒に閉じる。リスナーはポートで区別するので、数は TCP の
@@ -358,6 +396,7 @@ impl Manager {
                 port: p,
                 target,
                 task: None,
+                stop: None,
                 bind_err: None,
                 budget,
                 shared: Arc::default(),
@@ -476,8 +515,11 @@ impl Manager {
             Ok(listener) => {
                 l.bind_err = None;
                 l.budget.accept();
+                let (stop, stopped) = oneshot::channel();
+                l.stop = Some(stop);
                 l.task = Some(tokio::spawn(accept_loop(Accepting {
                     listener,
+                    stopped,
                     server: self.server,
                     port: l.port,
                     host: host.clone(),
@@ -508,29 +550,44 @@ impl Manager {
     }
 
     /// リスナーごとの状態。並びは Go の `Manager.Status` と同じく名前 (`tcp/<port>`) の文字列の順で、
-    /// ルールの状態の理由と `agent doctor` の最初の誤りは、この順で最初のリスナーから取る。
+    /// ルールの状態の理由と `agent doctor` の最初の誤りは、この順で最初のリスナーから取る。接続の数と
+    /// 予算の枠の数も読む。枠の数は予算の排他を 1 回取って読む。
     #[must_use]
     pub fn listener_stats(&self) -> Vec<ListenerStat> {
-        let mut out: Vec<ListenerStat> = self
-            .listeners
-            .values()
-            .map(|l| ListenerStat {
+        self.stats(true)
+    }
+
+    /// `counts` が偽なら、接続の数と予算の枠の数を読まずに 0 にする。ハートビートのルールの状態は
+    /// それらを使わないので、30 秒ごとに予算の排他を取らない。
+    fn stats(&self, counts: bool) -> Vec<ListenerStat> {
+        let mut ls: Vec<&Listener> = self.listeners.values().collect();
+        ls.sort_unstable_by(|a, b| go_key_order(a.port, b.port));
+        let flows = if counts {
+            self.tcp.flows_of(ls.iter().map(|l| &*l.budget))
+        } else {
+            vec![0; ls.len()]
+        };
+        ls.into_iter()
+            .zip(flows)
+            .map(|(l, flows)| ListenerStat {
                 rule_id: l.rule_id.clone(),
-                key: format!("tcp/{}", l.port),
+                port: l.port,
                 listening: l.task.is_some(),
                 err: l.err(),
-                sessions: l.shared.sessions.load(Ordering::Relaxed),
-                flows: l.budget.flows(),
+                sessions: if counts {
+                    l.shared.sessions.load(Ordering::Relaxed)
+                } else {
+                    0
+                },
+                flows,
             })
-            .collect();
-        out.sort_unstable_by(|a, b| a.key.cmp(&b.key));
-        out
+            .collect()
     }
 
     /// ルールごとの状態。1 つでも誤りのリスナーがあればそのルールは `error`。
     #[must_use]
     pub fn status(&self) -> Vec<RuleStatus> {
-        self.status_of(&self.listener_stats())
+        self.status_of(&self.stats(false))
     }
 
     /// [`Manager::listener_stats`] の 1 回の読みからルールごとの状態を作る。ハートビートと
@@ -540,16 +597,25 @@ impl Manager {
     pub fn status_of(&self, stats: &[ListenerStat]) -> Vec<RuleStatus> {
         let mut by: BTreeMap<String, RuleStatus> = BTreeMap::new();
         for l in stats {
-            let r = by.entry(l.rule_id.clone()).or_insert_with(|| RuleStatus {
-                id: l.rule_id.clone(),
-                state: STATUS_OK.into(),
-                reason: String::new(),
-            });
+            // 範囲のルールはリスナーが多いので、ルールの ID を写すのは初めて見たときだけにする
+            if !by.contains_key(&l.rule_id) {
+                by.insert(
+                    l.rule_id.clone(),
+                    RuleStatus {
+                        id: l.rule_id.clone(),
+                        state: STATUS_OK.into(),
+                        reason: String::new(),
+                    },
+                );
+            }
+            let Some(r) = by.get_mut(&l.rule_id) else {
+                continue;
+            };
             if let Some(e) = &l.err
                 && r.state == STATUS_OK
             {
                 r.state = STATUS_ERROR.into();
-                r.reason = format!("{}: {e}", l.key);
+                r.reason = format!("{}: {e}", l.key());
             }
         }
         for (id, reason) in &self.unsupported {
@@ -600,6 +666,8 @@ impl Drop for TunnelSide {
 /// 受け付けのタスクが持つもの。
 struct Accepting {
     listener: TcpListener,
+    /// 止める知らせ。送り手が落ちた場合も止める。
+    stopped: oneshot::Receiver<()>,
     server: Ipv4Addr,
     port: u16,
     host: String,
@@ -609,12 +677,17 @@ struct Accepting {
     targets: Arc<Targets>,
 }
 
-async fn accept_loop(a: Accepting) {
+async fn accept_loop(mut a: Accepting) {
     let port = a.port;
-    // 中継の接続はこのタスクが持つ。タスクを止めると JoinSet が捨てられ、どの接続も止まる
+    // 中継の接続はこのタスクが持つ。止める知らせでは接続のタスクを止めて終わりを待つ。タスクが外から
+    // abort された場合は JoinSet が捨てられ、どの接続も止まるが、終わりは待たない
     let mut flows = JoinSet::new();
     loop {
         tokio::select! {
+            _ = &mut a.stopped => {
+                flows.shutdown().await;
+                return;
+            }
             accepted = a.listener.accept() => {
                 let (conn, from) = match accepted {
                     Ok(c) => c,
@@ -651,7 +724,7 @@ async fn accept_loop(a: Accepting) {
                 let session = Session::new(&a.shared);
                 flows.spawn(relay_one(
                     down,
-                    (lease, session),
+                    Held { _lease: lease, _session: session },
                     port,
                     a.host.clone(),
                     a.tport,
@@ -667,7 +740,7 @@ async fn accept_loop(a: Accepting) {
 /// 1 本の接続を中継する。`held` の枠と接続の数えは中継が終わるまで持ち、落とすと予算と数へ返る。
 async fn relay_one(
     mut down: TunnelSide,
-    held: (flowpool::Lease, Session),
+    held: Held,
     port: u16,
     host: String,
     tport: u16,
@@ -839,6 +912,8 @@ mod tests {
         )];
         assert_eq!(m.apply(&off).await, 1);
         assert!(m.open_ports().read().unwrap().is_empty());
+        // 閉じるときは中継の接続のタスクの終わりを待つので、枠はもう返っている
+        assert_eq!(m.tcp_pool().in_use(), 0);
         // 開いていた接続は RST で切れている
         let mut buf = [0u8; 8];
         let r = tokio::time::timeout(Duration::from_secs(2), c.read(&mut buf))
@@ -1149,7 +1224,7 @@ mod tests {
         m.apply(&[rule("r_a", Proto::Tcp, "9-10", "192.0.2.1:80", true)])
             .await;
         let st = m.listener_stats();
-        let keys: Vec<&str> = st.iter().map(|s| s.key.as_str()).collect();
+        let keys: Vec<String> = st.iter().map(ListenerStat::key).collect();
         assert_eq!(keys, ["tcp/10", "tcp/9"]);
         assert!(st.iter().all(|s| !s.listening && s.err.is_some()));
         let rs = m.status();
