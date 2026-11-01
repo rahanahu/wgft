@@ -440,9 +440,9 @@ fn the_idle_timeout_and_the_sweep_follow_the_fixture() {
         Duration::from_secs(u64::from(i32::MAX.unsigned_abs()))
     );
     let idle = Duration::from_secs(def);
-    assert_eq!(super::sweep_interval(idle), idle / div);
+    assert_eq!(super::udp::sweep_interval(idle), idle / div);
     assert_eq!(
-        super::sweep_interval(Duration::from_millis(40)),
-        super::MIN_SWEEP
+        super::udp::sweep_interval(Duration::from_millis(40)),
+        super::udp::MIN_SWEEP
     );
 }

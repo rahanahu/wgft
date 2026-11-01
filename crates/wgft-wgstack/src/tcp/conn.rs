@@ -403,6 +403,7 @@ impl ConnSlots {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.hot.heap_bytes() + self.cold.heap_bytes() + self.bufs.heap_bytes()
     }
@@ -460,6 +461,7 @@ impl ConnSlots {
 
     /// 使っている枠を空きの list に返します。世代を進め、欄を 0 に戻し、輪の chunk を置き場に返します。
     /// floor の配列は持ち続けます。呼び手は先に表と待ち行列と boost の枠から外します。
+    #[cfg(test)]
     pub(crate) fn release(&mut self, i: u32, free: &mut FixedVec<u32>, pool: &mut ChunkPool) {
         let t = &mut self.hot[i as usize];
         if t.state == State::Free {
@@ -491,6 +493,7 @@ impl ConnSlots {
     }
 
     /// 使っている枠の番号です。
+    #[cfg(test)]
     pub(crate) fn in_use(&self) -> impl Iterator<Item = u32> + '_ {
         self.hot
             .iter()

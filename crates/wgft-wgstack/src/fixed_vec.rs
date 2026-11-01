@@ -23,6 +23,7 @@ use core::ops::{Deref, DerefMut};
 pub(crate) struct AllocError;
 
 /// 容量が足りないことを表します。
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Full;
 
@@ -70,6 +71,7 @@ impl<T> FixedVec<T> {
     }
 
     /// 長さを `len` 以下にします。容量は変えません。
+    #[cfg(test)]
     pub(crate) fn truncate(&mut self, len: usize) {
         self.v.truncate(len);
     }
@@ -104,6 +106,7 @@ impl<T: Copy> FixedVec<T> {
     }
 
     /// `src` を末尾に写します。容量が足りなければ何も足さずに誤りを返します。
+    #[cfg(test)]
     pub(crate) fn try_extend_from_slice(&mut self, src: &[T]) -> Result<(), Full> {
         if self.v.capacity() - self.v.len() < src.len() {
             return Err(Full);

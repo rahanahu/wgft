@@ -24,6 +24,7 @@ impl BitSet {
         n.div_ceil(64) * size_of::<u64>()
     }
 
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.words.heap_bytes()
     }

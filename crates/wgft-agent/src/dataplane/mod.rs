@@ -14,10 +14,10 @@
 //!   上の層の `Budget` を [`Carry`] で返す。[`Generations`] はそれを次の世代に渡し、スレッドがどの理由で
 //!   終わっても [`Generations::exited`] で知らせる
 
-pub mod clock;
+pub(crate) mod clock;
 mod driver;
 mod socket;
-pub mod stack;
+pub(crate) mod stack;
 #[cfg(test)]
 mod tests;
 
@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use wgft_wireguard::{Device, DeviceConfig, Drops, Event, Held, PeerStatus};
 
-pub use socket::{REQUESTED, REQUIRED, SocketBuffers};
+pub(crate) use socket::{REQUIRED, SocketBuffers};
 
 /// The layer above the WireGuard device: the TCP/IP core that ends the tunnel's traffic.
 ///

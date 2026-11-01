@@ -214,6 +214,7 @@ impl Ring {
     /// cap を `new_cap` に変え、`written` が渡す範囲 (書いた byte の区間) の中身を新しい位置へ移します。
     /// 呼び手は生きている範囲が `new_cap` 以下であることを保証します。移す間は、新旧の chunk を合わせて生きて
     /// いる範囲の 2 倍まで持ちます。確保に失敗したら新しい chunk を返し、輪を変えずに誤りを返します。
+    #[cfg(test)]
     pub(crate) fn resize(
         &mut self,
         new_cap: u64,
