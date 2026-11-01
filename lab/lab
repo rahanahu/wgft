@@ -695,9 +695,14 @@ paired_build_base() {
   if ((rust)); then
     command -v cargo-zigbuild >/dev/null || die "the Rust build needs cargo-zigbuild and zig on the host"
     local target=${XDG_CACHE_HOME:-$HOME/.cache}/wgft-lab/paired-base-target
-    (cd "$PAIRED_BASE_WT" && CARGO_TARGET_DIR="$target" cargo zigbuild --release --locked --target x86_64-unknown-linux-musl -p wgft) \
-      || die "cannot build the Rust wgft of --base $ref"
-    install -D -m 0755 "$target/x86_64-unknown-linux-musl/release/wgft" "$REPO/bin/base/rust/wgft"
+    mkdir -p "$target"
+    # 置き場はすべての作業ツリーと実行で共有する。cargo の錠は build の後の install を覆わないので、build から
+    # install までを置き場の flock で 1 つにし、同時の --base の build が互いの binary を入れないようにする
+    (
+      flock 9
+      (cd "$PAIRED_BASE_WT" && CARGO_TARGET_DIR="$target" cargo zigbuild --release --locked --target x86_64-unknown-linux-musl -p wgft) \
+        && install -D -m 0755 "$target/x86_64-unknown-linux-musl/release/wgft" "$REPO/bin/base/rust/wgft"
+    ) 9>"$target.lock" || die "cannot build the Rust wgft of --base $ref"
   fi
   git -C "$REPO" worktree remove --force "$PAIRED_BASE_WT" >/dev/null 2>&1 || true
   PAIRED_BASE_WT=""
@@ -787,6 +792,7 @@ cmd_paired() {
   [[ $path == fast || $path == rate ]] || die "the path is fast or rate; $usage"
   [[ $rounds =~ ^[1-9][0-9]*$ ]] && ((rounds % 2 == 0)) || die "--rounds wants an even number, so that each arm runs as often in each VM"
   [[ $runs =~ ^[1-9][0-9]*$ ]] || die "--runs wants a whole number of 1 or more"
+  ((rounds / 2 * runs >= 2)) || die "--rounds $rounds with --runs $runs plans $((rounds / 2 * runs)) pair per side; the ratio needs at least 2 on each side, so raise --rounds or --runs"
   [[ $vcpus =~ ^[1-9][0-9]*$ ]] || die "--vcpus wants a whole number of 1 or more"
   [[ $direction == down || $direction == up ]] || die "--direction wants down or up"
   [[ -z $bytes || $bytes =~ ^[1-9][0-9]*$ ]] || die "--bytes wants a whole number of bytes"

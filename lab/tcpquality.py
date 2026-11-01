@@ -323,6 +323,12 @@ def cpupaired(logfile):
                                               " ".join("%s=%d" % kv for kv in counts.items())))
     if late:
         print("WARN %d runs started after the planned start time (SYNC go with a negative wait); the pairs are kept" % late)
+    for side in ("a", "b"):
+        planned = sorted({rnd for rnd, _ in keys if side_of(rnd) == side})
+        absent = [rnd for rnd in planned if rnd not in by_round]
+        if absent and len(absent) < len(planned):
+            print("WARN x_in_vm=%s: no pair is left from round(s) %s, so this side rests on %d agent start(s)"
+                  % (side, ",".join(map(str, absent)), len(planned) - len(absent)))
     ok = True
     for side in ("a", "b"):
         if len(pairs[side]) < 2 or 2 * len(pairs[side]) < expected[side]:
