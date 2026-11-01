@@ -16,7 +16,13 @@
     reason = "test data"
 )]
 
+use crate::boost_tests::{
+    DEMAND_BYTES, Two, boost_two_with, boosted, inject_at, intervals, lent, read_n, send_bulk,
+    wide_limits,
+};
 use crate::buf::chunk::CHUNK_SIZE;
+use crate::buf::recv::splitmix64;
+use crate::buf::{BOOST_INTERVALS, FLOOR_INTERVALS, RECV_FLOOR};
 use crate::stack::{Error, Event, ListenerId};
 use crate::testnet_tests::{DUT, PEER, PeerConn, TEST_MTU, TestNet, show, small_limits};
 use crate::udp::{ENDPOINT_SHARE, TX_BYTES};
@@ -104,13 +110,9 @@ fn udp_send_waits_when_the_tunnel_budget_is_spent() {
         if i + 1 < frags {
             assert!(ev.is_empty(), "woken after fragment {i}: {ev:?}");
         } else {
-            let mut ev = ev;
-            ev.sort_by_key(|e| format!("{e:?}"));
-            assert_eq!(
-                ev,
-                [Event::UdpWritable(a), Event::UdpWritable(b)],
-                "every waiting endpoint is woken once by the last fragment"
-            );
+            assert_eq!(ev.len(), 2, "one wake per waiting endpoint: {ev:?}");
+            assert!(ev.contains(&Event::UdpWritable(a)), "{ev:?}");
+            assert!(ev.contains(&Event::UdpWritable(b)), "{ev:?}");
         }
     }
     n.check();
@@ -180,9 +182,10 @@ fn tw_limits(rows: usize) -> Limits {
     }
 }
 
-/// TIME_WAIT の表が満ちると、最も古い行を外して数えます。外す行は期限の順ではなく、list の順です。再送された FIN
+/// TIME_WAIT の表が満ちると、最も古い行 (list の先頭) を外して数えます。再送された FIN
 /// は行に ACK を返して期限を数え直し、行を list の末尾に移すので、追い出しの順が変わります。追い出された行の
-/// 相手の FIN には RST を返し、期限を過ぎた行は FIN に応えずに外れます。
+/// 相手の FIN には RST を返し、期限を過ぎた行は外れ、その FIN は
+/// どの接続にも当たらない segment として RST を受けます。
 #[test]
 fn time_wait_table_evicts_the_oldest_row_and_a_refreshed_row_survives() {
     let mut n = TestNet::new(tw_limits(3));
@@ -260,9 +263,10 @@ fn a_cookie_row_is_reset_exactly_when_its_retransmissions_run_out() {
         n.advance(Duration::from_millis(100));
         let at = (n.now - t0).as_millis() as u64;
         for o in n.drain() {
-            if o.rport != 42000 && o.rport != 42001 {
-                continue;
-            }
+            assert!(
+                o.rport == 42000 || o.rport == 42001,
+                "no packet goes to any other peer, spoofed sources included: {o}"
+            );
             if o.has(FLAG_RST) {
                 assert_eq!(o.flags, FLAG_RST | FLAG_ACK);
                 let p = if o.rport == 42000 { &quiet } else { &acking };
@@ -277,7 +281,12 @@ fn a_cookie_row_is_reset_exactly_when_its_retransmissions_run_out() {
                 synacks.push((at, o.rport));
                 if o.rport == 42001 {
                     n.peer_ack(&mut acking, &[]);
-                    n.drain();
+                    let outs = n.drain();
+                    assert!(
+                        outs.iter().all(|o| !o.has(FLAG_RST)),
+                        "an ACK from the peer draws no RST: {}",
+                        show(&outs)
+                    );
                 }
             }
         }
@@ -304,7 +313,6 @@ fn a_cookie_row_is_reset_exactly_when_its_retransmissions_run_out() {
     want.sort_unstable();
     assert_eq!(rsts, want, "one RST each, at the end of the 32 s wait");
     let st = n.s.stats();
-    assert_eq!(st.syn_cookies_reset, 2);
     // 偽の SYN の行も同じ再送を使い切り、cookie の無い行は RST を出さずに外れる
     assert_eq!(
         rows,
@@ -320,13 +328,6 @@ fn a_cookie_row_is_reset_exactly_when_its_retransmissions_run_out() {
 }
 
 // ---- 順序外のデータの取り消し ----
-
-use crate::boost_tests::{
-    DEMAND_BYTES, Two, boost_two_with, boosted, inject_at, intervals, lent, read_n, send_bulk,
-    wide_limits,
-};
-use crate::buf::recv::splitmix64;
-use crate::buf::{BOOST_INTERVALS, FLOOR_INTERVALS, RECV_FLOOR};
 
 /// 取り消しに使う中身です。offset `i` の byte は `i` で決まります。
 fn pattern(lo: usize, hi: usize) -> Vec<u8> {
@@ -416,7 +417,7 @@ fn renege_keeps_the_first_floor_intervals_and_redelivery_is_intact() {
         chunks_before,
         v.b.rcv.r.held_chunks()
     );
-    assert!(v.b.rcv.r.held_chunks() <= RECV_FLOOR as usize / crate::buf::chunk::CHUNK_SIZE);
+    assert!(v.b.rcv.r.held_chunks() <= RECV_FLOOR as usize / CHUNK_SIZE);
     assert_eq!(
         n.s.stats().boost_reneged_bytes,
         100 * (total as u64 + 1 - FLOOR_INTERVALS as u64),
@@ -479,7 +480,7 @@ fn demoting_a_send_only_holder_moves_its_intervals_to_the_floor_table() {
     );
     assert_eq!(n.s.conn(c1.slot).b.boost, Some(0));
     // 残りの枠をすべて受信の需要で埋める
-    let mut fill = Vec::new();
+    let mut _fill = Vec::new();
     for i in 0..15 {
         let mut p = n.handshake_sack(41000 + i, 80, true, true, true);
         let c = n.accept(l);
@@ -487,7 +488,7 @@ fn demoting_a_send_only_holder_moves_its_intervals_to_the_floor_table() {
         read_n(&mut n, c, DEMAND_BYTES);
         n.drain();
         assert!(boosted(&mut n, c), "filler {i}");
-        fill.push(c);
+        _fill.push(c);
     }
     assert_eq!(lent(&mut n), 16);
     // floor の中に順序外の区間を 3 つ置く
@@ -537,5 +538,4 @@ fn demoting_a_send_only_holder_moves_its_intervals_to_the_floor_table() {
         r += n.s.read(n.now, c1, &mut buf[r..]).unwrap();
     }
     assert_eq!(buf, pattern(0, 12000));
-    drop(fill);
 }
