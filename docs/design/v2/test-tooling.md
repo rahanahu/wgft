@@ -598,7 +598,7 @@ Rust の wgstack は段階を踏んで機能を足すので、記録に印を付
 印は記録を作る時に入力から決めます。
 相手が示す option (`sack`、`ts`、`ws`)、試験の選択 (輻輳の制御、boost の与え方)、入力の種類 (`udp`、`icmp`、`frag`、`ping`) です。
 `replay.rs` は Rust の wgstack が持つと宣言した印の集まりを持ち、印がすべてその中にある記録だけを照らし、残りを数えて報告します。
-すべての記録が一致すること (意図した違いの一覧の行を除く) は、agent を wgstack の上で動かす PR (wgstack の Rust 版の設計の実装の 7) のマージの前の条件で、ラボの一式で Rust の agent が Go の agent を置き換えられるとする判定の前の条件でもあります。
+すべての記録が一致すること (意図した違いの一覧の行を除く) は、agent を wgstack の上で動かす段 (agent の置き換えの設計の「wgstack の上の agent」) のマージの前の条件で、ラボの一式で Rust の agent が Go の agent を置き換えられるとする判定の前の条件でもあります。
 
 Go の不具合を Rust で直したときのように、意図して出力を変えた所は、意図した違いの一覧 (`testdata/wgstack-rec/divergences.json`) に書きます。
 1 行は、記録の名前、最初に食い違う frame の位置、Rust の応答、理由です。

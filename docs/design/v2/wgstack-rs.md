@@ -375,9 +375,17 @@ CPU の目標は置き換えの条件に入れないので ([置き換えの判�
 4. 新しい世代のスレッドに `Budget` を渡して核を作ります
 
 `Budget` は、作り直しが失敗して再試行の待ちに入る間も、作り直しを管理する task が持ち続けます。
-データプレーンで panic が起きると、巻き戻しでスレッドが終わり、`Budget` は取り出せません。
-このとき agent は新しい `Budget` を作ってトンネルを作り直します。
-古い `Budget` は巻き戻しで解放されているので、集まりはプロセスで 1 つのままです。
+データプレーンの panic は次のように扱います。
+
+- local の task の panic:中継の task のように spawn した local の task の panic は tokio が捕まえ、スレッドは終わりません
+- 核の呼び出しの panic:`wgft-netstack` は核を借用するたびに drop guard を置き、借用の中で巻き戻しが起きたら `Dataplane` に毒の印を付けます。
+  核の状態は途中で壊れているかもしれないためです
+- 駆動の終わり:駆動の task は毒の印を見たら終わり、スレッドも終わります。
+  このため、核の呼び出しの中の panic は、どの task で起きてもその世代を終わらせ、agent が作り直します。
+  核の外で panic した task はその task だけが終わり、巻き戻しで落ちる handle の `Drop` がその接続を `abort` して枠を返します
+- 新しい `Budget`:終わった世代の `Budget` は取り出さず、agent は新しい `Budget` を作ってトンネルを作り直します。
+  古い世代の `Dataplane` はスレッドの終わりで解放されるので、集まりはプロセスで 1 つのままです
+
 ワークスペースは release の build でも panic を巻き戻します。
 配布のために panic でプロセスを止める設定を選んだ場合は、この作り直しは起きず、プロセスが終わります。
 データプレーンのスレッドがどの理由で終わっても、作り直しを管理する task はそれを知り、トンネルを作り直します。
@@ -423,7 +431,8 @@ Go の測った値 (c_conn、記録 1 件、区間 1 つ) は Rust の型の大�
   `FixedVec` は `try_push` だけを持ち、容量を超えると誤りを返し、再確保しません。
   中身は `try_reserve_exact` で取った `Vec` で、`into_boxed_slice` には変えません。
   `try_reserve_exact` は要求より大きな容量を返すことがあり、`into_boxed_slice` はそのとき縮めるために再確保するためです。
-  `Bound` と会計は `capacity()` の実際の値で数えます
+  `Bound` と会計は `capacity()` の実際の値で数えます。
+  禁止の一覧の例外は `FixedVec` 自身の実装だけで、そこにだけ `#[expect(clippy::disallowed_methods, reason = "...")]` を付けます
 - 伸びる API の禁止:`Vec::push`、`Vec::extend`、`Vec::insert`、`Vec::resize`、`vec!`、`VecDeque`、`HashMap`、`BTreeMap`、`String` への追加のように容量を自動で伸ばす API を、[依存と隔離の検査](#依存と隔離の検査)の禁止の一覧に入れます
 - 0 で埋める:置き場に返す chunk は 0 で埋めます ([使い回しと古い byte](../userspace/wgstack-buffers.md#使い回しと古い-byte))
 
@@ -585,10 +594,11 @@ Go の wgstack の記録がすべて一致することは、ラボの一式で�
 - 比べる応答:引き取った packet の bytes と順序、アプリケーションの操作の結果、受け入れの結果、時刻です。
   `STATS`、`BOUND`、`HELD` の応答は byte の単位で比べません。
   Go と Rust で数の内訳と型の大きさが同じになる理由が無いためです
-- 段ごとの照合:PR 4b からは、相手が SACK を示さず、輻輳の制御に NewReno を選んだ記録が、握手の後のデータの転送まで一致します。
-  受信の窓の自動調整と受け手の ACK の規則を PR 4b に入れるのはこのためです
-- 照らす範囲の広がり:PR 5 で SACK と CUBIC の印の記録、PR 6 で UDP と ICMP と断片と ping の印の記録が加わります
-- 前の条件:すべての記録が一致することを、PR 7 の後に agent の置き換えをラボの一式で判定する前の条件にします
+- 段ごとの照合:PR 4b からは、相手が SACK も timestamp も示さず、輻輳の制御に NewReno を、boost の与え方に boost を求めない方針 (Go の `BoostNever`) を選んだ記録が、握手の後のデータの転送まで一致します。
+  受信の窓の自動調整と受け手の ACK の規則を PR 4b に入れるのはこのためです。
+  timestamp に頼る不要な再送の取り消しと boost の取得は PR 5 で入るので、timestamp と boost を使う記録は PR 5 から照らします
+- 照らす範囲の広がり:PR 5 で SACK、timestamp、CUBIC、boost の印の記録、PR 6 で UDP と ICMP と断片と ping の印の記録が加わります
+- 前の条件:すべての記録が一致することを、#680 の「wgstack の上の agent」の段と、agent の置き換えをラボの一式で判定することの前の条件にします
 
 #### bit の一致の条件
 
