@@ -27,6 +27,56 @@ impl HostAddr {
     }
 }
 
+/// `getifaddrs` が返した sockaddr を `T` (`sockaddr_in` か `sockaddr_in6`) として読む。
+///
+/// BSD 系 (macOS を含む) の netmask は `sa_len` が `T` より短いことがあり (例:`255.255.0.0` を
+/// 6 byte で表す)、`T` の大きさの参照として読むと確保の外を読む。このため参照を作らず、`sa_len` と
+/// `T` の大きさの小さい方の byte だけを 0 で埋めた `T` へ写し、足りない byte は 0 とする。`sa_len`
+/// を持たない OS (Linux) の `getifaddrs` は族の大きさの sockaddr を返すので、`T` の大きさを写す。
+///
+/// # Safety
+///
+/// `p` は null でなく、`sa_len` を持つ OS では `sa_len` byte、持たない OS では `T` の大きさの
+/// byte を読める sockaddr を指すこと。
+#[cfg(unix)]
+unsafe fn read_sockaddr<T: Copy>(p: *const libc::sockaddr) -> T {
+    #[cfg(any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))]
+    // SAFETY: 呼び手が p を読める sockaddr として渡し、sa_len は先頭の 1 byte である
+    let len = usize::from(unsafe { (&raw const (*p).sa_len).read() });
+    #[cfg(not(any(
+        target_vendor = "apple",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )))]
+    let len = size_of::<T>();
+    // SAFETY: 呼び手の約束のとおり p から len byte を読める
+    unsafe { copy_sockaddr(p.cast::<u8>(), len) }
+}
+
+/// `p` の先頭 `min(len, T の大きさ)` byte を 0 で埋めた `T` に写す。
+///
+/// # Safety
+///
+/// `p` から `min(len, T の大きさ)` byte を読めること。`T` はすべての byte が 0 の値を持てる
+/// 平たい C の構造体であること。
+#[cfg(unix)]
+unsafe fn copy_sockaddr<T: Copy>(p: *const u8, len: usize) -> T {
+    let mut out = std::mem::MaybeUninit::<T>::zeroed();
+    let n = len.min(size_of::<T>());
+    // SAFETY: p から n byte を読め、out は T の大きさの書ける領域で、両者は重ならない
+    unsafe { std::ptr::copy_nonoverlapping(p, out.as_mut_ptr().cast::<u8>(), n) };
+    // SAFETY: 0 で埋めた後に byte を写した平たい C の構造体はどの byte の並びでも値である
+    unsafe { out.assume_init() }
+}
+
 /// ホストの IPv4 のアドレスを読む (`getifaddrs`)。
 ///
 /// # Errors
@@ -52,10 +102,10 @@ pub fn read() -> std::io::Result<Vec<HostAddr>> {
         if i32::from(unsafe { (*ifa.ifa_addr).sa_family }) != libc::AF_INET {
             continue;
         }
-        // SAFETY: family が AF_INET なので sockaddr_in として読める。netmask も同じ family である
+        // SAFETY: どちらも getifaddrs が返した null でない sockaddr で、freeifaddrs までは有効である
         let (addr, mask) = unsafe {
-            let a = &*ifa.ifa_addr.cast::<libc::sockaddr_in>();
-            let m = &*ifa.ifa_netmask.cast::<libc::sockaddr_in>();
+            let a = read_sockaddr::<libc::sockaddr_in>(ifa.ifa_addr);
+            let m = read_sockaddr::<libc::sockaddr_in>(ifa.ifa_netmask);
             (
                 u32::from_be(a.sin_addr.s_addr),
                 u32::from_be(m.sin_addr.s_addr),
@@ -169,6 +219,29 @@ fn prefix_of(addr: std::net::IpAddr, prefix_len: u32) -> String {
     format!("{addr}/{prefix_len}")
 }
 
+/// BSD 系 (macOS を含む) の `getifaddrs` が link-local の IPv6 のアドレス (`fe80::/10`) の 3 byte 目と
+/// 4 byte 目に埋めるインタフェースの番号 (KAME の埋め込みの scope) を 0 に戻す。Go の `net.Interfaces`
+/// も同じく消すので、一覧のアドレスが Go と同じ形になる。
+#[cfg_attr(
+    not(any(
+        test,
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    )),
+    expect(dead_code, reason = "only BSD-derived systems embed the scope")
+)]
+fn strip_kame_scope(mut a: [u8; 16]) -> [u8; 16] {
+    if a[0] == 0xfe && a[1] & 0xc0 == 0x80 {
+        a[2] = 0;
+        a[3] = 0;
+    }
+    a
+}
+
 /// このホストのインタフェースを、OS が返す順に読む (`getifaddrs`)。アドレスを持たないインタフェースも
 /// 数える。
 ///
@@ -214,11 +287,13 @@ pub fn interfaces() -> std::io::Result<Vec<Interface>> {
         let family = i32::from(unsafe { (*ifa.ifa_addr).sa_family });
         let addr = match family {
             libc::AF_INET => {
-                // SAFETY: family が AF_INET なので sockaddr_in として読める。netmask も同じ family である
+                // SAFETY: どちらも getifaddrs が返した null でない sockaddr で、freeifaddrs までは有効である
                 let (a, m) = unsafe {
                     (
-                        (*ifa.ifa_addr.cast::<libc::sockaddr_in>()).sin_addr.s_addr,
-                        (*ifa.ifa_netmask.cast::<libc::sockaddr_in>())
+                        read_sockaddr::<libc::sockaddr_in>(ifa.ifa_addr)
+                            .sin_addr
+                            .s_addr,
+                        read_sockaddr::<libc::sockaddr_in>(ifa.ifa_netmask)
                             .sin_addr
                             .s_addr,
                     )
@@ -226,18 +301,27 @@ pub fn interfaces() -> std::io::Result<Vec<Interface>> {
                 prefix_of(IpAddr::V4(Ipv4Addr::from(u32::from_be(a))), m.count_ones())
             }
             libc::AF_INET6 => {
-                // SAFETY: family が AF_INET6 なので sockaddr_in6 として読める。netmask も同じ family である
+                // SAFETY: どちらも getifaddrs が返した null でない sockaddr で、freeifaddrs までは有効である
                 let (a, m) = unsafe {
                     (
-                        (*ifa.ifa_addr.cast::<libc::sockaddr_in6>())
+                        read_sockaddr::<libc::sockaddr_in6>(ifa.ifa_addr)
                             .sin6_addr
                             .s6_addr,
-                        (*ifa.ifa_netmask.cast::<libc::sockaddr_in6>())
+                        read_sockaddr::<libc::sockaddr_in6>(ifa.ifa_netmask)
                             .sin6_addr
                             .s6_addr,
                     )
                 };
                 let bits = m.iter().map(|b| b.count_ones()).sum();
+                #[cfg(any(
+                    target_os = "macos",
+                    target_os = "ios",
+                    target_os = "freebsd",
+                    target_os = "netbsd",
+                    target_os = "openbsd",
+                    target_os = "dragonfly"
+                ))]
+                let a = strip_kame_scope(a);
                 prefix_of(IpAddr::V6(Ipv6Addr::from(a)), bits)
             }
             _ => continue,
@@ -359,6 +443,48 @@ mod tests {
         assert!(one.contains(Ipv4Addr::new(10, 200, 0, 2)));
         assert!(!one.contains(Ipv4Addr::new(10, 200, 0, 3)));
         assert!(h("any", [0, 0, 0, 0], 0).contains(Ipv4Addr::new(203, 0, 113, 1)));
+    }
+
+    /// link-local のアドレスに埋めたインタフェースの番号だけを消し、他のアドレスは変えない。
+    #[test]
+    fn the_kame_scope_is_stripped_from_link_local_addresses() {
+        use std::net::Ipv6Addr;
+        let embedded: Ipv6Addr = "fe80:4::1".parse().unwrap();
+        assert_eq!(
+            Ipv6Addr::from(strip_kame_scope(embedded.octets())),
+            "fe80::1".parse::<Ipv6Addr>().unwrap()
+        );
+        for other in ["2001:db8:4::1", "fec0:4::1", "ff02:4::1"] {
+            let a: Ipv6Addr = other.parse().unwrap();
+            assert_eq!(Ipv6Addr::from(strip_kame_scope(a.octets())), a, "{other}");
+        }
+    }
+
+    /// BSD 系の短い netmask (`255.255.0.0` を `sa_len` 6 で表したもの) は、`sa_len` の外の byte を
+    /// 読まずに、足りない byte を 0 として読む。
+    #[cfg(unix)]
+    #[test]
+    fn a_short_netmask_reads_only_its_own_bytes() {
+        // sa_len、family、port の 2 byte、アドレスの先頭 2 byte。後ろは確保の外の代わりの印
+        let mut raw = [0xAAu8; 32];
+        raw[..6].copy_from_slice(&[6, 0, 0, 0, 255, 255]);
+        // SAFETY: raw は 32 byte を読め、6 byte だけを写す
+        let m: libc::sockaddr_in = unsafe { copy_sockaddr(raw.as_ptr(), 6) };
+        assert_eq!(u32::from_be(m.sin_addr.s_addr), 0xFFFF_0000);
+        assert_eq!(u32::from_be(m.sin_addr.s_addr).count_ones(), 16);
+        // IPv6 の /64 を 16 byte で表したもの
+        let mut raw6 = [0xAAu8; 40];
+        raw6[..16].copy_from_slice(&[
+            16, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255,
+        ]);
+        // SAFETY: raw6 は 40 byte を読め、16 byte だけを写す
+        let m6: libc::sockaddr_in6 = unsafe { copy_sockaddr(raw6.as_ptr(), 16) };
+        let bits: u32 = m6.sin6_addr.s6_addr.iter().map(|b| b.count_ones()).sum();
+        assert_eq!(bits, 64);
+        // sa_len が型より長くても、型の大きさまでしか写さない
+        // SAFETY: raw は 32 byte を読め、sockaddr_in の 16 byte だけを写す
+        let full: libc::sockaddr_in = unsafe { copy_sockaddr(raw.as_ptr(), 255) };
+        assert_eq!(u32::from_be(full.sin_addr.s_addr), 0xFFFF_AAAA);
     }
 
     #[cfg(any(unix, windows))]

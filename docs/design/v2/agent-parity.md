@@ -1300,6 +1300,15 @@ Windows の DACL とソケットの操作には `windows-sys` を使います。
 - `ctlsock`:`socket2` の AF_UNIX の待ち受けと接続です。
   読みと書きには接続ごとの全体の期限が付きます。
   受け口のスレッドと要求の処理は[制御ソケットの受け口](#制御ソケットの受け口)にあります
+- `hostaddr`:インタフェースの一覧を、Unix で `getifaddrs`、Windows で `GetAdaptersAddresses` から読みます。
+  追加の crate は使わず、`windows-sys` だけです。
+  `getifaddrs` の sockaddr は参照を作らずに読みます。
+  BSD 系 (macOS を含む) の netmask は `sa_len` が `sockaddr_in` より短いことがあるので (`255.255.0.0` を 6 byte で表すなど)、`sa_len` と型の大きさの小さい方の byte だけを 0 で埋めた構造体へ写し、足りない byte は 0 とします。
+  型の大きさの参照として読むと、確保の外を読んで帯の長さを誤るためです。
+  `sa_len` を持たない Linux は族の大きさの sockaddr を返すので、型の大きさを写します。
+  BSD 系の `getifaddrs` は link-local の IPv6 のアドレス (`fe80::/10`) の 3 byte 目と 4 byte 目にインタフェースの番号を埋めるので (KAME の埋め込みの scope)、その 2 byte を 0 に戻します。
+  Go の `net.Interfaces` も経路のソケットの読みで同じ 2 byte を消すので、一覧のアドレスが Go と同じ形になります。
+  macOS の build と試験は macOS の CI に任せ、手元では build していません
 
 ### 実機で確かめること
 
