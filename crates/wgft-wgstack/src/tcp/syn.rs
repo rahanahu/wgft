@@ -21,6 +21,17 @@ use crate::wire::{
 };
 use crate::{seq, tcp};
 
+/// 握手の途中の行への segment の処理の結果です。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowVerdict {
+    /// 処理し終えました。
+    Done,
+    /// accept の待ち行列の枠を予約しました。呼び手は行を接続の枠に移します。
+    Promote,
+    /// 確認番号が行の ISN に合わない ACK です。呼び手は cookie として確かめ、通らなければ RST を返します。
+    Cookie,
+}
+
 /// 行が次に送るものです。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum RowSend {
@@ -321,10 +332,10 @@ impl Shared {
         }
     }
 
-    /// 握手の途中の行への segment を処理します。握手の最後の ACK で accept の待ち行列の枠を予約できたら真を返し、
-    /// 呼び手は接続の枠を取って行を移します。予約できなければ ACK を捨て、行は残ります (Linux の
-    /// tcp_abort_on_overflow=0 と同じ)。
-    pub(crate) fn syn_input(&mut self, id: u32, seg: &Segment<'_>, now: i64) -> bool {
+    /// 握手の途中の行への segment を処理します。握手の最後の ACK で accept の待ち行列の枠を予約できたら
+    /// [`RowVerdict::Promote`] を返し、呼び手は接続の枠を取って行を移します。予約できなければ ACK を捨て、行は
+    /// 残ります (Linux の tcp_abort_on_overflow=0 と同じ)。
+    pub(crate) fn syn_input(&mut self, id: u32, seg: &Segment<'_>, now: i64) -> RowVerdict {
         let r = *self.syn.row(id);
         let rcv_nxt = r.irs.wrapping_add(1);
         let in_window = || {
@@ -335,7 +346,7 @@ impl Shared {
             if in_window() {
                 self.remove_syn_row(id);
             }
-            return false;
+            return RowVerdict::Done;
         }
         if seg.has(FLAG_SYN) {
             if !seg.has(FLAG_ACK) && seg.seq == r.irs {
@@ -343,35 +354,44 @@ impl Shared {
                 let row = self.syn.row_mut(id);
                 (row.pending, row.rtx) = (RowSend::SynAck, true);
                 self.queue_row(id);
-                return false;
+                return RowVerdict::Done;
             }
             if in_window() {
                 self.reply_rst(seg);
                 self.remove_syn_row(id);
-                return false;
+                return RowVerdict::Done;
             }
             self.row_ack(id, now);
-            return false;
+            return RowVerdict::Done;
         }
         if !seg.has(FLAG_ACK) {
-            return false;
+            return RowVerdict::Done;
         }
         if seg.ack != r.iss.wrapping_add(1) {
+            // 遅れて届いた cookie の SYN-ACK への ACK かもしれません。相手が SYN を送り直した時に表に空きが
+            // あれば、その SYN が行を作り、行の ISN は cookie と違います。cookie を送る窓の内だけ確かめます。
+            if self.cookie_window(now) {
+                return RowVerdict::Cookie;
+            }
             self.reply_rst(seg);
-            return false;
+            return RowVerdict::Done;
         }
         if r.ts_ok
             && let Some((ts_val, _)) = seg.opt.ts
             && seq::lt(ts_val, r.ts_recent)
         {
             self.row_ack(id, now);
-            return false;
+            return RowVerdict::Done;
         }
         if !in_window() {
             self.row_ack(id, now);
-            return false;
+            return RowVerdict::Done;
         }
-        self.reserve_accept(r.listener, now)
+        if self.reserve_accept(r.listener, now) {
+            RowVerdict::Promote
+        } else {
+            RowVerdict::Done
+        }
     }
 
     /// 待ち受け `port` の accept の待ち行列の枠を 1 つ予約し、予約できたかを返します。待ち受けの分 (Q の半分)、

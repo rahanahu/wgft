@@ -23,7 +23,7 @@ use crate::rng::Seeds;
 use crate::tcp::conn::{ConnBufs, ConnId, ConnSlots, QLink, State, Tcb, new_free_list};
 use crate::tcp::ctx::Conn;
 use crate::tcp::listen::{self, Listener, PORTS, PortTable};
-use crate::tcp::syn::SynTable;
+use crate::tcp::syn::{RowVerdict, SynTable};
 use crate::tcp::timewait::TwTable;
 use crate::tcp::{NUM_TIMERS, NUM_TIMERS32};
 use crate::time::Time;
@@ -507,8 +507,14 @@ impl<H: Hook> Stack<H> {
             }
             // 行を外したら、SYN を待ち受けに渡します。
             if let Some(r) = self.s.syn.find(seg.tup) {
-                if self.s.syn_input(r, seg, now) {
-                    self.promote(r, seg, now);
+                match self.s.syn_input(r, seg, now) {
+                    RowVerdict::Done => {}
+                    RowVerdict::Promote => self.promote(r, seg, now),
+                    RowVerdict::Cookie => {
+                        if !self.establish_cookie(seg, now, Some(r)) {
+                            self.s.reply_rst(seg);
+                        }
+                    }
                 }
                 return;
             }
@@ -525,28 +531,35 @@ impl<H: Hook> Stack<H> {
             if listening
                 && seg.flags & (FLAG_SYN | FLAG_ACK | FLAG_RST) == FLAG_ACK
                 && self.s.cookie_window(now)
-                && self.establish_cookie(seg, now)
             {
-                return;
+                if self.establish_cookie(seg, now, None) {
+                    return;
+                }
+                if seg.seq_len() > 0 {
+                    // 中身か FIN を持つ ACK は RST を返さずに捨てます。最後の ACK と最初の中身を失った相手の
+                    // 次の segment は cookie が通らないので、RST で切らずに、最初の中身の再送を待ちます。
+                    return;
+                }
             }
             self.s.reply_rst(seg);
             return;
         }
     }
 
-    /// 待ち受けへの、どの行にも当たらない ACK を cookie として確かめ、通れば接続を作って accept の待ち行列に
-    /// 入れます。ACK を処理し終えたかを返します。偽なら呼び手は RST を返します。
+    /// 待ち受けへの ACK を cookie として確かめ、通れば接続を作って accept の待ち行列に入れます。cookie が
+    /// 通ったかを返します。偽なら呼び手が捨てるか RST を返します。`row` は同じ 4 つ組の握手の途中の行で、
+    /// 接続を作れたら外します。
     ///
     /// accept の待ち行列か接続の枠が満杯なら、握手の途中の行の最後の ACK と同じく ACK を捨てて真を返します。
     /// 相手が ACK かデータを送り直した時に cookie がまだ通れば、その時に接続を作ります。
-    fn establish_cookie(&mut self, seg: &wire::Segment<'_>, now: i64) -> bool {
+    fn establish_cookie(&mut self, seg: &wire::Segment<'_>, now: i64, row: Option<u32>) -> bool {
         let Some(r) = self.s.check_cookie(seg, now) else {
             return false;
         };
         if !self.s.reserve_accept(r.listener, now) {
             return true;
         }
-        if self.open_from_row(&r, None, seg, now) {
+        if self.open_from_row(&r, row, seg, now) {
             self.s.stats.syn_cookies_accepted += 1;
         }
         true

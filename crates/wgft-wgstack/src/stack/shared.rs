@@ -107,8 +107,8 @@ pub struct Stats {
     pub syn_cookies_sent: u64,
     /// cookie が通り、接続を作った ACK です。
     pub syn_cookies_accepted: u64,
-    /// cookie を送ってから 2 周期の内に届き、cookie が通らなかった ACK です。どの行にも当たらない segment と
-    /// して RST を返します。
+    /// cookie を送ってから 2 周期の内に届き、cookie が通らなかった ACK です。握手の途中の行に当たる ACK と、
+    /// 中身も FIN も持たない ACK には RST を返し、ほかは捨てます。
     pub syn_cookies_rejected: u64,
     pub accept_overflow: u64,
     pub tw_evicted: u64,

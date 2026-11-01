@@ -88,6 +88,16 @@ impl CookieOpts {
     }
 }
 
+/// 時計の値 `ours` の下位 5 bit を `bits` に替えた、`ours` を超えない TSval です。
+pub(crate) fn cookie_ts_val(ours: u32, bits: u32) -> u32 {
+    let base = ours & !TS_OPT_MASK;
+    if base | bits > ours {
+        base.wrapping_sub(TS_OPT_MASK + 1) | bits
+    } else {
+        base | bits
+    }
+}
+
 /// 時刻 `now` (ns) の時刻の数です。
 #[expect(
     clippy::cast_possible_truncation,
@@ -157,9 +167,11 @@ impl Shared {
         let mut w = OptWriter::default();
         w.mss(u16::try_from(self.our_mss()).unwrap_or(u16::MAX));
         if let Some((ts_val, _)) = seg.opt.ts {
-            // TSval の下位 5 bit を option に替えます。値は時計より最大 31 ms 小さくなるだけです。
+            // TSval の下位 5 bit を option に替えます。後の segment の TSval (時計の値) より大きくすると、相手の
+            // PAWS が後の segment を古いとみなして捨てるので、時計の値を超えない値にします。値は時計より最大
+            // 63 ms 小さくなります。
             let ours = ts_clock(now).wrapping_add(self.ts_offset(seg.tup));
-            let v = (ours & !TS_OPT_MASK) | o.ts_bits();
+            let v = cookie_ts_val(ours, o.ts_bits());
             if o.sack_ok {
                 w.sack_perm_with_ts(v, ts_val);
             } else {
@@ -293,6 +305,21 @@ mod tests {
         // MSS の番号の書き換えと、MAC の 1 bit の書き換え
         assert_eq!(check(KEY, TUP, 99, iss ^ 1, ts, 10), None);
         assert_eq!(check(KEY, TUP, 99, iss ^ (1 << 31), ts, 10), None);
+    }
+
+    #[test]
+    fn cookie_ts_val_keeps_the_bits_and_stays_at_or_below_the_clock() {
+        for ours in (0..256u32).chain([u32::MAX - 40, u32::MAX, 0x8000_0000]) {
+            for bits in 0..=TS_OPT_MASK {
+                let v = cookie_ts_val(ours, bits);
+                assert_eq!(v & TS_OPT_MASK, bits);
+                let behind = ours.wrapping_sub(v);
+                assert!(
+                    behind < 2 * (TS_OPT_MASK + 1),
+                    "ours {ours} bits {bits} v {v}"
+                );
+            }
+        }
     }
 
     #[test]

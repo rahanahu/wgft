@@ -356,3 +356,142 @@ fn syn_fin_does_not_reuse_a_time_wait_row() {
     assert!(outs.iter().all(|o| o.flags == FLAG_ACK), "{}", show(&outs));
     assert_eq!((n.s.held().tw_rows, n.s.held().syn_rows), (1, 0));
 }
+
+#[test]
+fn cookie_ts_val_never_runs_ahead_of_later_segments() {
+    let (mut n, l) = flooded();
+    // TSval の下位 5 bit に入る option の値は時計の値の下位 5 bit より大きいことが多いので、多くの握手で
+    // 確かめます。
+    for k in 0..48u16 {
+        let mut p = cookie_syn(&mut n, 43000 + k, true, k % 2 == 0, true);
+        let syn_ack_ts = p.dut_ts;
+        let c = n.accept(l);
+        n.advance(Duration::from_millis(u64::from(k % 7)));
+        n.s.write(n.now, c, b"x").unwrap();
+        let outs = n.drain();
+        let data = outs
+            .iter()
+            .find(|o| o.rport == 43000 + k && !o.payload.is_empty())
+            .unwrap_or_else(|| panic!("no data: {}", show(&outs)));
+        let (v, _) = data.ts.unwrap();
+        assert!(
+            crate::seq::ge(v, syn_ack_ts),
+            "the SYN-ACK's TSval {syn_ack_ts} runs ahead of the next segment's {v}"
+        );
+        p.absorb(&outs);
+        n.s.abort(n.now, c);
+        n.drain();
+    }
+}
+
+#[test]
+fn data_that_fails_the_cookie_is_dropped_without_rst() {
+    let (mut n, l) = flooded();
+    n.inject(&TSeg {
+        sport: 44000,
+        dport: 80,
+        seq: 100,
+        flags: FLAG_SYN,
+        wnd: 65535,
+        mss: 1380,
+        ..TSeg::default()
+    });
+    let sa = n.drain().remove(0);
+    let data = |seq: u32, payload: &[u8]| TSeg {
+        sport: 44000,
+        dport: 80,
+        seq,
+        ack: sa.seq.wrapping_add(1),
+        flags: FLAG_ACK,
+        wnd: 65535,
+        payload: payload.to_vec(),
+        ..TSeg::default()
+    };
+    // 最後の ACK と最初の中身を失い、2 つ目の中身が先に届きます。
+    let rejected = n.s.stats().syn_cookies_rejected;
+    n.inject(&data(201, b"second"));
+    let outs = n.drain();
+    assert!(outs.is_empty(), "{}", show(&outs));
+    assert_eq!(n.s.stats().syn_cookies_rejected, rejected + 1);
+    assert_eq!(n.s.held().conns, 0);
+    // FIN だけの segment も同じです。中身の無い ACK には今までどおり RST を返します。
+    n.inject(&TSeg {
+        flags: FLAG_ACK | FLAG_FIN,
+        ..data(300, b"")
+    });
+    assert!(n.drain().is_empty());
+    n.inject(&data(300, b""));
+    let outs = n.drain();
+    assert!(outs.len() == 1 && outs[0].has(FLAG_RST), "{}", show(&outs));
+    // 最初の中身の再送で接続を作ります。
+    let first = vec![b'a'; 100];
+    n.inject(&data(101, &first));
+    let c = n.accept(l);
+    assert_eq!(n.read_all(c), first);
+    n.s.check_invariants().unwrap();
+}
+
+#[test]
+fn a_delayed_cookie_ack_wins_over_a_later_row() {
+    let (mut n, l) = flooded();
+    let syn = TSeg {
+        sport: 45000,
+        dport: 80,
+        seq: 500,
+        flags: FLAG_SYN,
+        wnd: 65535,
+        mss: 1380,
+        ..TSeg::default()
+    };
+    n.inject(&syn);
+    let cookie = n.drain().remove(0);
+    // 洪水の行を RST で外して表に空きを作ります。
+    for i in 0..200u32 {
+        n.inject(&TSeg {
+            src: Some(spoofed(i)),
+            sport: 1024 + (i % 50000) as u16,
+            dport: 80,
+            seq: i.wrapping_mul(2_654_435_761).wrapping_add(1),
+            flags: FLAG_RST,
+            ..TSeg::default()
+        });
+    }
+    n.drain();
+    assert_eq!(n.s.held().syn_rows, 0);
+    // 相手は SYN を送り直し、今度は行ができます。
+    n.inject(&syn);
+    let row_syn_ack = n.drain().remove(0);
+    assert_ne!(row_syn_ack.seq, cookie.seq);
+    assert_eq!(n.s.held().syn_rows, 1);
+    // 遅れて届いた cookie の SYN-ACK に相手が ACK します。
+    n.inject(&TSeg {
+        seq: 501,
+        ack: cookie.seq.wrapping_add(1),
+        flags: FLAG_ACK,
+        payload: b"hi".to_vec(),
+        ..syn.clone()
+    });
+    let outs = n.drain();
+    assert!(outs.iter().all(|o| !o.has(FLAG_RST)), "{}", show(&outs));
+    assert_eq!((n.s.held().syn_rows, n.s.held().conns), (0, 1));
+    assert_eq!(n.s.stats().syn_cookies_accepted, 1);
+    let c = n.accept(l);
+    assert_eq!(n.read_all(c), b"hi");
+    // cookie の窓の外では、行の ISN に合わない ACK に今までどおり RST を返します。
+    n.advance(Duration::from_nanos(3 * COOKIE_PERIOD as u64));
+    let syn2 = TSeg {
+        sport: 45001,
+        ..syn.clone()
+    };
+    n.inject(&syn2);
+    n.drain();
+    n.inject(&TSeg {
+        seq: 501,
+        ack: 12345,
+        flags: FLAG_ACK,
+        ..syn2
+    });
+    let outs = n.drain();
+    assert!(outs.iter().any(|o| o.has(FLAG_RST)), "{}", show(&outs));
+    n.s.check_invariants().unwrap();
+}
