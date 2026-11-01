@@ -108,8 +108,6 @@ impl std::error::Error for HelloError {}
 
 /// `HELLO` の上限の組を核の表の大きさにします。空なら既定です。名前の無い欄と 0 の欄は本番の値で、表の大きさの
 /// 初めの 5 つは必ず要ります (4 節)。
-///
-/// UDP の datagram の数 (`udpRxDgrams`、`udpTxDgrams`) は、核が UDP を持つ段 (PR 6) までは受け取って使いません。
 pub fn limits_from_hello(ls: &[frame::Limit]) -> Result<Limits, HelloError> {
     let def = Limits::default();
     if ls.is_empty() {
