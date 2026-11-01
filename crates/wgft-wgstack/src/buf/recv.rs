@@ -448,6 +448,7 @@ impl RecvBuf {
     }
 
     /// 区間を始まりの順に `f` に渡します。
+    #[cfg(test)]
     pub(crate) fn for_each_interval(&self, f: &mut dyn FnMut(u64, u64) -> bool) {
         self.walk(self.root, f);
     }
@@ -493,6 +494,7 @@ impl RecvBuf {
     }
 
     /// 輪を容量 `cap` に移し、書いた範囲を写します。確保に失敗したら輪を変えずに誤りを返します。
+    #[cfg(test)]
     pub(crate) fn resize_ring(&mut self, cap: u64, pool: &mut ChunkPool) -> Result<(), AllocError> {
         let cur = self.r.cap();
         let mut ring = core::mem::replace(&mut self.r, Ring::new(cur));

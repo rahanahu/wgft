@@ -84,6 +84,7 @@ impl TwTable {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn heap_bytes(&self) -> usize {
         self.rows.heap_bytes()
             + self.idx.heap_bytes()
@@ -427,7 +428,9 @@ impl Shared {
         let payload = u32::try_from(seg.payload.len()).unwrap_or(0);
         let ts_val = seg.opt.ts.map(|(v, _)| v);
         if seg.has(FLAG_SYN) {
+            // SYN と FIN の組は待ち受けが捨てるので、行を外しません。
             if !seg.has(FLAG_ACK)
+                && !seg.has(FLAG_FIN)
                 && r.state == TwState::TimeWait
                 && rfc6191(seg, r.ts_ok, r.ts_recent, r.rcv_nxt)
             {

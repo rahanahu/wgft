@@ -27,6 +27,13 @@ var (
 
 const port = 5001
 
+// wgstackRSEnv names the wgstack-dut binary, as for internal/tcpharness/rustdut. The wgstack-rs
+// engine runs it with --clock real (docs/design/v2/test-tooling.md section 5):
+//
+//	cargo build --release -p wgft-wgstack-dut
+//	WGFT_TEST_WGSTACK_DUT=$PWD/target/release/wgstack-dut QBENCH_SUBJECT=wgstack-rs go test -tags qbench ...
+const wgstackRSEnv = "WGFT_TEST_WGSTACK_DUT"
+
 // Listener is what the DUT side accepts on.
 type Listener interface {
 	Accept() (net.Conn, error)
@@ -47,6 +54,9 @@ type DUT struct {
 	OnAccept func(net.Conn) error
 	RTOAt    func(at time.Time) time.Duration
 	RTOErr   func() error // the last error reading the RTO, if any
+	// CPU, when set, is the CPU time the engine has used so far: an engine in a process of its
+	// own, whose CPU the harness can tell apart from its own. It is read before Close.
+	CPU func() time.Duration
 }
 
 func newWgstack() (*DUT, error) {
@@ -154,6 +164,8 @@ func newRig(engine, client string, imp Impair, seed int64, trace string) (*Rig, 
 	switch engine {
 	case "wgstack":
 		d, err = newWgstack()
+	case "wgstack-rs":
+		d, err = newWgstackRS()
 	case "gvisor":
 		d, err = newGvisor()
 	case "linux":

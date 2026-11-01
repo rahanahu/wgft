@@ -1,8 +1,9 @@
 //! wgstack の核の会計 (`Held`) が確保の数えとちょうど一致し、接続の枠をすべて満たした核が上界の floor の項に
 //! 届いて超えないことを、確保の数えで確かめます。accept の待ち行列にいる接続が送信のデータを持たないことも
-//! 測ります。数えはプロセスで 1 つなので、このファイルには試験を 1 つだけ置きます。
+//! 測ります。数えるのは試験のスレッドの確保だけです (`ThreadWindow`)。核はスレッドを持たないので、核の確保は
+//! すべてこのスレッドで起こります。libtest の main のスレッドが並行にする確保は数えません。
 
-use wgft_alloc_count::{CountingAlloc, live_bytes};
+use wgft_alloc_count::{CountingAlloc, ThreadWindow};
 use wgft_wgstack::{BoostPolicy, Held, Limits};
 use wgft_wgstack_bench::{MSS, Rig};
 
@@ -26,25 +27,25 @@ fn accounted(h: &Held) -> usize {
         - h.lent_array_bytes
 }
 
-/// 核と、会計を照らす起点の生きている byte です。
+/// 核と、核を作った後に開いた測りの窓です。
 struct Probe {
     rig: Rig,
-    base: usize,
+    w: ThreadWindow,
 }
 
 impl Probe {
     fn new(limits: Limits, boost: BoostPolicy) -> Self {
         let rig = Rig::build(0, false, limits, boost);
-        let base = live_bytes();
+        let w = ThreadWindow::open();
         let h = rig.held();
         assert_eq!(accounted(&h), 0, "a new stack accounts nothing: {h:?}");
-        Self { rig, base }
+        Self { rig, w }
     }
 
     /// 増えた byte が会計と一致することを確かめ、会計を返します。
     fn exact(&self, what: &str) -> Held {
         let h = self.rig.held();
-        let grown = live_bytes() - self.base;
+        let grown = self.w.grown();
         assert_eq!(
             grown,
             accounted(&h),
@@ -110,7 +111,7 @@ fn held_matches_the_allocations_and_the_floor_term_is_reached() {
         bound.floor_conn,
         "{h:?}"
     );
-    assert!((live_bytes() - p.base) as u64 <= bound.total - bound.fix);
+    assert!(p.w.grown() as u64 <= bound.total - bound.fix);
     // 確認を受けると送信の chunk は置き場に戻ります。
     for k in 0..slots {
         p.rig.ack(k);
