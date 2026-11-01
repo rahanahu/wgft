@@ -510,9 +510,7 @@ perf stat -e cache-misses,L1-dcache-load-misses,instructions,cycles \
 E コアは `L1-dcache-load-misses` を数えないので、E コアの車線では代わりに `mem_load_uops_retired.l1_miss` を
 数えます。
 
-2026-11-01 に、3 つの配列に分けた配置と、3 つの部分を 1 つの値に並べた配置 (輪の pointer の配列が接続の欄と同じ値にある形) をこのベンチで比べました。
-差は同じ配置を流し直した値の揺れと同じ大きさで、配置による一貫した差は見えませんでした。
-perf stat の数では、どちらの配置でも LLC の miss が 1,000 命令あたり 0.2 未満で、1024 本でも作業の集合がキャッシュに収まっていました。
+3 つの配列に分けた配置と、3 つの部分を 1 つの値に並べた配置 (輪の pointer の配列が接続の欄と同じ値にある形) の差は、このベンチでは流し直しの揺れの内で、1024 本でも作業の集合はキャッシュに収まります。
 分けた配置を選んだ理由は、測った速さではなく、`Tcb` の行が輪の配列と boost の段の大きさに左右されないことです。
 接続の数が L2 を超える負荷 (数千本の接続と大きな受信の窓) での差は測っていません。
 
@@ -542,8 +540,7 @@ I1 から I7 の不変条件もそのまま守ります ([不変条件](../users
   K を超えた接続を `abort` で終えるのは核の外の中継です。
   中継が閉じた後も送り残しを送っている接続は、枠と送信のデータを持ったまま中継の K に数えられません。
   このため、K + Q 本の枠がすべて accept されて両方の輪を満たす状態に届きえます。
-  2026-11-01 に確保の数え (`crates/wgft-alloc-count` の `wgstack_held`) で測りました。
-  中身の無い accept の前の接続は floor の記録の輪と区間の表の 21,712 byte を持ち、届いたデータの分は受信の floor (256 KiB) までの chunk を持ち、送信の chunk は 0 でした。
+  確保の数え (`crates/wgft-alloc-count` の `wgstack_held`) では、中身の無い accept の前の接続は floor の記録の輪と区間の表の 21,712 byte を持ち、届いたデータの分は受信の floor (256 KiB) までの chunk を持ち、送信の chunk は 0 でした。
   K = 4、Q = 8 の核は 12 本を accept し、12 本の両方の輪を満たした会計は floor の項にちょうど届き、超えませんでした。
   待ち行列の枠を送信の floor から外すには、核が accept した接続の数を K で抑える変更 (accept の意味の変更) が要るので、採りません
 - boost の配列:B 本の枠の分の boost の記録の輪と区間の表を `Budget` の作成の時に確保し、`Budget` の中に置きます。
@@ -908,7 +905,7 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   `recv_no_memory` を数えます。
   書き込みは `Error::NoMemory` を返します
 - 白箱の試験:Go の `tcp_test.go`、`ackpolicy_test.go`、`orphan_test.go`、`reuse_refused_test.go`、
-  `hystart_test.go` などを移しました。
+  `hystart_test.go` などに当たる試験を持ちます。
   SACK、D-SACK、boost、受信の窓の boost の段を使う試験 (`rcvwin_test.go` の多く) は次の節の試験です
 
 ### 回復と輻輳の制御と boost で決めたこと
@@ -956,7 +953,7 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   PRR の欄と RecoverFS は SACK による回復の間だけ触るので `ConnCold` に置きました
 - 記録の輪の添字:記録の輪の容量は 2 の冪でないので、剰余を割り算の命令にしないよう、先頭からの位置を 1 回の引き算で折り返します。
   意味は変わりません
-- 試験:Go の `sack_test.go`、`scoreboard_test.go`、`prr_test.go`、`lostq_audit_test.go`、`dsack_test.go`、`cwndval_test.go`、`lazyegress_test.go`、`tlp_rto_test.go`、`rack_test.go`、`undo_test.go`、`cc_test.go`、`boost_test.go`、`rcvwin_test.go` を移しました。
+- 試験:Go の `sack_test.go`、`scoreboard_test.go`、`prr_test.go`、`lostq_audit_test.go`、`dsack_test.go`、`cwndval_test.go`、`lazyegress_test.go`、`tlp_rto_test.go`、`rack_test.go`、`undo_test.go`、`cc_test.go`、`boost_test.go`、`rcvwin_test.go` に当たる試験を持ちます。
   Go の試験が大きさ 1 の枠の集まりを作る所は、Rust の `Budget` の枠の数が固定なので、ほかの枠を別の接続で埋めてから取り合いを起こします
   試験は毎回 `check_invariants` を呼ぶので、ワークスペースの `Cargo.toml` で `wgft-wgstack` を dev と test の build でも `opt-level = 2` で作ります。
   溢れの検査と `debug_assert` は残ります。
@@ -1007,18 +1004,17 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
 - まれにしか触らない状態の置き場:UDP の状態、ping の表、ICMP の誤りの速さの制限、再組み立ての表の掃除の時刻は、核の共有の状態 (`Shared`) の中に置きます。
   このため segment ごとの経路が触る欄のキャッシュの行の中の位置がずれます。
   これらを作成の時に確保する別の値に移す形は採りません。
-  2026-11-01 の `perf stat` の測りで、その形では `send_segment/1024` の 1,000 命令あたりの L1 の miss が減らずに増え、`Shared` に置く形との差は criterion の中央の推定の揺れの内だったためです。
-  増えた理由は調べていません
+  その形は `send_segment/1024` の L1 の miss を減らさず、`Shared` に置く形との速さの差も criterion の揺れの内だったためです
 - ping の表:応答の置き場は作成の時に確保する配列です。
   応答の置き場は Go と同じく MTU の大きさで、Go は最初に使う時に確保しますが、Rust は 16 個すべてを作成の時に確保します。
   上界はどちらも 16 個の分を数えます
 - PMTU:`pmtu_drop` を `tcp::input` に、`mark_lost_longer` を `tcp::sack` に Go と同じ形で写しました。
   `scoreboard_against_recount` の試験は、Go と同じく乱数の分岐で PMTU を引き下げます
-- 試験:Go の `udp_test.go`、`frag_test.go`、`fragidle_test.go`、`checksum_test.go` の UDP の試験、`sack_test.go` と `observe_test.go` の PMTU の試験を移しました。
+- 試験:Go の `udp_test.go`、`frag_test.go`、`fragidle_test.go`、`checksum_test.go` の UDP の試験、`sack_test.go` と `observe_test.go` の PMTU の試験に当たる試験を持ちます。
   Go の試験の読み書きの期限と、`Close` で待ちが解けることは handle の層の試験に移ります。
   `TestIdleDeviceSweepsAHeldFragment` は、Device のタイマーの goroutine の代わりに、`poll_timeout` の時刻を追う駆動が寿命の後に Time Exceeded を送ることを確かめます。
   受信の洪水の試験は 1 つの datagram ごとに `check_invariants` を呼ぶと遅いので、間を置いて呼びます。
-  Go の試験に無い試験も足しました。
+  Go の試験に無い試験も持ちます。
   送信の chunk の確保の失敗と取った chunk と番号の戻し、同じポートの待ち受けと endpoint が知らせの対象を分け合うこと、endpoint の chunk の上限と核の件数の上限の境目、ICMP の誤りへの誤りと multicast の送信元と引用の大きさの守り、断片を保持した時の掃除の時刻の張り直し、中身がちょうど新しい MSS の記録、PMTU の引き下げが損失の境目を数え直すこと、ログの数です
 - 検出力:変異の試験で残った変異のうち、次のものは出力を変えないことを確かめ、Go と同じ形のために守りを残しました。
   核の datagram の件数の予算の比べ (空きの list が先に尽きます)、閉じた endpoint の送り残しが今の chunk を外す時の世代の比べ (その chunk は送り残しが持つ間ほかの endpoint に渡りません)、checksum の 0 を 0xffff にする所 (`write_udp_header` も同じ置き換えをします)、Fragmentation Needed の引用の送信元の比べ (接続の表を引用の送信元で引くので見つかりません)、ICMP の誤りの後続の断片の守り (呼び手は後続の断片を渡しません)、再組み立ての知らせの後続の断片の守りと最初の断片の有無 (`param_problem_ok` と `timeout_quote` が同じ条件で断ります)
@@ -1163,7 +1159,7 @@ segment ごとの経路では、`Dlist` の印の読み書きは bit の演算�
 TCP の確立した接続の segment はポートの表を引きませんが、UDP は datagram ごとに引きます。
 UDP の datagram ごとの手間は、UDP の bench が無いので測っていません。
 
-2026-11-01 の測りでは、この形で試験の小さな表 (K = 16) の `check_invariants` は約 100 µs から約 9 µs に、`core` の fuzz の 25,000 回は約 60 秒から約 22 秒に縮みました。
+この形で、試験の小さな表 (K = 16) の `check_invariants` は 1 回に約 9 µs です。
 既定の表の `check_invariants` は、表の行の数 (TIME_WAIT の表の 65,536 行、接続の枠ごとの輪の chunk の位置) に比例する部分が大部分で、この形の対象ではありません。
 小さな表で残る約 9 µs は、接続の枠ごとの輪の容量の外の chunk の位置の確かめ、送り手と scoreboard の確かめ、UDP の datagram の管理の配列の確かめです。
 segment ごとの経路の criterion の組の差は、道具だけの費用の揺れの内でした。

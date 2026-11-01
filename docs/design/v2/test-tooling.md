@@ -390,7 +390,7 @@ delivered delivered p.conn
 このため、`Run`、期待した差の一覧、`gvisordut` の故障を入れた試験、`linuxdut` のラボでの実行は、表を使う形のまま変わりません。
 構文の誤りがある台本は、その名前の台本が誤りを報告して落ちる項目になり、ほかの台本と package の import を止めません。
 
-移した台本は、台本ごとに元の Go の関数と同じ DUT と同じ種で流し、確かめの ID、結果、観察の文字列の列が一致することを `wgstackdut`、`gvisordut`、`linuxdut` で確かめてから、Go の関数を消しました。
+台本を移すときは、元の Go の関数と同じ DUT と同じ種で流し、確かめの ID、結果、観察の文字列の列が一致することを `wgstackdut`、`gvisordut`、`linuxdut` で確かめてから、Go の関数を消します。
 Go の関数の実行が通らなかった組は一致の証拠にしていません。
 2 つの実行が同じように落ちれば行は一致しますが、DUT の状態の誤りを見ているだけかもしれないためです。
 
@@ -543,7 +543,7 @@ transcript の一致を求めるのは、台本の言語の台本だけです。
 Go に残す台本のうち別の goroutine で読み書きする台本 (受信の溢れ、窓の開き方など) は、goroutine の進み方で要求の順が変わるので、確かめの ID と結果と観察の文字列の一致だけを求めます。
 それらの台本は Rust の runner では流れないので、比べる相手は同じ台本を `wgstackdut` で流した結果と、`rustdut` で凍結した Go の wgstack に流した結果です。
 
-一致の確かめの DUT は `dutserve` (3 節。凍結した Go の wgstack) で、Rust の runner は `ProcessDut` でそれを叩きます。
+一致の確かめの DUT は凍結した Go の wgstack の `dutserve` (3 節) で、Rust の runner は `ProcessDut` でそれを叩きます。
 これで、Rust の runner の意味を Rust の wgstack に依らずに確かめられます。
 `wgstack-dut` のバイナリを両方の runner で叩く一致の確かめは、まだ足していません。
 今の `tests/scripts.rs` が transcript を照らす相手は、engine の名前が `wgstack` の DUT だけです。
@@ -1143,20 +1143,10 @@ cargo-fuzz の crate は `[workspace]` を自分で持ち、ワークスペー�
 
 ### 実行の速さ
 
-2026-11-01 に開発のホストで、`wgft-heavy --timing` の 1 つの車線で測りました。
-build は `cargo fuzz run -s none --no-trace-compares` (AddressSanitizer と比較の追跡を外し、debug assertions は残します) です。
-git の seed の写しから固定の `-runs` を流し、壁時計の時間で割りました。
-
-| target | `-runs` | 1 秒あたりの実行 |
-| --- | --- | --- |
-| `core` | 20,000 | 約 620 |
-| `replay` | 20,000 | 約 650 |
-| `adversarial_sender` | 200 | 約 4 |
-
-`adversarial_sender` の 1 回は、stream を最後まで送り切る 1 つの種です。
+速さは、`cargo fuzz run -s none --no-trace-compares` (AddressSanitizer と比較の追跡を外し、debug assertions は残します) の build で、git の seed の写しから固定の `-runs` を流して測ります。
+関門の回数 (7 節) はこの速さから決めます。
+`adversarial_sender` の 1 回は stream を最後まで送り切る 1 つの種で、ほかの target の 1 回より大きく重くなります。
 `core` と `replay` の 1 回の時間の多くは、各段の後の `check_invariants` です。
-小さな表の核でも 1 回に 50 から 60 µs ほどかかり、表の大きさでほとんど変わりませんでした (`core` の表と、どの表も 1 から 2 行にした表で、release の build、1 回の測り)。
-核を作って閉じるのは 0.2 ms ほどです。
 
 ## 7. 関門と CI
 
@@ -1222,7 +1212,10 @@ feature はワークスペースの中で統合され、別の crate の試験�
   核の crate の `wgstack_fault` の点として、実装の担当が次の一覧から書きます
 
 adapter の側に核の故障の写しを作らないのは、公開の API の外の状態を壊せず、作れるのは出力の書き換えだけになるためです。
-故障の一覧は次のとおりです。
+
+故障の点はまだ核に入っていません。
+`Cargo.toml` の `check-cfg` は `wgstack_fault` を値の無い形 (`values(none())`) で宣言するだけで、故障を選ぶ build はまだ作れません。
+下の表は、点を入れるときの一覧です。
 落ちるはずの確かめは、試験 (`crates/wgft-wgstack-dut/tests/` の `holding` と `fuzz_corpus`、関門の段) の名前で書きます。
 
 | 名前 | 故障 | 落ちるはずの確かめ |
