@@ -605,7 +605,7 @@ def latpaired(logfile):
                  "%.1f" % statistics.median(mbit) if mbit else "-",
                  "%.2f" % statistics.median(busy) if busy else "-", "%.2f" % max(busy) if busy else "-"))
     rc = 0
-    for key in ("udp_load_p99_ms", "udp_load_jitter_ms", "udp_idle_p99_ms", "udp_idle_jitter_ms"):
+    for key in ("udp_load_p50_ms", "udp_load_p99_ms", "udp_load_jitter_ms", "udp_idle_p99_ms", "udp_idle_jitter_ms"):
         rc = paired_ratio(logfile, key, "LATRATIO") or rc
     return rc
 
