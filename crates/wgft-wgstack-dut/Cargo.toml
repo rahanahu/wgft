@@ -17,7 +17,7 @@ flate2.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "sync", "macros"] }
-wgft-netstack.workspace = true
+wgft-netstack = { workspace = true, features = ["harness"] }
 wgft-tcpharness.workspace = true
 wgft-wgstack = { workspace = true, features = ["harness"] }
 

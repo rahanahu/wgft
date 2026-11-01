@@ -224,7 +224,9 @@ IPv4 でない packet は device の層が捨てます。
   採るかは CPU を測ってから決めます
 - UDP:`bind_udp(now, SocketAddrV4) -> Result<UdpId>`、`recv_from(now, UdpId, &mut [u8]) -> Result<(usize, SocketAddrV4)>`、`send_to(now, UdpId, &[u8], SocketAddrV4)`、`close_udp`。
   `send_to` は送信の予算を予約できなければ `WouldBlock` を返し、予約できるようになったら知らせます。
-  Go の `WriteTo` が予約できるまで待つ挙動は、handle の層の待ちになります
+  Go の `WriteTo` が予約できるまで待つ挙動は、handle の層の待ちになります。
+  agent の中継がトンネルへ応答を入れる口として `send_to_latest(now, UdpId, &[u8], SocketAddrV4, max_age_ms)` を足します。
+  待たず、`WouldBlock` を返さず、待ちの list にも入れません ([トンネルへ送る応答の詰まり](agent-parity.md#トンネルへ送る応答の詰まり))
 - keepalive の ping:`open_ping(now, Ipv4Addr) -> Result<PingId>`、`send_ping`、`recv_ping`、`close_ping`。
   表は Go と同じ固定の大きさで、満杯なら誤りを返します
 - 会計の故障:`udp_receive_fault() -> Option<UdpFault>` が、`agent doctor` の `tunnel.udp_accounting` に使う最初の違反を返します ([会計の不整合](../userspace/udp-accounting.md#会計の不整合))
@@ -412,6 +414,7 @@ UDP のソケットは駆動の task が持ちます。
 
 この規則で、核の出力は device の層の上限の内側にだけ滞留し、wgstack と UDP のソケットの間に上限の外の待ち行列はできません。
 核の出力は呼ばれない間も保持を増やさないので、送り出しの詰まりは核の中に積もらず、TCP の再送で回復します。
+UDP の応答だけは例外で、核の送信の予算の中に積もります。積もる量の上界は予算と、古いものから捨てる決まりと時間の上限で決まります ([トンネルへ送る応答の詰まり](agent-parity.md#トンネルへ送る応答の詰まり))。
 これは Go の設計の「出力の詰まり」と同じ性質です。
 
 ### 操作の知らせ
@@ -1495,6 +1498,17 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   ログの文面は記録の照合の対象ではありません。
   会計の不整合は門を通さずに 1 回だけ `LogKind::UdpFault` を出し、中身は `udp_receive_fault` が返します。
   ICMP の誤りの速さの制限で送らなかった数は `icmp_limited` に数えます
+- 古いものから捨てる送信:`send_to_latest` は、予約を断られたら捨ててから予約し直します。
+  endpoint の上限で断られたらその endpoint の最も古い送信の datagram を、核の全体の予算で断られたら送信の FIFO の先頭を捨て、足りるまで繰り返します。
+  捨てるのは入れる datagram の分だけなので、1 つの datagram が 1 回しか捨てられない分の仕事です。
+  外す操作を O(1) にするため、送信の FIFO は前の指しを持つ二重の list にし、endpoint の行は自分の送信の datagram の先頭と末尾を持ちます。
+  どの外し方でも、外すのは持ち主の endpoint で最も古い datagram なので、endpoint の列は一方向で足ります。
+  `max_age_ms` が 0 でなければ、datagram は入れた時刻 (ns) と時間の上限を持ち、`poll_udp` が先頭を取り出す時に、送り始めていない datagram が上限を超えていれば捨てます。
+  捨てた数は `udp_send_evicted` と `udp_send_expired` に数え、`LogKind::UdpSendDropped` の門 (1 分に 1 回まで) を通します。
+  `send_to` は変わらないので、凍結した Go の recording の照合には影響せず、divergences.json に足す行はありません。
+  待つ `send_to`、待ちの list の出入り、起こす経路は `cfg(test)` か `harness` の feature のときだけ作り、欄は残します。
+  endpoint の列では、送り始めた先頭を飛ばした捨てが 2 番目を外すことがあり、`unlink_tx` はそれ以外の位置を会計の不整合 (`UdpFault::SendListBroken`) にします。
+  不変条件の `check_invariants` は、送信の FIFO の前の指しと入れた時刻の順、endpoint の列の datagram の世代と順、列の長さが endpoint の送信の予算の件数に等しいことを確かめます
 - 断片の数:`fragments_dropped` は、Go の `FragmentsDropped` と同じく、datagram を完成させなかった断片 (保持した断片、重なった断片、捨てた断片) を数えます
 - 再組み立ての表の掃除の期限:`poll_timeout` は、表が項目を持つ間だけ次の掃除の時刻を返します (Go の `nextDeadline`)。
   呼び手の待ちのたびに表の全体をたどらないよう、表は使っている項目の数を持ちます

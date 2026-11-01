@@ -582,9 +582,20 @@ impl App {
             }
             _ => {
                 let k = r.pick(&[1usize, 1400, 9000, 65_000]);
-                let _ = n
-                    .stack()
-                    .send_to(now, u, &wbuf[..k], SocketAddrV4::new(PEER, port));
+                let to = SocketAddrV4::new(PEER, port);
+                // 待たずに古いものを捨てる送りと、時間の上限を持つ送りも混ぜます
+                match r.below(3) {
+                    0 => {
+                        let _ = n.stack().send_to(now, u, &wbuf[..k], to);
+                    }
+                    1 => {
+                        let _ = n.stack().send_to_latest(now, u, &wbuf[..k], to, 0);
+                    }
+                    _ => {
+                        let age = r.pick(&[1u16, 30, 100]);
+                        let _ = n.stack().send_to_latest(now, u, &wbuf[..k], to, age);
+                    }
+                }
             }
         }
     }
