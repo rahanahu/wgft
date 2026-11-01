@@ -10,6 +10,7 @@ default-members = [
   "crates/wgft-agent",
   "crates/wgft-netstack",
   "crates/wgft-proto",
+  "crates/wgft-udp-batch",
   "crates/wgft-wgstack",
   "crates/wgft-wireguard",
 ]
@@ -31,6 +32,7 @@ wgft-wgstack-bench = { path = "crates/wgft-wgstack-bench" }
 wgft-tcpharness = { path = "crates/wgft-tcpharness" }
 wgft-netstack = { path = "crates/wgft-netstack" }
 wgft-alloc-count = { path = "crates/wgft-alloc-count" }
+wgft-udp-batch = { path = "crates/wgft-udp-batch" }
 base64 = "0.23.1"
 criterion = "0.8.2"
 flate2 = "1.1.10"

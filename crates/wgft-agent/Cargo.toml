@@ -27,6 +27,7 @@ wgft-proto.workspace = true
 wgft-wireguard.workspace = true
 wgft-netstack.workspace = true
 wgft-wgstack.workspace = true
+wgft-udp-batch.workspace = true
 zeroize = { workspace = true, features = ["serde", "zeroize_derive"] }
 
 [lints]

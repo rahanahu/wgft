@@ -103,10 +103,8 @@ pub fn prepare_door(
         name: settings.name.clone(),
         version: crate::version(),
         allow_targets: settings.allow_targets.clone(),
-        limits: wgft_agent::flowpool::Limits {
-            udp: settings.max_udp_flows as usize,
-            tcp: settings.max_tcp_flows as usize,
-        },
+        limits: settings.flow_caps(),
+        batching: settings.batching(),
     };
     Ok(Prepared {
         options,

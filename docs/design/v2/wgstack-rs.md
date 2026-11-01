@@ -118,6 +118,7 @@ Go の `internal/ipv4frag` は gVisor の経路と共有する葉の package で
 | `crates/wgft-wgstack` | sans-IO の核 | 標準ライブラリだけ | 実装の担当 |
 | `crates/wgft-netstack` | 核を tokio の上で使う handle の層。TCP、UDP、ping の非同期の handle、waker の表、操作の知らせ | `wgft-wgstack`、tokio | 実装の担当 |
 | `crates/wgft-wgstack-bench` | 核の segment ごとの受信と送信の経路の criterion のベンチ。配布せず、`wgft` のバイナリにも入りません | `wgft-wgstack`、dev 依存の `criterion` | 実装の担当 |
+| `crates/wgft-udp-batch` | agent のトンネルのバッチの置き場と、Linux のバッチの system call の包み。agent のデータプレーンとホストの測定の道具が使います | Linux では `libc` | 実装の担当 |
 | `crates/wgft-agent-perf` | agent の tunnel のソケットの経路を、ホストの network namespace の中で `perf stat` の下で測る道具。配布せず、ワークスペースの既定の member に入りません。[agent-throughput.md](agent-throughput.md#目的byte-あたりの-cpu-と速さ)に使い方があります | `wgft-wireguard` | 実装の担当 |
 | `crates/wgft-wgstack/fuzz` | cargo-fuzz の target。ワークスペースの member に入りません | `wgft-wgstack`、`libfuzzer-sys` | target ごとに[fuzz](#fuzz)の表が決めます |
 | `crates/wgft-tcpharness`、`crates/wgft-wgstack-dut` | 試験の道具と DUT のバイナリ。配布せず、`wgft` のバイナリにも入りません | `wgft-wgstack` | 試験の担当 |
@@ -394,9 +395,11 @@ UDP のソケットは駆動の task が持ちます。
 ### 1 回の起床
 
 駆動の task は、UDP のソケットの準備、タイマー、操作の知らせ (後述) の 3 つを待ち、起きたら次の順に処理します。
+受信と送信はバッチで行い、1 と 3 を起床の始めから遅れの予算が経つまで交互に繰り返します ([バッチの作り](agent-throughput.md#バッチの作り))。
 
-1. UDP のソケットから datagram を読み、`Device::handle_datagram` に呼び手の復号の buffer と一緒に渡し、戻りの長さの packet を核の `handle_packet` に借用で渡します
-2. 時刻が来ていれば、device の層と核の `handle_timeout` を呼びます
+1. UDP のソケットから datagram の列を読み、それぞれを `Device::handle_datagram` でバッチの平文の領域に復号し、戻りの長さの packet を核の `handle_packet` に借用で渡します。
+   UDP の packet を先に渡します
+2. 最初の受信のバッチの後に、時刻が来ていれば、device の層と核の `handle_timeout` を呼びます
 3. 送り出しを次の規則で行います
 4. `poll_event` の知らせで waker を起こし、`poll_log` の行をログに出します
 5. device の層と核の `poll_timeout` の早い方でタイマーを張り直します
@@ -404,8 +407,9 @@ UDP のソケットは駆動の task が持ちます。
 送り出しの規則は次のとおりです。
 
 - 先に device の層:`Device::poll_transmit` が出す datagram を、ソケットが受け付ける間すべて送ります
-- 核から取り出す条件:device の層がピアとの使えるセッションを持ち、device の層の送る datagram の待ち行列が空の間だけ、核の `poll_transmit` で packet を 1 つ作り、`Device::handle_packet` で暗号にし、出た datagram を送ります。
-  これを 1 回の起床の上限の数まで繰り返します
+- 核から取り出す条件:device の層がピアとの使えるセッションを持ち、device の層の送る datagram の待ち行列が空で、前のバッチを送り切っている間だけ、核の `poll_transmit` でバッチの枠の数までの packet を作ります。
+  それを UDP の packet を先に `Device::handle_packet` で暗号にし、出た datagram の列を送ります。
+  これを 1 回の起床の遅れの予算の内で繰り返します
 - セッションが無いとき:核から取り出さず、device の層にハンドシェイクを始めさせます。
   セッションの無いピアへの packet はハンドシェイクを待つ待ち行列に入り、溢れると古いものから捨てられるためです。
   device の層の口は `Device::has_session` と `Device::start_handshake` です。
