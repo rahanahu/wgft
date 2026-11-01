@@ -16,13 +16,16 @@ use wgft_netstack::LanSocket;
 
 /// The receive buffer the LAN socket asks for while the tunnel side has no boost slot. Linux
 /// doubles it.
-pub const RECV_FLOOR: usize = 128 << 10;
+#[cfg(target_os = "linux")]
+pub(crate) const RECV_FLOOR: usize = 128 << 10;
 
 /// The receive buffer the LAN socket asks for while the tunnel side holds a boost slot.
-pub const RECV_BOOST: usize = 4 << 20;
+#[cfg(target_os = "linux")]
+pub(crate) const RECV_BOOST: usize = 4 << 20;
 
 /// The window clamp of the LAN socket, the size of the wgstack's boost receive buffer.
-pub const BOOST_WINDOW: usize = 4 << 20;
+#[cfg(target_os = "linux")]
+pub(crate) const BOOST_WINDOW: usize = 4 << 20;
 
 /// The LAN socket of a relayed connection, as the core's boost hook sees it.
 #[derive(Debug)]

@@ -47,24 +47,23 @@ use crate::logf;
 use crate::targets::{TargetError, Targets};
 use crate::tunnel::{Net, Stack};
 
-pub use lansock::{BOOST_WINDOW, LanConn, RECV_BOOST, RECV_FLOOR};
-pub use pipe::{BULK_BUF, BULK_KEEP, BULK_WAIT, IDLE_BUF};
-pub use replies::{REPLY_SLOTS, UDP_BUF};
-pub use udp::{DEFAULT_UDP_IDLE, MIN_SWEEP, sweep_interval, udp_idle_timeout};
-
-/// 宛先への接続の期限。
-pub const DIAL_TIMEOUT: Duration = crate::targets::DIAL_TIMEOUT;
+pub(crate) use lansock::LanConn;
+pub(crate) use pipe::{BULK_BUF, BULK_KEEP};
+pub(crate) use replies::{REPLY_SLOTS, UDP_BUF};
+#[cfg(test)]
+pub(crate) use udp::DEFAULT_UDP_IDLE;
+pub(crate) use udp::udp_idle_timeout;
 
 /// How often a finished relay checks first whether both sides delivered what they sent (Go's
 /// `deliveryPollMin`). The interval doubles up to [`DELIVERY_POLL_MAX`].
-pub const DELIVERY_POLL_MIN: Duration = Duration::from_millis(50);
+pub(crate) const DELIVERY_POLL_MIN: Duration = Duration::from_millis(50);
 
 /// The longest interval between two delivery checks (Go's `deliveryPollMax`).
-pub const DELIVERY_POLL_MAX: Duration = Duration::from_secs(2);
+pub(crate) const DELIVERY_POLL_MAX: Duration = Duration::from_secs(2);
 
 /// A listener's protocol. TCP sorts before UDP, as Go's `Key.String` names do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Kind {
+pub(crate) enum Kind {
     /// A TCP listener.
     Tcp,
     /// A UDP listener.
@@ -74,7 +73,7 @@ pub enum Kind {
 impl Kind {
     /// `tcp` or `udp`, the protocol word of Go's `proto.Proto`.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Kind::Tcp => "tcp",
             Kind::Udp => "udp",
@@ -90,7 +89,7 @@ impl fmt::Display for Kind {
 
 /// A listener's protocol and port (Go's `relay.Key`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Key {
+pub(crate) struct Key {
     /// The protocol.
     pub kind: Kind,
     /// The port on the tunnel address.
@@ -105,7 +104,7 @@ impl fmt::Display for Key {
 
 /// 試し接続の 1 周。[`Manager`] を借りずに走らせる。
 #[derive(Debug)]
-pub struct ProbeRound {
+pub(crate) struct ProbeRound {
     targets: Arc<Targets>,
     entries: Vec<ProbeEntry>,
 }
@@ -120,7 +119,7 @@ struct ProbeEntry {
 
 /// 試し接続の 1 周の結果。
 #[derive(Debug)]
-pub struct ProbeResults {
+pub(crate) struct ProbeResults {
     entries: Vec<ProbeEntry>,
     results: Vec<Result<(), TargetError>>,
 }
@@ -128,12 +127,12 @@ pub struct ProbeResults {
 impl ProbeRound {
     /// 試す宛先が無いか。
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// 試し接続を走らせる。同時に 32 件まで、1 件 2 秒。
-    pub async fn run(self) -> ProbeResults {
+    pub(crate) async fn run(self) -> ProbeResults {
         let list = self.entries.iter().map(|e| e.target.clone()).collect();
         let results = self.targets.probe_all(list).await;
         ProbeResults {
@@ -291,7 +290,7 @@ impl Drop for Listener {
 
 /// リスナー 1 つの状態 (Go の `relay.Status`)。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ListenerStat {
+pub(crate) struct ListenerStat {
     /// 属するルールの ID。
     pub rule_id: String,
     /// 待ち受けのプロトコルとポート。名前は [`ListenerStat::key`]。
@@ -310,8 +309,8 @@ pub struct ListenerStat {
 
 impl ListenerStat {
     /// `tcp/<port>` か `udp/<port>` の形の名前 (Go の `Key.String`)。
-    #[must_use]
-    pub fn name(&self) -> String {
+    #[cfg(test)]
+    pub(crate) fn name(&self) -> String {
         self.key.to_string()
     }
 }
@@ -344,7 +343,7 @@ fn go_port_order(a: u16, b: u16) -> std::cmp::Ordering {
 /// TCP と UDP のポートの数を超えない。v1 もルールの範囲の幅に上限を置かない。フロー数の予算もトンネルごとに作るので、
 /// 拒否の数はトンネルを作り直すと 0 に戻る。
 #[derive(Debug)]
-pub struct Manager {
+pub(crate) struct Manager {
     addr: Ipv4Addr,
     dataplane: Handle<Stack>,
     listeners: BTreeMap<Key, Listener>,
@@ -363,7 +362,7 @@ impl Manager {
     /// 動く。宛先の規則は `targets`、フロー数の上限は `limits` に従う。UDP のセッションは `udp_idle` の
     /// 間どちらの向きにも datagram が無ければ閉じる ([`udp_idle_timeout`] が全体状態の値から作る)。
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         addr: Ipv4Addr,
         dataplane: Handle<Stack>,
         targets: Arc<Targets>,
@@ -401,13 +400,13 @@ impl Manager {
 
     /// TCP のフロー数の予算。
     #[must_use]
-    pub fn tcp_pool(&self) -> &Pool {
+    pub(crate) fn tcp_pool(&self) -> &Pool {
         &self.tcp
     }
 
     /// UDP のフロー数の予算。
     #[must_use]
-    pub fn udp_pool(&self) -> &Pool {
+    pub(crate) fn udp_pool(&self) -> &Pool {
         &self.udp
     }
 
@@ -415,7 +414,7 @@ impl Manager {
     /// 実効宛先が同じならルールの ID だけを置き換える。開けなかったリスナーは状態の誤りに出し、
     /// [`Manager::retry`] が開き直す。開いたリスナーの宛先へ試し接続し、その結果を待ってから戻るので、
     /// 最初の状態は適用の直後のハートビートに載る。戻り値は操作の数。
-    pub async fn apply(&mut self, rules: &[AgentRule]) -> usize {
+    pub(crate) async fn apply(&mut self, rules: &[AgentRule]) -> usize {
         let mut want: BTreeMap<Key, (String, (String, u16))> = BTreeMap::new();
         self.unsupported.clear();
         for r in rules.iter().filter(|r| r.enabled) {
@@ -495,7 +494,8 @@ impl Manager {
     /// 30 秒ごとの見回り。開けなかったリスナーを開き直し、開いている TCP のリスナーの宛先へ試し接続する。
     /// UDP は到達を確かめる手段が無いので試さない (Go と同じ)。
     /// 宛先が戻れば誤りが消え、落ちれば付く。状態の変化はハートビートで報告される。
-    pub async fn retry(&mut self) {
+    #[cfg(test)]
+    pub(crate) async fn retry(&mut self) {
         let round = self.retry_round().await;
         let done = round.run().await;
         self.finish_probes(done);
@@ -504,7 +504,7 @@ impl Manager {
     /// 見回りのうち排他を要る前半。開けなかったリスナーを開き直し、試し接続の 1 周を返す。呼び手は
     /// agent の排他を放してから [`ProbeRound::run`] を走らせ、結果を [`Manager::finish_probes`] で書く。
     /// 試し接続の 1 周は宛先の数と応えない宛先で長くなるので、その間ハートビートと適用を止めないため。
-    pub async fn retry_round(&mut self) -> ProbeRound {
+    pub(crate) async fn retry_round(&mut self) -> ProbeRound {
         let closed: Vec<Key> = self
             .listeners
             .values()
@@ -537,7 +537,7 @@ impl Manager {
 
     /// 試し接続の結果を書く。走らせている間にリスナーが閉じたか、開き直されたか、宛先が変わった場合は、
     /// その結果を捨てる (Go の `applyProbes` と同じ)。到達性が変わったリスナーだけ、ログを 1 行出す。
-    pub fn finish_probes(&self, done: ProbeResults) {
+    pub(crate) fn finish_probes(&self, done: ProbeResults) {
         for (e, r) in done.entries.into_iter().zip(done.results) {
             let Some(l) = self.listeners.get(&e.key) else {
                 continue;
@@ -561,7 +561,7 @@ impl Manager {
     }
 
     /// すべてのリスナーと中継の接続を閉じる。
-    pub async fn close(&mut self) {
+    pub(crate) async fn close(&mut self) {
         close_all(std::mem::take(&mut self.listeners).into_iter().collect()).await;
     }
 
@@ -633,7 +633,7 @@ impl Manager {
 
     /// 待ち受けているリスナーの数。
     #[must_use]
-    pub fn listening(&self) -> usize {
+    pub(crate) fn listening(&self) -> usize {
         self.listeners.values().filter(|l| l.task.is_some()).count()
     }
 
@@ -642,7 +642,7 @@ impl Manager {
     /// ルールの状態の理由と `agent doctor` の最初の誤りは、この順で最初のリスナーから取る。接続の数と
     /// 予算の枠の数も読む。枠の数は予算の排他を 1 回取って読む。
     #[must_use]
-    pub fn listener_stats(&self) -> Vec<ListenerStat> {
+    pub(crate) fn listener_stats(&self) -> Vec<ListenerStat> {
         self.stats(true)
     }
 
@@ -688,7 +688,7 @@ impl Manager {
 
     /// ルールごとの状態。1 つでも誤りのリスナーがあればそのルールは `error`。
     #[must_use]
-    pub fn status(&self) -> Vec<RuleStatus> {
+    pub(crate) fn status(&self) -> Vec<RuleStatus> {
         self.status_of(&self.stats(false))
     }
 
@@ -696,7 +696,7 @@ impl Manager {
     /// `agent doctor` が同じ判定を使う (Go の `usermode.RuleStatuses`)。理由はリスナーの並びで最初の
     /// 誤りから取る。
     #[must_use]
-    pub fn status_of(&self, stats: &[ListenerStat]) -> Vec<RuleStatus> {
+    pub(crate) fn status_of(&self, stats: &[ListenerStat]) -> Vec<RuleStatus> {
         let mut by: BTreeMap<String, RuleStatus> = BTreeMap::new();
         for l in stats {
             // 範囲のルールはリスナーが多いので、ルールの ID を写すのは初めて見たときだけにする

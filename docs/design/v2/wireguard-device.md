@@ -195,7 +195,7 @@ MTU を外側の経路の限度に合わせて選んだ場合 (例えば IPv6 �
 そこで device は、送る packet の上限 (`Device::mtu`) を設定の MTU を 16 の倍数に切り下げた値にします (`sanstun_compat::inner_mtu`)。
 1420 なら 1408 です。
 詰めた後の平文は設定の MTU を超えず、datagram は設定の MTU に 32 バイトを足した長さ以下になります。
-上の層 (wgstack の核と TUN の殻) にはこの値を渡すので、TCP の MSS は 1368 になり、1380 バイトを超える UDP の datagram は核が断片に分けます。
+上の層 (wgstack の核) にはこの値を渡すので、TCP の MSS は 1368 になり、1380 バイトを超える UDP の datagram は核が断片に分けます。
 費用は packet ごとに最大 15 バイトの中身です。
 v1 の agent は wireguard-go の上で 1420 を使うので、MSS は 12 バイト小さくなります。
 MSS が小さくなる向きの違いなので、server の側に MSS のクランプは要りません ([tunnel.md の設定の対応](../spec/tunnel.md))。
@@ -242,13 +242,8 @@ sanstun が設定に無い鍵のために状態を増やさないことは、san
 
 ## 起動、再試行、期限切れ
 
-sanstun の persistent keepalive は、使えるセッションがあるときだけ送ります。
-sanstun は通信の有無に依らず間隔ごとに送ります。
+sanstun の persistent keepalive は、使えるセッションがあるときだけ、通信の有無に依らず間隔ごとに送ります。
 wireguard-go の persistent keepalive は、ピアへ送るか、ピアから認証した packet を受けるたびに間隔だけ先へ延びる timer です。
-通信の間に sanstun が足す keepalive は、間隔ごとに 32 バイトの datagram が 1 つ増えるだけで、害はありません。
-外から止めるには、sanstun が暗号化した keepalive を捨て、こちらの timer の期限に送り直す必要があります。
-sanstun は keepalive を送る口を公開しないので送り直せず、捨てると外向きの通信が最大で間隔の 2 倍まで途切れます。
-このため受け入れた違いとして残します。
 期限が来たときにセッションが無ければ、wireguard-go はハンドシェイクを始めます。
 device の層はこの timer をピアごとに持ちます。
 
@@ -260,6 +255,11 @@ device の層はこの timer をピアごとに持ちます。
 - 期限切れ:sanstun が接続の期限切れ (`REKEY_ATTEMPT_TIME` の 90 秒の間に応答が無い、または最後のハンドシェイクから 540 秒) を知らせたら、そのピアの状態と待っている packet を捨て、同じ設定の新しいトンネルに替えます。
   期限は keepalive の間隔の後に置き直します。
 - 送信:セッションの無いピアへの packet は、待たせてハンドシェイクを始めます。
+
+通信の間に sanstun が足す keepalive は、間隔ごとに 32 バイトの datagram が 1 つ増えるだけで、害はありません。
+外から止めるには、sanstun が暗号化した keepalive を捨て、こちらの timer の期限に送り直す必要があります。
+sanstun は keepalive を送る口を公開しないので送り直せず、捨てると外向きの通信が最大で間隔の 2 倍まで途切れます。
+このため受け入れた違いとして残します。
 
 ### ハンドシェイクの開始の間隔と打ち切りの後の休止
 
@@ -326,74 +326,6 @@ v1 の agent は keepalive の間隔ごとにトンネルの中で ping を送�
 v2 でも制御プレーンがこの ping を送ります。
 device の層の試験 `a_restarted_server_is_reached_again_by_traffic` は、この形の回復を偽の時計で確かめています。
 
-## 試作の外側の殻 (Linux の TUN)
-
-crate の `crates/wgft-wireguard-tun` は、`Device` を Linux の TUN と UDP の socket と tokio の event loop で動かす薄い殻です。
-ライブラリとして `spawn` と `Handle` (状態、endpoint の変更、socket の付け替え、event、停止) を持ち、同じ名前のバイナリを持ちます。
-ラボの試験と試作だけに使い、配布しません。
-Linux 以外では `spawn` が `Unsupported` の誤りを返します。
-
-agent はこの殻を使わなくなりました。
-agent はデータプレーンのスレッドで device の層と Rust の wgstack の核を直接動かします ([Rust の agent の置き換えの設計のデータプレーンのスレッドと送る経路](agent-parity.md#データプレーンのスレッドと送る経路))。
-殻は、device の層を Linux の WireGuard と wireguard-go に照らす `lab/wg-interop.sh` の道具として残し、ラボの一式が Rust の agent で通った後に消すかを決め直します。
-以下はその道具としての作りと、TUN の試作の agent が使っていた間の判断の記録です。
-
-TUN の試作の agent は、Rust の wgstack ができるまで、この殻の TUN を通してカーネルの TCP/IP stack を使いました。
-ラボの VM の中で、agent の中継はカーネルの socket を開きます。
-使い捨てのユーザー空間の TCP の stack は作りません。
-理由は 2 つです。
-1 つは、この段の目的が WireGuard の device の層と wire の相互運用を確かめることで、TCP の stack はその対象ではないためです。
-もう 1 つは、使い捨ての stack の試験と修正の費用が、Rust の wgstack ができた時点で無駄になるためです。
-この選択は試作の間だけのもので、v2 の agent のユーザー空間モードは TUN を使いません。
-
-TUN の先のカーネルは、受け取った packet をホストのすべてのサービスへ渡し、転送が有効なら LAN へも送ります。
-server がホストの別のサービスへ届かないように、殻は復号した packet を TUN へ書く前に呼び手の filter に通します。
-filter は packet ごとに、渡す、捨てる、返事を送る (例えば規則の無いポートへの TCP の RST) のどれかを決めます。
-返事は TUN から来た packet と同じく `Device::handle_packet` に入れます。
-何を通すかの判断は制御プレーンが持ち、殻は filter を呼んで数えるだけです。
-TUN から device への向きは filter に通しません。
-
-### 殻の経路
-
-乗っ取られた server がトンネルを通ってホストの別のサービスや LAN へ届かないように、殻は経路を次のように絞ります。
-
-- main の表を変えません。トンネルのアドレスは /32 でリンクに付けるので、アドレスの帯を TUN へ向ける経路はできません。
-  server が帯の広いアドレスを渡しても、LAN のルータのような帯の中のアドレスが TUN へ向くことはありません。
-- server の /32 は専用の表 (既定は 5180) に入れ、`from <トンネルのアドレス> lookup <表>` の rule (既定の優先度は 5180) でだけ引きます。
-  agent の中継の socket と ping の socket はトンネルのアドレスに bind するので、この rule に当たります。
-  表の番号は wg-quick の既定の 51820 を避けました。
-- 次の優先度の `from <トンネルのアドレス> unreachable` の rule で、トンネルのアドレスから表に無い宛先への通信を main の表へ落としません。
-- その次の優先度の `iif <TUN> blackhole` の rule で、TUN から来て、このホスト宛てでないものを捨てます。
-  このホスト宛ては優先度 0 の local の表で先に決まります。
-  IPv4 の転送が有効なホストでも、トンネルから LAN へは届きません。
-  殻は IPv4 の転送を変えません。
-- 3 つの rule は `protocol kernel` で足します。
-  systemd-networkd は、自分の設定に無い rule を起動し直しや reconfigure で消しますが、`kernel` の rule には触れません。
-- 足す前に、前の実行が残した同じ rule を消します。
-  それでも 3 つの優先度のどれかにほかの rule が残っているか、専用の表に経路があれば、ほかのソフトのものなので、混ぜずに止まります。
-  トンネルのアドレスが既にこのホストにある場合も止まります。
-  殻が止まるとき (設定の途中で失敗したときを含む) にも消します。
-  表の経路はリンクとともに消えます。
-- トンネルのアドレス以外を宛先にする packet は、filter の前に捨てて `wrong_destination` で数えます。
-  server はそうした packet を送らないので、数が増えるのは server が乗っ取られたか壊れた兆しです。
-  filter が捨てた数と device が捨てた数 (`Drops`) も、後の doctor が示せるように `Status` に出します。
-
-strict の rp_filter でも受信が通ることは、`lab/wg-interop.sh` が strict にして確かめます。
-
-TUN は `IFF_TUN_EXCL` で作り、同じ名前の持続する TUN が既にあれば付かずに失敗します。
-`ip` は PATH を使わず、root が持ちほかの利用者が書けないシステムの場所 (`/usr/sbin`、`/sbin`、`/usr/bin`、`/bin`) から探します。
-殻は TUN を閉じるときにリンクを消します。
-カーネルが、持続の印の無い TUN のリンクを記述子とともに消すためです。
-
-filter の panic は、その packet を捨てて数えます。
-filter が packet ごとに panic しても出力が溢れないように、殻は filter の中の panic を 1 分に 1 行だけ書く panic の hook を、元の hook の前に差し込みます。
-`panic = "abort"` で build したときは、プロセスが終わります。
-TUN の読み出しの誤りなどでループが終わると、`Handle::finished` が解け、`Handle::stop` がその誤りを返します。
-agent はトンネルを作り直します。
-
-`bind_to_device` は socket に `SO_BINDTODEVICE` で TUN を結び付けます。
-agent は待ち受けと ping の socket に使えます。
-
 ## 試験
 
 - 単体の試験:鍵、prefix、経路表、IPv4 の検査、キュー。経路表は wireguard-go の `TestTrieIPv4` (Linux の `selftest/allowedips.h` から移したもの) の場合を写し、素朴な最長一致の模型との一致を proptest で確かめます。
@@ -413,7 +345,10 @@ cd ..
 cargo +nightly fuzz run inbound -- -max_len=12000
 ```
 
-Linux の WireGuard と wireguard-go との相互運用は、この crate の上に積んだ TUN の殻と `lab/wg-interop.sh` で確かめます。
+Linux の WireGuard と wireguard-go との相互運用は、ラボの一式が Rust の agent を server の両方のモードと組んで確かめます。
+server のカーネルモードは Linux の WireGuard を、ユーザー空間モードは wireguard-go を使います。
+鍵の更新 (`REKEY_AFTER_TIME` の 120 秒) は `lab/lifecycle.sh` の check 13 が確かめます。
+TCP の接続と UDP の往復を 120 秒を超えて流し続け、server が新しいハンドシェイクを報告することと、前後のデータがすべて届くことを見ます。
 
 ## sanstun の振る舞いへの手当て
 
@@ -482,7 +417,7 @@ sanstun を改変 (fork やパッチ) しない所有者の方針に従い、受
 - sanstun 0.1.0 は第三者の監査を受けていません (sanstun の README)。
 - sanstun はハンドシェイクの開始の印 (TAI64N) にナノ秒までの時刻を入れます。
   WireGuard の仕様と Linux の実装は、時刻を 2^24 ナノ秒の単位に丸めて、印から送信の時刻を細かく読まれないようにします。
-  Linux の WireGuard と wireguard-go がこの印を受け付けることは、`lab/wg-interop.sh` (#671 の本文に結果) で確かめました。
+  Linux の WireGuard と wireguard-go がこの印を受け付けることは、ラボの一式のハンドシェイクで確かめています。
   印から時刻を細かく読まれることの影響は評価していません。
 - sanstun は、ピアごとに 1 秒あたり 50 回の開始の上限 (Linux の WireGuard) を持ちません。
   代わりに、全体で 1 秒あたり 100 回を超えると cookie を求め、cookie を持つ開始を送信元の IP ごとの bucket で絞ります。
@@ -500,5 +435,5 @@ sanstun を改変 (fork やパッチ) しない所有者の方針に従い、受
   `Instant::now()` をそのまま渡すと、Linux の `CLOCK_MONOTONIC` と macOS の時計は停止の間に進まず、device は壁時計では 180 秒より古いセッションをまだ新しいとみなし、相手はそれを捨てます。
   この場合は、返事の無いデータの 15 秒後に始まるハンドシェイクで回復すると見込みますが、確かめていません。
   停止の間も数えるには、呼び手が起動の時の `Instant` に、停止の間も進む時計 (Linux の `CLOCK_BOOTTIME`) の経過を足した値を渡します。
-  agent のデータプレーンは、v1 と同じく Linux と macOS では停止の間に止まる `Instant` を、Windows ではスリープの間も進む時計を渡すと決めました ([agent の置き換えの時計](agent-parity.md#時計))。
+  agent のデータプレーンは、v1 と同じく Linux と macOS では停止の間に止まる `Instant` を、Windows ではスリープの間も進む時計を渡します ([agent の置き換えの時計](agent-parity.md#時計))。
   Linux と macOS の上の回復の見込みは確かめていません。

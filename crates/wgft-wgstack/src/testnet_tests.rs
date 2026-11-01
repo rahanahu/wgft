@@ -162,7 +162,6 @@ pub(crate) struct Out {
     pub(crate) ts: Option<(u32, u32)>,
     pub(crate) sack: Vec<SackBlock>,
     pub(crate) payload: Vec<u8>,
-    pub(crate) id: u16,
 }
 
 impl Out {
@@ -403,7 +402,6 @@ pub(crate) fn parse_out(pkt: &[u8]) -> Out {
         ts: seg.opt.ts,
         sack: seg.opt.sack_blocks().to_vec(),
         payload: seg.payload.to_vec(),
-        id: u16::from_be_bytes([pkt[4], pkt[5]]),
     }
 }
 

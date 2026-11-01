@@ -123,7 +123,7 @@ impl Conn<'_> {
         self.s.signal(self.id, EV_WRITE);
     }
 
-    /// 握手の途中の行 `r` と最後の ACK から接続を確立します。dial の側を足す段では、交渉した値の組から作る
+    /// 握手の途中の行 `r` と最後の ACK から接続を確立します。dial の側を足すときは、交渉した値の組から作る
     /// 入口に分けます (wgstack-rs.md の「dial の側を足す継ぎ目」)。
     pub(crate) fn establish(&mut self, r: &SynRow, seg: &Segment<'_>, now: i64) {
         let generation = self.t.generation;
