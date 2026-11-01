@@ -69,6 +69,32 @@ impl Default for Limits {
     }
 }
 
+/// 輻輳の制御です。試験だけが選びます (Go の `Config.TestCongestion`)。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Congestion {
+    /// RFC 5681 の輻輳の回避と RFC 6582 です。
+    #[default]
+    NewReno,
+    /// RFC 9438 の CUBIC です。Go の既定です。
+    ///
+    /// CUBIC を入れる段 (PR 5) までは設定の誤りにし、その段で既定にします。
+    Cubic,
+}
+
+/// boost の与え方です。試験だけが選びます (Go の `Config.TestBoost`)。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BoostPolicy {
+    /// 需要の区間が閾値に届いた時に求めます。Go の既定です。
+    ///
+    /// boost の取得を入れる段 (PR 5) までは設定の誤りにし、その段で既定にします。
+    OnDemand,
+    /// accept が接続を返す時に求めます。PR 5 までは設定の誤りです。
+    AtAccept,
+    /// boost を求めません。
+    #[default]
+    Never,
+}
+
 /// 作成の時の設定です。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -78,6 +104,10 @@ pub struct Config {
     pub mtu: usize,
     /// 表の大きさです。
     pub limits: Limits,
+    /// 輻輳の制御です。
+    pub congestion: Congestion,
+    /// boost の与え方です。
+    pub boost: BoostPolicy,
 }
 
 impl Config {
@@ -87,6 +117,8 @@ impl Config {
             addr,
             mtu,
             limits: Limits::with_max_flows(0),
+            congestion: Congestion::NewReno,
+            boost: BoostPolicy::Never,
         }
     }
 }
@@ -98,6 +130,8 @@ pub enum ConfigError {
     Mtu(usize),
     /// 表の大きさが範囲の外です。
     Limits,
+    /// この段の核がまだ持たない選択です。
+    Unsupported,
 }
 
 impl fmt::Display for ConfigError {
@@ -105,6 +139,9 @@ impl fmt::Display for ConfigError {
         match self {
             Self::Mtu(m) => write!(f, "MTU {m} is out of range {MIN_MTU} to {MAX_MTU}"),
             Self::Limits => f.write_str("the table sizes are out of range"),
+            Self::Unsupported => f.write_str(
+                "the selected congestion control or boost policy is not implemented yet",
+            ),
         }
     }
 }
@@ -116,6 +153,9 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if !(MIN_MTU..=MAX_MTU).contains(&self.mtu) {
             return Err(ConfigError::Mtu(self.mtu));
+        }
+        if self.congestion != Congestion::NewReno || self.boost != BoostPolicy::Never {
+            return Err(ConfigError::Unsupported);
         }
         let l = &self.limits;
         // 番号は u32 に収め、タイマーの輪の節 (枠の数 × 4) も溢れない大きさにします。
@@ -158,6 +198,11 @@ mod tests {
         let c = Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420);
         assert_eq!(c.validate(), Ok(()));
         assert_eq!(c.limits.conns(), 2560);
+        let cubic = Config {
+            congestion: Congestion::Cubic,
+            ..c
+        };
+        assert_eq!(cubic.validate(), Err(ConfigError::Unsupported));
         assert_eq!(
             Limits::default(),
             Limits::with_max_flows(Limits::DEFAULT_MAX_FLOWS)

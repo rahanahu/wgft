@@ -76,7 +76,7 @@ impl RecordRing {
     }
 
     /// 末尾に記録を足します。呼び手は満杯でないことを確かめます。
-    pub(crate) fn push(&mut self, rec: Record) {
+    pub(crate) fn push_back(&mut self, rec: Record) {
         debug_assert!(!self.full());
         let len = self.recs.len();
         self.recs[(self.head + self.n) % len] = rec;
@@ -88,6 +88,13 @@ impl RecordRing {
         debug_assert!(self.n > 0);
         self.head = (self.head + 1) % self.recs.len();
         self.n -= 1;
+    }
+
+    /// 配列のすべての記録 (使っていない位置を含む) から印 `mask` を消します。世代の番号が一周した時に使います。
+    pub(crate) fn clear_flags(&mut self, mask: u8) {
+        for r in self.recs.iter_mut() {
+            r.flags &= !mask;
+        }
     }
 
     /// 記録をすべて外します。配列は持ち続けます。
@@ -134,11 +141,11 @@ mod tests {
     fn ring_wraps_and_moves() {
         let mut r = RecordRing::new(FixedVec::try_filled(3, |_| Record::default()).unwrap());
         for s in 1..=3 {
-            r.push(rec(s));
+            r.push_back(rec(s));
         }
         assert!(r.full());
         r.pop();
-        r.push(rec(4));
+        r.push_back(rec(4));
         assert_eq!((r.at(0).seq, r.at(2).seq), (2, 4));
         let old = r.resize(FixedVec::try_filled(5, |_| Record::default()).unwrap());
         assert_eq!(old.len(), 3);

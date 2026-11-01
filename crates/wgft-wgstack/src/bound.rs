@@ -18,7 +18,7 @@ use crate::frag;
 use crate::index;
 use crate::stack::{EventTargets, NoHook, Stack};
 use crate::tcp::NUM_TIMERS;
-use crate::tcp::conn::ConnSlot;
+use crate::tcp::conn;
 use crate::tcp::listen::{Listener, PORTS, PortRow};
 use crate::tcp::syn::SynRow;
 use crate::tcp::timewait::TwRow;
@@ -99,12 +99,13 @@ pub(crate) fn fix_parts(l: &Limits, mtu: usize, stack_size: usize) -> FixParts {
     let dlist = |k: usize| b(k * (2 * size_of::<u32>() + size_of::<bool>()));
     FixParts {
         stack: b(stack_size),
-        conn_slots: b(n * (size_of::<ConnSlot>() + size_of::<u32>())),
+        conn_slots: b(n * conn::slot_bytes()),
         conn_index: b(index::capacity_for(n) * (ent + size_of::<u64>())),
         syn: b(l.syn_rows * (size_of::<SynRow>() + size_of::<u32>())
             + index::capacity_for(l.syn_rows) * ent),
-        tw: b(l.tw_rows * (size_of::<TwRow>() + size_of::<u32>())
-            + index::capacity_for(l.tw_rows) * ent),
+        tw: b(l.tw_rows * (size_of::<TwRow>() + 3 * size_of::<u32>())
+            + index::capacity_for(l.tw_rows) * ent
+            + n * size_of::<u32>()),
         listeners: b(PORTS * size_of::<PortRow<Listener>>()),
         wheel: b(
             nodes * (size_of::<u64>() + 2 * size_of::<u32>() + size_of::<u16>())

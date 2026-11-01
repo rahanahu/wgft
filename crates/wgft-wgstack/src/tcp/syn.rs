@@ -2,16 +2,24 @@
 //!
 //! SYN-RCVD の接続を、接続の枠とは別の、バッファを持たない固定の数 N_syn の行に置きます。SYN-ACK の再送の
 //! 間隔は回数ごとに一定なので、回数ごとに 1 つの順序つきの list を持ち、各 list の先頭から期限を見ます。
-//! 空きの行は小さい番号から使い、返した行を先に使います。行を作り SYN-ACK を送る規則は核の段 (PR 4a) が
-//! 足します。
+//! 空きの行は小さい番号から使い、返した行を先に使います。握手の最後の ACK で接続の枠と accept の
+//! 待ち行列の枠を予約できたら、行を接続の枠に移します (`Stack::promote`)。
 
-use super::SYNACK_RETRIES;
+use super::listen::Listener;
+use super::{SYNACK_RETRIES, SYNACK_RTO, TS_OPTION_LEN, ts_clock};
 use crate::fixed_vec::{AllocError, FixedVec};
 use crate::index::Index;
 use crate::output::NIL;
 use crate::siphash::SipKey;
+use crate::stack::shared::LogKind;
+use crate::stack::{Shared, ns, time};
 use crate::time::Time;
 use crate::wire::Tuple;
+use crate::wire::{
+    self, FLAG_ACK, FLAG_RST, FLAG_SYN, IP_HEADER_LEN, MAX_OPTION_LEN, OptWriter, Segment,
+    TCP_HEADER_LEN, TcpHeader,
+};
+use crate::{seq, tcp};
 
 /// 行が次に送るものです。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -52,8 +60,6 @@ pub(crate) struct SynRow {
     pub(crate) ts_ok: bool,
     /// SYN-ACK を再送しました。
     pub(crate) rtx: bool,
-    /// 接続の枠へ移している途中です。
-    pub(crate) promoting: bool,
     pub(crate) used: bool,
     pub(crate) pending: RowSend,
 }
@@ -245,6 +251,256 @@ impl SynTable {
             return Err("a half-open row is in no list");
         }
         Ok(())
+    }
+}
+
+impl Shared {
+    /// 待ち受け `l` への新しい SYN に握手の途中の行を作れるかを返します。
+    pub(crate) fn syn_room(&self, l: &Listener) -> bool {
+        self.syn.has_free() && usize::from(l.syn_count) < self.config.limits.syn_rows / 2
+    }
+
+    /// 待ち受けへの SYN から行を作り、SYN-ACK を送ります。表が満杯か、待ち受けが N_syn の半分を使っていれば、
+    /// 状態を作らずに捨てます。`reuse` は TIME_WAIT の 4 つ組を使い直す時の前の接続の SND.NXT です。
+    pub(crate) fn new_syn_row(&mut self, seg: &Segment<'_>, now: i64, reuse: Option<u32>) {
+        let port = seg.tup.lport;
+        if !self
+            .listeners
+            .by_port(port)
+            .is_some_and(|l| self.syn_room(l))
+        {
+            self.refused(LogKind::SynFull, now);
+            return;
+        }
+        let ts = seg.opt.ts;
+        let ts_ok = ts.is_some();
+        let row = SynRow {
+            tup: seg.tup,
+            listener: port,
+            iss: self.isn(seg.tup, now, reuse),
+            irs: seg.seq,
+            deadline: time(now + SYNACK_RTO),
+            peer_mss: seg.opt.mss.filter(|&m| m != 0).unwrap_or(536),
+            ws_ok: seg.opt.wscale.is_some(),
+            snd_wscale: seg.opt.wscale.unwrap_or(0),
+            // SACK は SACK の段 (PR 5) まで交渉しません。SYN-ACK に SACK-permitted を載せません。
+            sack_ok: false,
+            ts_ok,
+            ts_recent: ts.map_or(0, |(v, _)| v),
+            ts_offset: if ts_ok { self.ts_offset(seg.tup) } else { 0 },
+            rcv_wnd: u16::try_from(self.initial_window(ts_ok)).unwrap_or(u16::MAX),
+            pending: RowSend::SynAck,
+            ..SynRow::default()
+        };
+        let Some(id) = self.syn.insert(row) else {
+            return;
+        };
+        if let Some(l) = self.listeners.by_port_mut(port) {
+            l.syn_count += 1;
+        }
+        self.queue_row(id);
+    }
+
+    /// 行を外して空きに返します。
+    pub(crate) fn remove_syn_row(&mut self, id: u32) {
+        let r = *self.syn.row(id);
+        if !r.used {
+            return;
+        }
+        self.syn.remove(id);
+        self.unqueue_row(id);
+        if let Some(l) = self.listeners.by_port_mut(r.listener) {
+            l.syn_count -= 1;
+        }
+    }
+
+    /// 握手の途中の行への segment を処理します。握手の最後の ACK で accept の待ち行列の枠を予約できたら真を返し、
+    /// 呼び手は接続の枠を取って行を移します。予約できなければ ACK を捨て、行は残ります (Linux の
+    /// tcp_abort_on_overflow=0 と同じ)。
+    pub(crate) fn syn_input(&mut self, id: u32, seg: &Segment<'_>, now: i64) -> bool {
+        let r = *self.syn.row(id);
+        let rcv_nxt = r.irs.wrapping_add(1);
+        let in_window = || {
+            let end = seg.seq.wrapping_add(seg.seq_len());
+            seq::ge(end, rcv_nxt) && seq::le(seg.seq, rcv_nxt.wrapping_add(u32::from(r.rcv_wnd)))
+        };
+        if seg.has(FLAG_RST) {
+            if in_window() {
+                self.remove_syn_row(id);
+            }
+            return false;
+        }
+        if seg.has(FLAG_SYN) {
+            if !seg.has(FLAG_ACK) && seg.seq == r.irs {
+                // 相手が SYN を再送しました。SYN-ACK を送り直します。
+                let row = self.syn.row_mut(id);
+                (row.pending, row.rtx) = (RowSend::SynAck, true);
+                self.queue_row(id);
+                return false;
+            }
+            if in_window() {
+                self.reply_rst(seg);
+                self.remove_syn_row(id);
+                return false;
+            }
+            self.row_ack(id, now);
+            return false;
+        }
+        if !seg.has(FLAG_ACK) {
+            return false;
+        }
+        if seg.ack != r.iss.wrapping_add(1) {
+            self.reply_rst(seg);
+            return false;
+        }
+        if r.ts_ok
+            && let Some((ts_val, _)) = seg.opt.ts
+            && seq::lt(ts_val, r.ts_recent)
+        {
+            self.row_ack(id, now);
+            return false;
+        }
+        if !in_window() {
+            self.row_ack(id, now);
+            return false;
+        }
+        let q = self.config.limits.accept_queue;
+        let full = self
+            .listeners
+            .by_port(r.listener)
+            .is_none_or(|l| usize::from(l.qlen) >= q / 2);
+        if full || self.queued >= q || self.conn_free.is_empty() {
+            self.refused(LogKind::AcceptOverflow, now);
+            return false;
+        }
+        self.queued += 1;
+        if let Some(l) = self.listeners.by_port_mut(r.listener) {
+            l.qlen += 1;
+        }
+        true
+    }
+
+    /// 予約した accept の待ち行列の枠を返します。接続の枠を取れなかったときに使います。
+    pub(crate) fn unreserve_accept(&mut self, port: u16, now: i64) {
+        self.queued -= 1;
+        if let Some(l) = self.listeners.by_port_mut(port) {
+            l.qlen -= 1;
+        }
+        self.refused(LogKind::AcceptOverflow, now);
+    }
+
+    /// 行から ACK を送ります。challenge ACK と同じ速さの制限を受けます。
+    fn row_ack(&mut self, id: u32, now: i64) {
+        if !self.challenge_allowed(now) {
+            return;
+        }
+        let row = self.syn.row_mut(id);
+        if row.pending == RowSend::None {
+            row.pending = RowSend::Ack;
+        }
+        self.queue_row(id);
+    }
+
+    /// SYN-ACK の再送の期限が来た行を処理します。再送の回数を使い切った行は消します。
+    pub(crate) fn expire_syn_rows(&mut self, now: i64) {
+        for k in 0..=SYNACK_RETRIES {
+            while let Some(id) = self.syn.list_head(k) {
+                let r = *self.syn.row(id);
+                if ns(r.deadline) > now {
+                    break;
+                }
+                if usize::from(r.retries) >= SYNACK_RETRIES {
+                    self.remove_syn_row(id);
+                    continue;
+                }
+                self.syn.list_remove(id);
+                let row = self.syn.row_mut(id);
+                row.retries += 1;
+                row.deadline = time(now + (SYNACK_RTO << row.retries));
+                (row.pending, row.rtx) = (RowSend::SynAck, true);
+                self.syn.list_push(id);
+                self.queue_row(id);
+            }
+        }
+    }
+
+    /// 行の組の項目 `id` の packet を作ります。
+    pub(crate) fn poll_row(&mut self, id: u32, b: &mut [u8], now: i64) -> usize {
+        let cap = u32::try_from(self.syn.capacity()).unwrap_or(0);
+        if id >= cap {
+            return self.poll_tw_row(id - cap, b, now);
+        }
+        let r = *self.syn.row(id);
+        if !r.used || r.pending == RowSend::None {
+            return 0;
+        }
+        let row = self.syn.row_mut(id);
+        row.pending = RowSend::None;
+        if r.pending == RowSend::SynAck {
+            if row.sent_at.as_nanos() == 0 {
+                row.sent_at = time(now);
+            }
+            return self.build_syn_ack(&r, b, now);
+        }
+        let h = TcpHeader {
+            tup: r.tup,
+            seq: r.iss.wrapping_add(1),
+            ack: r.irs.wrapping_add(1),
+            flags: FLAG_ACK,
+            wnd: r.rcv_wnd,
+        };
+        self.build_row_ack(b, &h, r.ts_ok, r.ts_offset, r.ts_recent, now)
+    }
+
+    /// 行の SYN-ACK を作ります。option は Linux と同じ並び (MSS、SACK-perm と TS、窓の scale) です。
+    fn build_syn_ack(&mut self, r: &SynRow, b: &mut [u8], now: i64) -> usize {
+        let mut o = OptWriter::default();
+        o.mss(u16::try_from(self.our_mss()).unwrap_or(u16::MAX));
+        let ts_val = ts_clock(now).wrapping_add(r.ts_offset);
+        match (r.sack_ok, r.ts_ok) {
+            (true, true) => o.sack_perm_with_ts(ts_val, r.ts_recent),
+            (false, true) => o.ts(ts_val, r.ts_recent),
+            (true, false) => o.sack_perm(),
+            (false, false) => {}
+        }
+        if r.ws_ok {
+            o.wscale(tcp::RCV_WINDOW_SHIFT);
+        }
+        let h = TcpHeader {
+            tup: r.tup,
+            seq: r.iss,
+            ack: r.irs.wrapping_add(1),
+            flags: FLAG_SYN | FLAG_ACK,
+            wnd: r.rcv_wnd,
+        };
+        if b.len() < IP_HEADER_LEN + TCP_HEADER_LEN + MAX_OPTION_LEN {
+            return 0;
+        }
+        let id = self.next_id();
+        wire::write_tcp(b, id, &h, Some(&mut o), 0);
+        wire::finish_tcp(b)
+    }
+
+    /// 行から送る ACK を作ります。
+    pub(crate) fn build_row_ack(
+        &mut self,
+        b: &mut [u8],
+        h: &TcpHeader,
+        ts: bool,
+        ts_offset: u32,
+        ts_recent: u32,
+        now: i64,
+    ) -> usize {
+        if b.len() < IP_HEADER_LEN + TCP_HEADER_LEN + TS_OPTION_LEN as usize {
+            return 0;
+        }
+        let mut o = OptWriter::default();
+        if ts {
+            o.ts(ts_clock(now).wrapping_add(ts_offset), ts_recent);
+        }
+        let id = self.next_id();
+        wire::write_tcp(b, id, h, Some(&mut o), 0);
+        wire::finish_tcp(b)
     }
 }
 

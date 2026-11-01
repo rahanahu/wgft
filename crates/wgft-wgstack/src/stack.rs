@@ -1,11 +1,15 @@
-//! 核の値 (wgstack-rs.md の「sans-IO の API」)。
+//! 核の値 (wgstack-rs.md の「sans-IO の API」、Go の `stack.go` と `device.go`)。
 //!
-//! この段の核は表をすべて作成の時に確保し、上界と保持の量と不変条件を出し、閉じる時にすべてを返します。
-//! packet の入出力とアプリケーションの操作は核の段 (PR 4a 以降) が足します。
+//! 核は表をすべて作成の時に確保し、packet と時刻とアプリケーションの操作を受けて状態を変え、送る packet、
+//! 次に起こす時刻、知らせを出します。閉じる時にすべてを返します。
+//! アプリケーションの操作は [`api`] にあり、接続の枠の外の共有の状態は [`shared`] にあります。
+
+pub(crate) mod api;
+pub(crate) mod shared;
 
 use crate::bound::{Bound, Held};
 use crate::budget::Budget;
-use crate::buf::chunk::ChunkPool;
+use crate::buf::chunk::{CHUNK_SIZE, ChunkPool};
 use crate::buf::{BOOST_SIZE, RECV_FLOOR, SEND_FLOOR};
 use crate::config::{Config, ConfigError};
 use crate::event::EventList;
@@ -13,16 +17,20 @@ use crate::fixed_vec::{AllocError, FixedVec};
 use crate::frag;
 use crate::index::Index;
 use crate::output::{CtlRing, Dlist};
-use crate::rng::{ChaCha8, Seeds};
-use crate::siphash::SipKey;
-use crate::tcp::NUM_TIMERS;
-use crate::tcp::conn::{ConnId, ConnSlots};
+use crate::rng::Seeds;
+use crate::tcp::conn::{ConnBufs, ConnId, ConnSlots, QLink, State, Tcb, new_free_list};
+use crate::tcp::ctx::Conn;
 use crate::tcp::listen::{self, Listener, PORTS, PortTable};
 use crate::tcp::syn::SynTable;
 use crate::tcp::timewait::TwTable;
+use crate::tcp::{NUM_TIMERS, NUM_TIMERS32};
 use crate::time::Time;
-use crate::wheel::Wheel;
+use crate::wheel::{NO_TICK, TICK_NS, Wheel};
+use crate::wire::{self, FLAG_ACK, FLAG_RST, FLAG_SYN, Ipv4Drop, PayloadDrop};
+pub use api::{Error, Event, ListenerId};
 use core::fmt;
+pub use shared::{LogKind, LogLine, Stats};
+pub(crate) use shared::{Output, Shared};
 
 /// 核が呼び手に伝える boost の変化と問い合わせです (wgstack-rs.md の「boost の hook」)。
 ///
@@ -130,38 +138,32 @@ impl EventTargets {
 
 /// wgstack の核です。1 つの所有者が `&mut` で呼ぶ値で、錠を持ちません。
 pub struct Stack<H: Hook = NoHook> {
-    pub(crate) config: Config,
-    pub(crate) now: Time,
-    pub(crate) isn_key: SipKey,
-    pub(crate) ts_key: SipKey,
-    pub(crate) ip_id: u32,
-    pub(crate) rng: ChaCha8,
     pub(crate) conns: ConnSlots,
-    pub(crate) conn_idx: Index,
-    pub(crate) syn: SynTable,
-    pub(crate) tw: TwTable,
-    pub(crate) listeners: PortTable<Listener>,
-    /// accept の待ち行列の全体の数です。
-    pub(crate) queued: usize,
-    pub(crate) out_conns: Dlist,
-    pub(crate) out_rows: Dlist,
-    pub(crate) ctl: CtlRing,
-    pub(crate) events: EventList,
-    pub(crate) wheel: Wheel,
-    pub(crate) fired: FixedVec<u32>,
-    pub(crate) chunks: ChunkPool,
-    pub(crate) frag: frag::Table,
-    pub(crate) budget: Budget,
+    pub(crate) s: Shared,
     pub(crate) hook: H,
 }
 
 impl<H: Hook> fmt::Debug for Stack<H> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Stack")
-            .field("config", &self.config)
-            .field("now", &self.now)
+            .field("config", &self.s.config)
+            .field("now", &self.s.now)
             .finish_non_exhaustive()
     }
+}
+
+/// 核が使う時刻の上限 (ns) です。約 73 年で、核が時刻に足す最も長い期限 (PAWS の 24 日、再送の打ち切りの
+/// 約 15 分) を足しても `i64` に収まります。
+pub(crate) const MAX_NOW: i64 = i64::MAX / 4;
+
+/// 核の時刻を Go と同じ符号つきの ns にします。`i64` を超える時刻は上限で止めます。
+pub(crate) fn ns(t: Time) -> i64 {
+    i64::try_from(t.as_nanos()).unwrap_or(i64::MAX)
+}
+
+/// 符号つきの ns を核の時刻にします。負の値は 0 にします。
+pub(crate) fn time(ns: i64) -> Time {
+    Time::from_nanos(u64::try_from(ns).unwrap_or(0))
 }
 
 impl<H: Hook> Stack<H> {
@@ -176,27 +178,40 @@ impl<H: Hook> Stack<H> {
         }
         match Tables::new(&config, seed) {
             Ok(t) => Ok(Self {
-                config,
-                now: Time::ZERO,
-                isn_key: t.seeds.isn_key,
-                ts_key: t.seeds.ts_key,
-                ip_id: t.seeds.ip_id,
-                rng: t.seeds.rng,
                 conns: t.conns,
-                conn_idx: t.conn_idx,
-                syn: t.syn,
-                tw: t.tw,
-                listeners: t.listeners,
-                queued: 0,
-                out_conns: t.out_conns,
-                out_rows: t.out_rows,
-                ctl: t.ctl,
-                events: t.events,
-                wheel: t.wheel,
-                fired: t.fired,
-                chunks: t.chunks,
-                frag: t.frag,
-                budget,
+                s: Shared {
+                    config,
+                    addr: config.addr.to_bits(),
+                    now: 0,
+                    isn_key: t.seeds.isn_key,
+                    ts_key: t.seeds.ts_key,
+                    ip_id: t.seeds.ip_id,
+                    rng: t.seeds.rng,
+                    conn_free: t.conn_free,
+                    qlinks: t.qlinks,
+                    conn_idx: t.conn_idx,
+                    syn: t.syn,
+                    tw: t.tw,
+                    listeners: t.listeners,
+                    queued: 0,
+                    out: Output {
+                        conns: t.out_conns,
+                        rows: t.out_rows,
+                        ctl: t.ctl,
+                        cur: 0,
+                        deficit: [0; shared::NUM_CLASSES],
+                    },
+                    events: t.events,
+                    wheel: t.wheel,
+                    fired: t.fired,
+                    chunks: t.chunks,
+                    frag: t.frag,
+                    budget,
+                    ch_sec: -1,
+                    ch_count: 0,
+                    stats: Stats::default(),
+                    gates: shared::Gates::default(),
+                },
                 hook,
             }),
             Err(_) => Err(NewError {
@@ -208,63 +223,87 @@ impl<H: Hook> Stack<H> {
 
     /// 作成の時の設定です。
     pub fn config(&self) -> &Config {
-        &self.config
+        &self.s.config
     }
 
     /// この核の上界の式の値です。作成の時の設定と型の大きさだけから決まります。
     pub fn bound(&self) -> Bound {
-        Bound::with_stack_size(&self.config.limits, self.config.mtu, size_of::<Self>())
+        Bound::with_stack_size(&self.s.config.limits, self.s.config.mtu, size_of::<Self>())
+    }
+
+    /// 枠 `i` の接続の view です。
+    pub(crate) fn conn(&mut self, i: u32) -> Conn<'_> {
+        let (t, k, b) = self.conns.parts_mut(i);
+        Conn {
+            id: i,
+            t,
+            k,
+            b,
+            s: &mut self.s,
+        }
+    }
+
+    /// 呼び手の時刻を核の時刻にします。前の値より戻った時刻は前の値にします。
+    ///
+    /// 時刻は [`MAX_NOW`] で止めます。核は時刻に期限の長さを足すので、止めないと上限の近くの時刻で足し算が
+    /// 溢れます。
+    pub(crate) fn clock(&mut self, now: Time) -> i64 {
+        self.s.now = self.s.now.max(ns(now).min(MAX_NOW));
+        self.s.now
+    }
+
+    /// 事象の数です。
+    pub fn stats(&self) -> Stats {
+        self.s.stats
     }
 
     /// 核が今持つ可変の保持の量です。
     pub fn held(&self) -> Held {
         let mut h = Held::default();
-        for (_, s) in self.conns.iter() {
-            let (recs, ivs) = s.array_bytes();
+        for (_, t, b) in self.conns.iter_bufs() {
+            let (recs, ivs) = b.array_bytes();
             h.record_bytes += recs;
             h.interval_bytes += ivs;
-            if s.in_use {
+            if t.state != State::Free {
                 h.conns += 1;
-                h.chunk_bytes += s.held_chunks() * crate::buf::chunk::CHUNK_SIZE;
-                h.reserved += s.snd.cap() + s.rcv.r.cap();
-                if s.boost.is_some() {
+                h.chunk_bytes += b.held_chunks() * CHUNK_SIZE;
+                h.reserved += b.snd.cap() + b.rcv.r.cap();
+                if b.boost.is_some() {
                     h.boosted += 1;
                 }
             }
         }
-        h.syn_rows = self.syn.len();
-        h.tw_rows = self.tw.len();
-        h.accept_queued = self.queued;
-        h.ctl_queued = self.ctl.len();
-        h.frag_bytes = self.frag.usage().0 - self.frag.base_cost();
-        h.events = self.events.len();
-        h.pool_chunks = self.chunks.kept();
+        h.syn_rows = self.s.syn.len();
+        h.tw_rows = self.s.tw.len();
+        h.accept_queued = self.s.queued;
+        h.ctl_queued = self.s.out.ctl.len();
+        h.frag_bytes = self.s.frag.usage().0 - self.s.frag.base_cost();
+        h.events = self.s.events.len();
+        h.pool_chunks = self.s.chunks.kept();
         h
     }
 
     /// 不変条件を確かめます。予約の和が上界以下であること、表の数と予約が一致すること、chunk と配列の持ち主が
     /// 1 つであることを確かめます。呼んだ時だけ手間がかかり、製品は呼びません。試験と fuzz が各段の後に呼びます。
     pub fn check_invariants(&self) -> Result<(), InvariantError> {
-        self.conns.check()?;
-        self.conn_idx.check()?;
-        self.syn.check()?;
-        self.tw.check()?;
-        self.out_conns.check()?;
-        self.out_rows.check()?;
-        self.events.check()?;
-        self.wheel.check()?;
-        self.budget.check()?;
+        let s = &self.s;
+        self.conns.check(&s.conn_free, &s.qlinks)?;
+        s.conn_idx.check()?;
+        s.syn.check()?;
+        s.tw.check()?;
+        s.out.conns.check()?;
+        s.out.rows.check()?;
+        s.events.check()?;
+        s.wheel.check()?;
+        s.budget.check()?;
         // 接続の表の項目は、使っている枠を同じ 4 つ組と世代で指します。
         let mut bad = None;
-        self.conn_idx.for_each(|tup, slot| {
-            let s = self.conns.slot(slot);
-            if !s.in_use
-                || !s.in_index
-                || s.tup != tup
-                || self
-                    .conn_idx
-                    .find(tup)
-                    .is_none_or(|(_, g)| g != s.generation)
+        s.conn_idx.for_each(|tup, slot| {
+            let t = self.conns.tcb(slot);
+            if t.state == State::Free
+                || !t.in_index
+                || t.tup != tup
+                || s.conn_idx.find(tup).is_none_or(|(_, g)| g != t.generation)
             {
                 bad = Some("a connection index entry points to the wrong slot");
             }
@@ -275,43 +314,57 @@ impl<H: Hook> Stack<H> {
         let mut chunks = 0;
         let mut reserved = 0;
         let mut boosted = 0;
-        for (i, s) in self.conns.iter() {
-            if s.in_index != self.conn_idx.find(s.tup).is_some_and(|(id, _)| id == i) && s.in_use {
+        for (i, t, b) in self.conns.iter_bufs() {
+            let used = t.state != State::Free;
+            if used && t.in_index != s.conn_idx.find(t.tup).is_some_and(|(id, _)| id == i) {
                 return Err("a slot's index mark disagrees with the index".into());
             }
-            if let Some(b) = s.boost {
-                if self.budget.holder(b) != Some(self.conns.id(i)) {
+            if let Some(n) = b.boost {
+                if s.budget.holder(n) != Some(self.conns.id(i)) {
                     return Err("a boosted slot is not the holder of its boost slot".into());
                 }
                 boosted += 1;
             }
-            chunks += s.held_chunks();
-            if s.in_use {
-                reserved += s.snd.cap() + s.rcv.r.cap();
+            chunks += b.held_chunks();
+            if used {
+                reserved += b.snd.cap() + b.rcv.r.cap();
+                check_conn(t, b)?;
+            }
+            for (k, &d) in t.tdl.iter().enumerate() {
+                let node = i * NUM_TIMERS32 + u32::try_from(k).unwrap_or(0);
+                if (d != 0) != s.wheel.deadline(node).is_some() {
+                    return Err("a connection timer disagrees with the wheel".into());
+                }
+            }
+            if !used && s.out.conns.contains(i) {
+                return Err("a free slot is in the output list".into());
             }
         }
-        if chunks != self.chunks.held() {
+        if chunks != s.chunks.held() {
             return Err("the chunk pool count disagrees with the rings".into());
         }
-        if boosted != self.budget.lent() {
+        if boosted != s.budget.lent() {
             return Err("the lent boost slots disagree with the boosted connections".into());
         }
         let floors = self.conns.len() as u64 * (SEND_FLOOR + RECV_FLOOR);
-        let boosts = self.budget.slots() as u64 * (2 * BOOST_SIZE - SEND_FLOOR - RECV_FLOOR);
+        let boosts = s.budget.slots() as u64 * (2 * BOOST_SIZE - SEND_FLOOR - RECV_FLOOR);
         if reserved > floors + boosts {
             return Err("the reservations exceed the bound".into());
         }
         let mut queued = 0;
         let mut bad = None;
-        self.listeners
-            .for_each_open(|port, l| match listen::check_queue(l, port, &self.conns) {
+        s.listeners.for_each_open(|port, l| {
+            match listen::check_queue(l, port, &s.qlinks, |i| {
+                self.conns.tcb(i).state != State::Free
+            }) {
                 Ok(_) => queued += usize::from(l.qlen),
                 Err(e) => bad = Some(e),
-            });
+            }
+        });
         if let Some(e) = bad {
             return Err(e.into());
         }
-        if queued != self.queued || self.queued > self.config.limits.accept_queue {
+        if queued != s.queued || s.queued > s.config.limits.accept_queue {
             return Err("the accept queue lengths disagree with the total".into());
         }
         Ok(())
@@ -319,44 +372,278 @@ impl<H: Hook> Stack<H> {
 
     /// 待ち受けと接続とソケットをすべて閉じ、`Budget` と最後の会計を返します。最後の会計はすべて 0 です。
     pub fn close(mut self, now: Time) -> Closed {
-        self.now = self.now.max(now);
+        self.clock(now);
+        let s = &mut self.s;
         // 借りている boost の配列を枠に返します。
-        for i in 0..self.budget.slots() {
-            if self.budget.holder(i).is_some() {
-                let s = self
-                    .conns
-                    .iter()
-                    .find(|(_, s)| s.boost == Some(i))
-                    .map(|(n, _)| n);
-                if let Some(n) = s {
-                    let (recs, iv) = self.conns.slot_mut(n).take_boost_arrays();
-                    self.budget.release(i, recs, iv);
-                }
+        for i in 0..s.budget.slots() {
+            if let Some(id) = s.budget.holder(i) {
+                let (recs, iv) = self.conns.bufs_mut(id.slot).take_boost_arrays();
+                s.budget.release(i, recs, iv);
             }
         }
-        self.syn.clear();
-        self.tw.clear();
-        self.conns.free_all(&mut self.chunks);
-        self.chunks.drain();
-        self.frag.clear();
-        self.ctl.clear();
-        self.events.clear();
-        while self.out_conns.pop_front().is_some() {}
-        while self.out_rows.pop_front().is_some() {}
-        self.queued = 0;
+        s.syn.clear();
+        s.tw.clear();
+        self.conns.free_all(&mut s.chunks);
+        s.chunks.drain();
+        s.frag.clear();
+        s.out.ctl.clear();
+        s.events.clear();
+        while s.out.conns.pop_front().is_some() {}
+        while s.out.rows.pop_front().is_some() {}
+        for l in s.qlinks.iter_mut() {
+            *l = QLink::default();
+        }
+        s.queued = 0;
         let held = self.held();
         debug_assert!(held.is_zero(), "close left {held:?}");
         Closed {
-            budget: self.budget,
+            budget: self.s.budget,
             held,
         }
     }
+
+    /// トンネルから届いた IPv4 の packet を 1 つ処理します (Go の `stack.input`)。packet は呼び出しの間だけ
+    /// 読み、保持するものは自分の予約に写します。捨てた packet は理由ごとに数えます。
+    pub fn handle_packet(&mut self, now: Time, pkt: &[u8]) {
+        let now = self.clock(now);
+        let ip = match wire::parse_ipv4(pkt) {
+            Ok(ip) => ip,
+            Err(Ipv4Drop::Malformed) => {
+                self.s.stats.malformed += 1;
+                return;
+            }
+            Err(Ipv4Drop::BadChecksum) => {
+                self.s.stats.bad_checksum += 1;
+                return;
+            }
+        };
+        if ip.dst != self.s.addr || ip.src == ip.dst {
+            self.s.stats.not_local += 1;
+            return;
+        }
+        if ip.fragment {
+            // 再組み立ての表との結合は UDP と ICMP の段 (PR 6) が足します。
+            self.s.stats.fragments_dropped += 1;
+            return;
+        }
+        match ip.proto {
+            wire::PROTO_TCP => match wire::parse_tcp(&ip) {
+                Ok(seg) => self.input_tcp(&seg, now),
+                Err(PayloadDrop::Malformed) => self.s.stats.malformed += 1,
+                Err(PayloadDrop::BadChecksum) => self.s.stats.bad_checksum += 1,
+            },
+            // UDP と ICMP は PR 6 が足します。
+            wire::PROTO_UDP => self.s.stats.udp_dropped += 1,
+            wire::PROTO_ICMP => self.s.stats.icmp_dropped += 1,
+            _ => self.s.stats.malformed += 1,
+        }
+    }
+
+    /// TCP の segment を、接続の枠、TIME_WAIT の行、握手の途中の行、待ち受けの順に渡します。
+    fn input_tcp(&mut self, seg: &wire::Segment<'_>, now: i64) {
+        if seg.has(FLAG_SYN)
+            && seg
+                .opt
+                .mss
+                .is_some_and(|m| m != 0 && u32::from(m) < crate::tcp::MIN_MSS)
+        {
+            self.s.drop_mss(now);
+            return;
+        }
+        let mut reuse = None;
+        for _ in 0..3 {
+            if let Some((id, generation)) = self.s.conn_idx.find(seg.tup) {
+                let t = self.conns.tcb(id);
+                if t.generation != generation || !t.in_index {
+                    continue;
+                }
+                if self.conn(id).input(seg, now, &mut reuse) {
+                    continue; // TIME_WAIT の接続が新しい SYN を受けた (RFC 6191)
+                }
+                return;
+            }
+            if let Some(r) = self.s.tw.find(seg.tup)
+                && self.s.tw_input(r, seg, now, &mut reuse)
+            {
+                return;
+            }
+            // 行を外したら、SYN を待ち受けに渡します。
+            if let Some(r) = self.s.syn.find(seg.tup) {
+                if self.s.syn_input(r, seg, now) {
+                    self.promote(r, seg, now);
+                }
+                return;
+            }
+            let listening = self.s.listeners.by_port(seg.tup.lport).is_some();
+            if listening && seg.flags & (FLAG_SYN | FLAG_ACK | FLAG_RST) == FLAG_SYN {
+                self.s.new_syn_row(seg, now, reuse);
+                return;
+            }
+            if listening && seg.has(FLAG_SYN) && !seg.has(FLAG_ACK) {
+                return; // SYN と RST の両方を持つ segment は捨てます
+            }
+            self.s.reply_rst(seg);
+            return;
+        }
+    }
+
+    /// 握手の途中の行 `row` を空きの接続の枠に移し、accept の待ち行列に入れ、最後の ACK が運んだ
+    /// データと FIN を処理します (Go の `promote`)。
+    fn promote(&mut self, row: u32, seg: &wire::Segment<'_>, now: i64) {
+        let r = *self.s.syn.row(row);
+        // floor の配列を確保できなければ、accept の待ち行列が満杯の時と同じく ACK を捨てて行を残します。
+        let Ok(Some(slot)) = self.conns.alloc(&mut self.s.conn_free) else {
+            self.s.unreserve_accept(r.listener, now);
+            return;
+        };
+        let mut c = self.conn(slot);
+        c.establish(&r, seg, now);
+        c.s.remove_syn_row(row);
+        let generation = c.t.generation;
+        c.s.conn_idx.insert(c.t.tup, slot, generation);
+        c.t.in_index = true;
+        let port = r.listener;
+        if let Some(l) = c.s.listeners.by_port_mut(port) {
+            listen::enqueue(l, port, &mut c.s.qlinks, slot);
+        }
+        c.s.signal_listener(port);
+        c.input_data(seg, now);
+        c.after_input(now);
+    }
+
+    /// 期限の来たタイマーと行の期限を、新しい `now` の時刻で 1 回ずつ処理します (Go の `advance`)。
+    pub fn handle_timeout(&mut self, now: Time) {
+        let now = self.clock(now);
+        let mut fired = core::mem::take(&mut self.s.fired);
+        fired.clear();
+        self.s
+            .wheel
+            .advance(u64::try_from(now).unwrap_or(0), &mut fired);
+        for &n in fired.iter() {
+            let i = n / NUM_TIMERS32;
+            let kind = (n % NUM_TIMERS32) as usize;
+            let t = self.conns.tcb_mut(i);
+            if t.state != State::Free && t.tdl[kind] != 0 && t.tdl[kind] <= now {
+                t.tdl[kind] = 0;
+                self.conn(i).on_timer(kind, now);
+            }
+        }
+        fired.clear();
+        self.s.fired = fired;
+        self.s.expire_syn_rows(now);
+        self.s.expire_tw_rows(now);
+    }
+
+    /// 次に [`Stack::handle_timeout`] を呼ぶ時刻です。
+    pub fn poll_timeout(&self) -> Option<Time> {
+        let mut next: Option<i64> = None;
+        let tick = self.s.wheel.next_tick();
+        if tick != NO_TICK {
+            next = Some(i64::try_from(tick * TICK_NS).unwrap_or(i64::MAX));
+        }
+        for d in [self.s.syn.next_deadline(), self.s.tw.next_deadline()]
+            .into_iter()
+            .flatten()
+        {
+            let d = ns(d);
+            if d != 0 && next.is_none_or(|n| d < n) {
+                next = Some(d);
+            }
+        }
+        next.map(time)
+    }
+
+    /// 次に送る IPv4 の packet を 1 つ `buf` に作り、長さを返します。`buf` は MTU 以上の長さを持ちます。組は
+    /// deficit round robin で選びます (Go の `stack.poll`)。
+    pub fn poll_transmit(&mut self, now: Time, buf: &mut [u8]) -> Option<usize> {
+        let now = self.clock(now);
+        let quantum = i64::try_from(self.s.config.mtu).unwrap_or(i64::MAX);
+        // 取り出した項目が何も作らなければ次を見ます。何も作らない項目は入れ直さないので、この繰り返しは有限です。
+        // 守りを重ねるため、list に入りうる項目の数を超えて何も作らなければ諦めます。Go の `len(rows)` は作成の時に
+        // 確保した行の数なので、表の容量と同じ値です。
+        let limit =
+            self.conns.len() + self.s.syn.capacity() + self.s.tw.capacity() + shared::NUM_CLASSES;
+        for _ in 0..=limit {
+            let cls = self.s.out.pick(quantum)?;
+            let n = match cls {
+                shared::CLASS_CTL => self.s.out.ctl.pop(buf).unwrap_or(0),
+                shared::CLASS_CONN => match self.s.out.conns.pop_front() {
+                    Some(id) => self.conn(id).poll(buf, now),
+                    None => 0,
+                },
+                shared::CLASS_ROW => match self.s.out.rows.pop_front() {
+                    Some(id) => self.s.poll_row(id, buf, now),
+                    None => 0,
+                },
+                _ => 0,
+            };
+            if n == 0 {
+                continue;
+            }
+            self.s.out.spent(cls, n);
+            return Some(n);
+        }
+        None
+    }
+
+    /// 次の知らせを取り出します。同じ対象の同じ種類の知らせは、取り出すまで 1 つにまとまります。
+    pub fn poll_event(&mut self) -> Option<Event> {
+        let (target, bit) = self.s.events.pop()?;
+        let n = self.conns.len();
+        if (target as usize) < n {
+            let t = self.conns.tcb(target);
+            // 枠を返した後の知らせは、枠を最後に使った接続の handle で出します。
+            let generation = if t.state == State::Free {
+                t.generation.saturating_sub(1)
+            } else {
+                t.generation
+            };
+            let id = ConnId {
+                slot: target,
+                generation,
+            };
+            return Some(match bit {
+                shared::EV_READ => Event::Readable(id),
+                shared::EV_WRITE => Event::Writable(id),
+                _ => Event::Closed(id),
+            });
+        }
+        let port = u16::try_from(target as usize - n).unwrap_or(0);
+        Some(Event::Acceptable(ListenerId {
+            port,
+            generation: self.s.listeners.generation(port),
+        }))
+    }
+
+    /// 1 分に 1 回までの門を通った拒否の数を 1 つ取り出します。駆動の層が英語の 1 行にしてログに出します。
+    pub fn poll_log(&mut self) -> Option<LogLine> {
+        self.s.gates.pop()
+    }
+}
+
+/// 使っている接続の欄が会計と合うことを確かめます。
+fn check_conn(t: &Tcb, b: &ConnBufs) -> Result<(), InvariantError> {
+    if t.tail_off < t.una_off || t.tail_off - t.una_off > b.snd.cap() {
+        return Err("the send ring holds more than its capacity".into());
+    }
+    if b.recs.len() > b.recs.capacity() {
+        return Err("a record ring holds more than its capacity".into());
+    }
+    if b.rcv.read_off > b.rcv.nxt_off {
+        return Err("the receive buffer reads past what arrived".into());
+    }
+    if t.snd_cap != b.snd.cap() || t.rcv_cap != b.rcv.r.cap() {
+        return Err("a connection's reservation disagrees with its rings".into());
+    }
+    Ok(())
 }
 
 /// 核の表です。作成の途中で確保に失敗したら、確保した分を解放して誤りを返します。
 struct Tables {
     seeds: Seeds,
     conns: ConnSlots,
+    conn_free: FixedVec<u32>,
+    qlinks: FixedVec<QLink>,
     conn_idx: Index,
     syn: SynTable,
     tw: TwTable,
@@ -383,9 +670,11 @@ impl Tables {
         };
         Ok(Self {
             conns: ConnSlots::new(n)?,
+            conn_free: new_free_list(n)?,
+            qlinks: FixedVec::try_filled(n, |_| QLink::default())?,
             conn_idx: Index::new(n, seeds.table_key, true)?,
             syn: SynTable::new(l.syn_rows, seeds.table_key)?,
-            tw: TwTable::new(l.tw_rows, seeds.table_key)?,
+            tw: TwTable::new(l.tw_rows, seeds.table_key, n)?,
             listeners: PortTable::new()?,
             out_conns: Dlist::new(n)?,
             out_rows: Dlist::new(l.syn_rows + l.tw_rows)?,
