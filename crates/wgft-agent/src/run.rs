@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, watch};
 use wgft_proto::{GoTime, Heartbeat, Join, STATUS_ERROR, STATUS_OK, State, TunnelStatus, WgConfig};
 use zeroize::Zeroizing;
 
@@ -102,6 +102,9 @@ pub(crate) struct Agent {
     pub(crate) state_changed: Arc<Notify>,
     /// トンネルの外殻のループが終わったことを、見張りに伝える。
     tunnel_dead: Arc<Notify>,
+    /// 見張りが新しいハンドシェイクを観測するたびに増やす。stream は再接続の待ちをこれで打ち切る
+    /// (仕様 stream.md の再接続)。
+    pub(crate) handshake_seen: watch::Sender<u64>,
 }
 
 // 鍵と恒久トークンを Debug に出さない
@@ -319,6 +322,7 @@ impl Agent {
         let hs = t.read().await.handshake_observed_at;
         let now = Instant::now();
         if hs.is_some() && hs != self.seen_handshake {
+            self.handshake_seen.send_modify(|n| *n += 1);
             self.seen_handshake = hs;
             self.seen_at = Some(now);
             self.rebuild_after = REBUILD_AFTER_MIN;
@@ -409,6 +413,7 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
         refused_logged: (0, None),
         state_changed: Arc::new(Notify::new()),
         tunnel_dead: Arc::new(Notify::new()),
+        handshake_seen: watch::Sender::new(0),
     }));
     {
         let mut a = agent.lock().await;
@@ -695,6 +700,7 @@ mod tests {
             refused_logged: (0, None),
             state_changed: Arc::new(Notify::new()),
             tunnel_dead: Arc::new(Notify::new()),
+            handshake_seen: watch::Sender::new(0),
         }
     }
 

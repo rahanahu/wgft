@@ -570,6 +570,40 @@ impl Device {
         true
     }
 
+    /// Whether the device can encrypt a packet for the peer now, without waiting for a handshake.
+    ///
+    /// The data plane pulls packets from the layer above only while this holds, so that packets do
+    /// not pile up in the bounded queue of packets waiting for a handshake. It errs on the side of
+    /// `false`: it is `false` during the last `KEEPALIVE_TIMEOUT` of a session this side answered,
+    /// where sending still works, and then [`Device::start_handshake`] replaces the session early.
+    /// It ignores the per-session message limit of about 2^64, past which a packet still waits for
+    /// the handshake that the limit starts. Returns `false` for an unknown key.
+    #[must_use]
+    pub fn has_session(&self, peer: &PublicKey, now: Instant) -> bool {
+        let Some(&id) = self.by_key.get(peer) else {
+            return false;
+        };
+        self.proto.has_session(id, now.max(self.now))
+    }
+
+    /// Starts a handshake with the peer, as sending a packet without a session would, and queues
+    /// the initiation for [`Device::poll_transmit`]. Returns `false` and does nothing when a
+    /// handshake is already in progress, the peer has no endpoint or the key is unknown.
+    pub fn start_handshake(&mut self, now: Instant, peer: &PublicKey) -> bool {
+        let now = self.clock(now);
+        let Some(&id) = self.by_key.get(peer) else {
+            return false;
+        };
+        if self.peers[id].endpoint.is_none() {
+            return false;
+        }
+        let Some(initiation) = self.proto.initiate(id, now) else {
+            return false;
+        };
+        self.send_to_peer(id, initiation);
+        true
+    }
+
     /// The state of a peer, or `None` for an unknown key.
     #[must_use]
     pub fn peer_status(&self, peer: &PublicKey, now: Instant) -> Option<PeerStatus> {
