@@ -361,7 +361,8 @@ func FuzzAdversarialSender(f *testing.F) {
 	f.Fuzz(func(t *testing.T, seed uint64) { runAudit(t, adversaryCfg(seed)) })
 }
 
-// adversaryCfg は種から相手の振る舞いの組み合わせを決める。
+// adversaryCfg は種から相手の振る舞いの組み合わせを決める。stream の長さの剰余は符号なしで取る。int にして
+// から取ると、積が 2^63 以上の種で長さが負になり make が落ちる。
 func adversaryCfg(seed uint64) auditCfg {
 	return auditCfg{
 		seed:       seed,
@@ -369,7 +370,7 @@ func adversaryCfg(seed uint64) auditCfg {
 		sack:       seed%3 != 0,
 		ws:         seed%5 != 0,
 		closeWrite: seed%2 == 1 || seed%3 == 2 || seed%5 == 1,
-		length:     2000 + int(seed*7919)%200000,
+		length:     2000 + int(seed*7919%200000),
 		advSteps:   2000 + int(seed%5)*1000,
 		lieTS:      seed%4 == 0,
 		lieDSK:     seed%3 == 1,
