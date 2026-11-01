@@ -3,6 +3,7 @@
 //!
 //! - [`dut`]:Rust の wgstack を [`wgft_tcpharness::dut::ClockedDut`] に合わせる adapter
 //! - [`serve`]:3 節の口の server。バイナリ `wgstack-dut` の中身です
+//! - [`real`]:`--clock real` の形。qbench の engine `wgstack-rs` として、核を実時間で動かします (Linux だけ)
 //! - [`rec`]:凍結した Go の wgstack の記録の読み込みと照合
 //! - [`fuzz`]:fuzz の target の本体。cargo-fuzz の target と stable の corpus の試験が同じ関数を呼びます
 //!
@@ -12,5 +13,7 @@
 
 pub mod dut;
 pub mod fuzz;
+#[cfg(target_os = "linux")]
+pub mod real;
 pub mod rec;
 pub mod serve;

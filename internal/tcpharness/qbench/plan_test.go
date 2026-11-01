@@ -37,6 +37,15 @@ import (
 // CPUs if fewer, in the gate, whose VM should have 8 vCPUs (incus config set <vm> limits.cpu=8).
 // 計測の計画 says how to choose it and when to measure a cell with 1.
 //
+// QBENCH_SUBJECT=wgstack-rs judges the Rust wgstack instead of the Go one: the wgstack-rs engine
+// runs the wgstack-dut binary that WGFT_TEST_WGSTACK_DUT names on the real clock
+// (engines_rust_linux_test.go), and the gate also measures the Go wgstack beside it without
+// judging it.
+//
+// QBENCH_DELAY_MS sets the link's one-way delay, 25 ms by default; QBENCH_RATE_MBIT=0 removes its
+// rate limit. The judgment's reference holds only for the defaults: the other values are for
+// finding what bounds a run.
+//
 // QBENCH_LOSS_MODEL=arrival drops by the earlier per-packet draws in arrival order instead of
 // the default content-keyed loss, which drops the same stream data on every engine (LossModel).
 //
@@ -170,6 +179,7 @@ type Run struct {
 	DataPkts     int
 	QDrops       int
 	Stats        string
+	CPU          time.Duration // the engine process's CPU time, handshake included; -1 for an engine without a process of its own
 }
 
 // open builds the rig, connects and accepts.
@@ -221,7 +231,7 @@ func open(engine, client string, imp Impair, seed int64, trace string) (*Rig, ne
 }
 
 func impair(c Cell) Impair {
-	imp := Impair{Delay: 25 * time.Millisecond, Loss: c.Loss, RateBps: int64(envInt("QBENCH_RATE_MBIT", 20)) * 1_000_000, QueuePkts: envInt("QBENCH_QUEUE_PKTS", 200)}
+	imp := Impair{Delay: time.Duration(envInt("QBENCH_DELAY_MS", 25)) * time.Millisecond, Loss: c.Loss, RateBps: int64(envInt("QBENCH_RATE_MBIT", 20)) * 1_000_000, QueuePkts: envInt("QBENCH_QUEUE_PKTS", 200)}
 	imp.LossModel, _ = envLossModel()
 	if c.Thin {
 		// a block per message, so a message is lost with probability Loss as a packet was
@@ -263,7 +273,7 @@ func checkLossModel(t *testing.T) LossModel {
 
 // runCell measures one run of c on engine.
 func runCell(engine string, c Cell, seed int64) (r Run) {
-	r = Run{Engine: engine, Cell: c.Name, Seed: seed, Recovery: -1, RTO: -1}
+	r = Run{Engine: engine, Cell: c.Name, Seed: seed, Recovery: -1, RTO: -1, CPU: -1}
 	trace := ""
 	if dir := os.Getenv("QBENCH_TRACE"); dir != "" {
 		trace = filepath.Join(dir, fmt.Sprintf("%s_%s_%d.tsv", engine, strings.NewReplacer("/", "_", "%", "pct").Replace(c.Name), seed))
@@ -318,6 +328,9 @@ func runCell(engine string, c Cell, seed int64) (r Run) {
 	r.Stats = "-"
 	if rig.D.Stats != nil {
 		r.Stats = rig.D.Stats(oe)
+	}
+	if rig.D.CPU != nil {
+		r.CPU = rig.D.CPU()
 	}
 	return
 }
@@ -476,12 +489,15 @@ type Summary struct {
 	P99HiMS    float64 `json:"p99_hi_ms,omitempty"`
 	// PerSeed is each finished run's Mbit/s by its seed, for a bulk cell: the engines run the same
 	// seeds, so judge compares them seed by seed.
-	PerSeed     map[string]float64 `json:"per_seed_mbps,omitempty"`
-	MaxMS       float64            `json:"max_ms"`
-	Samples     int                `json:"samples"`
-	Lost        int                `json:"lost"`        // thin messages never delivered, all runs
-	Unrecovered int                `json:"unrecovered"` // outage runs with no read after the outage
-	Spread      float64            `json:"spread"`      // max over min of the judged value across runs; spreadInf for a missing value; 0 for a thin stream
+	PerSeed map[string]float64 `json:"per_seed_mbps,omitempty"`
+	MaxMS   float64            `json:"max_ms"`
+	// CPUNsPerByte is the median over the finished runs of the engine process's CPU time per
+	// byte the receiver read, for an engine in a process of its own; 0 for the others.
+	CPUNsPerByte float64 `json:"cpu_ns_per_byte,omitempty"`
+	Samples      int     `json:"samples"`
+	Lost         int     `json:"lost"`        // thin messages never delivered, all runs
+	Unrecovered  int     `json:"unrecovered"` // outage runs with no read after the outage
+	Spread       float64 `json:"spread"`      // max over min of the judged value across runs; spreadInf for a missing value; 0 for a thin stream
 }
 
 // spreadInf stands for an infinite spread, which JSON cannot carry: a run without a judged value,
@@ -525,7 +541,7 @@ func spread(v []float64) float64 {
 
 func summarize(c Cell, runs []Run) Summary {
 	s := Summary{Runs: len(runs), RecoveryMS: -1, RTOMS: -1, P50MS: -1, P99MS: -1, MaxMS: -1}
-	var mb, rec, rto, judged []float64
+	var mb, rec, rto, judged, cpu []float64
 	var lat []time.Duration
 	var perRun [][]time.Duration
 	for _, r := range runs {
@@ -534,6 +550,9 @@ func summarize(c Cell, runs []Run) Summary {
 		}
 		s.OK++
 		mb = append(mb, r.Mbps)
+		if r.CPU > 0 && r.Bytes > 0 {
+			cpu = append(cpu, float64(r.CPU)/float64(r.Bytes))
+		}
 		if !c.Thin && !c.Outage {
 			if s.PerSeed == nil {
 				s.PerSeed = map[string]float64{}
@@ -563,6 +582,9 @@ func summarize(c Cell, runs []Run) Summary {
 		}
 	}
 	s.Mbps = medianF(mb)
+	if len(cpu) > 0 {
+		s.CPUNsPerByte = medianF(cpu)
+	}
 	if len(rec) > 0 {
 		s.RecoveryMS = medianF(rec)
 	}
@@ -859,20 +881,24 @@ func dur(d time.Duration) string {
 }
 
 func printRun(r Run) {
-	p99 := "-"
+	p50, p99 := "-", "-"
 	if len(r.Lat) > 0 {
 		l := append([]time.Duration(nil), r.Lat...)
 		sort.Slice(l, func(i, j int) bool { return l[i] < l[j] })
-		p99 = dur(quantile(l, 0.99))
+		p50, p99 = dur(quantile(l, 0.5)), dur(quantile(l, 0.99))
 	}
 	stats := ""
 	if r.Stats != "-" {
 		stats = fmt.Sprintf("QBENCH-STATS engine=%s cell=%s seed=%d %s\n", r.Engine, r.Cell, r.Seed, r.Stats)
 	}
 	// one Printf, so the lines of runs measured at once do not interleave
-	fmt.Printf("QBENCH-RUN engine=%s cell=%s seed=%d bytes=%d mbps=%.2f verified=%v recovery=%s rto=%s stall=%s samples=%d p99=%s lost=%d retrans=%d/%d qdrop=%d err=%q\n%s",
+	cpu := "-"
+	if r.CPU >= 0 {
+		cpu = r.CPU.Round(time.Millisecond).String()
+	}
+	fmt.Printf("QBENCH-RUN engine=%s cell=%s seed=%d bytes=%d mbps=%.2f verified=%v recovery=%s rto=%s stall=%s samples=%d p50=%s p99=%s lost=%d retrans=%d/%d qdrop=%d cpu=%s err=%q\n%s",
 		r.Engine, r.Cell, r.Seed, r.Bytes, r.Mbps, r.Verified, dur(r.Recovery), dur(r.RTO),
-		r.Stall.Round(time.Millisecond), len(r.Lat), p99, r.Lost, r.Retrans, r.DataPkts, r.QDrops, r.Err, stats)
+		r.Stall.Round(time.Millisecond), len(r.Lat), p50, p99, r.Lost, r.Retrans, r.DataPkts, r.QDrops, cpu, r.Err, stats)
 }
 
 // hostLoad is the machine's 1-minute load average and the CPU time the hypervisor took from
@@ -941,8 +967,8 @@ func measure(t *testing.T, c Cell, ci int, engines []string, runs, from, par int
 }
 
 func printSummary(c Cell, eng string, s Summary) {
-	fmt.Printf("QBENCH-SUMMARY engine=%s cell=%s runs=%d ok=%d mbps=%.2f recovery_ms=%.0f rto_ms=%.0f unrecovered=%d p50_ms=%.1f p99_ms=%.1f p99_ci_ms=%.1f-%.1f max_ms=%.1f samples=%d lost=%d spread=%.2f\n",
-		eng, c.Name, s.Runs, s.OK, s.Mbps, s.RecoveryMS, s.RTOMS, s.Unrecovered, s.P50MS, s.P99MS, s.P99LoMS, s.P99HiMS, s.MaxMS, s.Samples, s.Lost, s.Spread)
+	fmt.Printf("QBENCH-SUMMARY engine=%s cell=%s runs=%d ok=%d mbps=%.2f recovery_ms=%.0f rto_ms=%.0f unrecovered=%d p50_ms=%.1f p99_ms=%.1f p99_ci_ms=%.1f-%.1f max_ms=%.1f samples=%d lost=%d spread=%.2f cpu_ns_per_byte=%.2f\n",
+		eng, c.Name, s.Runs, s.OK, s.Mbps, s.RecoveryMS, s.RTOMS, s.Unrecovered, s.P50MS, s.P99MS, s.P99LoMS, s.P99HiMS, s.MaxMS, s.Samples, s.Lost, s.Spread, s.CPUNsPerByte)
 }
 
 // checkPool fails the test when a thin cell's pool is below the plan's 1,000 samples.
@@ -1031,17 +1057,21 @@ func refLossModel(ref *Reference, cell string) string {
 // measured again with twice the runs. It takes about 5 minutes; verdicts are printed, not failed.
 func TestQBenchRoutine(t *testing.T) {
 	par := envInt("QBENCH_PARALLEL", 1)
-	engines := []string{"wgstack"}
+	subj := subject(t)
+	engines := []string{subj}
 	if v := os.Getenv("QBENCH_ENGINES"); v != "" {
 		engines = strings.Split(v, ",")
 	}
+	// without the subject the routine mode measures and prints the engines it is given, as for
+	// profiling one engine alone, and judges nothing
+	judged := has(engines, subj)
 	if (has(engines, "linux") || os.Getenv("QBENCH_CLIENT") == "linux") && !inNetns(t) {
 		return
 	}
 	pinLinux(t, engines)
 	model := checkLossModel(t)
 	ref := loadReference(t)
-	fmt.Printf("QBENCH-META mode=routine loss_model=%s reference=%q measured=%q base_runs=%d\n", model, ref.Where, ref.Measured, ref.BaseRuns)
+	fmt.Printf("QBENCH-META mode=routine subject=%s loss_model=%s reference=%q measured=%q base_runs=%d\n", subj, model, ref.Where, ref.Measured, ref.BaseRuns)
 	runs := envInt("QBENCH_RUNS", 5)
 	cells := cellFilter(routineCells())
 	var table []string
@@ -1052,23 +1082,53 @@ func TestQBenchRoutine(t *testing.T) {
 			}
 		}
 		res := measure(t, c, ci, engines, runs, 0, par)
-		wg := summarize(c, res["wgstack"])
-		printSummary(c, "wgstack", wg)
-		checkPool(t, c, "wgstack", wg)
+		for _, e := range engines {
+			if e != subj || !judged {
+				s := summarize(c, res[e])
+				printSummary(c, e, s) // measured beside the subject, not judged
+				checkPool(t, c, e, s)
+			}
+		}
+		if !judged {
+			continue
+		}
+		wg := summarize(c, res[subj])
+		printSummary(c, subj, wg)
+		checkPool(t, c, subj, wg)
 		gv, haveG := ref.Cells[c.Name]["gvisor"]
 		lx, haveL := ref.Cells[c.Name]["linux"]
 		v := judge(c, wg, gv, lx, haveG, haveL)
 		if near(v) {
-			more := measure(t, c, ci, []string{"wgstack"}, runs, runs, par)
-			wg = summarize(c, append(res["wgstack"], more["wgstack"]...))
-			printSummary(c, "wgstack", wg)
+			more := measure(t, c, ci, []string{subj}, runs, runs, par)
+			wg = summarize(c, append(res[subj], more[subj]...))
+			printSummary(c, subj, wg)
 			v = judge(c, wg, gv, lx, haveG, haveL)
 			v.Result += " after doubling"
 		}
-		table = append(table, row(c, wg, gv, lx, v))
+		table = append(table, row(c, v, wg, gv, lx))
 	}
-	printTable(table)
+	printTable([]string{subj, "gVisor", "Linux"}, table)
 }
+
+// subject is the engine the verdicts judge, QBENCH_SUBJECT: the Go wgstack, "wgstack", by
+// default, or the Rust wgstack, "wgstack-rs", in wgstack-dut (docs/design/v2/test-tooling.md
+// section 5). While both exist, the gate with the Rust subject also measures the Go wgstack and
+// prints it beside the subject without judging it.
+func subject(t *testing.T) string {
+	switch v := os.Getenv("QBENCH_SUBJECT"); v {
+	case "", "wgstack":
+		return "wgstack"
+	case "wgstack-rs":
+		return v
+	default:
+		t.Fatalf("QBENCH_SUBJECT=%q: want wgstack or wgstack-rs", v)
+		return ""
+	}
+}
+
+// isReference reports whether e is an engine the judgment compares the subject with, whose
+// medians the gate stores for the routine mode.
+func isReference(e string) bool { return e == "gvisor" || e == "linux" }
 
 // TestQBenchGate is the gate matrix: wgstack, gVisor and Linux in the same process and VM, 9 runs
 // per cell, judged by 判定の規則, with the runs doubled for a cell within 5% of its line or, for a
@@ -1079,9 +1139,23 @@ func TestQBenchRoutine(t *testing.T) {
 func gatePar() int { return min(8, runtime.NumCPU()) }
 
 func TestQBenchGate(t *testing.T) {
-	engines := []string{"wgstack", "gvisor", "linux"}
+	subj := subject(t)
+	engines := []string{subj, "gvisor", "linux"}
+	if subj != "wgstack" {
+		engines = []string{subj, "wgstack", "gvisor", "linux"}
+	}
 	if v := os.Getenv("QBENCH_ENGINES"); v != "" {
 		engines = strings.Split(v, ",")
+	}
+	if !has(engines, subj) {
+		t.Fatalf("QBENCH_ENGINES=%s leaves out the subject %s", strings.Join(engines, ","), subj)
+	}
+	// the engines printed beside the subject without being judged or stored
+	var beside []string
+	for _, e := range engines {
+		if e != subj && !isReference(e) {
+			beside = append(beside, e)
+		}
 	}
 	// the gate fixes each cell's client itself, so QBENCH_CLIENT does not apply
 	cells := nameFilter(gateCells())
@@ -1096,7 +1170,7 @@ func TestQBenchGate(t *testing.T) {
 	where := pinLinux(t, engines)
 	runs := envInt("QBENCH_RUNS", 9)
 	par := envInt("QBENCH_PARALLEL", gatePar())
-	fmt.Printf("QBENCH-META mode=gate loss_model=%s parallel=%d cpus=%d %s\n", model, par, runtime.NumCPU(), hostLoad())
+	fmt.Printf("QBENCH-META mode=gate subject=%s engines=%s loss_model=%s parallel=%d cpus=%d %s\n", subj, strings.Join(engines, ","), model, par, runtime.NumCPU(), hostLoad())
 	prov := provenance(where)
 	if os.Getenv("QBENCH_WRITE_REF") != "" {
 		if prov.Commit == "" {
@@ -1147,7 +1221,7 @@ func TestQBenchGate(t *testing.T) {
 		m := sum()
 		gv, haveG := m["gvisor"]
 		lx, haveL := m["linux"]
-		v := judge(c, m["wgstack"], gv, lx, haveG, haveL)
+		v := judge(c, m[subj], gv, lx, haveG, haveL)
 		if near(v) {
 			more := measure(t, c, ci, engines, runs, runs, par)
 			for e, rs := range more {
@@ -1155,8 +1229,14 @@ func TestQBenchGate(t *testing.T) {
 			}
 			m = sum()
 			gv, lx = m["gvisor"], m["linux"]
-			v = judge(c, m["wgstack"], gv, lx, haveG, haveL)
+			v = judge(c, m[subj], gv, lx, haveG, haveL)
 			v.Result += " after doubling"
+		}
+		// the engines beside the subject get the same rule on the same runs, printed only, so a
+		// verdict of the Rust wgstack can be set against the frozen Go wgstack's
+		for _, e := range beside {
+			bv := judge(c, m[e], gv, lx, haveG, haveL)
+			fmt.Printf("QBENCH-BESIDE engine=%s cell=%s value=%.3f line=%.3f verdict=%q\n", e, c.Name, bv.Value, bv.Line, bv.Result)
 		}
 		// a reference that failed or spreads too far is not stored; the cell keeps what it had
 		if bad := unstorable(engines, m); bad != "" {
@@ -1166,14 +1246,18 @@ func TestQBenchGate(t *testing.T) {
 			ref.Cells[c.Name] = map[string]Summary{}
 			ref.CellMeta[c.Name] = prov
 			for _, e := range engines {
-				if e != "wgstack" {
+				if isReference(e) {
 					ref.Cells[c.Name][e] = m[e]
 				}
 			}
 		}
-		table = append(table, row(c, m["wgstack"], gv, lx, v))
+		cols := []Summary{m[subj]}
+		for _, e := range beside {
+			cols = append(cols, m[e])
+		}
+		table = append(table, row(c, v, append(cols, gv, lx)...))
 	}
-	printTable(table)
+	printTable(append(append([]string{subj}, beside...), "gVisor", "Linux"), table)
 	if path := os.Getenv("QBENCH_WRITE_REF"); path != "" {
 		b, _ := json.MarshalIndent(ref, "", "  ")
 		if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
@@ -1187,7 +1271,7 @@ func TestQBenchGate(t *testing.T) {
 // returns "" when they may.
 func unstorable(engines []string, m map[string]Summary) string {
 	for _, e := range engines {
-		if e == "wgstack" {
+		if !isReference(e) {
 			continue
 		}
 		s := m[e]
@@ -1201,17 +1285,23 @@ func unstorable(engines []string, m map[string]Summary) string {
 	return ""
 }
 
-func row(c Cell, wg, gv, lx Summary, v Verdict) string {
+// row is one line of the table: the cell, a value per engine in the order of printTable's
+// header, the rule and the verdict.
+func row(c Cell, v Verdict, cols ...Summary) string {
 	val := func(s Summary) string {
+		failed := ""
+		if s.OK < s.Runs {
+			failed = fmt.Sprintf(", %d of %d runs failed", s.Runs-s.OK, s.Runs)
+		}
 		switch {
 		case s.Runs == 0:
 			return "-"
 		case c.Thin:
-			return fmt.Sprintf("%.0f / %.0f (%.0f to %.0f) / %.0f ms, %d lost", s.P50MS, s.P99MS, s.P99LoMS, s.P99HiMS, s.MaxMS, s.Lost)
+			return fmt.Sprintf("%.0f / %.0f (%.0f to %.0f) / %.0f ms, %d lost%s", s.P50MS, s.P99MS, s.P99LoMS, s.P99HiMS, s.MaxMS, s.Lost, failed)
 		case c.Outage:
-			return fmt.Sprintf("%.0f ms, RTO %.0f ms, %.2f Mbit/s", s.RecoveryMS, s.RTOMS, s.Mbps)
+			return fmt.Sprintf("%.0f ms, RTO %.0f ms, %.2f Mbit/s%s", s.RecoveryMS, s.RTOMS, s.Mbps, failed)
 		}
-		return fmt.Sprintf("%.2f Mbit/s", s.Mbps)
+		return fmt.Sprintf("%.2f Mbit/s%s", s.Mbps, failed)
 	}
 	rule := fmt.Sprintf("%s: %.1f vs %.1f", v.Rule, v.Value, v.Line)
 	if v.Line > 0 && v.Line < 2 {
@@ -1220,13 +1310,17 @@ func row(c Cell, wg, gv, lx Summary, v Verdict) string {
 	if c.NotJudged != "" {
 		rule = "-"
 	}
-	return fmt.Sprintf("| %s | %s | %s | %s | %s | %s |", c.Name, val(wg), val(gv), val(lx), rule, v.Result)
+	vals := make([]string, len(cols))
+	for i, s := range cols {
+		vals[i] = val(s)
+	}
+	return fmt.Sprintf("| %s | %s | %s | %s |", c.Name, strings.Join(vals, " | "), rule, v.Result)
 }
 
-func printTable(rows []string) {
+func printTable(engines []string, rows []string) {
 	fmt.Println("QBENCH-TABLE")
-	fmt.Println("| cell | wgstack | gVisor | Linux | rule: value vs line | verdict |")
-	fmt.Println("|---|---|---|---|---|---|")
+	fmt.Printf("| cell | %s | rule: value vs line | verdict |\n", strings.Join(engines, " | "))
+	fmt.Println("|---" + strings.Repeat("|---", len(engines)+2) + "|")
 	for _, r := range rows {
 		fmt.Println(r)
 	}

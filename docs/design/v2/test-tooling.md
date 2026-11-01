@@ -1066,7 +1066,7 @@ engine は `wgstack-dut` のバイナリを `--clock real` で起こします。
 
 - packet:Go の側が socketpair を作り、片方を子のプロセスの fd 3 に渡し、もう片方を `tun.Device` として Rig の Link につなぎます
 - アプリケーション:受け入れた接続ごとに、Go の側が Unix ソケットで待ち、`CONN_SOCKET` でそのパスを渡します。子のプロセスは接続して、engine の接続と Unix ソケットの間で byte を中継します。Go の側は通常の `net.Conn` を受け取るので、`runBulk` と `runThin` は変わりません。`Abort` は `ABORT` を送ります
-- 統計:`Stats` は `STATS` と子のプロセスの CPU 時間 (`wait4` の rusage) を出し、`RTOAt` は `RTO_AT` を使います
+- 統計:`Stats` は `STATS` を出し、`CPU` は子のプロセスの CPU 時間を出し、`RTOAt` は `RTO_AT` を使います
 
 TUN を使わない理由は次のとおりです。
 qbench の経路は、client と DUT の間の packet をすべて Go の Link が受け取り、中身で決める損失、並べ替え、途絶を engine の間で同じに入れます。
@@ -1083,7 +1083,35 @@ Linux の TUN の上で Rust の engine を動かす確かめは、qbench でな
 
 判定は環境変数 `QBENCH_SUBJECT=wgstack-rs` で、判定する engine を Rust の wgstack にします。
 移行の間、関門は Go の wgstack も測り、判定せずに並べて出します。
-`--clock real` は Rust の wgstack の実時間の外側の層を使うので、その層ができた後に作ります。
+`--clock real` は Rust の wgstack の実時間の外側の層 (`wgft-netstack` の handle と、agent のデータプレーンと同じ順の駆動) を使います。
+
+### 段 8 で決めたこと
+
+- 時計の形:`--clock real` は Linux だけで、`wgstack-dut` は fd 3 が開いた socket であることを確かめてから持ち主になります。
+  1 つのスレッドの上で、駆動の task、要求に答える task、接続ごとの中継の task が交互に核を借用します。
+  標準入力の frame は別のスレッドで読みます。
+  packet の socket を相手が閉じると、駆動の task は終わります
+- `ACCEPT`:実時間の形でも待たずに答え、受け入れる接続が無ければ `WOULD_BLOCK` です。
+  Go の側は 1 ms ごとに問い直します。
+  答えが待たないという口の規則を両方の時計で同じに保つためです。
+  受け入れは握手の後で、qbench の測る区間の外にあります
+- `CONN_SOCKET`:Go の側は受け入れた接続ごとに Unix ソケットで待ち、`wgstack-dut` が接続した後に `OK` を返します。
+  中継は製品の中継 (`wgft-agent` の `relay::pipe`) と同じ規則で、片方の向きの終わりは反対側の送る向きを閉じて伝え、誤りは両方を止めて RST にします。
+  向きごとのバッファは製品の大きいバッファと同じ 32 KiB です。
+  `Abort` は `ABORT` を送り、中継の task が接続を RST で終えます
+- `RTO_AT`:Rust の核は RTO の経過を知らせないので、分からないと答えます。
+  qbench の回復の判定の線は Linux の回復の時間と Linux の RTO から作るので、判定は変わりません。
+  表の Rust の wgstack の RTO は -1 です
+- CPU:`wait4` の rusage ではなく、`Stats` を読む時に `/proc/<pid>/task/*/schedstat` の和を読みます。
+  qbench は rig を閉じる前に `Stats` を読み、schedstat は ns の単位で数えるためです。
+  値は握手と中継の 1 段を含みます。
+  Go の wgstack、gVisor、Linux は試験と同じプロセスかカーネルの中で動くので、qbench は CPU を分けて測りません
+- 判定の切り替え:`QBENCH_SUBJECT` は `wgstack` (既定) か `wgstack-rs` です。
+  関門の既定の engine の並びは、主題が `wgstack-rs` の時に `wgstack-rs`、`wgstack`、`gvisor`、`linux` です。
+  基準の値 (`testdata/reference.json`) に入れるのは gVisor と Linux だけで、主題と並べて測る Go の wgstack は入れません
+- 中継の 1 段の測り方:`wgstack-dut --relay A B` は 2 つの Unix ソケットの間を同じ中継で写し、核を通しません。
+  `TestQBenchRelayStage` が、細い stream の遅れを中継の有無で比べ、大きな写しの byte あたりの CPU を測ります。
+  測った値は [wgstack の Rust 版の設計の PR 8 の測定](wgstack-rs.md#pr-8-の測定)にあります
 
 ## 6. fuzz
 
