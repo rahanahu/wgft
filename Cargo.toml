@@ -10,6 +10,15 @@ license = "MIT"
 repository = "https://github.com/rahanahu/wgft"
 publish = false
 
+[workspace.dependencies]
+# 版はここだけに書き、各 crate は `name.workspace = true` で継ぐ
+wgft-wireguard = { path = "crates/wgft-wireguard" }
+base64 = "0.23.1"
+getrandom = "0.4.3"
+proptest = "1.12.0"
+sanstun = "0.1.0"
+zeroize = "1.9.1"
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 missing_debug_implementations = "warn"

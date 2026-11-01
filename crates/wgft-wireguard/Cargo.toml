@@ -1,0 +1,26 @@
+[package]
+name = "wgft-wireguard"
+description = "The WireGuard device layer of the wgft agent, built on sanstun"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+getrandom.workspace = true
+sanstun.workspace = true
+zeroize.workspace = true
+
+[features]
+# fuzz の target だけが使う。検査を通さずに暗号化する口を開ける
+fuzzing = []
+# 種と壁時計を呼び手が渡す Device::with_seed を開ける。試験と fuzz だけが使う
+deterministic = []
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
