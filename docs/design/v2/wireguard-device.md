@@ -269,6 +269,8 @@ cargo +nightly fuzz run inbound -- -max_len=12000
 
 Linux の WireGuard と wireguard-go との相互運用は、ラボの一式が Rust の agent を server の両方のモードと組んで確かめます。
 server のカーネルモードは Linux の WireGuard を、ユーザー空間モードは wireguard-go を使います。
+鍵の更新 (`REKEY_AFTER_TIME` の 120 秒) は `lab/lifecycle.sh` の check 13 が確かめます。
+TCP の接続と UDP の往復を 120 秒を超えて流し続け、server が新しいハンドシェイクを報告することと、前後のデータがすべて届くことを見ます。
 
 ## 判断と理由
 
@@ -300,8 +302,6 @@ server のカーネルモードは Linux の WireGuard を、ユーザー空間�
 - sanstun は、ピアごとに 1 秒あたり 50 回の開始の上限 (Linux の WireGuard) を持ちません。
   代わりに、全体で 1 秒あたり 100 回を超えると cookie を求め、cookie を持つ開始を送信元の IP ごとの bucket で絞ります。
   この違いで負荷の高いときの挙動がどう変わるかは確かめていません。
-- 鍵の更新 (`REKEY_AFTER_TIME` の 120 秒) の Linux の WireGuard と wireguard-go との相互運用は、ラボの一式が 120 秒を超えて転送を続ける確認を持つかを確かめていません。
-  device の層の試験は、2 つの sanstun の device の間の鍵の更新だけを確かめます。
 - cookie の返事の経路 (負荷が高いときのハンドシェイク) は device の層の試験で通していません。
   sanstun の試験が sanstun の中で確かめています。
 - 性能 (packet ごとの割り当て、1 秒あたりの packet の数、CPU) は測っていません。
