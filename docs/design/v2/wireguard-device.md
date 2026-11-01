@@ -19,8 +19,9 @@ TCP と UDP の中継の層 (Rust の wgstack と制御プレーン) はこの c
 
 ## sanstun の隔離
 
-sanstun を使うのは `src/protocol.rs` の 1 つの module だけです。
-この module は sanstun の型を外に出さず、wgft の型 (鍵、ピアの番号、バイト列、捨てた理由) だけで device の層と話します。
+sanstun を使うのは `src/protocol.rs` の 1 つの module と、その子の `src/sanstun_compat.rs` だけです。
+`sanstun_compat` は sanstun の振る舞いへの手当てを集めた module です ([sanstun の振る舞いへの手当て](#sanstun-の振る舞いへの手当て))。
+`protocol` の module は sanstun の型を外に出さず、wgft の型 (鍵、ピアの番号、バイト列、捨てた理由) だけで device の層と話します。
 crate の公開の API にも sanstun の型は現れません。
 
 差し替えのための trait と 2 つ目の実装は作りません。
@@ -64,6 +65,13 @@ sanstun を別の実装に替える必要が出た場合は、`protocol.rs` を�
 ハンドシェイクの開始の message は壁時計の時刻 (TAI64N) を含みます。
 再起動の前後でこの値が戻ると、相手は新しい開始を古い開始の再送とみなして捨てます。
 この挙動は試験 `a_restarted_agent_needs_a_later_wall_clock` で確かめています。
+
+印の秒は、Linux の WireGuard と wireguard-go と同じく 2^62 + 10 に Unix 時刻を足した値です。
+sanstun 0.1.0 は 2^62 + 37 を足すので、そのままでは印が 27 秒進みます。
+進んだ印を受けた server は、同じ鍵の Go の agent やカーネルモードの agent に戻したとき、その開始を古いものの再送として 27 秒の間捨てます。
+sanstun は Unix 時刻を呼び手から受けるので、渡す時刻から 27 秒を引き、印を標準の値に揃えます (`sanstun_compat::stamp_base`)。
+device の API の Unix 時刻 (`unix_floor` と `unix_high_water`) は、引く前の本当の Unix 時刻のままです。
+試験 `initiations_carry_the_standard_tai64n_label` が、sanstun の相手が読んだ印の秒を確かめています。
 
 製品の `Device::new` は、作成の時に壁時計を 1 回だけ読み、呼び手が渡す床 (`unix_floor`) の 1 秒後と比べて大きい方を印の基準にします。
 床は、前の実行の `Device::unix_high_water` を呼び手が保存した値です。
@@ -113,7 +121,7 @@ v1 の agent は wireguard-go に次の UAPI の設定を渡します (`tunnel.g
 | `allowed_ip` | `peers[0].allowed_ips` | server のトンネルのアドレスの /32 だけ |
 | `persistent_keepalive_interval` | `peers[0].persistent_keepalive` | server が送る値。既定は 25 秒 |
 | `endpoint` | `peers[0].endpoint` | 解決した server のアドレス |
-| (TUN の MTU) | `mtu` | 1420 |
+| (TUN の MTU) | `mtu` | 1420。送る packet の上限は 16 の倍数に切り下げた 1408 ([MTU と詰め物](#mtu-と詰め物))。v1 で agent の netstack が wg0 と同じ MTU を使うという[ネットワークの設計](../network.md#4-ネットワーク)の記述は、v2 ではこの切り下げた値に読み替えます |
 
 ピアは server の 1 つだけです。
 preshared key は v1 が使わないので持ちません。
@@ -176,7 +184,24 @@ v1 で wireguard-go が netstack の TUN の Write に渡したときと同じ�
 ヘッダの checksum は確かめません。
 wireguard-go と Linux の WireGuard も確かめず、packet を受け取る IP の層が確かめます。
 
-送信の packet が MTU より長い場合は捨てます。
+### MTU と詰め物
+
+WireGuard はデータの message の平文を 16 バイトの倍数まで 0 で詰めます。
+論文 (5.4.6 節)、wireguard-go、Linux の WireGuard は、詰めた長さを MTU で止めます。
+sanstun 0.1.0 は MTU を知らず、常に 16 の倍数まで詰めます。
+このままでは、MTU 1420 のちょうど 1420 バイトの packet が 1424 バイトに詰められ、datagram は 1452 バイトでなく 1456 バイトになります。
+MTU を外側の経路の限度に合わせて選んだ場合 (例えば IPv6 の外側の経路の 1420) は、超えた分で外側の packet が断片化するか捨てられます。
+
+そこで device は、送る packet の上限 (`Device::mtu`) を設定の MTU を 16 の倍数に切り下げた値にします (`sanstun_compat::inner_mtu`)。
+1420 なら 1408 です。
+詰めた後の平文は設定の MTU を超えず、datagram は設定の MTU に 32 バイトを足した長さ以下になります。
+上の層 (wgstack の核) にはこの値を渡すので、TCP の MSS は 1368 になり、1380 バイトを超える UDP の datagram は核が断片に分けます。
+費用は packet ごとに最大 15 バイトの中身です。
+v1 の agent は wireguard-go の上で 1420 を使うので、MSS は 12 バイト小さくなります。
+MSS が小さくなる向きの違いなので、server の側に MSS のクランプは要りません ([tunnel.md の設定の対応](../spec/tunnel.md))。
+試験 `padding_never_takes_a_data_message_past_the_mtu` が、576 から 9216 の MTU で datagram の長さを確かめています。
+
+送信の packet が `Device::mtu` より長い場合は捨てます。
 受信の packet の長さには MTU の上限を置きません。
 Linux の WireGuard と wireguard-go と同じ扱いです。
 受信の packet は、詰め物を除いた長さの新しいバッファに写してから渡すキューに入れます。
@@ -217,7 +242,7 @@ sanstun が設定に無い鍵のために状態を増やさないことは、san
 
 ## 起動、再試行、期限切れ
 
-sanstun の persistent keepalive は、使えるセッションがあるときだけ送ります。
+sanstun の persistent keepalive は、使えるセッションがあるときだけ、通信の有無に依らず間隔ごとに送ります。
 wireguard-go の persistent keepalive は、ピアへ送るか、ピアから認証した packet を受けるたびに間隔だけ先へ延びる timer です。
 期限が来たときにセッションが無ければ、wireguard-go はハンドシェイクを始めます。
 device の層はこの timer をピアごとに持ちます。
@@ -231,13 +256,66 @@ device の層はこの timer をピアごとに持ちます。
   期限は keepalive の間隔の後に置き直します。
 - 送信:セッションの無いピアへの packet は、待たせてハンドシェイクを始めます。
 
+通信の間に sanstun が足す keepalive は、間隔ごとに 32 バイトの datagram が 1 つ増えるだけで、害はありません。
+外から止めるには、sanstun が暗号化した keepalive を捨て、こちらの timer の期限に送り直す必要があります。
+sanstun は keepalive を送る口を公開しないので送り直せず、捨てると外向きの通信が最大で間隔の 2 倍まで途切れます。
+このため受け入れた違いとして残します。
+
+### ハンドシェイクの開始の間隔と打ち切りの後の休止
+
+論文 (6.1 節) は、ハンドシェイクの開始を `REKEY_TIMEOUT` (5 秒) に 1 回より多く送らないと定めます。
+wireguard-go と Linux の WireGuard は、前の開始か応答の送信から 5 秒が経つまで新しい開始を送りません。
+sanstun は進行中のハンドシェイクを 1 つに保つだけで、この間隔を持ちません。
+agent のデータプレーンは使えるセッションが無い間、起きるたびに `start_handshake` を呼びます。
+このため、90 秒の再試行の打ち切りでトンネルを取り替えた同じ起床で次の開始を送り、開始の間隔が 2 秒前後に縮んでいました。
+
+device の層は、自分が始める開始 (`start_handshake`、セッションの無いピアへの packet、keepalive の期限) に次の規則を当てます。
+
+- 間隔:ピアへ最後に開始か応答を送ってから `REKEY_TIMEOUT` が経つまで始めません。
+  sanstun の timer が送る再送と鍵の更新は、sanstun が進行中の開始から間隔を取るので、そのまま送ります。
+- 休止:接続の期限切れ (使ったトンネルの再試行の打ち切りか鍵の期限切れ) の後は、keepalive の間隔だけ `start_handshake` と keepalive の期限による開始を控えます。
+  論文の規則 (打ち切りの後は新しいデータまで始めない) に合わせます。
+  データの packet は休止の中でも開始を促し、間隔の規則だけを受けます。
+  wireguard-go と同じです。
+  ただし agent のデータプレーンはこの道を使いません。
+  セッションが無い間は上の層から packet を引かず、`start_handshake` だけを呼ぶので、打ち切りの後は送るものがあっても keepalive の間隔の休止を待ちます。
+  server が始めたハンドシェイクにはすぐ答えるので、server の側からの回復は休止に止められません。
+  keepalive を持たないピアには休止を置きません。
+- 控えた要求:規則で控えた要求は覚えておき、許される時刻に `handle_timeout` が行います。
+  `poll_timeout` はその時刻を含みます。
+  その時までにセッションができていれば (相手が始めたハンドシェイクなど) 捨てます。
+
+server が始めたハンドシェイクに答えた直後は、server の確認が届くまで agent のセッションは使えません。
+前はこの間に agent が自分の開始を重ねていましたが、応答も間隔に数えるので、確認が先に届きます。
+試験 `initiations_are_paced_and_pause_after_the_peer_gives_up`、`data_starts_a_handshake_during_the_pause_but_not_within_the_rekey_timeout`、`answering_the_server_holds_back_an_own_initiation` が確かめています。
+
+### passive keepalive
+
+論文 (6.5 節)、wireguard-go、Linux の WireGuard は、返事をしていない最初のデータの受信から `KEEPALIVE_TIMEOUT` (10 秒) の間なにも送らなければ keepalive を 1 つ送ります。
+後から届いたデータでこの期限は延びません。
+sanstun 0.1.0 は、データを受けるたびに期限を受信の時刻から 10 秒後へ延ばします。
+10 秒より短い間隔で片向きのデータ (server から agent への UDP など) が届き続けると、sanstun は keepalive を送りません。
+相手は返事の無いデータの 15 秒後に新しいハンドシェイクを始めるので、Linux の server は 15 から 25 秒ごとにハンドシェイクを繰り返します。
+これは規則からの帰結で、ラボでは観測していません。
+sanstun は keepalive を送る口を公開せず、空の平文の暗号化を拒みます。
+
+device の層は、返事をしていない最初と最後のデータの受信の時刻をピアごとに持ちます (`sanstun_compat::PassiveKeepalive`)。
+sanstun の送信の記録が進む呼び出し (データの暗号化、開始、応答、keepalive) で消します。
+最初の受信から `KEEPALIVE_TIMEOUT` が経っても sanstun が送っていなければ、その 1 回の timer の呼び出しの間だけ、公開の `set_keepalive_timeout` で値を最後の受信からの経過に縮めます。
+sanstun の passive keepalive の期限が今になり、sanstun が keepalive を送ります。
+呼び出しの後で元の値に戻します。
+縮めた値が sanstun 0.1.0 の中で効く箇所と、どれも余計な送信を生まない理由は `PassiveKeepalive::force` の文書に書きました。
+この方法は sanstun 0.1.0 の timer の作りに依ります。
+sanstun を上げるときは、試験 `one_way_data_gets_a_passive_keepalive_within_the_keepalive_timeout` がこの規則を確かめ直します。
+この試験は、片向きのデータの間に agent が 11 秒より長く黙らないことと、server が新しいハンドシェイクを始めないことを確かめます。
+
 server が始めたセッションでは、agent は応答の側です。
 応答の側のセッションは 180 秒で使えなくなり、sanstun は応答の側から新しいハンドシェイクを始めません。
 Linux の WireGuard の server は、送るデータが無ければハンドシェイクを始めません。
 上の期限の規則が、この場合に agent の側からハンドシェイクを始めます。
 試験 `an_idle_responder_keeps_contacting_the_server` は、600 秒の間に agent の送信が 40 秒より長く途切れないことを確かめています。
 
-応答しない server に対しては、5 秒ごとの再送が 90 秒続き、keepalive の間隔の後に同じ再送が始まります。
+応答しない server に対しては、5 秒ごとの再送が 90 秒続き、keepalive の間隔の休止の後に同じ再送が始まります (下の「ハンドシェイクの開始の間隔と打ち切りの後の休止」)。
 
 sanstun は、ハンドシェイクを一度もしていないトンネルも作成から 540 秒で期限切れにします。
 期限の切れたトンネルはハンドシェイクを受けないので、device の層は同じように取り替えます。
@@ -272,6 +350,44 @@ server のカーネルモードは Linux の WireGuard を、ユーザー空間�
 鍵の更新 (`REKEY_AFTER_TIME` の 120 秒) は `lab/lifecycle.sh` の check 13 が確かめます。
 TCP の接続と UDP の往復を 120 秒を超えて流し続け、server が新しいハンドシェイクを報告することと、前後のデータがすべて届くことを見ます。
 
+## sanstun の振る舞いへの手当て
+
+sanstun 0.1.0 の振る舞いのうち、WireGuard の仕様と違い、外から直せるものは `src/sanstun_compat.rs` に集めて直します。
+sanstun は改変しません。
+手当てはそれぞれ 1 つの const か関数か型で、sanstun の版と、補う振る舞いを文書に書きます。
+同じ module の試験が、手当てが頼る sanstun の振る舞いを固定します。
+sanstun を上げてその振る舞いが直ると試験が落ち、消す手当てを指します。
+
+| 手当て | 補う sanstun 0.1.0 の振る舞い | 固定する試験 | 消し方 |
+| --- | --- | --- | --- |
+| `stamp_base`:sanstun に渡す Unix 時刻から 27 秒を引く ([時刻](#時刻)) | 開始の印の秒が 2^62 + 37 + Unix 時刻 | `sanstun_stamps_initiations_27_seconds_ahead` | sanstun が 2^62 + 10 に直した版に上げるのと同じ変更で、`stamp_base` を消して時刻をそのまま渡します。印は前後で同じ値になり、server の側で戻りません。直った sanstun で消し忘れると印が 27 秒戻り、server は前の印より古い開始を 27 秒の間捨てます。agent の `agent.json.clock` は値を前の版の単位 (27 秒小さい値) で持ちます ([agent の制御](agent-control.md))。手当てを消した後もこの単位は変えず、そのまま残せます |
+| `inner_mtu`:送る packet の上限を 16 の倍数に切り下げる ([MTU と詰め物](#mtu-と詰め物)) | 平文を MTU に依らず 16 の倍数まで詰める | `sanstun_pads_past_the_mtu` | sanstun が詰め物の上限を受ける口を持ったら、そこへ設定の MTU を渡し、`inner_mtu` を設定の MTU そのものにします。試験は口が増えても落ちないので、sanstun を上げるときに変更の記録を確かめます |
+| `PassiveKeepalive`:passive keepalive を最初の受信から 10 秒に送らせる ([passive keepalive](#passive-keepalive)) | データを受けるたびに passive keepalive の期限を延ばす | `sanstun_postpones_the_passive_keepalive_on_every_receipt` | 型と、`protocol.rs` の `passive` の呼び出し (`on_data`、`on_send`、`deadline`、`force`) と、`Device::handle_timeout` の `passive_keepalive` の呼び出しを消します |
+
+開始の間隔と打ち切りの後の休止 ([上の節](#ハンドシェイクの開始の間隔と打ち切りの後の休止)) は手当てでなく device の層の規則です。
+sanstun が開始の間隔を持つようになっても残します。
+データプレーンは起きるたびに開始を頼むので、控えた開始を許される時刻に送る規則が device の層に要るためです。
+
+## WireGuard の仕様との違い
+
+論文 (rev e2da747、2020-06-01)、wireguard.com/protocol、wireguard-go、Linux の WireGuard と照らした違いのうち、上の節で直したもの以外を挙げます。
+どれも sanstun 0.1.0 の作りで、外から変えられないか、変える利点がありません。
+sanstun を改変 (fork やパッチ) しない所有者の方針に従い、受け入れた違いとして残します。
+
+| 違い | 仕様と他の実装 | sanstun と device の層 | 影響 |
+| --- | --- | --- | --- |
+| 再試行の打ち切り | 打ち切りでは待つ packet だけを捨て、セッションは残します | 打ち切り (`REKEY_ATTEMPT_TIME`) でトンネルの全セッションを捨て、device の層が新しいトンネルに替えます | 鍵の更新に失敗した後、まだ使えた古いセッションでの受信も止まります。相手が 90 秒応答しない状況なので、実害は小さいと見ます |
+| 鍵を消す時刻 | 最後の鍵の導出から 540 秒 | 最後のハンドシェイクの完了か、トンネルの作成から 540 秒 | 使っていないトンネルは device の層が取り替え、知らせません。540 秒の直前に始めた開始は打ち切られます |
+| 再送の窓 | 約 2000 (論文)、wireguard-go と Linux は 8128 | 8192 | 少し広いだけで、安全性は変わりません |
+| 送信の index | 32 ビットの乱数 | 24 ビットの乱数のトンネルの番号と 8 ビットの通し番号 | 同じトンネルのハンドシェイクを結び付けて読めます。トンネルを取り替えると番号も替わります |
+| セッションの数 | 現在、前、次の 3 つ | 8 つの環 | 古いセッションが少し長く残ります |
+| 受けた cookie を使う時間 | 論文と wireguard-go は 120 秒、Linux は 115 秒 | 120 秒 | 古い mac2 は新しい cookie の返事を招くだけです |
+| 負荷の判定と開始の上限 | ハンドシェイクの待ち行列の長さ、ピアごとに 1 秒あたり 50 回 | 1 秒あたり 100 回で cookie を求め、送信元ごとの bucket で絞ります | 未確認の節に書きました |
+| TAI64N のナノ秒 | 2^24 ナノ秒の単位に丸めます | 丸めません | 未確認の節に書きました |
+| persistent keepalive | 送るか受けるたびに延びる timer | 通信の有無に依らず間隔ごと | 上の「起動、再試行、期限切れ」に書きました |
+| DSCP と ECN | ハンドシェイクに AF41 を付け、ECN を RFC 6040 で写します | どちらもしません | 中の wgstack は ECN を使わず、agent の 1 つのピアでは優先度の印の利点が小さいためです |
+| 経路の無い宛先 | Linux は ICMP の宛先到達不能を返します | 黙って捨て、`NoRoute` で数えます | agent の宛先は server の /32 だけで、核が経路を選ぶので起きません |
+
 ## 判断と理由
 
 - 暗号の処理を呼び出しの中で済ませます。
@@ -291,6 +407,10 @@ TCP の接続と UDP の往復を 120 秒を超えて流し続け、server が�
   agent のピアは 1 つで、server の役でもピアの数に依らない引きの費用で足りるためです。
 - 送信の packet の長さを MTU で抑え、受信の packet の長さは抑えません。
   受信の側を相手の MTU に合わせて絞ると、相手の設定の違いで黙って通らなくなるためです。
+- sanstun の WireGuard の仕様との違いは、外から保証できるものを device の層で直します。
+  直したものは TAI64N の基準、MTU を超える詰め物、開始の間隔と打ち切りの後の休止、passive keepalive の時刻です。
+  外から直せないものは、sanstun を改変せず受け入れた違いとして文書に残します。
+  依存を改変しない、資源を少し多く使う、性能を少し下げる、fork する、の順に選ぶ所有者の方針に従います。
 
 ## 未確認
 
@@ -306,6 +426,9 @@ TCP の接続と UDP の往復を 120 秒を超えて流し続け、server が�
   sanstun の試験が sanstun の中で確かめています。
 - 性能 (packet ごとの割り当て、1 秒あたりの packet の数、CPU) は測っていません。
 - device のキューと sanstun の状態を合わせたメモリの保持量は測っていません。
+- MTU の切り下げで、agent が送る 1381 から 1392 バイトの UDP の datagram は、核が断片に分けて送るようになりました。
+  断片に分けた UDP が v1 の server (カーネルモードとユーザー空間モード) を通って相手に届くことは、端から端までは確かめていません。
+  ラボの `e2e.sh` の 3000 バイトの UDP は server から agent への向きだけを断片にし、ラボの echo の返事は短いので、agent が断片に分ける向きは通りません。
 - Windows と macOS では、CI が build と単体の試験を流すだけです。
   実機の相互運用は確かめていません。
 - ホストの一時停止:device は呼び手が渡す `Instant` だけを時計に使うので、停止の間の時間を数えるかは呼び手の時計の選び方で決まります。
