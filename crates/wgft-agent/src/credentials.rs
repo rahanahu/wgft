@@ -120,7 +120,14 @@ fn open_regular(path: &Path, opts: &mut OpenOptions) -> std::io::Result<(File, f
         use std::os::unix::fs::OpenOptionsExt;
         opts.custom_flags(libc::O_NOFOLLOW);
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+        // symlink を辿らず、リンク自身を開く。通常のファイルの検査で拒まれる
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    #[cfg(all(not(unix), not(windows)))]
     if fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err(std::io::Error::other("is a symbolic link"));
     }
@@ -133,7 +140,16 @@ fn open_regular(path: &Path, opts: &mut OpenOptions) -> std::io::Result<(File, f
             e
         }
     })?;
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let f = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::GENERIC_READ;
+        use windows_sys::Win32::Storage::FileSystem::{READ_CONTROL, WRITE_DAC};
+        // DACL をこの handle に付け直せるように WRITE_DAC つきで開く
+        opts.access_mode(GENERIC_READ | WRITE_DAC | READ_CONTROL)
+            .open(path)?
+    };
+    #[cfg(all(not(unix), not(windows)))]
     let f = opts.open(path)?;
     let meta = f.metadata()?;
     if !meta.file_type().is_file() {
@@ -210,6 +226,11 @@ impl serde_json::ser::Formatter for GoIndent {
 impl Credentials {
     /// 読む。無ければ [`CredentialsError::NotFound`]。symlink と通常のファイルでないものは拒む。
     ///
+    /// Windows では、開いたファイルの DACL を呼び出した利用者の SID で付け直す (付けられなければ
+    /// 拒む)。純粋な読みではないので、`agent doctor` や制御ソケットの段のように、持ち主でない
+    /// 利用者や権限の無い利用者が読むだけの呼び出しは、この関数を使わず別の読み (Go の `ReadFile`
+    /// に当たるもの) を使うこと。
+    ///
     /// # Errors
     ///
     /// 読めないか JSON として読めなければ誤りを返す。
@@ -221,7 +242,7 @@ impl Credentials {
             }
             Err(e) => return Err(other(path, e)),
         };
-        tighten_existing(path);
+        tighten_existing(&f).map_err(|e| other(path, format!("secure credentials file: {e}")))?;
         if meta.len() > MAX_FILE_SIZE {
             return Err(other(path, "is larger than wgft ever writes"));
         }
@@ -419,20 +440,14 @@ pub fn lock_path(credentials: &Path) -> PathBuf {
 pub fn acquire(credentials: &Path) -> Result<Lock, CredentialsError> {
     let p = lock_path(credentials);
     for _ in 0..4 {
-        let mut opts = OpenOptions::new();
-        opts.read(true).write(true).create(true).truncate(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let (f, opened) = open_regular(&p, &mut opts).map_err(|e| other(&p, e))?;
+        let (f, opened) = open_lock(&p).map_err(|e| other(&p, e))?;
         match f.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => return Err(CredentialsError::Locked),
             Err(TryLockError::Error(e)) => return Err(other(&p, e)),
         }
-        tighten_existing(&p);
+        // 締められなければ、ロックを渡さずに拒む。f はここで閉じてロックも離す
+        tighten_existing(&f).map_err(|e| other(&p, format!("secure lock file: {e}")))?;
         if same_file(&opened, &p) {
             return Ok(Lock { _file: f });
         }
@@ -441,6 +456,30 @@ pub fn acquire(credentials: &Path) -> Result<Lock, CredentialsError> {
         &p,
         "the lock file kept being replaced while it was being locked",
     ))
+}
+
+/// ロックファイルを開く (無ければ作る)。Windows は作成の時点から DACL つきで作る。
+fn open_lock(p: &Path) -> std::io::Result<(File, fs::Metadata)> {
+    #[cfg(windows)]
+    {
+        let f = crate::platform::winsec::create_private_file(p, false)?;
+        let meta = f.metadata()?;
+        if !meta.file_type().is_file() {
+            return Err(std::io::Error::other("is not a regular file"));
+        }
+        Ok((f, meta))
+    }
+    #[cfg(not(windows))]
+    {
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        open_regular(p, &mut opts)
+    }
 }
 
 /// 開いたファイル `opened` と、今の `path` が同じファイルかどうか。
@@ -476,7 +515,8 @@ pub fn ensure_data_dir(dir: &Path) -> std::io::Result<()> {
             fs::create_dir_all(parent)?;
         }
         match crate::platform::winsec::create_private_dir(dir) {
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            // 競合で他が先に作った場合だけ許す。ディレクトリでないものは誤り
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
             r => r,
         }
     }
@@ -506,15 +546,25 @@ fn open_new_private(path: &Path, opts: &OpenOptions) -> std::io::Result<File> {
     }
 }
 
-/// 既存のファイルの保護を締め直す。Windows は DACL を付け直す。付けられなければ警告して続ける
-/// (他の利用者が作ったファイルなど、付ける権限が無いことがある)。Unix では何もしない。
-fn tighten_existing(path: &Path) {
+/// 開いたファイルの保護を締め直す。Windows は開いた handle に DACL を付け直す。Unix では何もしない
+/// (既にあるファイルの権限は変えない)。
+#[cfg_attr(
+    not(windows),
+    expect(
+        clippy::unnecessary_wraps,
+        reason = "the same signature as the Windows version"
+    )
+)]
+fn tighten_existing(f: &File) -> std::io::Result<()> {
     #[cfg(windows)]
-    if let Err(e) = crate::platform::winsec::restrict_file(path, true) {
-        crate::logf!("cannot restrict the permissions of {}: {e}", path.display());
+    {
+        crate::platform::winsec::restrict_open_file(f)
     }
     #[cfg(not(windows))]
-    let _ = path;
+    {
+        let _ = f;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

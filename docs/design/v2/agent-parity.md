@@ -330,7 +330,7 @@ musl の割り当て器は解放したメモリを早く OS に返しますが�
   1 つの接続が期限の 30 秒まで握り続けると、その間の次の接続は待ちます。
   相手は同じホストの CLI だけで、要求の頻度も低いので、この待ちを許します
 - ソケット:`socket2` の AF_UNIX を Linux、macOS、Windows で使います。
-  `socket2` は Windows の AF_UNIX の型を持ちますが、Windows の実行時の挙動は確かめていません
+  `socket2` の AF_UNIX は Windows の CI の実行で動くことを確かめました。実機での挙動は未確認です
 - 開き方:起動のたびに同じパスの古いファイルを消してから待ち受けます。
   パスが 103 byte を超えて開けなければ、その旨をログに出して制御ソケットを使わずに動きます
 - 権限:Unix では 0600 にし、失敗を無視します。
@@ -466,7 +466,7 @@ clap の derive でコマンドの構成とフラグの名前を書き、値の�
 既定はプロセスの起動の時に 1 回だけ決め、`--help` の既定の表示にも同じ値を出します。
 macOS で `HOME` が空なら作業ディレクトリの `wgft`、Windows で `ProgramData` が空なら `C:\ProgramData` を使います。
 Windows の環境変数の名前は大文字と小文字を区別せずに引きます。
-Rust の `std::env::var` は Windows の API を使うので同じ扱いになると見込みますが、確かめていません。
+Rust の `std::env::var` は Windows の API を使うので同じ扱いになります。Windows の CI で確かめました。
 
 ### ファイル記述子の上限
 
@@ -651,16 +651,25 @@ Windows の DACL とソケットの操作には `windows-sys` を使います。
 
 - `paths`:OS の分類と環境の引き方を引数に取る純粋な関数で、3 つの OS の表をどの OS の試験でも確かめます。
   `wgft` の既定の表示は起動の時に 1 回だけ決めます
-- `fdlimit`:soft を hard まで上げます。
+- `fdlimit`:`agent run` の起動だけで、soft を hard まで上げます。
+  上げた上限は子のプロセスへ引き継がれます。Go は 1.21 から exec の前に元の値へ戻すので、子を起こす段は `original_soft` の値を `pre_exec` で戻します。
+  hard が無制限の Linux では、soft を `fs.nr_open` まで上げます。Go は上げません
+  macOS の頭打ちと上がることは macOS の CI の子のプロセスの試験で確かめました
   hard が無制限のときは、macOS で `kern.maxfilesperproc`、Linux で `fs.nr_open` で頭を打ちます。
   試験は soft を下げた子のプロセスで呼び、上がることを確かめます
 - `winsec`:`windows-sys` で DACL を付けます。
   ファイルと一時ファイルは `CreateFileW` の `SECURITY_ATTRIBUTES` で作成の時点から付け、既存のファイルは開いた handle に `SetSecurityInfo` で付け直します。
   ディレクトリは `OICI` つきで作ります。
   利用者が SYSTEM か Administrators のときは、同じ ACE を重ねません
-- 既存のファイルの付け直し:`agent.json` を読むときとロックを取るときに呼びます。
-  付けられなければ、警告を出して続けます。
-  他の利用者が作ったファイルのように付ける権限が無い場合に、読めるものまで止めないためです
+- 既存のファイルの付け直し:`agent.json` を読むときとロックを取るときに、`WRITE_DAC` つきで開いた同じ handle に付けます。
+  付けられなければ Go と同じく拒みます。
+  読みでは `secure credentials file: ...` の誤りにし、ロックでは握ったロックを手放してから誤りを返します。
+  この読みは DACL を呼び出した利用者の SID で書き換えるので、`agent doctor` と制御ソケットの段は、DACL に触れない別の読みを使います
+- ロックファイル:Windows では `OPEN_ALWAYS` で DACL つきで作り、通常のファイルであることを確かめます
+- 制御ソケットのパスの長さ:上限は OS が決める値 (Linux と Windows は 107 byte、macOS は 103 byte) に従い、socket2 の判定を使います。
+  Go が開けるパスは Rust も開けます。
+  古いファイルを消す前に判定します。
+  ソケットの drop は名前でファイルを消すので、認証情報のロックより先に drop します
 - DACL の照合:読み返した SDDL は、保護の印と ACE の集合で比べ、trustee は SID に揃えます。
   並びや継承の印の書き方の違い、組み込みの Administrator を `LA` と書くような別名で落とさないためです。
   Windows の CI の実行で、別名が現れることを確かめました
@@ -748,10 +757,7 @@ wgstack の口が前提と違えば、wgstack の上の agent と UDP の中継�
 - wgstack の UDP の口は #681 の提案で、#681 のレビューで変わりえます
 - macOS の kqueue と Windows の AFD の poll で、接続した UDP のソケットへの ICMP の拒否が読みか誤りの準備として届くこと
 - Windows の接続した UDP のソケットが、宛先の Port Unreachable の後に `WSAECONNRESET` を返すこと
-- `socket2` の AF_UNIX が Windows の実行時に動くこと。`ctlsock` の試験が Windows の CI で初めて確かめる
-- Windows の DACL の読み返しの SDDL の書き方。`winsec` の試験が Windows の CI で初めて確かめる
 - `GetAdaptersAddresses` が返す adapter の名前 (FriendlyName) が、TUN の名前と一致すること
-- Rust の `std::env::var` が Windows で環境変数の名前の大文字と小文字を区別しないこと
 - musl と glibc の `getaddrinfo` の順と Go の resolver の順の違い。wgft が並べ直すので結果には効かない見込みです
 - ラボの台本が照らす agent のログの行の一覧は、調べた範囲のもので、ラボの切り替えの PR で数え直します
 - 大きさの目安は、Go の対応するコードと今の Rust の試作の大きさからの見積もりです

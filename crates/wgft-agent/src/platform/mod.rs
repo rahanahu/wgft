@@ -7,3 +7,19 @@ pub mod fdlimit;
 pub mod paths;
 #[cfg(windows)]
 pub mod winsec;
+
+/// NUL で終わる UTF-16 の文字列を読む。
+///
+/// # Safety
+///
+/// `p` は NUL で終わる有効な UTF-16 の列を指し、呼び出しの間は読めること。
+#[cfg(windows)]
+pub(crate) unsafe fn utf16z_to_string(p: *const u16) -> String {
+    let mut n = 0;
+    // SAFETY: 呼び出し側の約束で、NUL まで読める
+    while unsafe { *p.add(n) } != 0 {
+        n += 1;
+    }
+    // SAFETY: 上で数えた n 個の要素は読める
+    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, n) })
+}

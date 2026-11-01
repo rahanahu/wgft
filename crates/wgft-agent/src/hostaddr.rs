@@ -108,7 +108,7 @@ pub fn read() -> std::io::Result<Vec<HostAddr>> {
 /// 読めなければ誤りを返す。
 #[cfg(windows)]
 pub fn read() -> std::io::Result<Vec<HostAddr>> {
-    use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS};
+    use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_NO_DATA, ERROR_SUCCESS};
     use windows_sys::Win32::NetworkManagement::IpHelper::{
         GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST,
         GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
@@ -134,6 +134,8 @@ pub fn read() -> std::io::Result<Vec<HostAddr>> {
         };
         match rc {
             ERROR_SUCCESS => break,
+            // adapter が 1 つも無いホスト
+            ERROR_NO_DATA => return Ok(Vec::new()),
             ERROR_BUFFER_OVERFLOW if tries < 4 => tries += 1,
             e => return Err(std::io::Error::from_raw_os_error(e.cast_signed())),
         }
@@ -147,13 +149,8 @@ pub fn read() -> std::io::Result<Vec<HostAddr>> {
         let name = if a.FriendlyName.is_null() {
             String::new()
         } else {
-            let mut n = 0;
             // SAFETY: FriendlyName は NUL で終わる UTF-16 の文字列を指す
-            while unsafe { *a.FriendlyName.add(n) } != 0 {
-                n += 1;
-            }
-            // SAFETY: 上で数えた n 個の要素は読める
-            String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(a.FriendlyName, n) })
+            unsafe { crate::platform::utf16z_to_string(a.FriendlyName) }
         };
         let mut u = a.FirstUnicastAddress;
         while !u.is_null() {

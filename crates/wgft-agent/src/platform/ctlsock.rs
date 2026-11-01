@@ -1,6 +1,8 @@
 //! 制御ソケットの搬送。`<データディレクトリ>/agent.json.sock` の AF_UNIX の待ち受けと接続を、Linux、
 //! macOS、Windows で同じ口にする。要求と応答の中身は持たない。契約は `docs/design/spec/control-socket.md`。
 //!
+//! パスの長さの上限は OS が決め (Linux と Windows は 107 byte、macOS は 103 byte)、socket2 の判定に従う。
+//!
 //! 受け口は専用の OS のスレッドで [`Listener::accept`] を呼ぶ使い方を想定する (tokio は Windows の
 //! AF_UNIX を持たない)。Windows の AF_UNIX の実行時の挙動は未確認で、Windows の CI で確かめる。
 
@@ -10,16 +12,14 @@ use std::time::{Duration, Instant};
 
 use socket2::{Domain, SockAddr, Socket, Type};
 
-/// どの OS でも `sun_path` に収まるパスの長さの上限 (byte)。
-pub const MAX_PATH_LEN: usize = 103;
-
 /// 接続 1 つの読みと書きの全体の期限の既定。
 pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// 待ち受けを開けなかった理由。
 #[derive(Debug)]
 pub enum BindError {
-    /// パスが [`MAX_PATH_LEN`] を超える。呼び出し側は制御ソケットを使わずに動く。
+    /// パスが `sun_path` に収まらない (byte 数)。上限は OS で違い、socket2 の判定に従うので、Go が開ける
+    /// パスは Rust も開ける。呼び出し側は制御ソケットを使わずに動く。
     PathTooLong(usize),
     /// Windows で DACL を付けられなかった。ソケットは閉じて消してある。
     Security(io::Error),
@@ -33,7 +33,7 @@ impl std::fmt::Display for BindError {
             BindError::PathTooLong(n) => {
                 write!(
                     f,
-                    "socket path is {n} bytes, over the limit of {MAX_PATH_LEN}"
+                    "socket path is {n} bytes, too long for a Unix socket address"
                 )
             }
             BindError::Security(e) => write!(f, "restrict the socket to its owner: {e}"),
@@ -44,16 +44,22 @@ impl std::fmt::Display for BindError {
 
 impl std::error::Error for BindError {}
 
-fn check_len(path: &Path) -> Result<(), BindError> {
-    let n = path.as_os_str().as_encoded_bytes().len();
-    if n > MAX_PATH_LEN {
-        Err(BindError::PathTooLong(n))
-    } else {
-        Ok(())
-    }
+/// ソケットのアドレスにする。長すぎるパスは socket2 が `InvalidInput` で拒むので、それを
+/// [`BindError::PathTooLong`] にする。
+fn sock_addr(path: &Path) -> Result<SockAddr, BindError> {
+    SockAddr::unix(path).map_err(|e| {
+        if e.kind() == io::ErrorKind::InvalidInput {
+            BindError::PathTooLong(path.as_os_str().as_encoded_bytes().len())
+        } else {
+            BindError::Io(e)
+        }
+    })
 }
 
 /// 待ち受けているソケット。drop でソケットを閉じ、ファイルを消す。
+///
+/// drop は名前でファイルを消すので、認証情報のロックより先に drop すること。ロックを手放した後に
+/// 消すと、次の agent が同じパスに作った新しいソケットを消しかねない。
 #[derive(Debug)]
 pub struct Listener {
     socket: Socket,
@@ -69,14 +75,14 @@ impl Listener {
     ///
     /// パスが長すぎるか、開けなければ誤りを返す。
     pub fn bind(path: &Path) -> Result<Listener, BindError> {
-        check_len(path)?;
+        // 古いファイルを消す前にアドレスを確かめる。長すぎるパスでは何も消さない
+        let addr = sock_addr(path)?;
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(BindError::Io(e)),
         }
         let socket = Socket::new(Domain::UNIX, Type::STREAM, None).map_err(BindError::Io)?;
-        let addr = SockAddr::unix(path).map_err(BindError::Io)?;
         socket.bind(&addr).map_err(BindError::Io)?;
         // ここから先の失敗ではファイルを残さない
         let l = Listener {
@@ -216,9 +222,12 @@ impl Write for Stream {
 ///
 /// パスが長すぎるか、接続できなければ誤りを返す。
 pub fn connect(path: &Path, timeout: Duration) -> io::Result<Stream> {
-    check_len(path).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+    let addr = sock_addr(path).map_err(|e| match e {
+        BindError::Io(e) => e,
+        other => io::Error::new(io::ErrorKind::InvalidInput, other.to_string()),
+    })?;
     let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
-    socket.connect_timeout(&SockAddr::unix(path)?, timeout)?;
+    socket.connect_timeout(&addr, timeout)?;
     Ok(Stream::new(socket, DEFAULT_DEADLINE))
 }
 
@@ -279,15 +288,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// 前のプロセスが unlink せずに落とした本物の AF_UNIX のソケットのファイルを置き換える。
+    #[test]
+    fn replaces_a_real_stale_socket() {
+        let d = short_dir("real");
+        let p = d.join("a.sock");
+        {
+            let s = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
+            s.bind(&SockAddr::unix(&p).unwrap()).unwrap();
+            s.listen(1).unwrap();
+            // unlink せずに閉じる
+        }
+        assert!(
+            std::fs::symlink_metadata(&p).is_ok(),
+            "the stale socket file must remain"
+        );
+        let l = Listener::bind(&p).unwrap();
+        std::thread::scope(|sc| {
+            sc.spawn(|| echo_once(&l));
+            let mut c = connect(&p, Duration::from_secs(5)).unwrap();
+            c.write_all(b"y\n").unwrap();
+            let mut got = String::new();
+            BufReader::new(&mut c).read_line(&mut got).unwrap();
+            assert_eq!(got, "echo y\n");
+        });
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn rejects_a_path_over_the_limit() {
         let d = short_dir("long");
-        let p = d.join("x".repeat(MAX_PATH_LEN));
+        let p = d.join("x".repeat(300));
         assert!(matches!(Listener::bind(&p), Err(BindError::PathTooLong(_))));
         assert!(connect(&p, Duration::from_secs(1)).is_err());
-        // 上限ちょうどは長さの検査を通る (開けるかは OS の sun_path の長さで決まる)
-        let edge = PathBuf::from("a".repeat(MAX_PATH_LEN));
-        assert!(check_len(&edge).is_ok());
         let _ = std::fs::remove_dir_all(&d);
     }
 

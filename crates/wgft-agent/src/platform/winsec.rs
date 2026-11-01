@@ -52,16 +52,6 @@ impl<T> Drop for LocalMem<T> {
     }
 }
 
-fn wide_ptr_to_string(p: *const u16) -> String {
-    let mut n = 0;
-    // SAFETY: p は NUL で終わる UTF-16 の文字列を指す
-    while unsafe { *p.add(n) } != 0 {
-        n += 1;
-    }
-    // SAFETY: 上で数えた n 個の要素は読める
-    String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, n) })
-}
-
 /// 実行中の利用者の SID の文字列 (`S-1-5-21-...`)。
 pub fn current_user_sid() -> io::Result<String> {
     let mut token: HANDLE = ptr::null_mut();
@@ -106,7 +96,8 @@ pub fn current_user_sid() -> io::Result<String> {
         return Err(io::Error::last_os_error());
     }
     let s = LocalMem(s);
-    Ok(wide_ptr_to_string(s.0))
+    // SAFETY: 成功した呼び出しが返した NUL で終わる文字列
+    Ok(unsafe { super::utf16z_to_string(s.0) })
 }
 
 /// 3 者の SDDL。`inherit` が真なら子へ継承する `OICI` を添える。利用者が SYSTEM か Administrators
@@ -181,7 +172,8 @@ fn with_attributes<R>(
 
 /// 3 者だけの DACL を持つファイルを作る。`create_new` が真なら既にあれば失敗し、偽なら開く (無ければ
 /// 作る)。作成の時点から DACL を持つので、作ってから締めるまでの間に他の利用者が開けない。開いた
-/// 既存のファイルには付かないので、続けて [`restrict_file`] を呼ぶ。
+/// 既存のファイルには付かないので、続けて [`restrict_open_file`] を呼ぶ。返す handle は `WRITE_DAC`
+/// つきで開いてある。
 pub fn create_private_file(path: &Path, create_new: bool) -> io::Result<File> {
     let sddl = sddl_for(&current_user_sid()?, false);
     let w = wide(path.as_os_str());
@@ -190,7 +182,7 @@ pub fn create_private_file(path: &Path, create_new: bool) -> io::Result<File> {
         let h = unsafe {
             CreateFileW(
                 w.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
+                GENERIC_READ | GENERIC_WRITE | WRITE_DAC | READ_CONTROL,
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 sa,
                 if create_new { CREATE_NEW } else { OPEN_ALWAYS },
@@ -220,7 +212,12 @@ pub fn create_private_dir(path: &Path) -> io::Result<()> {
     })
 }
 
-/// 開いた handle の DACL を 3 者だけの継承なしの形にする。
+/// 開いた `f` の DACL を 3 者だけの継承なしの形にする。名前を辿らず、この handle に付ける。`f` は
+/// `WRITE_DAC` つきで開いてあること。
+pub fn restrict_open_file(f: &File) -> io::Result<()> {
+    restrict_handle(f.as_raw_handle())
+}
+
 fn restrict_handle(h: HANDLE) -> io::Result<()> {
     let d = Descriptor::from_sddl(&sddl_for(&current_user_sid()?, false))?;
     let acl = d.dacl()?;
@@ -294,7 +291,8 @@ pub fn read_dacl_sddl(path: &Path) -> io::Result<String> {
         return Err(io::Error::last_os_error());
     }
     let s = LocalMem(s);
-    Ok(wide_ptr_to_string(s.0))
+    // SAFETY: 成功した呼び出しが返した NUL で終わる文字列
+    Ok(unsafe { super::utf16z_to_string(s.0) })
 }
 
 /// `path` の DACL が 3 者だけの継承なしの形かを確かめる。ACE の並びの違いや、継承の印の書き方の差は
@@ -345,7 +343,9 @@ fn canonical_ace(ace: &str) -> String {
         return ace;
     }
     let out = LocalMem(out);
-    format!("{head};{}", wide_ptr_to_string(out.0))
+    // SAFETY: 成功した呼び出しが返した NUL で終わる文字列
+    let text = unsafe { super::utf16z_to_string(out.0) };
+    format!("{head};{text}")
 }
 
 fn same_dacl(got: &str, want: &str) -> bool {

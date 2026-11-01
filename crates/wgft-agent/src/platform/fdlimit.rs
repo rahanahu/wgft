@@ -1,6 +1,10 @@
 //! 起動の時に soft の `RLIMIT_NOFILE` を hard の値まで上げる。Go の実行環境が v1 で行っていたことで、
 //! 同梱の unit と plist は `LimitNOFILE` を書かずにこれに頼る。macOS では hard が無制限でも
 //! `kern.maxfilesperproc` を超える値を設定できないので、その値で頭を打つ。
+//!
+//! 上げた上限は子のプロセスへ引き継がれる。Go は 1.21 から exec の前に元の値へ戻す。Rust の agent が子の
+//! プロセスを起こす段 (カーネルモードの helper など) は、[`original_soft`] の値を `pre_exec` で戻すこと。
+//! hard が無制限の Linux では、soft を `fs.nr_open` まで上げる (Go は上げない)。
 
 /// 上げた結果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,7 +22,20 @@ pub struct Raised {
 ///
 /// 上限を読めないか設定できなければ誤りを返す。呼び出し側は英語の 1 行を出して起動を続ける。
 pub fn raise_nofile() -> std::io::Result<Option<Raised>> {
-    imp::raise()
+    let r = imp::raise()?;
+    if let Some(r) = r {
+        // 最初の呼び出しの前の値だけを覚える
+        let _ = ORIGINAL.set(r.from);
+    }
+    Ok(r)
+}
+
+static ORIGINAL: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// 上げる前の soft の値。上げていなければ `None`。子のプロセスを起こすときに戻すための値。
+#[must_use]
+pub fn original_soft() -> Option<u64> {
+    ORIGINAL.get().copied()
 }
 
 /// 上げる先。`hard` が無制限 (`u64::MAX`) のときは `cap` で頭を打つ。`cap` が無ければ `hard` のまま。

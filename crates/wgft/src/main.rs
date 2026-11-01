@@ -208,6 +208,11 @@ fn agent_options(a: &RunArgs) -> Result<Options, Refusal> {
 
 fn run_agent(a: &RunArgs) -> Result<(), AgentError> {
     let opts = agent_options(a)?;
+    // Go の実行環境が v1 で行っていたとおり、soft の open file の上限を hard の値まで上げる。
+    // agent run だけで行い、他のコマンドは何も出さない
+    if let Err(e) = wgft_agent::platform::fdlimit::raise_nofile() {
+        wgft_agent::logf!("cannot raise the open file limit, continuing with the current one: {e}");
+    }
     if !a.agent_netstack.is_empty() {
         wgft_agent::logf!(
             "WGFT_AGENT_NETSTACK={}: unused; this Rust agent prototype carries the tunnel on a Linux TUN device and the kernel network stack",
@@ -220,10 +225,6 @@ fn run_agent(a: &RunArgs) -> Result<(), AgentError> {
 fn main() -> ExitCode {
     // 時差はスレッドが 1 つのうちに読む
     wgft_agent::logging::init();
-    // Go の実行環境が v1 で行っていたとおり、soft の open file の上限を hard の値まで上げる
-    if let Err(e) = wgft_agent::platform::fdlimit::raise_nofile() {
-        wgft_agent::logf!("cannot raise the open file limit, continuing with the current one: {e}");
-    }
     let cli = match Cli::try_parse() {
         Ok(c) => c,
         Err(e) => {
