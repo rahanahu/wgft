@@ -100,14 +100,82 @@ pub fn read() -> std::io::Result<Vec<HostAddr>> {
     Ok(out)
 }
 
-/// Unix でなければ読まない。試作のトンネルは Linux だけで動く。
+/// ホストの IPv4 のアドレスを読む (`GetAdaptersAddresses`)。interface の名前は adapter の
+/// FriendlyName である。
 ///
 /// # Errors
 ///
-/// 返さない。
-#[cfg(not(unix))]
+/// 読めなければ誤りを返す。
+#[cfg(windows)]
 pub fn read() -> std::io::Result<Vec<HostAddr>> {
-    Ok(Vec::new())
+    use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS};
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST,
+        GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_INET;
+
+    let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    // 一覧は構造体の境界に揃えた領域に書かれる。足りなければ必要な長さが返るので取り直す
+    let mut size: u32 = 16 * 1024;
+    let mut buf: Vec<u64>;
+    let mut tries = 0;
+    loop {
+        buf = vec![0u64; (size as usize).div_ceil(8)];
+        // SAFETY: buf は size byte 以上の書き込める領域で、境界は構造体に足りる
+        let rc = unsafe {
+            GetAdaptersAddresses(
+                u32::from(AF_INET),
+                flags,
+                std::ptr::null(),
+                buf.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
+                &raw mut size,
+            )
+        };
+        match rc {
+            ERROR_SUCCESS => break,
+            ERROR_BUFFER_OVERFLOW if tries < 4 => tries += 1,
+            e => return Err(std::io::Error::from_raw_os_error(e.cast_signed())),
+        }
+    }
+    let mut out = Vec::new();
+    let mut adapter = buf.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+    while !adapter.is_null() {
+        // SAFETY: adapter は GetAdaptersAddresses が buf の中に作った一覧の要素である
+        let a = unsafe { &*adapter };
+        adapter = a.Next;
+        let name = if a.FriendlyName.is_null() {
+            String::new()
+        } else {
+            let mut n = 0;
+            // SAFETY: FriendlyName は NUL で終わる UTF-16 の文字列を指す
+            while unsafe { *a.FriendlyName.add(n) } != 0 {
+                n += 1;
+            }
+            // SAFETY: 上で数えた n 個の要素は読める
+            String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(a.FriendlyName, n) })
+        };
+        let mut u = a.FirstUnicastAddress;
+        while !u.is_null() {
+            // SAFETY: u は一覧の要素である
+            let ua = unsafe { &*u };
+            u = ua.Next;
+            let sa = ua.Address.lpSockaddr;
+            // SAFETY: lpSockaddr は null か有効な sockaddr を指す
+            if sa.is_null() || unsafe { (*sa).sa_family } != AF_INET {
+                continue;
+            }
+            // SAFETY: family が AF_INET なので sockaddr_in で、4 byte 目から IPv4 のアドレスが続く。
+            // 境界 1 の配列として読む
+            let octets = unsafe { sa.cast::<u8>().add(4).cast::<[u8; 4]>().read() };
+            out.push(HostAddr {
+                interface: name.clone(),
+                addr: Ipv4Addr::from(octets),
+                prefix_len: ua.OnLinkPrefixLength.min(32),
+            });
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -151,11 +219,11 @@ mod tests {
         assert_eq!(conflict(Ipv4Addr::new(10, 9, 9, 9), &host, "wgftrs0"), None);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn reads_this_host() {
         let addrs = read().unwrap();
-        // ループバックの interface は Linux と macOS のどちらにもある
+        // ループバックの interface は Linux、macOS、Windows のどれにもある
         assert!(addrs.iter().any(|a| a.addr.is_loopback()), "{addrs:?}");
     }
 }

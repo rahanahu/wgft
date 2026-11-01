@@ -88,7 +88,7 @@ Go の v1 の agent と仕様に対して、今の Rust の agent に無いも�
 
 | 項目 | 仕様 | 今の Rust | 段 |
 | --- | --- | --- | --- |
-| 制御ソケット | [control-socket.md](../spec/control-socket.md)。`rotate-key` と `doctor` | 無い | 「制御ソケット」 |
+| 制御ソケット | [control-socket.md](../spec/control-socket.md)。`rotate-key` と `doctor` | 搬送の層だけ済み (`platform::ctlsock`)。受け口と要求の処理は無い | 「制御ソケット」 |
 | `agent doctor` | [control-socket.md の agent doctor --json](../spec/control-socket.md#agent-doctor---json) と [検査の一覧](../diagnosis/agent-evidence.md#検査の一覧と証拠の出どころ) | 無い | 「agent doctor の骨組み」と「agent doctor の稼働中の検査」 |
 
 ### CLI と設定
@@ -107,7 +107,7 @@ Go の v1 の agent と仕様に対して、今の Rust の agent に無いも�
 | 整数のフラグ | Go の整数の書き方 (`0x`、先頭の 0 の 8 進、`_`) | 試作は値を受けない | 「設定の層」 |
 | 真偽値のフラグ | `--json` と `--json=false` の形だけ | 無い | 「設定の層」 |
 | フラグの誤りの出力と終了コード | `Error: <文>` の 1 行で使い方を書かない。終了コード 1、`agent doctor` は 2 | clap の既定。使い方を書き、終了コード 2 | 「設定の層」 |
-| 既定のパス | Linux、macOS、Windows の表。macOS は `$HOME`、Windows は `%ProgramData%` | Linux と固定の `C:\ProgramData` | 「platform の層」 |
+| 既定のパス | Linux、macOS、Windows の表。macOS は `$HOME`、Windows は `%ProgramData%` | 済み (`platform::paths`)。3 つの OS の表をどの OS の試験でも確かめる | 「platform の層」 |
 | 設定ファイルの権限の警告 | Unix で other が読める dotenv が `WGFT_JOIN` を持つとき | 無い | 「設定の層」 |
 | メモリの行 | `memory soft limit:` の行。Go 以外は書かなくてよい | 無い | 「UDP の中継」が `memory bound:` の行を書く。[メモリの上界の行](#メモリの上界の行) |
 | `docs/cli.md` | Go の `TestCLIDocUpToDate` | 無い | 「CLI の文書の照合」 |
@@ -116,11 +116,11 @@ Go の v1 の agent と仕様に対して、今の Rust の agent に無いも�
 
 | 項目 | 仕様 | 今の Rust | 段 |
 | --- | --- | --- | --- |
-| Windows の DACL | [credentials.md の Windows の DACL](../spec/credentials.md#windows-の-dacl) | 無い | 「platform の層」 |
-| ロック | `flock` と `LockFileEx` | `File::try_lock` で同じ方式 | 済み。Windows の試験を「platform の層」が足す |
+| Windows の DACL | [credentials.md の Windows の DACL](../spec/credentials.md#windows-の-dacl) | 済み (`platform::winsec`)。Windows の CI で確かめる | 「platform の層」 |
+| ロック | `flock` と `LockFileEx` | `File::try_lock` で同じ方式 | 済み。Windows の試験は「platform の層」で足した |
 | 一時ファイルの片付け | ロックを取った後に消す | 消す | 済み |
 | 時刻の印の水位 | Go の agent には無い | `agent.json.clock` に残す | 済み。Rust だけのファイルで、Go の agent は読まない |
-| ファイル記述子の上限 | Go の性質:Go の実行環境は Unix で起動の時に soft の `RLIMIT_NOFILE` を hard の値まで上げる。macOS では `kern.maxfilesperproc` で頭を打つ。同梱の unit と plist は `LimitNOFILE` を書かず、これに頼る | 上げない | 「platform の層」 |
+| ファイル記述子の上限 | Go の性質:Go の実行環境は Unix で起動の時に soft の `RLIMIT_NOFILE` を hard の値まで上げる。macOS では `kern.maxfilesperproc` で頭を打つ。同梱の unit と plist は `LimitNOFILE` を書かず、これに頼る | 済み (`platform::fdlimit`)。`wgft` の起動で呼ぶ | 「platform の層」 |
 
 ## UDP の中継
 
@@ -645,6 +645,28 @@ B14 (`rust-windows` と `rust-macos`) で、次をすべて build し、単体�
 Windows の DACL とソケットの操作には `windows-sys` を使います。
 ライセンスは MIT と Apache-2.0 の選択で、`cargo deny` の許可の一覧に入ります。
 
+### platform の層の作り
+
+`crates/wgft-agent` の module `platform` に、OS の差を閉じ込めます。
+
+- `paths`:OS の分類と環境の引き方を引数に取る純粋な関数で、3 つの OS の表をどの OS の試験でも確かめます。
+  `wgft` の既定の表示は起動の時に 1 回だけ決めます
+- `fdlimit`:soft を hard まで上げます。
+  hard が無制限のときは、macOS で `kern.maxfilesperproc`、Linux で `fs.nr_open` で頭を打ちます。
+  試験は soft を下げた子のプロセスで呼び、上がることを確かめます
+- `winsec`:`windows-sys` で DACL を付けます。
+  ファイルと一時ファイルは `CreateFileW` の `SECURITY_ATTRIBUTES` で作成の時点から付け、既存のファイルは開いた handle に `SetSecurityInfo` で付け直します。
+  ディレクトリは `OICI` つきで作ります。
+  利用者が SYSTEM か Administrators のときは、同じ ACE を重ねません
+- 既存のファイルの付け直し:`agent.json` を読むときとロックを取るときに呼びます。
+  付けられなければ、警告を出して続けます。
+  他の利用者が作ったファイルのように付ける権限が無い場合に、読めるものまで止めないためです
+- DACL の照合:読み返した SDDL は、保護の印と ACE の集合で比べます。
+  並びや継承の印の書き方の違いで落とさないためです
+- `ctlsock`:`socket2` の AF_UNIX の待ち受けと接続です。
+  読みと書きには接続ごとの全体の期限が付きます。
+  受け口のスレッドと要求の処理は「制御ソケット」の段が作ります
+
 ### 実機で確かめること
 
 次は CI で確かめられないので、v2.0.0 の前にリリース候補の関門 (D1 と D2) と同じ項目で実機で確かめます。
@@ -714,9 +736,9 @@ wgstack の口が前提と違えば、wgstack の上の agent と UDP の中継�
   余裕の 32 MiB は「UDP の中継」の段のラボの測定で確かめます
 - `WGFT_AGENT_BATCH_MIB` から導く量:Rust の wgstack の送信の経路が決まるまで決めません。
   受け付ける値と誤りの文面は今の仕様のままです
-- インタフェースの一覧の取り方:ブロードキャストの判定はホストのインタフェースのアドレスとプレフィクス長を読みます。
-  推奨は、Unix で `getifaddrs`、Windows で `GetAdaptersAddresses` を platform の層で呼ぶことです。
-  寛容なライセンスの crate で同じことができれば、それを使います
+- インタフェースの一覧の取り方:決めました。
+  Unix で `getifaddrs`、Windows で `GetAdaptersAddresses` を `hostaddr` が呼びます。
+  追加の crate は使わず、`windows-sys` だけです
 - 新しいハンドシェイクで stream の再接続の待ちを打ち切ること:#679 が待ちの途中で打ち切るかを確かめます。
   打ち切らなければ agent の device の殻の段で足します
 
@@ -725,7 +747,9 @@ wgstack の口が前提と違えば、wgstack の上の agent と UDP の中継�
 - wgstack の UDP の口は #681 の提案で、#681 のレビューで変わりえます
 - macOS の kqueue と Windows の AFD の poll で、接続した UDP のソケットへの ICMP の拒否が読みか誤りの準備として届くこと
 - Windows の接続した UDP のソケットが、宛先の Port Unreachable の後に `WSAECONNRESET` を返すこと
-- `socket2` の AF_UNIX が Windows の実行時に動くこと
+- `socket2` の AF_UNIX が Windows の実行時に動くこと。`ctlsock` の試験が Windows の CI で初めて確かめる
+- Windows の DACL の読み返しの SDDL の書き方。`winsec` の試験が Windows の CI で初めて確かめる
+- `GetAdaptersAddresses` が返す adapter の名前 (FriendlyName) が、TUN の名前と一致すること
 - Rust の `std::env::var` が Windows で環境変数の名前の大文字と小文字を区別しないこと
 - musl と glibc の `getaddrinfo` の順と Go の resolver の順の違い。wgft が並べ直すので結果には効かない見込みです
 - ラボの台本が照らす agent のログの行の一覧は、調べた範囲のもので、ラボの切り替えの PR で数え直します

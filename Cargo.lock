@@ -1257,6 +1257,7 @@ dependencies = [
  "wgft-proto",
  "wgft-wireguard",
  "wgft-wireguard-tun",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
