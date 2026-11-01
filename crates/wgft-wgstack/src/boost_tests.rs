@@ -27,12 +27,12 @@ use crate::wire::FLAG_ACK;
 use core::time::Duration;
 
 /// 区間に読めたか受け入れた byte がこの値以上なら需要があります (Go の `demandBytes`)。
-const DEMAND_BYTES: usize = 64 << 10;
+pub(crate) const DEMAND_BYTES: usize = 64 << 10;
 /// timestamp を使う接続の中身の大きさです (Go の `rwMSS`)。
 const RW_MSS: usize = TEST_MTU - 40 - 12;
 
 /// 16 本の枠すべてを埋める試験のための、接続の数に余裕のある表の大きさです。
-fn wide_limits() -> Limits {
+pub(crate) fn wide_limits() -> Limits {
     Limits {
         max_flows: 40,
         ..small_limits()
@@ -40,7 +40,7 @@ fn wide_limits() -> Limits {
 }
 
 /// 相手から `bytes` byte を MSS ごとに送り、核の ACK を読み捨てます (Go の `sendBulk`)。
-fn send_bulk(n: &mut TestNet, p: &mut PeerConn, bytes: usize) {
+pub(crate) fn send_bulk(n: &mut TestNet, p: &mut PeerConn, bytes: usize) {
     let mut left = bytes;
     while left > 0 {
         let k = left.min(RW_MSS);
@@ -51,7 +51,7 @@ fn send_bulk(n: &mut TestNet, p: &mut PeerConn, bytes: usize) {
 }
 
 /// `k` byte をちょうど読みます (Go の `readN`)。
-fn read_n(n: &mut TestNet, c: ConnId, k: usize) {
+pub(crate) fn read_n(n: &mut TestNet, c: ConnId, k: usize) {
     let mut b = vec![0u8; k];
     let mut got = 0;
     while got < k {
@@ -61,17 +61,17 @@ fn read_n(n: &mut TestNet, c: ConnId, k: usize) {
 }
 
 /// 接続が枠を持つかです。
-fn boosted(n: &mut TestNet, c: ConnId) -> bool {
+pub(crate) fn boosted(n: &mut TestNet, c: ConnId) -> bool {
     n.s.conn(c.slot).b.boost.is_some()
 }
 
 /// 貸している枠の数です (Go の `pool.held()`)。
-fn lent(n: &mut TestNet) -> usize {
+pub(crate) fn lent(n: &mut TestNet) -> usize {
     n.s.conn(0).s.budget.lent()
 }
 
 /// boost の接続の窓の上限と歩みの上限を予約まで上げ、広げた窓を知らせます (Go の `openWindow`)。
-fn open_window(n: &mut TestNet, c: ConnId) {
+pub(crate) fn open_window(n: &mut TestNet, c: ConnId) {
     let now = ns(n.now);
     let mut v = n.s.conn(c.slot);
     v.t.rcv_want = v.t.rcv_cap;
@@ -82,7 +82,7 @@ fn open_window(n: &mut TestNet, c: ConnId) {
 }
 
 /// 相手から受信の offset `off` に `data` を送ります (Go の `injectAt`)。
-fn inject_at(n: &mut TestNet, p: &mut PeerConn, c: ConnId, off: u64, data: &[u8]) {
+pub(crate) fn inject_at(n: &mut TestNet, p: &mut PeerConn, c: ConnId, off: u64, data: &[u8]) {
     let irs = n.s.conn(c.slot).t.irs;
     let mut s = p.seg(FLAG_ACK, data);
     s.seq = irs.wrapping_add(1).wrapping_add(off as u32);
@@ -90,7 +90,7 @@ fn inject_at(n: &mut TestNet, p: &mut PeerConn, c: ConnId, off: u64, data: &[u8]
 }
 
 /// 受信の区間を始まりの順に集めます (Go の `rcv.intervals(nil)`)。
-fn intervals(n: &mut TestNet, c: ConnId) -> Vec<(u64, u64)> {
+pub(crate) fn intervals(n: &mut TestNet, c: ConnId) -> Vec<(u64, u64)> {
     let mut v = Vec::new();
     n.s.conn(c.slot).b.rcv.for_each_interval(&mut |s, e| {
         v.push((s, e));
@@ -100,17 +100,17 @@ fn intervals(n: &mut TestNet, c: ConnId) -> Vec<(u64, u64)> {
 }
 
 /// 枠の集まりを満たして取り合う 2 本の接続です (Go の `boostTwo`)。
-struct Two {
-    n: TestNet,
-    c1: ConnId,
-    p1: PeerConn,
-    c2: ConnId,
-    p2: PeerConn,
+pub(crate) struct Two {
+    pub(crate) n: TestNet,
+    pub(crate) c1: ConnId,
+    pub(crate) p1: PeerConn,
+    pub(crate) c2: ConnId,
+    pub(crate) p2: PeerConn,
 }
 
 /// 枠が 16 本すべて埋まった集まりで、1 本目に枠 0 を持たせ、2 本目は持たせません。`sack` で SACK を交渉するかを
 /// 選びます (Go の `boostTwoWith`)。残りの 15 本の枠は、需要を示して枠を得た接続が持ちます。
-fn boost_two_with(sack: bool) -> Two {
+pub(crate) fn boost_two_with(sack: bool) -> Two {
     let mut n = TestNet::new(wide_limits());
     let l = n.listen(80);
     let mut p1 = n.handshake_sack(40000, 80, true, sack, true);

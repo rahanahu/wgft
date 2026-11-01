@@ -98,3 +98,5 @@ mod testnet_tests;
 mod touched_tests;
 #[cfg(test)]
 mod undo_tests;
+#[cfg(test)]
+mod whitebox_tests;
