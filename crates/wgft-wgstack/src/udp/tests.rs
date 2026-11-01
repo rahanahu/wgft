@@ -855,3 +855,60 @@ fn outage_model_compares_drop_oldest_with_drop_by_age() {
     assert!(oldest > 118_000);
     assert_eq!(outage_model(100, 1_000, 120_000).0, 0);
 }
+
+/// 予算が尽きた時、断片に分けて送り始めた先頭は捨てず、次に古い datagram を捨てます。送り始めた datagram は
+/// 残りの断片まで送り終えます。
+#[test]
+fn send_latest_skips_a_head_that_has_started_to_leave() {
+    let mut n = TestNet::new(small_limits());
+    let pc = bind(&mut n, 53);
+    let cap = TX_DATAGRAMS / ENDPOINT_SHARE;
+    let big = seq_payload(0, 6000);
+    send_latest(&mut n, pc, &big, 0).unwrap();
+    let mut buf = vec![0u8; TEST_MTU];
+    assert!(n.s.poll_transmit(n.now, &mut buf).is_some());
+    for i in 1..cap {
+        send_latest(&mut n, pc, &seq_payload(i as u16, 20), 0).unwrap();
+    }
+    assert_eq!(n.s.held().udp_tx_datagrams, cap);
+    send_latest(&mut n, pc, &seq_payload(cap as u16, 20), 0).unwrap();
+    assert_eq!(n.s.stats().udp_send_evicted, 1);
+    let pkts = n.drain_raw();
+    let rest = pkts
+        .iter()
+        .take_while(|p| u16::from_be_bytes([p[6], p[7]]) & 0x1fff != 0)
+        .count();
+    assert!(rest >= 1, "the rest of the first datagram still leaves");
+    let seqs: Vec<u16> = pkts
+        .iter()
+        .filter(|p| u16::from_be_bytes([p[6], p[7]]).trailing_zeros() >= 13)
+        .map(|p| u16::from_be_bytes([p[28], p[29]]))
+        .collect();
+    let want: Vec<u16> = (2..=cap as u16).collect();
+    assert_eq!(seqs, want, "datagram 1 went, the started one did not");
+    // 全体の予算で断られた場合も同じ。先頭が送り始めたものなら、全体で 2 番目を捨てる
+    let ports: Vec<UdpId> = (0..4).map(|i| bind(&mut n, 60 + i)).collect();
+    send_latest(&mut n, ports[0], &seq_payload(0, 6000), 0).unwrap();
+    assert!(n.s.poll_transmit(n.now, &mut buf).is_some());
+    for (k, &p) in ports.iter().enumerate() {
+        for i in 0..cap - usize::from(k == 0) {
+            send_latest(&mut n, p, &seq_payload((100 * k + i + 1) as u16, 20), 0).unwrap();
+        }
+    }
+    assert_eq!(n.s.held().udp_tx_datagrams, TX_DATAGRAMS);
+    let before = n.s.stats().udp_send_evicted;
+    // 5 つ目の endpoint の送信は核の全体の予算で断られ、全体の先頭は送り始めた datagram なので、2 番目を捨てる
+    send_latest(&mut n, pc, &seq_payload(9999, 20), 0).unwrap();
+    assert_eq!(n.s.stats().udp_send_evicted, before + 1);
+    let pkts = n.drain_raw();
+    assert!(u16::from_be_bytes([pkts[0][6], pkts[0][7]]) & 0x1fff != 0);
+    let seqs: Vec<u16> = pkts
+        .iter()
+        .filter(|p| u16::from_be_bytes([p[6], p[7]]).trailing_zeros() >= 13)
+        .map(|p| u16::from_be_bytes([p[28], p[29]]))
+        .collect();
+    assert!(!seqs.contains(&1), "the second oldest went");
+    assert_eq!(seqs[0], 2);
+    n.s.check_invariants().unwrap();
+    assert_eq!(n.s.held().udp_tx_datagrams, 0);
+}

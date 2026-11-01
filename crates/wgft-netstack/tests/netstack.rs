@@ -412,6 +412,25 @@ async fn send_to_latest_never_waits_and_keeps_the_newest() {
     .await;
 }
 
+/// 0 でない時間の上限は、1 ms に満たなくても無制限にならず、少なくとも 1 ms に切り上げます。
+#[tokio::test(start_paused = true)]
+async fn a_tiny_max_age_is_not_unlimited() {
+    run(async {
+        let a = netstack(A);
+        let b = netstack(B);
+        let mut ua = UdpSocket::bind(&a, sa(A, 53)).unwrap();
+        let ub = UdpSocket::bind(&b, sa(B, 5353)).unwrap();
+        ub.send_to_latest(b"x", sa(A, 53), Duration::from_micros(1))
+            .unwrap();
+        tokio::time::advance(Duration::from_millis(5)).await;
+        spawn_local(drive(a.clone(), b.clone(), no_drops));
+        let mut buf = [0u8; 8];
+        assert!(timeout(SHORT, ua.recv_from(&mut buf)).await.is_err());
+        assert_eq!(b.with(|n| n.core().stats().udp_send_expired), 1);
+    })
+    .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn closing_an_endpoint_fails_its_waiting_senders() {
     run(async {

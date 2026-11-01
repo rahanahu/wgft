@@ -9,7 +9,9 @@ use std::fmt;
 use std::future::poll_fn;
 use std::io;
 use std::net::SocketAddrV4;
+#[cfg(any(test, feature = "harness"))]
 use std::pin::pin;
+#[cfg(any(test, feature = "harness"))]
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -18,6 +20,7 @@ use wgft_wgstack::{Error, UdpId};
 
 use crate::Access;
 use crate::error::{io_error, poisoned};
+#[cfg(any(test, feature = "harness"))]
 use crate::wakers::UdpWrite;
 
 /// An unconnected UDP endpoint on the tunnel address. Dropping it closes the endpoint, returns
@@ -114,6 +117,7 @@ impl<A: Access> UdpSocket<A> {
     }
 
     /// Sends `data` as one datagram to `to`; see [`UdpSender::send_to`].
+    #[cfg(any(test, feature = "harness"))]
     pub async fn send_to(&self, data: &[u8], to: SocketAddrV4) -> io::Result<usize> {
         send_to(&self.access, self.id, data, to).await
     }
@@ -135,14 +139,23 @@ impl<A: Access> Drop for UdpSocket<A> {
             return;
         }
         let id = self.id;
-        let waiters = self.access.with(|ns| {
+        let close = |ns: &mut crate::Netstack<A::Hook>| {
             let now = ns.now();
             ns.core_mut().close_udp(now, id);
             ns.wakers.clear_udp_read(id.port());
-            ns.wakers.udp_write()
-        });
-        // 待っている送り手は試し直して、閉じた誤りを受けます。借用を返した後に起こします。
-        waiters.0.notify_waiters();
+        };
+        // 待っている送り手は試し直して、閉じた誤りを受けます。借用を返した後に起こします。製品の build には
+        // 待つ送り手がいない
+        #[cfg(any(test, feature = "harness"))]
+        {
+            let waiters = self.access.with(|ns| {
+                close(ns);
+                ns.wakers.udp_write()
+            });
+            waiters.0.notify_waiters();
+        }
+        #[cfg(not(any(test, feature = "harness")))]
+        self.access.with(close);
     }
 }
 
@@ -167,7 +180,8 @@ impl<A: Access> UdpSender<A> {
         self.id
     }
 
-    /// Sends `data` as one datagram to `to`, waiting while the send budget is used up. A
+    /// Sends `data` as one datagram to `to`, waiting while the send budget is used up. Only tests and
+    /// the replay of the Go recordings have it; the product sends with [`UdpSender::send_to_latest`]. A
     /// datagram longer than the MTU leaves in fragments. Cancel-safe: the datagram is queued
     /// whole when the future completes, and not at all before.
     ///
@@ -175,6 +189,7 @@ impl<A: Access> UdpSender<A> {
     ///
     /// Fails when the endpoint is closed, `to` or the length is invalid, UDP has stopped after an
     /// accounting fault, or the generation has ended.
+    #[cfg(any(test, feature = "harness"))]
     pub async fn send_to(&self, data: &[u8], to: SocketAddrV4) -> io::Result<usize> {
         send_to(&self.access, self.id, data, to).await
     }
@@ -182,8 +197,9 @@ impl<A: Access> UdpSender<A> {
     /// Sends `data` as one datagram to `to` and never waits. When the send budget is used up, the
     /// oldest queued datagram is dropped to make room: the endpoint's own oldest when its share
     /// is full, the tunnel's oldest when the tunnel's budget is. A datagram that has waited longer
-    /// than `max_age` without starting to leave is dropped instead of sent; a zero `max_age`
-    /// means no limit. Drops are counted in the core's statistics and logged at most once a
+    /// than `max_age` without starting to leave is dropped instead of sent. A zero `max_age`
+    /// means no limit; any other value counts in whole milliseconds, rounded up to at least 1 ms, and
+    /// is capped at 65535 ms. Drops are counted in the core's statistics and logged at most once a
     /// minute.
     ///
     /// # Errors
@@ -210,7 +226,11 @@ fn send_to_latest<A: Access>(
     if access.is_poisoned() {
         return Err(poisoned());
     }
-    let ms = u16::try_from(max_age.as_millis()).unwrap_or(u16::MAX);
+    let ms = if max_age.is_zero() {
+        0
+    } else {
+        u16::try_from(max_age.as_millis().max(1)).unwrap_or(u16::MAX)
+    };
     let r = access.with(|ns| {
         let now = ns.now();
         ns.core_mut().send_to_latest(now, id, data, to, ms)
@@ -225,12 +245,14 @@ fn send_to_latest<A: Access>(
 }
 
 /// 1 回の試しの結果です。
+#[cfg(any(test, feature = "harness"))]
 enum Sent {
     Done(usize),
     Wait(Arc<UdpWrite>),
     Failed(Error),
 }
 
+#[cfg(any(test, feature = "harness"))]
 async fn send_to<A: Access>(
     access: &A,
     id: UdpId,

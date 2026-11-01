@@ -91,12 +91,15 @@ pub enum UdpFault {
     SlotReleasedTwice,
     /// 予算の数が負になりました。値は違反を見つけた時の核の予算の byte と件数です。
     BudgetNegative { bytes: i64, datagrams: i64 },
+    /// 送信の datagram が、持ち主の endpoint の列の先頭にも 2 番目にもありませんでした。
+    SendListBroken,
 }
 
 impl fmt::Display for UdpFault {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SlotReleasedTwice => f.write_str("UDP slot released twice"),
+            Self::SendListBroken => f.write_str("UDP send list broken"),
             Self::BudgetNegative { bytes, datagrams } => write!(
                 f,
                 "UDP budget went negative: {bytes} bytes {datagrams} datagrams"
@@ -515,6 +518,10 @@ impl Udp {
         }
         self.dg[dir][usize::from(id)] = Dgram::default();
         let _ = self.dg_free[dir].try_push(id);
+        // 待つ送り手は `send_to` だけが作る。製品の build には `send_to` が無いので、起こす相手もいない
+        #[cfg(not(any(test, feature = "harness")))]
+        let _ = woken;
+        #[cfg(any(test, feature = "harness"))]
         if dir == TX {
             while let Some(port) = self.wait_head {
                 let ep = self.eps.by_port_mut(port);
@@ -531,6 +538,7 @@ impl Udp {
     }
 
     /// endpoint `port` を送信の予算の空きを待つ list に入れます。
+    #[cfg(any(test, feature = "harness"))]
     fn wait(&mut self, port: u16) {
         let head = self.wait_head;
         let Some(ep) = self.eps.by_port_mut(port) else {
@@ -546,6 +554,7 @@ impl Udp {
     }
 
     /// endpoint `port` を待ちの list から外します。閉じる時に呼びます。
+    #[cfg(any(test, feature = "harness"))]
     fn unwait(&mut self, port: u16) {
         if !self.eps.by_port(port).is_some_and(|e| e.waiting) {
             return;
@@ -709,14 +718,32 @@ impl Udp {
         } else {
             self.dg[TX][usize::from(g.next)].prev = g.prev;
         }
-        if self.eps.generation(g.ep_port) == g.ep_gen
-            && let Some(ep) = self.eps.by_port_mut(g.ep_port)
-            && ep.tx_head == id
-        {
+        if self.eps.generation(g.ep_port) != g.ep_gen {
+            return;
+        }
+        let Some(ep) = self.eps.by_port_mut(g.ep_port) else {
+            return;
+        };
+        let head = ep.tx_head;
+        let mut broken = false;
+        if head == id {
             ep.tx_head = g.ep_next;
             if g.ep_next == NIL16 {
                 ep.tx_tail = NIL16;
             }
+        } else if head != NIL16 && self.dg[TX][usize::from(head)].ep_next == id {
+            // 送り始めた先頭を飛ばして 2 番目を外す場合 (`evict_oldest_tx`)
+            self.dg[TX][usize::from(head)].ep_next = g.ep_next;
+            if g.ep_next == NIL16
+                && let Some(ep) = self.eps.by_port_mut(g.ep_port)
+            {
+                ep.tx_tail = head;
+            }
+        } else {
+            broken = true;
+        }
+        if broken {
+            self.fail(UdpFault::SendListBroken);
         }
     }
 
@@ -806,6 +833,16 @@ impl Udp {
             if !g.used || n > self.dg[TX].len() || g.prev != prev {
                 return Err("the UDP send FIFO is broken");
             }
+            // 入れた順に並ぶので、時刻は戻らない
+            if prev != NIL16
+                && self.dg[TX][usize::from(prev)]
+                    .queued_ms
+                    .wrapping_sub(g.queued_ms)
+                    < 1 << 31
+                && self.dg[TX][usize::from(prev)].queued_ms != g.queued_ms
+            {
+                return Err("the UDP send FIFO is out of order");
+            }
             prev = id;
             n += 1;
             if g.next == NIL16 && id != self.tx_tail {
@@ -846,7 +883,17 @@ impl Udp {
                     bad = Some("an endpoint send list is broken");
                     return;
                 };
-                if !g.used || g.ep_port != port || tk > self.dg[TX].len() {
+                if !g.used
+                    || g.ep_port != port
+                    || g.ep_gen != self.eps.generation(port)
+                    || tk > self.dg[TX].len()
+                    || (last != NIL16
+                        && self.dg[TX][usize::from(last)]
+                            .queued_ms
+                            .wrapping_sub(g.queued_ms)
+                            < 1 << 31
+                        && self.dg[TX][usize::from(last)].queued_ms != g.queued_ms)
+                {
                     bad = Some("an endpoint send list is broken");
                     return;
                 }
@@ -900,12 +947,22 @@ impl Shared {
     /// 送信の FIFO で最も古い datagram を捨てて予約を返します。`port` を渡すと、その endpoint の最も古い
     /// datagram を捨てます。捨てるものが無ければ `false` です。捨てた数は数え、ログの門に通します。
     fn evict_oldest_tx(&mut self, port: Option<u16>) -> bool {
-        let id = match port {
+        let mut id = match port {
             Some(p) => self.udp.eps.by_port(p).map_or(NIL16, |ep| ep.tx_head),
             None => self.udp.tx_head,
         };
         if id == NIL16 {
             return false;
+        }
+        // 断片に分けて送り始めた先頭は、残りを送る方が、送った断片を無駄にするより安いので飛ばして、次に古い
+        // datagram を捨てます。次が無ければ、場所を作るためにこれを捨てます。送り始められるのは FIFO の先頭だけ
+        // なので、飛ばす先頭は 1 つで、次は O(1) で引けます
+        let g = &self.udp.dg[TX][usize::from(id)];
+        if g.sent > 0 {
+            let next = if port.is_some() { g.ep_next } else { g.next };
+            if next != NIL16 {
+                id = next;
+            }
         }
         self.udp.unlink_tx(id);
         self.release_udp(TX, id);
@@ -1101,6 +1158,7 @@ impl<H: Hook> Stack<H> {
     /// endpoint 1 つの上限) を予約できなければ `WouldBlock` を返し、予約が返ったら `UdpWritable` を出します。
     /// chunk を確保できなければ、待たずに [`Error::NoMemory`] を返します。
     /// MTU を超える datagram は、送る時に DF を立てない断片に分けます。
+    #[cfg(any(test, feature = "harness"))]
     pub fn send_to(
         &mut self,
         now: Time,
@@ -1159,6 +1217,7 @@ impl<H: Hook> Stack<H> {
                 // TCP の `write` と同じく、確保の失敗は待たずに誤りで返します。送信の予約が返る当てが無いためです。
                 Err(Refused::NoMemory) => return Err(Error::NoMemory),
                 Err(r @ (Refused::Endpoint | Refused::Tunnel)) => {
+                    #[cfg(any(test, feature = "harness"))]
                     if latest.is_none() {
                         s.udp.wait(id.port);
                         return Err(Error::WouldBlock);
@@ -1203,6 +1262,7 @@ impl<H: Hook> Stack<H> {
             s.release_udp(RX, head);
             head = next;
         }
+        #[cfg(any(test, feature = "harness"))]
         s.udp.unwait(id.port);
         s.udp.eps.close(id.port, id.generation);
         let t = s.port_target(id.port);

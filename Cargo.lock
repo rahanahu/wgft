@@ -1695,6 +1695,7 @@ version = "0.1.0"
 dependencies = [
  "tokio",
  "wgft-alloc-count",
+ "wgft-netstack",
  "wgft-wgstack",
 ]
 

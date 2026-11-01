@@ -11,9 +11,14 @@ description = "Async TCP, UDP and ping handles over the wgstack core"
 tokio = { workspace = true, features = ["sync"] }
 wgft-wgstack.workspace = true
 
+[features]
+# 待つ `send_to` の口を開ける。試験と Go の recording の道具だけが使い、製品の build にはない。
+harness = ["wgft-wgstack/harness"]
+
 [lints]
 workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util", "io-util"] }
 wgft-alloc-count.workspace = true
+wgft-netstack = { path = ".", features = ["harness"] }
