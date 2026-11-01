@@ -1,0 +1,138 @@
+# The deepest nesting and the longest expression both parsers take.
+scenario nesting
+refs: parser fixture
+
+if true
+  if true
+    if true
+      if true
+        if true
+          if true
+            if true
+              if true
+                if true
+                  if true
+                    if true
+                      if true
+                        if true
+                          if true
+                            if true
+                              if true
+                                if true
+                                  if true
+                                    if true
+                                      if true
+                                        if true
+                                          if true
+                                            if true
+                                              if true
+                                                if true
+                                                  if true
+                                                    if true
+                                                      if true
+                                                        if true
+                                                          if true
+                                                            if true
+                                                              if true
+                                                                if true
+                                                                  if true
+                                                                    if true
+                                                                      if true
+                                                                        if true
+                                                                          if true
+                                                                            if true
+                                                                              if true
+                                                                                if true
+                                                                                  if true
+                                                                                    if true
+                                                                                      if true
+                                                                                        if true
+                                                                                          if true
+                                                                                            if true
+                                                                                              if true
+                                                                                                if true
+                                                                                                  if true
+                                                                                                    if true
+                                                                                                      if true
+                                                                                                        if true
+                                                                                                          if true
+                                                                                                            if true
+                                                                                                              if true
+                                                                                                                if true
+                                                                                                                  if true
+                                                                                                                    if true
+                                                                                                                      if true
+                                                                                                                        if true
+                                                                                                                          if true
+                                                                                                                            if true
+                                                                                                                              if true
+                                                                                                                                stop
+                                                                                                                              end
+                                                                                                                            end
+                                                                                                                          end
+                                                                                                                        end
+                                                                                                                      end
+                                                                                                                    end
+                                                                                                                  end
+                                                                                                                end
+                                                                                                              end
+                                                                                                            end
+                                                                                                          end
+                                                                                                        end
+                                                                                                      end
+                                                                                                    end
+                                                                                                  end
+                                                                                                end
+                                                                                              end
+                                                                                            end
+                                                                                          end
+                                                                                        end
+                                                                                      end
+                                                                                    end
+                                                                                  end
+                                                                                end
+                                                                              end
+                                                                            end
+                                                                          end
+                                                                        end
+                                                                      end
+                                                                    end
+                                                                  end
+                                                                end
+                                                              end
+                                                            end
+                                                          end
+                                                        end
+                                                      end
+                                                    end
+                                                  end
+                                                end
+                                              end
+                                            end
+                                          end
+                                        end
+                                      end
+                                    end
+                                  end
+                                end
+                              end
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+let a = (((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+let b = !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!true
+let c = -------------------------------------------------------------------------------------------------------------------------------1
+let d = ((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((-1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+let e = -1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1

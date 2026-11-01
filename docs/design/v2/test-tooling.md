@@ -2,7 +2,7 @@
 
 この文書は、Rust に移る wgstack を確かめる試験の道具の設計を定めます。
 対象は、適合の台本をデータにする言語、台本を流す 2 つの runner、Rust の DUT を別のプロセスとして叩く標準入出力の口、凍結した Go の wgstack の記録との照合、qbench、fuzz、関門です。
-1 節の台本の言語と 2 節の Go の runner、3 節の口の符号と `dutserve` と `rustdut`、4 節の記録は実装済みで、ほかの節は未実装です。
+1 節の台本の言語と 2 節の Go の runner、3 節の口の符号と `dutserve` と `rustdut`、4 節の記録、Rust の構文解析器と台本の乱数の写しは実装済みで、ほかの節は未実装です。
 実装は 8 節の順に積んだ PR で行い、各 PR がこの文書の該当する節を実装に合わせて直します。
 
 Rust の wgstack そのもの (sans-IO の API、crate の分け方、bit の一致の条件、実装の PR の順) は、wgstack の Rust 版の設計 (`docs/design/v2/wgstack-rs.md`) が決めます。
@@ -79,8 +79,11 @@ JSON は差分を小さく保つため、空白の無い 1 行で書きます。
 
 名前が `err-` で始まる fixture は誤りの例で、`.ast.json` は誤りの行と種類 (kind) だけを持ちます。
 英語の文は 2 つの構文解析器で違ってよく、比べません。
-種類は `layout` (tab と閉じない文字列)、`header`、`block` (`if`、`else`、`end`、`stop`)、`template`、`syntax`、`unknown-statement`、`unknown-function`、`arity`、`named-argument`、`bind`、`unbound`、`unreachable` です。
+種類は `layout` (tab、UTF-8 でない行、閉じない文字列)、`header`、`block` (`if`、`else`、`end`、`stop`)、`template`、`syntax`、`unknown-statement`、`unknown-function`、`arity`、`named-argument`、`bind`、`unbound`、`unreachable` です。
 Go の構文解析器は fuzz の対象 (`FuzzParseScript`) を持ち、台本と fixture を種にして、panic せず、誤りがどれも種類を持つことを確かめます。
+Rust の構文解析器は `crates/wgft-tcpharness` の `script` にあり、cargo-fuzz の target `parse_script` (`crates/wgft-tcpharness/fuzz/`) が同じことを確かめます。
+種は台本と構文の fixture の directory をそのまま corpus として渡し、写しを置きません。
+Rust の試験 (`crates/wgft-tcpharness/tests/script_fixtures.rs`) は、構文の fixture と本物の台本の構文木の JSON を、Go の `json.Marshal` と同じ規則 (鍵の順、HTML の escape、U+2028 と U+2029) で書き、byte の単位で比べます。
 
 ### 文の形
 
@@ -106,6 +109,11 @@ attrs   = INDENT "what:" TEMPLATE NL INDENT "got:" TEMPLATE NL
   - 結び:どの名前もその読み取りに至るすべての経路で先に結ばれていること。`if` で片方の枝だけが結ぶ名前を後で読む台本は誤りです。`stop` で終わる枝はすべての名前を結んだものと数えます
 - 名前つきの引数:同じ名前を 2 度渡すこと、`=` の後に空白を置くこと (`match= x`) は誤りです
 - 文字列:`what:` と `got:` の text の中の `"` は対で書きます。閉じない `"` は、行の終わりまでを文字列とみなす誤りを避けるため、`layout` の誤りです
+- 文字と入れ子の上限:台本は UTF-8 の text で、UTF-8 として読めない行は `layout` の誤りです。
+  `if` の中の `if` は 64 段まで (超えれば `block`)、括弧、呼び出し、添字、単項の演算子の入れ子は 128 段まで、1 つの文か 1 つの `{式}` の字句は 512 個までです (超えれば `syntax` か `template`)。
+  上限は構文木をたどる再帰の深さを入力に依らず抑えるためのものです。
+  Go の goroutine の stack は伸びますが、Rust の stack は伸びず、深い入れ子の入力で溢れます。
+  2 つの構文解析器が同じ入力に同じ誤りを返すよう、上限は両方に同じ値で置きます
 - `linux:` の行:`tcpharness.Scenario.Linux` と同じく、参照の Linux がこの台本だけに使う sysctl です。`=` の前後の空白は捨てます。今移す台本は使いません
 
 ### 式と型
@@ -946,6 +954,7 @@ Linux の TUN の上で Rust の engine を動かす確かめは、qbench でな
 | (無し) | 同じ所の `replay` (試験の担当) | 記録の要求の列 |
 | `internal/wgstack` の `FuzzParse` | 同じ所の `parse` (実装の担当) | Go の corpus の bytes をそのまま |
 | `FuzzAdversarialSender` | 同じ所の `adversarial_sender` (試験の担当) | u64 の種を 8 byte の little endian に |
+| `internal/tcpharness` の `FuzzParseScript` | `crates/wgft-tcpharness/fuzz/` の `parse_script` (試験の担当) | 台本と構文の fixture の directory |
 | `proto`、`credentials`、`enroll`、`allowtargets`、`policy`、`vpsd` の fuzz | それぞれを移す crate の `fuzz/` | 1 つの引数の対象は bytes をそのまま、複数の引数の対象は対象ごとに決めた並び |
 
 `core` は `FuzzCore` の解釈器 (`op%8` で操作を選び、相手の模型 `peerConn` が packet を作る) を同じ byte の読み方で写します。
@@ -1016,14 +1025,15 @@ feature はワークスペースの中で統合され、別の crate の試験�
 | T1b | `test(tcpharness): move the ICMP, UDP and RFC 2525 scenarios to scripts` | 残りの台本と (T1b) の文と関数、3 つの DUT での照らし、移した Go の関数と照らしの試験を消す | 約 +900、-1,300 行 | T1a |
 | T2a | `test(tcpharness): add the DUT frames, a Go frame server and rustdut` | `internal/dutproto` と frame の付録、`internal/wgstack` の `dutserve` の形、`rustdut`、`wgstackdut` と `rustdut` で同じ結果になる確かめ | 約 4,300 行 (実績) | この文書 |
 | T2b | `test(wgstack): record the frozen Go wgstack for replay` | `testNet` の記録の包み、記録の手順、2 回作って同じになる確かめ、git に入れる記録 | 約 1,800 行 (実績) と記録 4.7 MB | T2a |
-| T3a | `test(wgstack-rs): add the tcpharness crate` | 口の符号、packet の組み立て、台本の乱数の写し、`ProcessDut`、記録の読み込み | 約 1,500 行 | T2a |
-| T3b | `test(wgstack-rs): run scenario scripts in Rust` | Rust の構文解析器と runner、`dutserve` に対する transcript の一致、CI の `harness-rust-go` | 約 2,000 行 | T1b、T3a |
-| T3c | `test(wgstack-rs): add wgstack-dut and replay the Go recordings` | adapter、`wgstack-dut`、記録の照合と意図した違いの一覧、期待した差の一覧のファイル、関門の段 | 約 1,200 行 | T2b、T3b、実装の 4 |
+| T3a | `test(wgstack-rs): add the tcpharness crate with the script parser` | Rust の構文解析器と静的な検査、構文の fixture との byte の一致、台本の乱数の写し、Go と同じ JSON の書き手、`parse_script` の fuzz の target、CI の製品の木の検査 | 約 2,400 行 (実績) | T1b |
+| T3b | `test(wgstack-rs): run scenario scripts in Rust` | 口の符号、packet の組み立て、`ClockedDut` と偽の時計の runner、`ProcessDut`、`dutserve` に対する transcript の一致、CI の `harness-rust-go` | 約 3,000 行 | T2a、T3a |
+| T3c | `test(wgstack-rs): add wgstack-dut and replay the Go recordings` | adapter、`wgstack-dut`、記録の読み込みと照合、意図した違いの一覧、期待した差の一覧のファイル、関門の段 | 約 1,500 行 | T2b、T3b、実装の 4 |
 | T4 | `test(wgstack-rs): fuzz targets and adversarial bounds` | `tools/fuzzseed`、`core`、`adversarial_sender`、`replay`、回帰の試験、敵対的な保持の試験、stream の一致の試験、故障を入れた build | 約 3,000 行。段ごとに分ける | 実装の 3 から。4 から 6 に合わせて足す |
 | 8 の試験の側 | `test(wgstack-rs): qbench through wgstack-dut` | `--clock real`、socketpair の `tun.Device`、`wgstack-rs` の engine、判定の切り替え | 約 1,000 行 | 実装の 5 と 7 |
 | 後の段 | 未定 | 台本の相手が SYN から SACK-permitted と timestamp を外す harness の選択と、それを使う台本の 4b の変種の記録 (4 節) | 未見積 | T1b、T2b、T3a |
 
 T1 と T2 は Go の側だけで完結するので、この文書の後すぐに並べて始められます。
+T3a は構文解析器を先に分けた段で、Go の側の T1 だけに依ります。
 T3a と T3b は Rust の wgstack を待ちません。
 `dutserve` を相手に Rust の runner の意味を確かめられるためです。
 Rust の wgstack を相手にするのは T3c からで、実装の 4 の API が固まった後です。
@@ -1035,7 +1045,7 @@ Rust の wgstack を相手にするのは T3c からで、実装の 4 の API �
 - `dutserve` の `udpSendReady`:UDP の会計の不整合の条件は、`TestDutserveReadyMatchesBlocking` の列が通りません
 - `rustdut` の往復の費用:`dutserve` を相手に全部の台本を 1 つの種で流すと、適合と輻輳の制御の実行で 5 秒ほどでした (1 回の測り)。1 往復の時間は測っていません
 - 記録の大きさ:T2b で測り、5 MiB の上限を保ちました (4 節)。Rust の照らし直しが記録を読む時間は測っていません
-- 乱数の写し:Go の PCG と `IntN` の写しと、Go の `%q` と `%.0f` の丸めの写しは、Go の試験が書き出した値との照合で確かめます。照合の値の数は T3b で決めます
+- 乱数の写し:Go の PCG と `IntN` の写しは、T3a で `rng.json` の値と一致しました。`IntN` の棄却の枝 (`lo < n`) は 2^64 分の 20000 の確率でしか通らないので、値では確かめていません。Go の `%q` と `%.0f` の丸めの写しは、T3b で Go の試験が書き出した値と照らします
 - 実時間の Rust の DUT:`--clock real` の外側の層が製品の層と同じものになるかは、Rust の wgstack の外側の層の設計で決まります
 - qbench の Unix ソケットの 1 段:細い stream の遅れの p99 にどれだけ加わるかは未測定です
 - fuzz の速さ:cargo-fuzz の 1 秒あたりの実行回数は未測定で、関門の回数はその後に決めます

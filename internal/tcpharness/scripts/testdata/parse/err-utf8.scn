@@ -1,0 +1,5 @@
+# A line that is not valid UTF-8 is a layout error, so both parsers hold every text as UTF-8.
+scenario bad-utf8
+refs: parser fixture
+
+log café
