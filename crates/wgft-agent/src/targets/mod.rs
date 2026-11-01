@@ -410,18 +410,21 @@ mod tests {
         );
     }
 
-    /// 32 ポートの範囲のルールが 1 つの名前を宛先にし、DNS が 600 ミリ秒かかっても、名前の解決を
-    /// 相乗りするので、32 件の試し接続が 2 秒の期限に収まる。
+    /// 32 の待ち受けが 1 つの名前を宛先にし、DNS が 600 ミリ秒かかっても、名前の解決を相乗りするので、
+    /// 32 件の試し接続がすべて 2 秒の期限の中で届く。宛先はどれも待ち受けているポートにして、閉じたポートの
+    /// 扱いの OS の違い (Windows はループバックの拒否にも SYN を送り直す) と、隣のポートを他の試験が
+    /// 使うことに依らないようにする。
     #[tokio::test]
     async fn probes_of_a_port_range_share_one_slow_lookup() {
-        let probe_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = probe_listener.local_addr().unwrap().port();
-        drop(probe_listener);
+        let mut ups = Vec::new();
+        for _ in 0..32 {
+            ups.push(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap());
+        }
         let lookups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = Arc::clone(&lookups);
         let resolver = Arc::new(Resolver::with_lookup(
             8,
-            2,
+            1,
             Arc::new(move |_h: &str, _| {
                 counter.fetch_add(1, Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(600));
@@ -429,18 +432,14 @@ mod tests {
             }),
         ));
         let t = Arc::new(Targets::with(None, unicast_lan(), resolver));
-        let list: Vec<(String, u16)> = (0..32)
-            .map(|i| ("nas.lan".to_owned(), base.wrapping_add(i)))
+        let list: Vec<(String, u16)> = ups
+            .iter()
+            .map(|l| ("nas.lan".to_owned(), l.local_addr().unwrap().port()))
             .collect();
         let got = t.probe_all(list).await;
         assert_eq!(lookups.load(Ordering::SeqCst), 1);
         for g in got {
-            let e = g.unwrap_err();
-            // 閉じたポートなので拒まれるが、期限切れにはならない。Windows はループバックの拒否にも SYN を
-            // 送り直すので、文は照らさない
-            #[cfg(not(windows))]
-            assert!(!e.text.contains("did not answer"), "{e}");
-            let _ = e;
+            assert_eq!(g, Ok(()));
         }
     }
 
