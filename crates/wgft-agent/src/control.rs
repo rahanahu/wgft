@@ -296,7 +296,7 @@ fn budget(proto: &str, r: flowpool::Reading) -> DoctorBudget {
             .refusals
             .into_iter()
             .map(|(rule_id, reason, n)| DoctorRefusal {
-                rule_id,
+                rule_id: clip_text(&rule_id),
                 reason: reason.as_str().to_owned(),
                 count: n,
             })
@@ -309,7 +309,8 @@ fn rules(states: &[wgft_proto::RuleStatus], listeners: &[ListenerStat]) -> Vec<D
     let mut out: Vec<DoctorRule> = states
         .iter()
         .map(|s| DoctorRule {
-            id: s.id.clone(),
+            // 仕様の「1 つの文字列は 512 byte で切る」に従い、ID も切る。Go の agent は ID を切らない
+            id: clip_text(&s.id),
             state: s.state.clone(),
             reason: clip_text(&s.reason),
             ..DoctorRule::default()
@@ -368,6 +369,31 @@ mod tests {
             sessions: 0,
             flows: 0,
         }
+    }
+
+    /// 応答の 1 つの文字列は 512 byte で切る (仕様)。ルール ID と拒否のルール ID も切る。
+    #[test]
+    fn rule_ids_are_clipped_like_every_string() {
+        let long = "r".repeat(2000);
+        let states = vec![wgft_proto::RuleStatus {
+            id: long.clone(),
+            state: "ok".into(),
+            reason: String::new(),
+        }];
+        let out = rules(&states, &[stat(&long, 80, true, None)]);
+        assert_eq!(out[0].id.len(), 512 + wgft_proto::textsafe::CLIP_MARK.len());
+        assert_eq!(out[0].listeners, 1);
+        let b = budget(
+            "tcp",
+            flowpool::Reading {
+                refusals: vec![(long, flowpool::Reason::Floor, 1)],
+                ..flowpool::Reading::default()
+            },
+        );
+        assert_eq!(
+            b.refusals[0].rule_id.len(),
+            512 + wgft_proto::textsafe::CLIP_MARK.len()
+        );
     }
 
     #[test]

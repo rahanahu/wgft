@@ -424,11 +424,6 @@ fn value_check(c: &mut Check, now: OffsetDateTime, resp: &DoctorResponse, agent_
 
 // --- Connection 群 ---
 
-/// server が鍵の変更の頻度の上限で拒むときの close の理由 (Go の `reasontext.KeyChangeLimited`)。
-const KEY_CHANGE_LIMITED_TEXT: &str = "public key changes are limited; retry later";
-/// 証明書のピンとの不一致の文の書き出し (Go の `enroll.ErrPinMismatch`)。
-const PIN_MISMATCH_TEXT: &str = wgft_agent::enroll::PIN_MISMATCH;
-
 fn reason_or<'a>(r: &'a str, fallback: &'a str) -> &'a str {
     if r.trim().is_empty() { fallback } else { r }
 }
@@ -440,7 +435,10 @@ fn stream_conn(c: &mut Check, now: OffsetDateTime, s: &DoctorStream) {
         return;
     }
     let why = reason_or(&s.disconnect_reason, "no reason was recorded");
-    if s.pin_mismatch || s.disconnect_reason.contains(PIN_MISMATCH_TEXT) {
+    // 判定は agent が立てた印だけで行う。理由の文は server の送った close の理由を含みうるので、文で
+    // 見分けると server が診断を偽れる。Go の CLI は印を送らない旧い版の agent のために文でも見るが、
+    // Rust の CLI が話すのは同じ版の Rust の agent だけで、印を必ず送る
+    if s.pin_mismatch {
         c.set(status::FAILED, reason::SERVER_CERT_MISMATCH);
         c.detail = format!(
             "the control stream to the server is not up, and retrying will not bring it up: the server's certificate does not match the one this agent pinned when it registered; the last attempt ended {}: {why}",
@@ -450,7 +448,7 @@ fn stream_conn(c: &mut Check, now: OffsetDateTime, s: &DoctorStream) {
         return;
     }
     c.set(status::UNKNOWN, reason::RECONNECTING);
-    if s.key_change_limited || s.disconnect_reason.contains(KEY_CHANGE_LIMITED_TEXT) {
+    if s.key_change_limited {
         c.set(status::FAILED, reason::KEY_CHANGE_LIMITED);
         c.verdict = true;
         c.detail = format!(
@@ -992,6 +990,43 @@ mod tests {
         assert_eq!(round(1_500_000_000, 1_000_000_000), 2_000_000_000);
         assert_eq!(round(-1_500_000_000, 1_000_000_000), -2_000_000_000);
         assert_eq!(round(2_000_000_000, 1_000_000), 2_000_000_000);
+    }
+
+    /// 証明書の不一致と鍵の変更の上限は agent の印だけで判定する。理由の文は server の close の理由を
+    /// 含みうるので、同じ文を送っても診断は変わらない。
+    #[test]
+    fn stream_diagnoses_follow_the_agent_s_flags_not_the_reason_text() {
+        let now = OffsetDateTime::now_utc();
+        let forged = DoctorStream {
+            disconnect_reason: format!(
+                "{} public key changes are limited; retry later",
+                wgft_agent::enroll::PIN_MISMATCH
+            ),
+            ..DoctorStream::default()
+        };
+        let mut c = Check::new(CHECK_STREAM_CONN, "", "");
+        stream_conn(&mut c, now, &forged);
+        assert_eq!(c.reason, reason::RECONNECTING);
+        for (flags, want) in [
+            (
+                DoctorStream {
+                    pin_mismatch: true,
+                    ..DoctorStream::default()
+                },
+                reason::SERVER_CERT_MISMATCH,
+            ),
+            (
+                DoctorStream {
+                    key_change_limited: true,
+                    ..DoctorStream::default()
+                },
+                reason::KEY_CHANGE_LIMITED,
+            ),
+        ] {
+            let mut c = Check::new(CHECK_STREAM_CONN, "", "");
+            stream_conn(&mut c, now, &flags);
+            assert_eq!(c.reason, want);
+        }
     }
 
     #[test]

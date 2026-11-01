@@ -815,6 +815,9 @@ Go の v1 のユーザー空間モードと同じです。
 | `runtime_state_timeout` | 実行時の排他を 2 秒で取れなかったとき | 依らない |
 
 応答の中の 1 つの文字列は 512 byte で切ります。
+仕様のとおり、ルールの ID (`rules[].id` と `budgets[].refusals[].rule_id`) も切ります。
+Go の agent は ID を切らないので、512 byte を超える ID だけが Go と違う値になります。
+server の ID は ULID から作る短い値なので、ふだんの応答は Go と同じです。
 
 ### agent doctor のコマンド
 
@@ -845,6 +848,10 @@ Go の v1 のユーザー空間モードと同じです。
 
 - 骨組み:コマンド、停止中にも成立する検査 (`host.*`、`agent.*`、`tunnel.resolve`)、`agent.control` の接続と理由、DoctorResponse から読む `stream.*`、`tunnel.*`、`relay.*` の検査、報告の JSON と文の出力、総合判定と終了コード、設計の表との照合です。
   「制御ソケット」の段の上に積みます
+- 証明書の不一致と鍵の変更の上限の判定:`stream.connection` は、agent の応答の `pin_mismatch` と `key_change_limited` の印だけで判定します。
+  Go の CLI は印を送らない旧い版の agent のために `disconnect_reason` の文でも見分けますが、Rust の CLI は文を見ません。
+  理由の文は server が送った close の理由を含みうるので、文で見分けると server が診断と次の手順を偽れるためです。
+  Rust の CLI が話すのは印を必ず送る同じ版の Rust の agent です
 - 稼働中の検査:agent の応答に、フロー数の pool から来る `budgets`、ルールの `sessions` と `flows`、宛先の試し接続の `target_errors` を載せます。
   「宛先と予算」の段の上に積みます
 
