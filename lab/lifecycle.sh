@@ -381,7 +381,19 @@ kill_server() {
   done
 }
 none_running() { ! sandbox_any_named wgft echo socat; }
-kill_all() { sandbox_kill_named wgft echo socat; must_wait "kill_all: leftover wgft/echo/socat processes gone" 5 none_running; }
+# kill_all: SIGTERM to every wgft, echo and socat of this sandbox, then wait for them to go. When one
+# outlives the wait, name it, with its state and what it waits on, so the failure says which process.
+kill_all() {
+  sandbox_kill_named wgft echo socat
+  must_wait "kill_all: leftover wgft/echo/socat processes gone" 5 none_running && return 0
+  local p line
+  for p in $(sandbox_pids_named wgft echo socat); do
+    # a process that ended after the wait has no ps line; skip it
+    line=$(ps -o pid=,stat=,etimes=,wchan:24=,args= -p "$p" 2>/dev/null | cut -c1-200)
+    [ -n "$line" ] && echo "   still running after SIGTERM: $line"
+  done
+  return 1
+}
 reset_kernel_state() {
   vps ip link del wgft0 2>/dev/null
   vps nft delete table inet wgft 2>/dev/null
