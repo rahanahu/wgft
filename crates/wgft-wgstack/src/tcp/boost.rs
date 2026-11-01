@@ -10,11 +10,10 @@
 
 use super::ctx::Conn;
 use super::{MS, SEC};
+use crate::budget::BoostArrays;
 use crate::buf::BOOST_SIZE;
-use crate::buf::records::Record;
-use crate::buf::recv::Interval;
+use crate::buf::ring::Ring;
 use crate::config::BoostPolicy;
-use crate::fixed_vec::FixedVec;
 
 /// 需要の区間です。
 const DEMAND_WINDOW: i64 = 250 * MS;
@@ -70,27 +69,26 @@ impl Conn<'_> {
         false
     }
 
-    /// 枠を持つ接続の送信の向きを boost の段に移し、boost の配列を使い始めます。`iv` は受信が boost の段に移る
-    /// まで控えに置きます。輪の確保に失敗したら何も変えずに配列を返します。
-    pub(crate) fn enter_boost(
-        &mut self,
-        slot: usize,
-        recs: FixedVec<Record>,
-        iv: FixedVec<Interval>,
-    ) -> Result<(), (FixedVec<Record>, FixedVec<Interval>)> {
+    /// 枠を持つ接続の送信の向きを boost の段に移し、boost の配列を使い始めます。受信の区間の表と輪の chunk の表は、
+    /// 受信が boost の段に移るまで控えに置きます。輪の確保に失敗したら何も変えずに配列を返します。
+    pub(crate) fn enter_boost(&mut self, slot: usize, a: BoostArrays) -> Result<(), BoostArrays> {
+        let BoostArrays { recs, iv, snd, rcv } = a;
         let (lo, hi) = (self.t.una_off, self.t.tail_off);
-        let Ok(next) = self
+        let next = Ring::with_table(BOOST_SIZE, snd);
+        let next = match self
             .b
             .snd
-            .resized(BOOST_SIZE, &mut self.s.chunks, |f| f(lo, hi))
-        else {
-            return Err((recs, iv));
+            .copy_into(next, &mut self.s.chunks, |f| f(lo, hi))
+        {
+            Ok(next) => next,
+            Err(snd) => return Err(BoostArrays { recs, iv, snd, rcv }),
         };
         self.b.snd.release(&mut self.s.chunks);
         self.b.snd = next;
         self.t.snd_cap = BOOST_SIZE;
         self.b.spare_recs = self.b.recs.resize(recs);
         self.b.spare_iv = iv;
+        self.b.spare_tbl = rcv;
         self.b.boost = Some(slot);
         Ok(())
     }
@@ -98,8 +96,17 @@ impl Conn<'_> {
     /// 受信の窓を floor より先へ開きます。枠を持つ接続で呼びます。広告する窓は一度に開きません。窓の上限は測定で
     /// 上がり、窓は届いた segment ごとに広がります。輪の確保に失敗したら floor の段のままにし、次の需要で試し直します。
     pub(crate) fn grow_recv(&mut self) {
-        let Ok(next) = self.b.rcv.resized_ring(BOOST_SIZE, &mut self.s.chunks) else {
-            return;
+        let table = core::mem::take(&mut self.b.spare_tbl);
+        let next = match self
+            .b
+            .rcv
+            .copied_ring(Ring::with_table(BOOST_SIZE, table), &mut self.s.chunks)
+        {
+            Ok(next) => next,
+            Err(table) => {
+                self.b.spare_tbl = table;
+                return;
+            }
         };
         let boost_iv = core::mem::take(&mut self.b.spare_iv);
         match self.b.rcv.set_intervals(boost_iv) {
@@ -109,6 +116,7 @@ impl Conn<'_> {
                 self.b.spare_iv = boost_iv;
                 let mut next = next;
                 next.release(&mut self.s.chunks);
+                self.b.spare_tbl = next.take_table();
                 return;
             }
         }
@@ -128,16 +136,24 @@ impl Conn<'_> {
         let floor_recs = core::mem::take(&mut self.b.spare_recs);
         self.b.recs.clear();
         let recs = self.b.recs.resize(floor_recs);
-        let iv = if self.b.rcv.intervals_capacity() == crate::buf::BOOST_INTERVALS {
+        // 輪の chunk は呼び手が先に返しています。
+        let snd = self.b.snd.take_table();
+        let (iv, rcv) = if self.b.rcv.intervals_capacity() == crate::buf::BOOST_INTERVALS {
             self.b.rcv.clear_intervals();
             let floor_iv = core::mem::take(&mut self.b.spare_iv);
-            match self.b.rcv.set_intervals(floor_iv) {
+            let iv = match self.b.rcv.set_intervals(floor_iv) {
                 Ok(boost) => boost,
                 Err(floor) => floor, // 区間を空にしたので起きません
-            }
+            };
+            (iv, self.b.rcv.r.take_table())
         } else {
-            core::mem::take(&mut self.b.spare_iv)
+            (
+                core::mem::take(&mut self.b.spare_iv),
+                core::mem::take(&mut self.b.spare_tbl),
+            )
         };
-        self.s.budget.release(slot, recs, iv);
+        self.s
+            .budget
+            .release(slot, BoostArrays { recs, iv, snd, rcv });
     }
 }

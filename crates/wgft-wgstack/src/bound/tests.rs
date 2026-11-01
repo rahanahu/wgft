@@ -13,6 +13,7 @@
 
 use super::*;
 use crate::config::Config;
+use crate::stack::Stack;
 use core::fmt::Write;
 use core::net::Ipv4Addr;
 
@@ -32,7 +33,7 @@ const END: &str = "<!-- END GENERATED TABLE -->\n";
 /// 生成する表です。行の名前は `FixParts` と `Bound` の欄の名前で、説明は文書の手で書いた部分が持ちます。
 fn table() -> String {
     let limits = TABLE_KS.map(Limits::with_max_flows);
-    let parts = limits.map(|l| fix_parts(&l, TABLE_MTU, size_of::<Stack<NoHook>>()));
+    let parts = limits.map(|l| fix_parts(&l, TABLE_MTU, crate::stack::stack_size::<NoHook>()));
     let bounds = limits.map(|l| Bound::for_limits(&l, TABLE_MTU));
     let mut w = String::new();
     w.push_str("| term |");
@@ -58,13 +59,13 @@ fn table() -> String {
         ("`chunk_pool`", &|i| parts[i].chunk_pool),
         ("`fix`", &|i| bounds[i].fix),
         ("`floor_conn`", &|i| bounds[i].floor_conn),
+        ("`floor_arrays`", &|i| bounds[i].floor_arrays),
         ("`boost`", &|i| bounds[i].boost),
         ("`frag`", &|i| bounds[i].frag),
         ("`udp_rx`", &|i| bounds[i].udp_rx),
         ("`udp_tx`", &|i| bounds[i].udp_tx),
         ("`ping`", &|i| bounds[i].ping),
         ("`total`", &|i| bounds[i].total),
-        ("`transient`", &|i| bounds[i].transient),
     ];
     for (name, f) in rows {
         write!(w, "| {name} |").unwrap();
@@ -123,7 +124,7 @@ fn fix_matches_the_allocated_tables() {
             ..Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420)
         };
         let s = Stack::new(config, Budget::new().unwrap(), &[7; 64], NoHook).unwrap();
-        let p = fix_parts(&limits, config.mtu, size_of::<Stack<NoHook>>());
+        let p = fix_parts(&limits, config.mtu, crate::stack::stack_size::<NoHook>());
         let sh = &s.s;
         assert_eq!(
             p.conn_slots,
@@ -144,7 +145,7 @@ fn fix_matches_the_allocated_tables() {
             p.chunk_pool,
             b(sh.chunks.heap_bytes() + POOL_KEEP * CHUNK_SIZE)
         );
-        assert_eq!(p.stack, b(size_of::<Stack<NoHook>>()));
+        assert_eq!(p.stack, b(crate::stack::stack_size::<NoHook>()));
         let bound = s.bound();
         assert_eq!(bound, Bound::for_limits(&limits, 1420));
         // boost の項は Budget が確保した配列と管理を覆います。
@@ -187,10 +188,11 @@ fn bound_does_not_depend_on_use() {
         .write(0, &[1; 1000], &mut s.s.chunks)
         .unwrap();
     assert_eq!(s.bound(), before);
-    assert!(before.floor_conn > 0 && before.transient > 0);
+    assert!(before.floor_conn > 0 && before.boost > 0);
     let _ = s.close(Time::ZERO);
 }
 
+use crate::buf::ring::Ring;
 use crate::time::Time;
 
 /// すべての枠を使い、boost の枠をすべて貸し、どの輪も満たした核の保持を、上界の項ごとに比べます。
@@ -222,12 +224,12 @@ fn a_full_stack_meets_each_term() {
         let id = s.conns.id(i);
         let boosted = s.s.budget.acquire(id);
         let (t, _, c) = s.conns.parts_mut(i);
-        if let Some((b, recs, iv)) = boosted {
+        if let Some((b, a)) = boosted {
             c.boost = Some(b);
-            c.snd = crate::buf::ring::Ring::new(BOOST_SIZE);
-            c.spare_recs = c.recs.resize(recs);
-            c.rcv.r = crate::buf::ring::Ring::new(BOOST_SIZE);
-            c.spare_iv = c.rcv.set_intervals(iv).unwrap();
+            c.snd = Ring::with_table(BOOST_SIZE, a.snd);
+            c.spare_recs = c.recs.resize(a.recs);
+            c.rcv.r = Ring::with_table(BOOST_SIZE, a.rcv);
+            c.spare_iv = c.rcv.set_intervals(a.iv).unwrap();
         }
         let (snd_cap, rcv_cap) = (c.snd.cap(), c.rcv.r.cap());
         (t.snd_cap, t.rcv_cap) = (snd_cap, rcv_cap);
@@ -248,17 +250,26 @@ fn a_full_stack_meets_each_term() {
     let bound = s.bound();
     let (n, slots) = (b(limits.conns()), b(BOOST_SLOTS));
     assert_eq!(h.boosted as u64, slots);
+    assert_eq!(h.slot_arrays, limits.conns());
+    assert_eq!(s.slots_used(), h.slot_arrays);
     let chunk_terms = n * (SEND_FLOOR + RECV_FLOOR)
         + slots * ((BOOST_SIZE - SEND_FLOOR) + (BOOST_SIZE - RECV_FLOOR));
     let record_terms =
         n * b(FLOOR_RECORDS * size_of::<Record>()) + slots * b(BOOST_RECORDS * size_of::<Record>());
     let interval_terms = n * b(FLOOR_INTERVALS * size_of::<Interval>())
         + slots * b(BOOST_INTERVALS * size_of::<Interval>());
+    assert_eq!(
+        n * b(FLOOR_RECORDS * size_of::<Record>() + FLOOR_INTERVALS * size_of::<Interval>()),
+        bound.floor_arrays,
+        "the floor arrays of every slot"
+    );
     assert_eq!(b(h.chunk_bytes), chunk_terms, "chunk bytes");
     assert_eq!(b(h.record_bytes), record_terms, "record bytes");
     assert_eq!(b(h.interval_bytes), interval_terms, "interval bytes");
+    // boost の段の輪の chunk の表は会計の外で、Budget の作成の時に確保したものです。
+    let table_terms = slots * b(2 * BOOST_RING_SLOTS * size_of::<Option<Chunk>>());
     assert_eq!(
-        chunk_terms + record_terms + interval_terms,
+        chunk_terms + record_terms + interval_terms + table_terms,
         bound.floor_conn + bound.boost - b(Budget::slot_bytes()),
         "the filled stack reaches exactly the floor and boost terms"
     );

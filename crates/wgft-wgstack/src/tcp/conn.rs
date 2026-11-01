@@ -15,10 +15,11 @@
 //!
 //! accept の待ち行列の節は、別の接続の処理が書き換えるので、核の共有の状態 (`Shared::qlinks`) に置きます。
 
+use crate::budget::BoostArrays;
 use crate::buf::chunk::ChunkPool;
 use crate::buf::records::{Record, RecordRing};
 use crate::buf::recv::{Interval, RecvBuf};
-use crate::buf::ring::Ring;
+use crate::buf::ring::{BOOST_RING_SLOTS, ChunkTable, Ring};
 use crate::buf::{
     BOOST_INTERVALS, BOOST_RECORDS, BOOST_SIZE, FLOOR_INTERVALS, FLOOR_RECORDS, RECV_FLOOR,
     SEND_FLOOR,
@@ -271,8 +272,9 @@ pub(crate) struct ConnCold {
     pub(crate) wdem: crate::tcp::boost::Demand,
 }
 
-/// 接続の送受信の輪と記録の輪です。`repr(C)` で小さな管理の欄を前に、輪の chunk の pointer の配列を後ろに
-/// 置きます。受信の経路は受信のバッファの管理の行と、使う chunk の pointer の行だけを触ります。
+/// 接続の送受信の輪と記録の輪です。`repr(C)` で小さな管理の欄を前に、輪の floor の段の chunk の pointer の
+/// 配列を後ろに置きます。受信の経路は受信のバッファの管理の行と、使う chunk の pointer の行だけを触ります。
+/// boost の段の chunk の pointer の表は `Budget` から借り、輪が持ちます。
 #[derive(Debug)]
 #[repr(C)]
 pub(crate) struct ConnBufs {
@@ -281,6 +283,8 @@ pub(crate) struct ConnBufs {
     /// 区間の表 (移った後は floor の区間の表) を置きます。
     pub(crate) spare_recs: FixedVec<Record>,
     pub(crate) spare_iv: FixedVec<Interval>,
+    /// 受信が boost の段に移るまでの、受信の輪の boost の段の chunk の表の控えです。
+    pub(crate) spare_tbl: ChunkTable,
     /// 借りている boost の枠の番号です。
     pub(crate) boost: Option<usize>,
     pub(crate) rcv: RecvBuf,
@@ -293,10 +297,16 @@ impl ConnBufs {
             recs: RecordRing::default(),
             spare_recs: FixedVec::new(),
             spare_iv: FixedVec::new(),
+            spare_tbl: FixedVec::new(),
             boost: None,
             rcv: RecvBuf::new(RECV_FLOOR, FixedVec::new(), 0),
             snd: Ring::new(SEND_FLOOR),
         }
+    }
+
+    /// 枠が floor の記録の輪を持つかを返します。boost の間は控えに持ちます。区間の表は記録の輪と同じ時に確保します。
+    pub(crate) fn has_floor_arrays(&self) -> bool {
+        self.recs.capacity() != 0 || self.spare_recs.capacity() != 0
     }
 
     /// 枠が持つ floor の記録の輪と区間の表の byte 数です。使っている配列が boost のものなら、それも数えます。
@@ -321,17 +331,24 @@ impl ConnBufs {
         self.recs.heap_bytes() + iv
     }
 
-    /// boost の配列を取り出し、boost の印を外します。受信が boost の段に移っていれば、使っている区間の表が boost
-    /// のもので、移っていなければ控えが boost のものです。輪の中身は移さないので、呼び手は続けて枠を返します。
-    pub(crate) fn take_boost_arrays(&mut self) -> (FixedVec<Record>, FixedVec<Interval>) {
+    /// boost の配列を取り出し、boost の印を外します。受信が boost の段に移っていれば、使っている区間の表と輪の
+    /// chunk の表が boost のもので、移っていなければ控えが boost のものです。輪の chunk は置き場に返し、中身は
+    /// 移さないので、呼び手は続けて枠を返します。
+    pub(crate) fn take_boost_arrays(&mut self, pool: &mut ChunkPool) -> BoostArrays {
         self.boost = None;
+        self.snd.release(pool);
+        self.rcv.r.release(pool);
         let recs = self.recs.take();
-        let iv = if self.rcv.intervals_capacity() == BOOST_INTERVALS {
-            self.rcv.take_intervals()
+        let snd = self.snd.take_table();
+        let (iv, rcv) = if self.rcv.intervals_capacity() == BOOST_INTERVALS {
+            (self.rcv.take_intervals(), self.rcv.r.take_table())
         } else {
-            core::mem::take(&mut self.spare_iv)
+            (
+                core::mem::take(&mut self.spare_iv),
+                core::mem::take(&mut self.spare_tbl),
+            )
         };
-        (recs, iv)
+        BoostArrays { recs, iv, snd, rcv }
     }
 
     /// 送受信の輪が持つ chunk の数です。
@@ -372,11 +389,22 @@ impl Default for QLink {
 }
 
 /// 接続の枠の表です。3 つの配列は同じ番号で 1 つの枠を表します。
+///
+/// 試験と fuzz の build (`cfg(test)` か feature `harness`) では、配列を書き換える口 (`*_mut`、`alloc`、`release`、
+/// `free_all`) がどれも書き換える枠の印を `touched` に付けます。配列はこの型の外から見えないので、印の無い枠は
+/// 印を外した時から変わっていません。書き換えた枠だけを確かめる試験がこの性質に依ります (wgstack-rs.md の
+/// 「書き換えた所だけの確かめ」)。製品の build に印と印を付ける処理はありません。
 #[derive(Debug)]
 pub(crate) struct ConnSlots {
     hot: FixedVec<Tcb>,
     cold: FixedVec<ConnCold>,
     bufs: FixedVec<ConnBufs>,
+    /// 前に [`ConnSlots::take_touched`] を呼んでから書き換えた枠の印です。
+    #[cfg(any(test, feature = "harness"))]
+    touched: crate::bitset::BitSet,
+    /// floor の配列を持つ枠の数です。枠は初めて使う時に配列を確保して持ち続けるので、作ってから使ったことのある
+    /// 枠の数で、[`ConnSlots::free_all`] で 0 に戻ります。
+    with_arrays: usize,
 }
 
 /// 空きの枠の list を作ります。小さい番号から使います。
@@ -395,11 +423,20 @@ pub(crate) const fn slot_bytes() -> usize {
 }
 
 impl ConnSlots {
+    /// 試験と fuzz の build だけにある欄 `touched` の byte です。[`crate::stack::HARNESS_BYTES`] との一致を試験が確かめます。
+    #[cfg(test)]
+    pub(crate) fn harness_bytes(&self) -> usize {
+        size_of_val(&self.touched)
+    }
+
     pub(crate) fn new(n: usize) -> Result<Self, AllocError> {
         Ok(Self {
             hot: FixedVec::try_filled(n, |_| Tcb::default())?,
             cold: FixedVec::try_filled(n, |_| ConnCold::default())?,
             bufs: FixedVec::try_filled(n, |_| ConnBufs::new())?,
+            with_arrays: 0,
+            #[cfg(any(test, feature = "harness"))]
+            touched: crate::bitset::BitSet::new(n)?,
         })
     }
 
@@ -418,6 +455,8 @@ impl ConnSlots {
     }
 
     pub(crate) fn tcb_mut(&mut self, i: u32) -> &mut Tcb {
+        #[cfg(any(test, feature = "harness"))]
+        self.touched.set(i);
         &mut self.hot[i as usize]
     }
 
@@ -426,11 +465,15 @@ impl ConnSlots {
     }
 
     pub(crate) fn bufs_mut(&mut self, i: u32) -> &mut ConnBufs {
+        #[cfg(any(test, feature = "harness"))]
+        self.touched.set(i);
         &mut self.bufs[i as usize]
     }
 
     /// 枠 `i` の 3 つの部分です。
     pub(crate) fn parts_mut(&mut self, i: u32) -> (&mut Tcb, &mut ConnCold, &mut ConnBufs) {
+        #[cfg(any(test, feature = "harness"))]
+        self.touched.set(i);
         let i = i as usize;
         (&mut self.hot[i], &mut self.cold[i], &mut self.bufs[i])
     }
@@ -441,6 +484,8 @@ impl ConnSlots {
         let Some(i) = free.pop() else {
             return Ok(None);
         };
+        #[cfg(any(test, feature = "harness"))]
+        self.touched.set(i);
         let s = &mut self.bufs[i as usize];
         if s.recs.capacity() == 0 && s.spare_recs.capacity() == 0 {
             let (Ok(recs), Ok(iv)) = (
@@ -451,6 +496,7 @@ impl ConnSlots {
                 return Err(AllocError);
             };
             s.recs = RecordRing::new(recs);
+            self.with_arrays += 1;
             if let Err(e) = s.rcv.set_intervals(iv) {
                 debug_assert!(e.is_empty(), "an unused slot holds no intervals");
             }
@@ -463,6 +509,7 @@ impl ConnSlots {
     /// floor の配列は持ち続けます。呼び手は先に表と待ち行列と boost の枠から外します。
     #[cfg(test)]
     pub(crate) fn release(&mut self, i: u32, free: &mut FixedVec<u32>, pool: &mut ChunkPool) {
+        self.touched.set(i);
         let t = &mut self.hot[i as usize];
         if t.state == State::Free {
             return;
@@ -513,6 +560,10 @@ impl ConnSlots {
 
     /// 枠をすべて返し、floor の配列も解放します。核を閉じる時に呼びます。
     pub(crate) fn free_all(&mut self, pool: &mut ChunkPool) {
+        #[cfg(any(test, feature = "harness"))]
+        for i in 0..self.hot.len() {
+            self.touched.set(u32::try_from(i).unwrap_or(u32::MAX));
+        }
         for (t, b) in self.hot.iter_mut().zip(self.bufs.iter_mut()) {
             b.snd.release(pool);
             b.rcv.r.release(pool);
@@ -523,10 +574,34 @@ impl ConnSlots {
             t.state = State::Free;
             t.in_index = false;
         }
+        self.with_arrays = 0;
+    }
+
+    /// floor の配列を持つ枠の数です。核を作ってから使ったことのある枠の数です。
+    pub(crate) fn with_arrays(&self) -> usize {
+        self.with_arrays
+    }
+
+    /// 前の呼び出しから書き換えた枠の番号を小さい順に `f` に渡し、印を外します。
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn take_touched(&mut self, mut f: impl FnMut(u32)) {
+        self.touched.for_each(&mut f);
+        self.touched.clear();
     }
 
     /// 空きの list `free` と使っている印が一致し、輪と段が合うことを確かめます。
+    #[cfg(test)]
     pub(crate) fn check(&self, free: &[u32], links: &[QLink]) -> Result<(), &'static str> {
+        self.check_free(free, links)?;
+        for i in 0..self.hot.len() {
+            self.check_slot(u32::try_from(i).unwrap_or(u32::MAX))?;
+        }
+        Ok(())
+    }
+
+    /// 空きの list `free` と使っている印が一致し、floor の配列を持つ枠の数が合うことを確かめます。手間は枠の数に
+    /// 比例します。
+    pub(crate) fn check_free(&self, free: &[u32], links: &[QLink]) -> Result<(), &'static str> {
         // 印は 1 枠 1 bit で、検査の間だけ確保します (wgstack-rs.md の「不変条件の検査の手間」)。
         let mut seen = crate::bitset::BitSet::new(self.hot.len())
             .map_err(|_| "allocation failed while checking")?;
@@ -555,13 +630,20 @@ impl ConnSlots {
         if free.len() + used != self.hot.len() {
             return Err("the free slots and the used slots do not add up");
         }
-        for (_, t, b) in self.iter_bufs() {
-            b.snd.check()?;
-            b.rcv.r.check()?;
-            b.rcv.check()?;
-            check_stage(t, b)?;
+        if self.bufs.iter().filter(|b| b.has_floor_arrays()).count() != self.with_arrays {
+            return Err("the count of slots with floor arrays disagrees with the slots");
         }
         Ok(())
+    }
+
+    /// 枠 `i` の輪、受信の区間の表、段が合うことを確かめます。枠 `i` の 3 つの配列の要素と、それが持つ配列だけを
+    /// 読みます。
+    pub(crate) fn check_slot(&self, i: u32) -> Result<(), &'static str> {
+        let (t, b) = (&self.hot[i as usize], &self.bufs[i as usize]);
+        b.snd.check()?;
+        b.rcv.r.check()?;
+        b.rcv.check()?;
+        check_stage(t, b)
     }
 }
 
@@ -579,14 +661,15 @@ fn check_stage(t: &Tcb, s: &ConnBufs) -> Result<(), &'static str> {
             || !(fresh || arrays == (FLOOR_RECORDS, FLOOR_INTERVALS))
             || s.spare_recs.capacity() != 0
             || s.spare_iv.capacity() != 0
+            || s.spare_tbl.capacity() != 0
         {
             return Err("a slot without boost is not at the floor stage");
         }
         return Ok(());
     }
-    let recv_ok = match (ivs, s.spare_iv.len()) {
-        (FLOOR_INTERVALS, BOOST_INTERVALS) => s.rcv.r.cap() == RECV_FLOOR,
-        (BOOST_INTERVALS, FLOOR_INTERVALS) => s.rcv.r.cap() == BOOST_SIZE,
+    let recv_ok = match (ivs, s.spare_iv.len(), s.spare_tbl.len()) {
+        (FLOOR_INTERVALS, BOOST_INTERVALS, BOOST_RING_SLOTS) => s.rcv.r.cap() == RECV_FLOOR,
+        (BOOST_INTERVALS, FLOOR_INTERVALS, 0) => s.rcv.r.cap() == BOOST_SIZE,
         _ => false,
     };
     if s.snd.cap() != BOOST_SIZE
@@ -650,7 +733,7 @@ mod tests {
         free[0] = 2;
         t.check(&free, &[]).unwrap();
         // 使っている枠が floor でない段を持つ。
-        t.bufs_mut(i).snd = Ring::new(BOOST_SIZE);
+        t.bufs_mut(i).snd = Ring::owning(BOOST_SIZE);
         assert_eq!(
             t.check(&free, &[]),
             Err("a slot without boost is not at the floor stage")
@@ -684,7 +767,10 @@ mod tests {
             (0, 0),
             "arrays are allocated on first use"
         );
+        assert!(!t.bufs(0).has_floor_arrays());
         t.alloc(&mut free).unwrap();
+        assert!(t.bufs(0).has_floor_arrays());
+        assert_eq!(t.with_arrays(), 1);
         let bytes = t.bufs(0).array_bytes();
         assert_eq!(
             bytes,
@@ -696,9 +782,17 @@ mod tests {
         t.bufs_mut(0).snd.write(0, &[1; 100], &mut p).unwrap();
         t.release(0, &mut free, &mut p);
         assert_eq!(t.bufs(0).array_bytes(), bytes);
+        assert!(
+            t.bufs(0).has_floor_arrays(),
+            "a released slot keeps its arrays"
+        );
         assert_eq!((t.bufs(0).held_chunks(), p.held()), (0, 0));
+        t.alloc(&mut free).unwrap();
+        assert_eq!(t.with_arrays(), 1, "a reused slot is counted once");
+        t.release(0, &mut free, &mut p);
         t.free_all(&mut p);
         assert_eq!(t.bufs(0).array_bytes(), (0, 0));
+        assert_eq!(t.with_arrays(), 0);
         assert!(!free.is_empty() && t.len() == 1);
         assert!(t.heap_bytes() >= size_of::<Tcb>() + size_of::<ConnBufs>());
     }

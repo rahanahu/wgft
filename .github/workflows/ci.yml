@@ -445,6 +445,20 @@ jobs:
             echo "the wgft binary depends on a test tooling crate" >&2
             exit 1
           fi
+      # The wgstack core's test and fuzz machinery (the touched-slot check, table reuse) sits behind its
+      # harness feature, which only the test tooling enables; the product binary's build never turns it on
+      # (docs/design/v2/wgstack-rs.md, after the boost hook list).
+      - name: product features
+        run: |
+          # -p wgft is how the lab and releases build the binary; the bare form is what `cargo build`
+          # resolves for the workspace's default members
+          for args in "-p wgft" ""; do
+            features=$(cargo tree $args -e features --target all --prefix none --locked)
+            if printf '%s\n' "$features" | grep -F 'wgft-wgstack feature "harness"'; then
+              echo "cargo tree $args builds the wgstack core with its harness feature" >&2
+              exit 1
+            fi
+          done
       # The fuzz targets build these crates with code that the normal build leaves out:
       # wgft-wgstack under --cfg fuzzing, wgft-wireguard with its fuzzing and deterministic
       # features. The fuzz crates need nightly, so check that code here on the pinned stable.

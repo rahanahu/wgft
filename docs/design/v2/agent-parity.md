@@ -613,6 +613,8 @@ Go の `memory soft limit:` の行の代わりで、ラボの `lifecycle.sh` の
 - データプレーンの駆動:1 回の起床で起こす waker を移す `Vec` です。
   waker の表の行の数で頭を打ちます
 - WireGuard の device:[device のキューと上界](wireguard-device.md#キューと上界) の値です
+- トンネルのバッチ:WireGuard のソケットの受信と送信のバッチが持つバッファです。
+  データプレーンは datagram を 1 つずつ読み書きするので、今は 0 です (下の実装の項を参照)
 - TCP の中継:接続 1 本の固定の大きさと、データが流れる間だけ借りる写しのバッファ (向きごとに 32 KiB、Go の `internal/netpipe` と同じ) の和 × `WGFT_MAX_TCP_FLOWS` と、置き場に残す 16 × 32 KiB の和です
 - UDP の中継:応答のバッファの枠の 64 × 65535 byte と、セッション 1 つの固定の大きさ × `WGFT_MAX_UDP_FLOWS` です
 - 待ち受け:待ち受け 1 つの固定の大きさ × 開いた待ち受けの数です。
@@ -640,12 +642,18 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
   後者は作成の時に接続の枠の数だけ確保し、育ちません
 - データプレーンの駆動:waker を移す `Vec` は表の行の数 (`Netstack::waker_slots`) まで育ち、容量はその 2 倍までなので、2 × 行の数 × `Waker` の大きさです
 - WireGuard の device:device の上限の件数とバイト数に、件数ごとの `Vec` の頭と、復号の一時のバッファと、データプレーンの受信と送り出しのバッファを足します
-- TCP の中継:接続 1 本につき、中継の task の future (8 KiB)、tokio の task と I/O の登録の余裕 (各 512 byte)、両方の向きの大きいバッファ (32 KiB ずつ) です。
+- トンネルのバッチ:`batch_bytes` の項で、今は 0 です。
+  バッチを入れる変更は、1 回の受信と送信のバッチが持つバッファ (`recvmmsg` と `sendmmsg` の datagram の配列、GRO と GSO でまとめた datagram、`WGFT_AGENT_BATCH_MIB` の送信の向きの予算) をこの項に数え、同じ変更で[上界の表](agent-bound.md)を作り直します。
+  device の層の使い回しのバッファの数え方は、[バッチの作りの規則](agent-throughput.md#バッチの作りの規則)が決めます。
+  バッチの段の最初の段階 (確保をやめ、まだ 1 packet ずつ送受信する間)は `device` の項に数えます。
+  バッチの段が入った後は、データプレーンの受信と送信のバッファを `device` の項から `batch` の項に移します。
+  バッチのバッファは起動の時に確保するので、ラボの check 5 と 5b の洪水が満たせる項に `batch` を加えます
+- TCP の中継:接続 1 本につき、中継の task の future、tokio の task と I/O の登録の余裕 (各 512 byte)、両方の向きの大きいバッファ (32 KiB ずつ) です。
   データプレーンのスレッドが使い回しに残す大きいバッファ 16 個を足します。
   下の項の行では、接続ごとの task と登録の部分と、大きいバッファの部分を分けて書きます
-- UDP の中継:応答のバッファの枠の 64 × 65535 byte と、セッション 1 つにつき、表の項と容量の余裕と共有の値 (512 byte。表の容量は数の 4 倍までで、hash の表の bucket はその 8 分の 7 の逆数倍なので、項 5 つ分を数えます)、応答の task の future (1 KiB)、tokio の task と I/O の登録の余裕です。
+- UDP の中継:応答のバッファの枠の 64 × 65535 byte と、セッション 1 つにつき、表の項と容量の余裕と共有の値 (表の容量は数の 4 倍までで、hash の表の bucket はその 8 分の 7 の逆数倍なので、項 5 つ分を数えます)、応答の task の future、tokio の task と I/O の登録の余裕です。
 - 名前の解決:スレッド 1 本を Rust の既定のスタックの 2 MiB と `getaddrinfo` の作業の 64 KiB とします
-- 全体状態:写しの数 4 × 1 通の上限 4 MiB × 倍率 16 と、stream のバッファの 2 × 4 MiB の和 (264 MiB) です。
+- 全体状態:写しの数 4 × 1 通の上限 4 MiB × 倍率 16 と、stream のバッファの 2 × 4 MiB の和です。
   写しの数は [全体状態の適用](agent-control.md#全体状態の適用) の 4 つです。
   倍率は、読んだ 1 通が持つ確保の入力の長さに対する上限 (`wgft_proto::STATE_HELD_FACTOR`) です。
   最も密な形は空の文字列を並べた capability の列で、3 byte ごとに `String` の 24 byte を持ち、列の容量は長さの 2 倍まで育つので 16 倍です。
@@ -679,24 +687,37 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
 - 待ち受けの行:適用で TCP と UDP の待ち受けの数が前の行から変わったら、`memory bound with <T> TCP and <U> UDP listeners: <N> MiB` を書きます。
   `<N>` は起動の時の行の値に待ち受けの項を足した値で、開けなかった待ち受けも数えます。
   形は保証の外です
-- future の大きさ:中継の task と応答の task の future の大きさは、型から読む単体の試験で定数を超えないことを確かめます。
-  tokio の task と I/O の登録の大きさは tokio の内部の型なので、余裕のある定数にしました
-- 固定の基礎:40 MiB です。
-  ラボの check 5 と 5b で、トンネルと TCP と UDP の待ち受けを開いた後、洪水の前に測った RSS (UDP 4096 と TCP 1024 の上限で 32 MiB、既定の上限で 37 MiB) を切り上げました。
+- 流れごとの大きさ:中継の task と応答の task の future と、UDP のセッションの表の項は、型の大きさを読んで要求の byte で数え、64 byte に切り上げます。
+  割り当て器の丸めは数えず、ラボの確かめの余裕に入ります。
+  切り上げは、最適化の段で future の大きさが数 byte 変わっても上界の表が変わりにくいようにするためだけのものです。
+  tokio の task と I/O の登録の大きさは tokio の内部の型なので、余裕のある定数にします
+- 固定の基礎:32 MiB です。
+  ラボの check 5 と 5b で、トンネルと TCP と UDP の待ち受けを開いた後、洪水の前に測った RSS (2026-11-01 に UDP 4096 と TCP 1024 の上限で 26 MiB、既定の上限で 27 MiB と 29 MiB) を切り上げました。
   この RSS は核と handle の層の表の触れた部分も含み、それらは自分の項でも数えるので、基礎は多めに数えます。
   測ったのはラボの Linux の musl の静的なビルドだけで、Windows と macOS のビルドの RSS は測っていません
 
-核の項は接続の枠ごとの floor の項が大部分を占め、`WGFT_MAX_TCP_FLOWS` が 1024 で約 1 GiB です。
+項ごとの値は、代表の上限で[上界の表](agent-bound.md)が示します。
+表は `memory::tests::bound_table_is_up_to_date` が `MemoryBound` から生成し、計算と違えば失敗します。
+核の項は接続の枠ごとの floor の項が大部分を占めます。
 このため行の値は RSS よりずっと大きく、check 5 と 5b の RSS の比較はこの上界の中に収まることだけを確かめます。
 行の全体との比較で余裕の 32 MiB を使う場面はまだ無く、余裕が足りるかは、上界が RSS に近づく使い方でしか確かめられません。
 
 行の値が RSS よりずっと大きいので、次の仕組みで上界を実際の保持と比べます。
 
 - 項の行:`memory bound:` の行の次に、項ごとの MiB を次の形の 1 行で書きます。
-  `memory bound terms: base <N> MiB, core fixed <N> MiB, core flows <N> MiB, tables <N> MiB, driver <N> MiB, device <N> MiB, tcp relay <N> MiB, tcp bulk <N> MiB, udp relay <N> MiB, resolver <N> MiB, state <N> MiB; per listener, not in the line: tcp <N> KiB, udp <N> KiB`
-  核の項は、作成の時に作って流れによらず持つ固定の部分 (`Bound::fix`、`core fixed`) と残り (`core flows`) に分けます。
+  `memory bound terms: base <N> MiB, core fixed <N> MiB, core arrays <N> MiB, core flows <N> MiB, tables <N> MiB, driver <N> MiB, device <N> MiB, batch <N> MiB, tcp relay <N> MiB, tcp bulk <N> MiB, udp relay <N> MiB, resolver <N> MiB, state <N> MiB; per listener, not in the line: tcp <N> KiB, udp <N> KiB`
+  核の項は、作成の時に作って流れによらず持つ固定の部分 (`Bound::fix`、`core fixed`)、接続の枠が初めて使われた時から持つ floor の記録の輪と区間の表 (`Bound::floor_arrays`、`core arrays`)、残り (`core flows`) に分けます。
   TCP の中継の項は、接続ごとの task と登録の部分 (`tcp relay`) と大きいバッファの部分 (`tcp bulk`) に分けます。
   形は保証の外で、ラボの check 5 と 5b が読みます
+- 使った枠の行:agent は核を作ってから使ったことのある接続の枠 (floor の配列を持つ枠) の数を 1 秒ごとに読み、刻みの倍数に切り上げた値が増えたときだけ、`memory: connection slots used so far: at most <N> of <N_c>; their floor arrays hold <K> KiB` を書きます。
+  核は枠が初めて配列を確保する時に数えて持つので (`Stack::slots_used`)、読むのは定数の手間で、データプレーンのスレッドで枠をたどりません。
+  枠は配列を持ち続けるので数は減らず、行の値は読んだ時の数の上界です。
+  刻みは次の手順で決めます:N_c を 32 で割って切り上げ、その値と 64 の大きい方を取り、64 の倍数に切り上げます。
+  このため、N_c が大きくても、行の数はトンネルを立てるたびに 32 までです。
+  `slot_watch` は `Tunnel::start` ごとに動き始め、最後に書いた値 `shown` を 0 から始めます。
+  洪水で数が一気に増えても行は増えすぎません。
+  ラボの check 5 と 5b は、RSS を測った後に、最後に出たこの行を読みます。
+  形は保証の外です
 - 単体の試験 (`relay/held_tests.rs`):小さい上限 (UDP 128、TCP 24) の agent を試験の相手と組み、`wgft-alloc-count` で数えた生きている確保を段ごとに測ります。
   作成の後の保持を作成の時に作る項 (核の固定の部分、表、駆動、device) と比べ、応答のバッファの枠をすべて貸させた後の育ちを枠の数の UDP のバッファと比べます。
   予算が拒むまで UDP のセッションを作った後の中継の育ちをセッションの数とセッションの項の積と比べ、予算が拒むまで TCP の中継を開いて両向きに大きいバッファを借りさせた後の中継の育ちを、中継の数と接続ごとの項の積と生きている大きいバッファの和と比べます。
@@ -709,25 +730,67 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
   比べる量には、流れの数によらない誤差として 64 KiB を足します。
   数えはプロセスで 1 つなので、試験ごとにプロセスを分けて流す cargo-nextest の下でだけ測り、`cargo test` では測らずに終わります
 - ラボの check 5 と 5b:Rust の agent では、洪水の前 (トンネルと待ち受けを開いた後) の RSS を測り、洪水の間の RSS の育ちが、洪水が満たせる項と余裕の 32 MiB の和を超えないことも確かめます。
-  洪水は黙った TCP の接続と 1 byte の datagram なので、満たせる項は核の固定の部分 (触れていなかった表)、表、駆動、device、TCP の中継の接続ごとの部分、UDP の中継です。
-  データが流れないので、TCP の中継の大きいバッファと核の接続ごとの送受信の部分は入れません。
+  洪水は黙った TCP の接続と 1 byte の datagram なので、満たせる項は核の固定の部分 (触れていなかった表)、洪水が使った接続の枠の配列、表、駆動、device、TCP の中継の接続ごとの部分、UDP の中継です。
+  黙った接続も、枠を初めて使う時に floor の記録の輪と区間の表を確保して 0 で埋めるので、使った枠の配列は満たせる項に入ります。
+  使った枠の数は `core arrays` の項の N_c ではなく、前述の使った枠の行から読みます。
+  使った枠の行が無いときは、`core arrays` の項の全体を満たせる項に入れます
+  データが流れないので、TCP の中継の大きいバッファと核の接続ごとの送受信のバッファは入れません。
   行の全体との比較は核の項で緩いので、中継の漏れはこの比較で先に見えます
 
-単体の試験の検出力として、セッションごとに 2 KiB と中継ごとに 8 KiB の余分な保持を足すと、比べる量をわずかに超えて失敗しました。
+単体の試験の検出力として、2026-11-01 にセッションごとに 2 KiB、中継ごとに 4 KiB の余分な保持を足すと失敗し、その半分では通りました。
 返さない大きいバッファと、閉じても解放しない保持も失敗になりました。
 
-ラボの check 5 と 5b の育ちの比較では、既定の上限で育ちが洪水の満たせる項を 8 MiB 超え、余裕の中に収まりました。
-超えた分は割り当て器の管理の領域と、核の接続ごとの部分のうち黙った接続でも触れる頁と見込みますが、確かめていません。
-余裕の 32 MiB を足した値と育ちの差は、UDP 4096 と TCP 1024 の上限で 48 MiB、既定の上限で 24 MiB で、これより小さい中継の漏れはこの比較では見えません。
+ラボの check 5 と 5b の育ちの比較では、2026-11-01 に UDP 4096 と TCP 1024 の上限で育ちが 45 MiB、洪水が満たせる項が 71 MiB、既定の上限で育ちが 86 MiB、満たせる項が 109 MiB でした。
+洪水が使った接続の枠は、使った枠の行でそれぞれ 1,536 本のうち 1,152 本以下、2,560 本のうち 2,304 本以下でした。
+洪水は K を超える接続を開くので、accept の待ち行列の枠の多くも使います。
+余裕の 32 MiB を足した値と育ちの差は、UDP 4096 と TCP 1024 の上限で 58 MiB、既定の上限で 55 MiB で、これより小さい中継の漏れはこの比較では見えません。
+差の多くは、上限まで数える UDP の中継と TCP の中継の項を、洪水がすべては満たさないことによると見込みますが、項ごとには確かめていません。
 小さい漏れは単体の試験が見ます。
 
 まだ確かめていない保持があります。
 核の接続ごとの送信と受信の floor を満たす量 (宛先か server が読まない間に溜まる量) を流す場面は、単体の試験にもラボにもありません。
 単体の試験は核の保持を核が数えた値で差し引くので、核の項を実際の保持で確かめたことにはなりません。
 
-ラボの静的なビルドは musl の割り当て器を使います。
-musl の割り当て器は解放したメモリを早く OS に返しますが、スレッドの間の競合で遅くなります。
-割り当て器を替えるかは移行の調査の未決の点で、替えた場合も余裕の理由は変わりません。
+ラボの静的なビルドは `cargo zigbuild` の musl の target で、割り当て器は musl のものではなく zig の同梱の `malloc` (`heap.SmpAllocator`) です。
+割り当て器は OS の標準のまま、Linux の build は musl の静的な build のままにすることを、所有者が 2026-11-02 に決めました ([割り当て器と libc の比べ](wgstack-rs.md#割り当て器と-libc-の比べ))。
+替えた場合も余裕の理由は変わりません。
+
+### 上界と実際の保持の差
+
+ラボの RSS は行の値の 1 割にも届きません。
+項ごとに、相手が実際に満たせる最悪か、式が数えすぎている量か、予約だけで使わない量かに分けます。
+差の大きな項は、相手が実際に満たせる最悪の量の項です。
+式が数えすぎている量は、小さな項にだけあります。
+段を変える間の一時の保持は、段を変える接続の boost の枠の予約の内にあるので、別の項を持ちません ([上界の式の写し方](wgstack-rs.md#上界の式の写し方))。
+
+相手が満たせる最悪の項は次のとおりです。
+
+- 核の floor (`core flows` の floors と `core arrays`):トンネルの側の相手が窓を 0 にして ACK を返さない間に LAN の側のサービスが送ると、送信の floor が満ちます。
+  LAN の側のサービスが読まない間に相手が送ると、受信の floor が満ちます。
+  中継は書く先が詰まっている間は読まないので、どちらも中継の大きいバッファの 1 つ分の先で止まります。
+  核は accept した接続の数を K で抑えないので、accept の待ち行列の枠も数えます ([上界の式の写し方](wgstack-rs.md#上界の式の写し方))。
+  この項を残すことは、所有者が 2026-11-01 に認めました。
+  核の単体の試験 (`bound::tests::a_full_stack_meets_each_term`) は、すべての枠の両方の輪を満たした核の保持が floor と boost の項にちょうど届くことを確かめます。
+  agent の中継を通してすべての枠の両方の floor を満たす試験はありません (前述のまだ確かめていない保持)
+- boost (`core flows` の `boost`):需要の判定を満たす量を送る相手が枠を得て、その輪を満たします
+- TCP の中継の大きいバッファ (`tcp bulk`):両方の向きで書く先が詰まった中継は、読んだ分を大きいバッファに持ったまま待ちます
+- 全体状態 (`state`):信頼する server が最も密な形の最大の 1 通を送るときの量です。
+  server を奪った相手に対する上界は定めていません ([エージェントとホストのメモリの条件](../userspace/memory-agent-host.md))
+
+式が数えすぎている量と、予約だけで使わない量は次のとおりです。
+
+- 流れごとの大きさ:型の大きさを 64 byte に切り上げた分だけ多く数えます (前述の実装の項)
+- 固定の基礎 (`base`):測った RSS は核と handle の層の表の触れた部分を含み、それらは自分の項でも数えます。
+  重なりの量は測っていません
+- 名前の解決 (`resolver`):スレッドのスタックの 2 MiB は予約したアドレスの範囲で、RSS になるのは `getaddrinfo` が触れた頁だけです。
+  触れる深さは OS の解決の実装で変わり、測っていないので、予約の大きさで数えたままにします
+
+ラボの check 5 と 5b の洪水は黙った接続と小さな datagram で、floor、boost、大きいバッファ、全体状態のどれも満たしません。
+RSS と行の値の差は、主にこの満たしていない項の分です。
+行の値を大きく下げるには floor の模型を変える必要があり、所有者が 2026-10-31 に採った[需要で育つバッファ](../userspace/wgstack-buffers.md)がその設計です。
+その設計は、接続ごとの保証を 1 つの向きに 64 KiB にし、それを超える分をプロセスで 1 つの予算から借りる形にします。
+Rust の核にはまだ入っていません。
+入れる時機は[需要で育つバッファとの関係](wgstack-rs.md#需要で育つバッファとの関係)のとおりです。
 
 ## 制御ソケットと agent doctor
 
@@ -1114,6 +1177,8 @@ macOS では hard の値が無制限でも `kern.maxfilesperproc` を超える�
 | `listener tcp/<port> -> <宛先> opened; rule <ID>` | `lifecycle.sh` の check 2 と 11。上の行が無いことの確認と組にし、開き直した後の行があることを確かめる |
 | `<待ち受け>: <理由>; refusing new connections` | フロー数の拒否。`lifecycle.sh` の check 5e が `rule <ID> holds ... for a rule added later` を照らす。`<理由>` は Go の `internal/resource/pool.go` の拒否の文 (`flow budget full: ...`、`rule <ID> holds ... for a rule added later`、`... below its minimum ...` など) をそのまま写します |
 | `memory bound: <N> MiB, ...` | `lifecycle.sh` の check 5 と 5b ([メモリの上界の行](#メモリの上界の行)) |
+| `memory bound terms: ...` | `lifecycle.sh` の check 5 と 5b。洪水が満たせる項を読みます |
+| `memory: connection slots used so far: ...` | `lifecycle.sh` の check 5 と 5b。洪水が使った接続の枠の配列の KiB を読みます |
 | `dropped TCP handshakes that advertise an MSS below 536` | `exhaustion.sh` の kernel の `mss`。wgstack の捨てた数の口が要る |
 
 行が無いことを確かめる `absent` の確認は、Rust の agent が別の文面を書いても通ってしまいます。
@@ -1196,7 +1261,8 @@ Rust の側は、agent のホストのコマンドのフラグが Go と同じ�
 - `go` のとき:書き換えは機械的で、挙動は変わりません
 - 一式の外の台本:`version-skew.sh` と `upgrade.sh` の「今のビルドの agent」、`scale.sh` と `rcvwin.sh` のユーザー空間モードの agent も `AGENT_WGFT` にします。
   `version-skew.sh` は今のビルドの agent の版を `"$AGENT_WGFT" version` で確かめます。
-  Go の netstack を比べる `tcpquality.sh` と、Go のメモリの probe を読む `agentmem.sh` は、Go の `wgft` のままにします
+  Go の netstack を比べる `tcpquality.sh` と、Go のメモリの probe を読む `agentmem.sh` は、Go の `wgft` のままにします。
+  `tcpquality.sh` は Rust の agent を `AGENT_WGFT` でなくモード `rust` で起動し、Go の agent の `gvisor` と `wgstack` と同じ実行で比べます
 
 ### 確認の分け方
 
@@ -1381,7 +1447,10 @@ Windows の DACL とソケットの操作には `windows-sys` を使います。
   実際の挙動は確かめていません
 - エンドポイントの名前を `AF_INET` で引く Windows の経路は、Windows の CI の build と試験だけで、実機では確かめていません
 - 核の接続ごとの送受信の floor を満たす量を流す場面 (読まない相手) で、核の保持が核の項に収まること
-- 固定の基礎の 40 MiB は Linux の musl の静的なビルドの RSS から決めました。
+- check 5 と 5b の RSS は洪水の最中の 1 回の読みで、その後の最大値を見ません。
+  2026-11-02 の測定では、今のラボの build の check 5 の洪水の RSS が 69 MiB で、その後の VmHWM は 98 MiB でした ([割り当て器と libc の比べ](wgstack-rs.md#割り当て器と-libc-の比べ))。
+  check 5 で VmHWM も読むことを、後の変更の候補にします
+- 固定の基礎の 32 MiB は Linux の musl の静的なビルドの RSS から決めました。
   Windows と macOS のビルドの起動の後の RSS は測っていません
 - macOS の kqueue と Windows の AFD の poll で、接続した UDP のソケットへの ICMP の拒否が応答の task に届いてセッションを閉じることは、CI のループバックの宛先で確かめただけです。
   実機の LAN の宛先では確かめていません

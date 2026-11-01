@@ -8,6 +8,7 @@ use crate::budget::Budget;
 use crate::buf::chunk::{CHUNK_SIZE, Chunk, POOL_KEEP};
 use crate::buf::records::Record;
 use crate::buf::recv::Interval;
+use crate::buf::ring::BOOST_RING_SLOTS;
 use crate::buf::{
     BOOST_INTERVALS, BOOST_RECORDS, BOOST_SIZE, BOOST_SLOTS, FLOOR_INTERVALS, FLOOR_RECORDS,
     RECV_FLOOR, SEND_FLOOR,
@@ -17,7 +18,7 @@ use crate::frag;
 use crate::icmp::{PING_ENDPOINTS, Pings};
 use crate::index;
 use crate::output::Dlist;
-use crate::stack::{EventTargets, NoHook, Stack};
+use crate::stack::{EventTargets, NoHook};
 use crate::tcp::NUM_TIMERS;
 use crate::tcp::conn;
 use crate::tcp::listen::{Listener, PortTable};
@@ -33,8 +34,12 @@ pub struct Bound {
     pub fix: u64,
     /// N_c × (f_s + f_r + r_f + h_f) です。
     pub floor_conn: u64,
-    /// B × (d_s + d_r + d_rec + d_h) と枠の管理です。d_rec と d_h は boost の輪と表の全体で、`Budget` が作成の
-    /// 時に確保します。floor の輪と表は枠に残るので `floor_conn` が数えます。
+    /// `floor_conn` のうち、floor の送信の記録の輪と区間の表の N_c × (r_f + h_f) です。枠を初めて使う時に確保し、
+    /// 枠と共に持つので、データを運ばない接続も持ちます。`floor_conn` の内訳で、`total` に重ねて足しません。
+    pub floor_arrays: u64,
+    /// B × (d_s + d_r + d_rec + d_h + 2 × d_tbl) と枠の管理です。d_rec と d_h は boost の輪と表の全体、d_tbl は
+    /// boost の段の輪の chunk の表で、`Budget` が作成の時に確保します。floor の輪と表は枠に残るので `floor_conn`
+    /// が数えます。
     pub boost: u64,
     /// M_frag:再組み立ての表の保持 byte の上限です。
     pub frag: u64,
@@ -44,12 +49,42 @@ pub struct Bound {
     pub udp_tx: u64,
     /// N_ping × c_ping:ping の endpoint の行と応答の置き場です。
     pub ping: u64,
-    /// 項の和です。
+    /// 項の和です。段を変える間の一時の保持は、段を変える接続が持つ boost の枠の予約の内にあるので、別の項を
+    /// 持ちません ([`STAGE_CHANGE_FITS`])。
     pub total: u64,
-    /// 段を変える間の一時の保持で、式に含めない項です。1 本の接続の操作の中で起きるので、同時に起きる数は boost の
-    /// 枠の数以下で、B × (f_s + f_r) で抑えます。
-    pub transient: u64,
 }
+
+/// 段を変える間の一時の保持が、その接続の boost の予約の内にあることです (wgstack-rs.md の「上界の式の写し方」)。
+///
+/// 段を変えるのは枠を持つ接続だけで、枠は段を移す前に受け取り、移した後に返します (`try_boost`、`grow_recv`、
+/// `demote`)。核は 1 つのスレッドで動くので、1 回の移しは 1 本の接続の 1 回の呼び出しの中で終わり、その間にほかの
+/// 接続が枠や chunk を取ることはありません。枠を持つ接続の予約は、両方の向きの boost の段で 2B 個の chunk です
+/// (B は boost の段の chunk の数、F は floor の段の chunk の数)。
+///
+/// 移す間に接続が持つ chunk は、呼び出しごとに次の数以下です。送信の輪は確認した分の chunk を返すので、生きている
+/// 範囲 (floor 以下) に掛かる chunk だけを持ち、境目がそろわなければ F + 1 個です。新しい floor の輪は位置を
+/// floor で割った余りに置くので F 個以下です。
+///
+/// - `enter_boost`:送信の古い floor の輪 F、新しい boost の輪 F + 1、floor の受信の輪 F で、3F + 1 です
+/// - `grow_recv`:boost の送信の輪 B、受信の古い floor の輪 F、新しい boost の輪 F + 1 で、B + 2F + 1 です
+/// - `demote`:受信の取り消しは区間の表だけを変え、古い boost の受信の輪は chunk を B 個まで持ったままです。
+///   受信の古い輪 B と新しい floor の輪 F、送信の古い boost の輪 F + 1 と新しい floor の輪 F で、B + 3F + 1 です
+///
+/// 最も大きい `demote` の和が 2B 以下であることを確かめます。
+pub(crate) const STAGE_CHANGE_FITS: bool = {
+    let c = CHUNK_SIZE as u64;
+    let floor = (if SEND_FLOOR > RECV_FLOOR {
+        SEND_FLOOR
+    } else {
+        RECV_FLOOR
+    }) / c;
+    let boost = BOOST_SIZE / c;
+    let enter_boost = 3 * floor + 1;
+    let grow_recv = boost + 2 * floor + 1;
+    let demote = boost + 3 * floor + 1;
+    enter_boost <= demote && grow_recv <= demote && demote <= 2 * boost
+};
+const _: () = assert!(STAGE_CHANGE_FITS);
 
 /// 項の内訳です。生成する表が使います。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -89,16 +124,21 @@ fn b(n: usize) -> u64 {
 
 /// 接続の枠 1 つの floor の項 f_s + f_r + r_f + h_f です。
 pub(crate) fn floor_per_conn() -> u64 {
-    SEND_FLOOR
-        + RECV_FLOOR
-        + b(FLOOR_RECORDS * size_of::<Record>() + FLOOR_INTERVALS * size_of::<Interval>())
+    SEND_FLOOR + RECV_FLOOR + floor_arrays_per_conn()
 }
 
-/// boost の枠 1 つの項 d_s + d_r + d_rec + d_h です。
+/// 接続の枠 1 つの floor の配列の項 r_f + h_f です。
+fn floor_arrays_per_conn() -> u64 {
+    b(FLOOR_RECORDS * size_of::<Record>() + FLOOR_INTERVALS * size_of::<Interval>())
+}
+
+/// boost の枠 1 つの項 d_s + d_r + d_rec + d_h + 2 × d_tbl です。d_tbl は boost の段の輪の chunk の表です。
 pub(crate) fn boost_per_slot() -> u64 {
     (BOOST_SIZE - SEND_FLOOR)
         + (BOOST_SIZE - RECV_FLOOR)
-        + b(BOOST_RECORDS * size_of::<Record>() + BOOST_INTERVALS * size_of::<Interval>())
+        + b(BOOST_RECORDS * size_of::<Record>()
+            + BOOST_INTERVALS * size_of::<Interval>()
+            + 2 * BOOST_RING_SLOTS * size_of::<Option<Chunk>>())
 }
 
 /// 核の表の固定の項の内訳です。表の作成と同じ数で数えます。
@@ -136,12 +176,13 @@ pub(crate) fn fix_parts(l: &Limits, mtu: usize, stack_size: usize) -> FixParts {
 impl Bound {
     /// 表の大きさ `limits` と MTU `mtu` の核の上界です。核の値の大きさは hook の無い核で数えます。
     pub fn for_limits(limits: &Limits, mtu: usize) -> Self {
-        Self::with_stack_size(limits, mtu, size_of::<Stack<NoHook>>())
+        Self::with_stack_size(limits, mtu, crate::stack::stack_size::<NoHook>())
     }
 
     pub(crate) fn with_stack_size(l: &Limits, mtu: usize, stack_size: usize) -> Self {
         let fix = fix_parts(l, mtu, stack_size).sum();
         let floor_conn = b(l.conns()) * floor_per_conn();
+        let floor_arrays = b(l.conns()) * floor_arrays_per_conn();
         let boost = b(BOOST_SLOTS) * boost_per_slot() + b(Budget::slot_bytes());
         let frag = b(frag::LIMITS.bytes);
         let ck = b(udp::CHUNKS * Udp::chunk_rec_size());
@@ -151,13 +192,13 @@ impl Bound {
         Self {
             fix,
             floor_conn,
+            floor_arrays,
             boost,
             frag,
             udp_rx,
             udp_tx,
             ping,
             total: fix + floor_conn + boost + frag + udp_rx + udp_tx + ping,
-            transient: b(BOOST_SLOTS) * (SEND_FLOOR + RECV_FLOOR),
         }
     }
 }
@@ -172,6 +213,9 @@ impl Bound {
 pub struct Held {
     /// 使っている接続の枠です。
     pub conns: usize,
+    /// floor の送信の記録の輪と区間の表を持つ接続の枠です。枠は初めて使う時に配列を確保して持ち続けるので、核を
+    /// 作ってから使ったことのある枠の数です。
+    pub slot_arrays: usize,
     /// 握手の途中の行です。
     pub syn_rows: usize,
     /// TIME_WAIT と FIN_WAIT_2 の行です。

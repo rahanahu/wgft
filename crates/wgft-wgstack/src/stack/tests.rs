@@ -14,6 +14,7 @@
 use super::*;
 use crate::buf::BOOST_SIZE;
 use crate::buf::chunk::CHUNK_SIZE;
+use crate::buf::ring::Ring;
 use crate::config::Limits;
 use crate::tcp::listen::enqueue;
 use crate::tcp::syn::SynRow;
@@ -90,27 +91,36 @@ fn close_returns_everything() {
         enqueue(l, 80, &mut s.s.qlinks, i);
     }
     let first = s.conns.id(0);
-    let (b, recs, iv) = s.s.budget.acquire(first).unwrap();
+    let (b, a) = s.s.budget.acquire(first).unwrap();
     // 送信と受信の両方を boost の段に移します。
     let (t, _, c) = s.conns.parts_mut(0);
     c.boost = Some(b);
+    let end = 3 * CHUNK_SIZE as u64;
     c.snd
-        .resize(BOOST_SIZE, &mut s.s.chunks, |f| f(0, 3 * CHUNK_SIZE as u64))
+        .move_to(Ring::with_table(BOOST_SIZE, a.snd), 0, end, &mut s.s.chunks);
+    c.spare_recs = c.recs.resize(a.recs);
+    let next = c
+        .rcv
+        .copied_ring(Ring::with_table(BOOST_SIZE, a.rcv), &mut s.s.chunks)
         .unwrap();
-    c.spare_recs = c.recs.resize(recs);
-    c.rcv.resize_ring(BOOST_SIZE, &mut s.s.chunks).unwrap();
-    c.spare_iv = c.rcv.set_intervals(iv).unwrap();
+    c.rcv.r.release(&mut s.s.chunks);
+    c.rcv.r = next;
+    c.spare_iv = c.rcv.set_intervals(a.iv).unwrap();
     (t.snd_cap, t.rcv_cap) = (BOOST_SIZE, BOOST_SIZE);
-    // 2 本目は送信だけを boost の段に移し、boost の区間の表を控えに持ちます。
+    // 2 本目は送信だけを boost の段に移し、boost の区間の表と受信の輪の表を控えに持ちます。
     let second = s.conns.id(1);
-    let (b2, recs2, iv2) = s.s.budget.acquire(second).unwrap();
+    let (b2, a2) = s.s.budget.acquire(second).unwrap();
     let (t, _, c) = s.conns.parts_mut(1);
     c.boost = Some(b2);
-    c.snd
-        .resize(BOOST_SIZE, &mut s.s.chunks, |f| f(0, 3 * CHUNK_SIZE as u64))
-        .unwrap();
-    c.spare_recs = c.recs.resize(recs2);
-    c.spare_iv = iv2;
+    c.snd.move_to(
+        Ring::with_table(BOOST_SIZE, a2.snd),
+        0,
+        end,
+        &mut s.s.chunks,
+    );
+    c.spare_recs = c.recs.resize(a2.recs);
+    c.spare_iv = a2.iv;
+    c.spare_tbl = a2.rcv;
     t.snd_cap = BOOST_SIZE;
     s.s.syn
         .insert(SynRow {
@@ -201,4 +211,100 @@ fn invariants_catch_a_broken_count() {
     assert_eq!(s.config().mtu, 1420);
     let _ = format!("{s:?}");
     let _ = s.close(Time::ZERO);
+}
+
+/// floor に戻す間に接続が持つ chunk は、その接続の boost の枠の予約 (両方の向きの boost の段) の内にあります
+/// (`bound::STAGE_CHANGE_FITS`)。受信の取り消しは区間の表だけを変えるので、順序外のデータで満ちた古い受信の輪は、
+/// 新しい floor の輪を作る間も chunk を持ったままです。
+#[test]
+fn demote_holds_within_the_connection_s_reservation() {
+    use crate::buf::chunk::{held_peak, reset_held_peak};
+    use crate::buf::{RECV_FLOOR, SEND_FLOOR};
+    use crate::tcp::boost::IDLE_RECLAIM;
+    let mut s = Stack::new(small(), Budget::new().unwrap(), &[7; 64], NoHook).unwrap();
+    let i = s.conns.alloc(&mut s.s.conn_free).unwrap().unwrap();
+    let id = s.conns.id(i);
+    let (b, a) = s.s.budget.acquire(id).unwrap();
+    let pool = &mut s.s.chunks;
+    let (t, k, c) = s.conns.parts_mut(i);
+    c.boost = Some(b);
+    // 送信:boost の段の輪に、境目のそろわない floor の分の送り残しを持ちます。
+    let una = 100;
+    c.snd
+        .move_to(Ring::with_table(BOOST_SIZE, a.snd), una, una, pool);
+    c.snd
+        .write(una, &vec![5u8; usize::try_from(SEND_FLOOR).unwrap()], pool)
+        .unwrap();
+    c.spare_recs = c.recs.resize(a.recs);
+    (t.una_off, t.tail_off) = (una, una + SEND_FLOOR);
+    t.snd_cap = BOOST_SIZE;
+    t.cwnd = 1;
+    // 受信:順序どおりの未読は floor の内で、小さな穴の先の boost の段の輪の残りを順序外のデータで満たします。
+    // 順序外のデータのうち floor の内の分は取り消しの後も残るので、新しい floor の輪も満ちます。
+    let next = c
+        .rcv
+        .copied_ring(Ring::with_table(BOOST_SIZE, a.rcv), pool)
+        .unwrap();
+    c.rcv.r.release(pool);
+    c.rcv.r = next;
+    c.spare_iv = c.rcv.set_intervals(a.iv).unwrap();
+    k.rcv_boost = true;
+    t.rcv_cap = BOOST_SIZE;
+    assert_eq!(c.rcv.insert(0, &[1; 1000], BOOST_SIZE, pool).accepted, 1000);
+    let ooo = 2000;
+    let data = vec![2u8; usize::try_from(BOOST_SIZE - ooo).unwrap()];
+    assert_eq!(
+        c.rcv.insert(ooo, &data, BOOST_SIZE, pool).accepted,
+        data.len()
+    );
+    k.last_demand = 0;
+    let conn_before = c.held_chunks();
+    let held_before = s.s.chunks.held();
+    s.check_invariants().unwrap();
+
+    reset_held_peak(held_before);
+    assert!(
+        s.demote(id, IDLE_RECLAIM + 1),
+        "the idle holder returns to the floor"
+    );
+    let growth = held_peak() - held_before;
+    let c = CHUNK_SIZE as u64;
+    let reservation = usize::try_from(2 * BOOST_SIZE / c).unwrap();
+    eprintln!(
+        "demote: the connection held {conn_before} chunks, grew by at most {growth} while it moved, against a reservation of {reservation}"
+    );
+    // 最も多く持つ場合 (bound::STAGE_CHANGE_FITS の demote の和) に届きます。
+    let (f, b) = (RECV_FLOOR / c, BOOST_SIZE / c);
+    assert_eq!(
+        conn_before + growth,
+        usize::try_from(b + 3 * f + 1).unwrap()
+    );
+    assert!(
+        conn_before + growth <= reservation,
+        "the connection held {conn_before} chunks and grew by {growth} while it moved, above its reservation of {reservation}"
+    );
+    let after = s.conns.bufs_mut(i).held_chunks();
+    assert!(
+        after <= usize::try_from((SEND_FLOOR + RECV_FLOOR) / c).unwrap(),
+        "{after} chunks after demote"
+    );
+    assert_eq!(s.s.chunks.held(), held_before - conn_before + after);
+    assert_eq!(s.s.budget.lent(), 0);
+    s.check_invariants().unwrap();
+    let closed = s.close(Time::from_nanos(IDLE_RECLAIM.unsigned_abs() + 2));
+    assert!(closed.held.is_zero(), "{:?}", closed.held);
+}
+
+/// 試験と fuzz の build だけにある欄の byte の和 `HARNESS_BYTES` が、欄の型の大きさの和と一致します。
+/// 欄の型の大きさが変わった場合と、`HARNESS_BYTES` を誤って直した場合を検出します。
+/// 試験だけの欄を足すときは、その欄の `harness_bytes` もこの和に足します (足し忘れた新しい欄は検出できません)。
+#[test]
+fn harness_bytes_match_the_harness_only_fields() {
+    let s = Stack::new(small(), Budget::new().unwrap(), &[7; 64], NoHook).unwrap();
+    let sum = s.conns.harness_bytes()
+        + s.s.events.harness_bytes()
+        + s.s.budget.harness_bytes()
+        + s.s.listeners.harness_bytes()
+        + s.s.udp.eps.harness_bytes();
+    assert_eq!(sum, HARNESS_BYTES);
 }

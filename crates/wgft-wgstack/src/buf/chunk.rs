@@ -36,6 +36,24 @@ std::thread_local! {
     static FAIL_AFTER: core::cell::Cell<Option<usize>> = const { core::cell::Cell::new(None) };
 }
 
+// 試験だけが使う、輪が持つ chunk の数の最大です。確保の失敗の注入と同じく型の外に置きます。
+#[cfg(test)]
+std::thread_local! {
+    static PEAK_HELD: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// 試験だけが使う、輪が持つ chunk の数の最大を `held` に戻します。
+#[cfg(test)]
+pub(crate) fn reset_held_peak(held: usize) {
+    PEAK_HELD.set(held);
+}
+
+/// 試験だけが使う、[`reset_held_peak`] の後に輪が持った chunk の数の最大です。
+#[cfg(test)]
+pub(crate) fn held_peak() -> usize {
+    PEAK_HELD.get()
+}
+
 /// 試験だけが使う、chunk の確保の失敗の注入を設定します。
 #[cfg(test)]
 pub(crate) fn fail_chunks_after(n: Option<usize>) {
@@ -70,6 +88,8 @@ impl ChunkPool {
             None => try_boxed_bytes::<CHUNK_SIZE>()?,
         };
         self.held += 1;
+        #[cfg(test)]
+        PEAK_HELD.set(PEAK_HELD.get().max(self.held));
         Ok(c)
     }
 

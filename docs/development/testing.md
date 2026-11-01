@@ -324,8 +324,8 @@ L15 は server の 30 秒ごとの再試行を待つ場合に、確認の待ち�
 | B10 | Docker のイメージの疎通 (`scripts/docker-smoke.sh`) | `deploy/Dockerfile.*` から作ったイメージで server と agent が動かないこと | Docker か Podman のある Linux (ホスト、CI の runner、ラボの VM のどれでも可) | `build`、`rc` | 契機に当たる PR ごとと、リリース候補ごとに 1 回 | 自動 (開発者が起動) |
 | B11 | `lab/rcvwin.sh` | ユーザー空間モードの中継で、`vpsd` の公開側のカーネルの TCP ソケットが、穴の後ろの順序外のデータとして floor を超える受信のメモリを持ったまま boost の枠を返すこと。穴が埋まった後に、その枠が別の接続へ戻らないこと ([設計文書の 7 節](../design/agent-dataplane.md#7-データプレーン自宅側)) | ラボ | `resource`、`userspace` | 契機に当たる PR ごとに 1 回 | 自動 (開発者が起動) |
 | B12 | `lab/lab test internal/nettun vps -test.run='^(TestRelayHold|TestSetupFailure)OutOfOrderKernelData$'` | 中継終了時と中継開始前の通常の失敗で、カーネル TCP ソケットの順序外の受信メモリが、フローと送信元ごとの枠を返した後にも残ること | 使い捨て VM の隔離した network namespace | `resource`、`userspace` | 契機に当たる PR ごとに 1 回 | 自動 (開発者が起動) |
-| B13 | CI の `rust-check` (`cargo fmt --check`、`cargo clippy -D warnings`、`cargo nextest run`、`cargo test --doc`) | Rust のワークスペースの書式、lint、テストの退行 | CI (Linux) | `rust` | 契機に当たる PR の更新ごと | 自動 |
-| B14 | CI の `rust-windows` と `rust-macos` (`cargo clippy -D warnings` と `cargo nextest run`) | Windows と macOS でだけ通らない Rust のコード | CI (Windows と macOS の runner) | `rust` | 契機に当たる PR の更新ごと | 自動 |
+| B13 | CI の `rust-check` (`cargo fmt --check`、`cargo clippy --workspace -D warnings`、`cargo nextest run --workspace`、`cargo test --workspace --doc`) | Rust のワークスペースの書式、lint、テストの退行 | CI (Linux) | `rust` | 契機に当たる PR の更新ごと | 自動 |
+| B14 | CI の `rust-windows` と `rust-macos` (`cargo clippy --workspace -D warnings` と `cargo nextest run --workspace`) | Windows と macOS でだけ通らない Rust のコード | CI (Windows と macOS の runner) | `rust` | 契機に当たる PR の更新ごと | 自動 |
 | B15 | CI の `rust-deny` (`cargo deny check`) | 許可リスト外のライセンス (MPL-2.0 と GPL 系を含む)、RustSec の advisory、crates.io 以外の依存元 | CI (Linux) | `rust`、週に 1 回の定期実行 | 契機に当たる PR の更新ごと。定期実行は週に 1 回 | 自動 |
 | B16 | CI の `harness-rust-go` (Go の runner と Rust の runner の transcript の一致) | 2 つの runner の台本の意味のずれ、Rust の口の符号と DUT の口の食い違い | CI (Linux) | `harness` | 契機に当たる PR の更新ごと | 自動 |
 

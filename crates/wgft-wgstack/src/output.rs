@@ -91,13 +91,19 @@ impl Dlist {
         true
     }
 
-    /// 節 `i` を外します。入っていなければ何もしません。
+    /// 節 `i` を外します。入っていなければ何もしません。試験と fuzz の build では、外した節を作成の時の値 (`NIL`)
+    /// に戻します。list に無い節がどれも作成の時と同じ値になり、空の list を次の核に渡せるためです
+    /// ([`crate::stack::Spare`])。
     pub(crate) fn remove(&mut self, i: u32) {
         if !self.in_list.get(i) {
             return;
         }
         self.in_list.unset(i);
         let (p, x) = (self.prev[i as usize], self.next[i as usize]);
+        #[cfg(any(test, feature = "harness"))]
+        {
+            (self.prev[i as usize], self.next[i as usize]) = (NIL, NIL);
+        }
         if p == NIL {
             self.head = x;
         } else {
@@ -109,6 +115,16 @@ impl Dlist {
             self.prev[x as usize] = p;
         }
         self.n -= 1;
+    }
+
+    /// 節と印がすべて作成の時の値かを返します。手間は節の数に比例し、試験が使います。
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn is_fresh(&self) -> bool {
+        self.head == NIL
+            && self.tail == NIL
+            && self.n == 0
+            && self.in_list.count() == 0
+            && self.next.iter().chain(self.prev.iter()).all(|&x| x == NIL)
     }
 
     pub(crate) fn pop_front(&mut self) -> Option<u32> {

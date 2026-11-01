@@ -17,6 +17,7 @@ pub(crate) const PORTS: usize = 1 << 16;
 
 /// ポートごとの行と、その世代です。
 #[derive(Clone, Copy, Debug, Default)]
+#[cfg_attr(any(test, feature = "harness"), derive(PartialEq, Eq))]
 pub(crate) struct PortRow<R> {
     /// 開くたびに進める世代です。閉じた後の handle を見分けます。
     pub(crate) generation: u32,
@@ -30,6 +31,10 @@ pub(crate) struct PortTable<R> {
     rows: FixedVec<PortRow<R>>,
     open: BitSet,
     count: usize,
+    /// 作ってから開いたことのあるポートの印です。試験と fuzz の build だけにあり、核を使い回す試験が開いた行だけを
+    /// 戻すのに使います ([`crate::stack::Spare`])。
+    #[cfg(any(test, feature = "harness"))]
+    opened: BitSet,
 }
 
 /// 開く時の誤りです。
@@ -39,11 +44,19 @@ pub(crate) enum OpenError {
 }
 
 impl<R: Default + Copy> PortTable<R> {
+    /// 試験と fuzz の build だけにある欄 `opened` の byte です。[`crate::stack::HARNESS_BYTES`] との一致を試験が確かめます。
+    #[cfg(test)]
+    pub(crate) fn harness_bytes(&self) -> usize {
+        size_of_val(&self.opened)
+    }
+
     pub(crate) fn new() -> Result<Self, AllocError> {
         Ok(Self {
             rows: FixedVec::try_filled(PORTS, |_| PortRow::default())?,
             open: BitSet::new(PORTS)?,
             count: 0,
+            #[cfg(any(test, feature = "harness"))]
+            opened: BitSet::new(PORTS)?,
         })
     }
 
@@ -75,6 +88,8 @@ impl<R: Default + Copy> PortTable<R> {
             return Err(OpenError::InUse);
         }
         self.open.set(u32::from(port));
+        #[cfg(any(test, feature = "harness"))]
+        self.opened.set(u32::from(port));
         self.count += 1;
         let r = &mut self.rows[usize::from(port)];
         r.generation = r.generation.wrapping_add(1);
@@ -124,6 +139,33 @@ impl<R: Default + Copy> PortTable<R> {
         });
     }
 
+    /// 開いたことのある行を作成の時の値に戻し、開いている印と開いたことのある印を外します。核を閉じた後に呼びます。
+    /// 行の世代を変えるのは [`PortTable::open`] だけで、開いたことのある印もそこで付けます。閉じた行は世代のほかは
+    /// 作成の時の値なので、表は作成の時の表と同じになります。手間は開いたことのある行の数と bit の集合の語の数に
+    /// 比例します。試験と fuzz の build だけにあります。
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn restore(&mut self) {
+        let (rows, open) = (&mut self.rows, &mut self.open);
+        self.opened.for_each(|p| {
+            open.unset(p);
+            rows[p as usize] = PortRow::default();
+        });
+        self.opened.clear();
+        self.count = 0;
+    }
+
+    /// すべての行と印が作成の時の値かを返します。手間は表の大きさに比例し、試験が使います。
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn is_fresh(&self) -> bool
+    where
+        R: PartialEq,
+    {
+        self.count == 0
+            && self.open.count() == 0
+            && self.opened.count() == 0
+            && self.rows.iter().all(|r| *r == PortRow::default())
+    }
+
     /// 開いている行の数が bit の集合と合うことを確かめます。
     pub(crate) fn check(&self) -> Result<(), &'static str> {
         if self.open.count() != self.count {
@@ -135,6 +177,7 @@ impl<R: Default + Copy> PortTable<R> {
 
 /// 待ち受けの行です。
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(any(test, feature = "harness"), derive(PartialEq, Eq))]
 pub(crate) struct Listener {
     pub(crate) qhead: u32,
     pub(crate) qtail: u32,

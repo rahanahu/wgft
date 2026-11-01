@@ -45,6 +45,8 @@ pub use stack::{
     Closed, Error, Event, Hook, InvariantError, ListenerId, LogKind, LogLine, NewError,
     NewErrorKind, NoHook, Stack, Stats,
 };
+#[cfg(any(test, feature = "harness"))]
+pub use stack::{Spare, TouchedCheck};
 pub use tcp::conn::ConnId;
 pub use time::Time;
 pub use udp::{UdpFault, UdpId};
@@ -93,4 +95,8 @@ mod tcp_tests;
 #[cfg(test)]
 mod testnet_tests;
 #[cfg(test)]
+mod touched_tests;
+#[cfg(test)]
 mod undo_tests;
+#[cfg(test)]
+mod whitebox_tests;

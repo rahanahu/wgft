@@ -40,7 +40,7 @@ use super::testpeer::{self, Outcome, Peer};
 use super::tests::{rule, targets, wait_for};
 use super::{BULK_BUF, BULK_KEEP, Kind, Manager, ProbeResults, ProbeRound};
 use crate::flowpool::Limits;
-use crate::memory::{LISTENER_TCP, LISTENER_UDP, MemoryBound, TCP_RELAY_CONN, UDP_SESSION};
+use crate::memory::{LISTENER_TCP, LISTENER_UDP, MemoryBound, tcp_relay_conn, udp_session};
 use crate::targets::TargetError;
 
 /// 測りの誤差として認める量。実行環境と台本の通信路が測りの間に一時に持つもの (ログの行、チャネルの
@@ -147,19 +147,34 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
     let server_side = settled().await.saturating_sub(t0);
     drop(server);
 
-    // 試験の側:TCP の宛先の接続 1 本の持ち物を、普通の client で同じ量を往復させて測る
+    // 試験の側:TCP の宛先の接続 1 本の持ち物を、普通の client で同じ量を往復させて測る。測りは client の
+    // ソケットの登録も含み、agent の中継では中継の LAN の側のソケットがそれに当たるので、宛先の側だけを残すために
+    // 受け付けない待ち受けへの client だけの登録を別に測って引く。測りの外の持ち物 (列と受けのバッファ) は先に
+    // 確保する
     let ttarget = tcp_echo().await;
-    let t1 = settled().await;
-    let mut plain = Vec::new();
+    let mut plain = Vec::with_capacity(limits.tcp);
     let mut back = vec![0u8; chunk.len()];
+    let t1 = settled().await;
     for _ in 0..limits.tcp {
         let mut s = LanStream::connect(ttarget).await.unwrap();
         s.write_all(&chunk).await.unwrap();
         s.read_exact(&mut back).await.unwrap();
         plain.push(s);
     }
-    let echo_conn = settled().await.saturating_sub(t1).div_ceil(limits.tcp);
+    let echo_and_client = settled().await.saturating_sub(t1);
     drop(plain);
+    let idle = LanListener::bind("127.0.0.1:0").await.unwrap();
+    let idle_addr = idle.local_addr().unwrap();
+    let mut clients = Vec::with_capacity(limits.tcp);
+    let t1b = settled().await;
+    for _ in 0..limits.tcp {
+        clients.push(LanStream::connect(idle_addr).await.unwrap());
+    }
+    let client_only = settled().await.saturating_sub(t1b);
+    drop((clients, idle));
+    let echo_conn = echo_and_client
+        .saturating_sub(client_only)
+        .div_ceil(limits.tcp);
 
     // UDP の echo の宛先
     let usock = LanSocket::bind("127.0.0.1:0").await.unwrap();
@@ -240,7 +255,7 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
     let udp_growth = after_udp
         .saturating_sub(after_replies)
         .saturating_sub(udp_core);
-    let udp_allowed = n_udp * UDP_SESSION + SLACK;
+    let udp_allowed = n_udp * udp_session() + SLACK;
     eprintln!(
         "udp: {n_udp} sessions grew the relay by {udp_growth} bytes against {udp_allowed}, the core by {udp_core}; the scripted sources held {udp_test_side}"
     );
@@ -289,9 +304,15 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
         .saturating_sub(udp_closed)
         .saturating_sub(n_tcp * echo_conn)
         .saturating_sub(tcp_core);
-    let tcp_allowed = n_tcp * TCP_RELAY_CONN + bulk * BULK_BUF + SLACK;
+    let tcp_allowed = n_tcp * tcp_relay_conn() + bulk * BULK_BUF + SLACK;
+    let per_relay = tcp_growth.saturating_sub(bulk * BULK_BUF) / n_tcp.max(1);
     eprintln!(
         "tcp: {n_tcp} relays grew the relay by {tcp_growth} bytes with {bulk} bulk buffers alive against {tcp_allowed}, the core by {tcp_core}; the scripted clients and the echo connections held {tcp_test_side}"
+    );
+    eprintln!(
+        "tcp: {per_relay} bytes per relay besides the bulk buffers, against a future of {} bytes and a term of {} bytes",
+        super::future_sizes().0,
+        tcp_relay_conn()
     );
     assert!(
         bulk <= BULK_KEEP,

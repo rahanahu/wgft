@@ -140,6 +140,75 @@ impl EventTargets {
     }
 }
 
+/// 接続の枠 1 つの数えです。不変条件の確かめが、表の数と比べる和を作ります。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SlotTally {
+    /// 送受信の輪が持つ chunk の数です。
+    chunks: usize,
+    /// 使っている枠の送受信の輪の容量 (予約) の byte です。
+    reserved: u64,
+    /// boost の枠を借りていれば 1 です。
+    boosted: usize,
+}
+
+impl SlotTally {
+    fn add(&mut self, t: Self) {
+        self.chunks += t.chunks;
+        self.reserved += t.reserved;
+        self.boosted += t.boosted;
+    }
+
+    #[cfg(any(test, feature = "harness"))]
+    fn sub(&mut self, t: Self) {
+        self.chunks -= t.chunks;
+        self.reserved -= t.reserved;
+        self.boosted -= t.boosted;
+    }
+}
+
+/// [`Stack::check_invariants_touched`] が呼び出しの間に持つ、接続の枠ごとの数えとその和です。
+///
+/// 核の外の値で、核の型は持ちません。1 つの核に属します。別の核に渡すと、印の無い枠の数えが前の核の値のまま残り、
+/// 答えが変わります。核を作り直したら [`TouchedCheck::new`] で作り直します。
+/// 試験と fuzz の build (`cfg(test)` か feature `harness`) だけにあります。
+#[cfg(any(test, feature = "harness"))]
+#[derive(Debug, Default)]
+pub struct TouchedCheck {
+    tally: FixedVec<SlotTally>,
+    sum: SlotTally,
+    /// 書き換えた枠の番号を取り出す場所です。
+    pending: FixedVec<u32>,
+    /// 数えが前の呼び出しの状態と合っています。偽なら次の呼び出しがすべての枠を数え直します。
+    primed: bool,
+}
+
+#[cfg(any(test, feature = "harness"))]
+impl TouchedCheck {
+    /// 空の控えです。最初の呼び出しがすべての枠を確かめます。
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+fn slot_u32(i: usize) -> u32 {
+    u32::try_from(i).unwrap_or(u32::MAX)
+}
+
+/// 試験と fuzz の build (`cfg(test)` か feature `harness`) だけにある核の欄の byte です。接続の枠の表の書き換えの印
+/// (`ConnSlots::touched`)、印を持つ知らせの対象の数 (`EventList::marked`)、待ち受けの表と UDP の endpoint の表の
+/// 開いたことのある印 (`PortTable::opened`)、配列を返された boost の枠の印 (`Budget::dirty`) です。
+#[cfg(any(test, feature = "harness"))]
+pub(crate) const HARNESS_BYTES: usize =
+    3 * size_of::<crate::bitset::BitSet>() + size_of::<usize>() + size_of::<u64>();
+
+/// 上界の式が使う核の値の大きさです。製品の核の大きさで数え、試験と fuzz の build だけにある欄を入れません。
+pub(crate) const fn stack_size<H: Hook>() -> usize {
+    let size = size_of::<Stack<H>>();
+    #[cfg(any(test, feature = "harness"))]
+    let size = size - HARNESS_BYTES;
+    size
+}
+
 /// wgstack の核です。1 つの所有者が `&mut` で呼ぶ値で、錠を持ちません。
 pub struct Stack<H: Hook = NoHook> {
     pub(crate) conns: ConnSlots,
@@ -174,13 +243,55 @@ impl<H: Hook> Stack<H> {
     /// 核を作り、表をすべて確保します。`seed` は 64 byte の乱数の種で、製品は OS の乱数から作り、試験は固定の
     /// 種を渡します。失敗したら渡した `Budget` を誤りに入れて返します。
     pub fn new(config: Config, budget: Budget, seed: &[u8; 64], hook: H) -> Result<Self, NewError> {
+        Self::create(config, budget, hook, |c| Tables::new(c, seed))
+    }
+
+    /// [`Stack::new`] と同じく核を作り、`spare` の表 ([`Stack::close_keeping`] が返した表) を新しく作る代わりに
+    /// 使います。大きさが合わない表と `spare` に無い表は新しく作ります。ほかの表は [`Stack::new`] と同じ口で
+    /// 作るので、作った核は [`Stack::new`] が作る核と同じ状態です。試験と fuzz の build だけにあります。
+    #[cfg(any(test, feature = "harness"))]
+    pub fn new_reusing(
+        config: Config,
+        budget: Budget,
+        spare: Spare,
+        seed: &[u8; 64],
+        hook: H,
+    ) -> Result<Self, NewError> {
+        Self::create(config, budget, hook, |c| {
+            let n = c.limits.conns();
+            Tables::with_ports(
+                c,
+                seed,
+                match spare.listeners {
+                    Some(t) => t,
+                    None => PortTable::new()?,
+                },
+                match spare.eps {
+                    Some(t) => t,
+                    None => PortTable::new()?,
+                },
+                match spare.events {
+                    Some(e) if e.targets() == EventTargets::count(n) => e,
+                    _ => EventList::new(EventTargets::count(n))?,
+                },
+            )
+        })
+    }
+
+    /// 設定を確かめ、`tables` で表を作り、核を組み立てます。
+    fn create(
+        config: Config,
+        budget: Budget,
+        hook: H,
+        tables: impl FnOnce(&Config) -> Result<Tables, AllocError>,
+    ) -> Result<Self, NewError> {
         if let Err(e) = config.validate() {
             return Err(NewError {
                 kind: NewErrorKind::Config(e),
                 budget,
             });
         }
-        match Tables::new(&config, seed) {
+        match tables(&config) {
             Ok(t) => Ok(Self {
                 conns: t.conns,
                 s: Shared {
@@ -245,7 +356,7 @@ impl<H: Hook> Stack<H> {
 
     /// この核の上界の式の値です。作成の時の設定と型の大きさだけから決まります。
     pub fn bound(&self) -> Bound {
-        Bound::with_stack_size(&self.s.config.limits, self.s.config.mtu, size_of::<Self>())
+        Bound::with_stack_size(&self.s.config.limits, self.s.config.mtu, stack_size::<H>())
     }
 
     /// 枠 `i` の接続の view です。
@@ -281,6 +392,7 @@ impl<H: Hook> Stack<H> {
             let (recs, ivs) = b.array_bytes();
             h.record_bytes += recs;
             h.interval_bytes += ivs;
+            h.slot_arrays += usize::from(b.has_floor_arrays());
             if t.state != State::Free {
                 h.conns += 1;
                 h.chunk_bytes += b.held_chunks() * CHUNK_SIZE;
@@ -305,19 +417,117 @@ impl<H: Hook> Stack<H> {
         h
     }
 
+    /// 核を作ってから使ったことのある接続の枠の数です。枠は初めて使う時に floor の送信の記録の輪と区間の表を確保し、
+    /// 持ち続けるので、この数の枠がその配列を持ちます。数えは枠を初めて使う時だけ増えるので、読むのは定数の手間です。
+    pub fn slots_used(&self) -> usize {
+        self.conns.with_arrays()
+    }
+
     /// 不変条件を確かめます。予約の和が上界以下であること、表の数と予約が一致すること、chunk と配列の持ち主が
     /// 1 つであることを確かめます。呼んだ時だけ手間がかかり、製品は呼びません。試験と fuzz が各段の後に呼びます。
+    ///
+    /// すべての接続の枠を確かめ、表の数と和をすべて数え直します。各段の後に書き換えた枠だけを確かめる形は
+    /// [`Stack::check_invariants_touched`] で、同じ状態に同じ答えを返します。
     pub fn check_invariants(&self) -> Result<(), InvariantError> {
         let s = &self.s;
-        self.conns.check(&s.conn_free, &s.qlinks)?;
+        self.conns.check_free(&s.conn_free, &s.qlinks)?;
+        let mut sum = SlotTally::default();
+        for i in 0..self.conns.len() {
+            sum.add(self.check_slot(slot_u32(i))?);
+        }
+        self.check_shared(&sum, EventList::check, u64::MAX)
+    }
+
+    /// [`Stack::check_invariants`] と同じ不変条件を、前の呼び出しから書き換えた接続の枠だけを確かめて確かめます
+    /// (wgstack-rs.md の「書き換えた所だけの確かめ」)。試験と fuzz が各段の後に呼びます。試験と fuzz の build
+    /// (`cfg(test)` か feature `harness`) だけにあります。
+    ///
+    /// 接続の枠の表は、試験と fuzz の build で、配列を書き換える口を通った枠に印を付けます。この関数は印のある枠
+    /// だけを確かめ直して印を外します。`c` は前の呼び出しまでの枠ごとの数え (chunk、予約、boost) とその和を持ち、
+    /// 書き換えた枠の分だけを入れ替えます。初めての呼び出しと、前の呼び出しが誤りを返した後は、すべての枠を
+    /// 確かめて数え直します。
+    ///
+    /// 枠の配列は表の型の外から見えないので、印の無い枠の欄と輪は前の呼び出しが確かめた時のままです。枠だけを
+    /// 読む確かめ (輪、区間の表、段、送り手と scoreboard) はその時と同じ答えを返し、数えも同じ値なので、この関数は
+    /// 同じ状態に [`Stack::check_invariants`] と同じ答えを返します。枠と共有の表の間の確かめと共有の表の確かめは、
+    /// 毎回すべてを確かめます。知らせの印は数え直さず、印を書く口が増減で保つ数で確かめます。誤りの文も同じです。
+    #[cfg(any(test, feature = "harness"))]
+    pub fn check_invariants_touched(&mut self, c: &mut TouchedCheck) -> Result<(), InvariantError> {
+        let slots = self.conns.len();
+        let ready = c.primed && c.tally.len() == slots;
+        c.primed = false;
+        if c.pending.capacity() < slots {
+            c.pending = FixedVec::try_with_capacity(slots)
+                .map_err(|_| "allocation failed while checking")?;
+        }
+        c.pending.clear();
+        let pending = &mut c.pending;
+        self.conns.take_touched(|i| {
+            let _ = pending.try_push(i);
+        });
+        // 空きの boost の枠の chunk の表は、配列を返された枠だけを確かめ直します。最初の呼び出しはすべてを確かめます。
+        let dirty = self.s.budget.take_dirty();
+        let budget_scan = if ready { dirty } else { u64::MAX };
+        let s = &self.s;
+        self.conns.check_free(&s.conn_free, &s.qlinks)?;
+        if ready {
+            for k in 0..c.pending.len() {
+                let i = c.pending[k] as usize;
+                let t = self.check_slot(slot_u32(i))?;
+                c.sum.sub(c.tally[i]);
+                c.sum.add(t);
+                c.tally[i] = t;
+            }
+        } else {
+            if c.tally.len() != slots {
+                c.tally = FixedVec::try_filled(slots, |_| SlotTally::default())
+                    .map_err(|_| "allocation failed while checking")?;
+            }
+            c.sum = SlotTally::default();
+            for i in 0..slots {
+                let t = self.check_slot(slot_u32(i))?;
+                c.sum.add(t);
+                c.tally[i] = t;
+            }
+        }
+        self.check_shared(&c.sum, EventList::check_counted, budget_scan)?;
+        c.primed = true;
+        Ok(())
+    }
+
+    /// 枠 `i` の配列の要素と、それが持つ配列だけを読む確かめをし、枠の数えを返します。
+    fn check_slot(&self, i: u32) -> Result<SlotTally, InvariantError> {
+        self.conns.check_slot(i)?;
+        let (t, b) = (self.conns.tcb(i), self.conns.bufs(i));
+        let used = t.state != State::Free;
+        if used {
+            check_conn(t, b)?;
+            crate::tcp::sack::check_sender(t, &b.recs)?;
+        }
+        Ok(SlotTally {
+            chunks: b.held_chunks(),
+            reserved: if used { b.snd.cap() + b.rcv.r.cap() } else { 0 },
+            boosted: usize::from(b.boost.is_some()),
+        })
+    }
+
+    /// 共有の表と、枠と共有の表の間の不変条件を確かめ、枠の数えの和 `sum` を表の数と比べます。知らせの list は
+    /// `events` で確かめ、空きの boost の枠の chunk の表は `budget_scan` の bit の立った枠だけで確かめます。
+    fn check_shared(
+        &self,
+        sum: &SlotTally,
+        events: fn(&EventList) -> Result<(), &'static str>,
+        budget_scan: u64,
+    ) -> Result<(), InvariantError> {
+        let s = &self.s;
         s.conn_idx.check()?;
         s.syn.check()?;
         s.tw.check()?;
         s.out.conns.check()?;
         s.out.rows.check()?;
-        s.events.check()?;
+        events(&s.events)?;
         s.wheel.check()?;
-        s.budget.check()?;
+        s.budget.check_scanning(budget_scan)?;
         s.udp.check()?;
         s.pings.check()?;
         s.listeners.check()?;
@@ -339,25 +549,15 @@ impl<H: Hook> Stack<H> {
         if let Some(e) = bad {
             return Err(e.into());
         }
-        let mut chunks = 0;
-        let mut reserved = 0;
-        let mut boosted = 0;
         for (i, t, b) in self.conns.iter_bufs() {
             let used = t.state != State::Free;
             if used && t.in_index != s.conn_idx.find(t.tup).is_some_and(|(id, _)| id == i) {
                 return Err("a slot's index mark disagrees with the index".into());
             }
-            if let Some(n) = b.boost {
-                if s.budget.holder(n) != Some(self.conns.id(i)) {
-                    return Err("a boosted slot is not the holder of its boost slot".into());
-                }
-                boosted += 1;
-            }
-            chunks += b.held_chunks();
-            if used {
-                reserved += b.snd.cap() + b.rcv.r.cap();
-                check_conn(t, b)?;
-                crate::tcp::sack::check_sender(t, &b.recs)?;
+            if let Some(n) = b.boost
+                && s.budget.holder(n) != Some(self.conns.id(i))
+            {
+                return Err("a boosted slot is not the holder of its boost slot".into());
             }
             for (k, &d) in t.tdl.iter().enumerate() {
                 let node = i * NUM_TIMERS32 + u32::try_from(k).unwrap_or(0);
@@ -371,15 +571,15 @@ impl<H: Hook> Stack<H> {
         }
         let (rx, _) = s.udp.held(crate::udp::RX);
         let (tx, _) = s.udp.held(crate::udp::TX);
-        if chunks + (rx + tx) / CHUNK_SIZE != s.chunks.held() {
+        if sum.chunks + (rx + tx) / CHUNK_SIZE != s.chunks.held() {
             return Err("the chunk pool count disagrees with the rings".into());
         }
-        if boosted != s.budget.lent() {
+        if sum.boosted != s.budget.lent() {
             return Err("the lent boost slots disagree with the boosted connections".into());
         }
         let floors = self.conns.len() as u64 * (SEND_FLOOR + RECV_FLOOR);
         let boosts = s.budget.slots() as u64 * (2 * BOOST_SIZE - SEND_FLOOR - RECV_FLOOR);
-        if reserved > floors + boosts {
+        if sum.reserved > floors + boosts {
             return Err("the reservations exceed the bound".into());
         }
         let mut queued = 0;
@@ -408,13 +608,54 @@ impl<H: Hook> Stack<H> {
 
     /// 待ち受けと接続とソケットをすべて閉じ、`Budget` と最後の会計を返します。最後の会計はすべて 0 です。
     pub fn close(mut self, now: Time) -> Closed {
+        let held = self.close_tables(now);
+        Closed {
+            budget: self.s.budget,
+            held,
+        }
+    }
+
+    /// [`Stack::close`] と同じく核を閉じ、加えてポートの数の行を持つ表を作成の時の値に戻して返します
+    /// (wgstack-rs.md の「核の使い回し」)。試験と fuzz が、次の核を [`Stack::new_reusing`] で作るために使います。
+    ///
+    /// ポートの行は開いた時にだけ世代が進み、閉じた行は世代のほかは作成の時の値です。ポートの表は開いたことのある
+    /// 行に印を持つので (試験と fuzz の build だけ)、その行を戻せば表は作成の時と同じになります。印の残る知らせの
+    /// list は返さず、次の核はそれを新しく作ります。試験と fuzz の build だけにあります。
+    #[cfg(any(test, feature = "harness"))]
+    pub fn close_keeping(mut self, now: Time) -> (Closed, Spare) {
+        let held = self.close_tables(now);
+        let Self { s, .. } = self;
+        let mut spare = Spare::default();
+        let mut listeners = s.listeners;
+        listeners.restore();
+        spare.listeners = Some(listeners);
+        let mut eps = s.udp.eps;
+        eps.restore();
+        spare.eps = Some(eps);
+        if s.events.is_empty() {
+            spare.events = Some(s.events);
+        }
+        (
+            Closed {
+                budget: s.budget,
+                held,
+            },
+            spare,
+        )
+    }
+
+    /// 核の表を空にし、最後の会計を返します。会計はすべて 0 です。
+    fn close_tables(&mut self, now: Time) -> Held {
         self.clock(now);
         let s = &mut self.s;
         // 借りている boost の配列を枠に返します。
         for i in 0..s.budget.slots() {
             if let Some(id) = s.budget.holder(i) {
-                let (recs, iv) = self.conns.bufs_mut(id.slot).take_boost_arrays();
-                s.budget.release(i, recs, iv);
+                let arrays = self
+                    .conns
+                    .bufs_mut(id.slot)
+                    .take_boost_arrays(&mut s.chunks);
+                s.budget.release(i, arrays);
             }
         }
         s.syn.clear();
@@ -435,10 +676,7 @@ impl<H: Hook> Stack<H> {
         s.queued = 0;
         let held = self.held();
         debug_assert!(held.is_zero(), "close left {held:?}");
-        Closed {
-            budget: self.s.budget,
-            held,
-        }
+        held
     }
 
     /// トンネルから届いた IPv4 の packet を 1 つ処理します。packet は呼び出しの間だけ読み、保持するものは自分の
@@ -773,6 +1011,9 @@ fn check_conn(t: &Tcb, b: &ConnBufs) -> Result<(), InvariantError> {
     if t.tail_off < t.una_off || t.tail_off - t.una_off > b.snd.cap() {
         return Err("the send ring holds more than its capacity".into());
     }
+    if b.snd.holds_outside(t.una_off, t.tail_off) {
+        return Err("the send ring holds a chunk outside its unacknowledged data".into());
+    }
     if b.recs.len() > b.recs.capacity() {
         return Err("a record ring holds more than its capacity".into());
     }
@@ -786,6 +1027,41 @@ fn check_conn(t: &Tcb, b: &ConnBufs) -> Result<(), InvariantError> {
         return Err("a connection without boost has a boost reservation".into());
     }
     Ok(())
+}
+
+/// 閉じた核から次の核へ渡す、ポートの数の行を持つ表です (wgstack-rs.md の「核の使い回し」)。
+///
+/// 待ち受けの表、UDP の endpoint の表、知らせの list はポートの数 (65,536) の行を持ち、小さな表の核の作成の手間の
+/// 大部分を占めます。[`Stack::close_keeping`] が閉じた核から取り出して作成の時の値に戻し、
+/// [`Stack::new_reusing`] が新しく作る代わりに使います。試験と fuzz の build だけにあります。
+#[cfg(any(test, feature = "harness"))]
+#[derive(Debug, Default)]
+pub struct Spare {
+    listeners: Option<PortTable<Listener>>,
+    eps: Option<PortTable<crate::udp::UdpEp>>,
+    events: Option<EventList>,
+}
+
+#[cfg(any(test, feature = "harness"))]
+impl Spare {
+    /// 表を持たない値です。[`Stack::new_reusing`] はすべての表を新しく作ります。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 持っている表の数です。3 なら次の核はポートの数の行を持つ表を作りません。
+    pub fn kept(&self) -> usize {
+        usize::from(self.listeners.is_some())
+            + usize::from(self.eps.is_some())
+            + usize::from(self.events.is_some())
+    }
+
+    /// 持っている表が、新しく作った表とすべての行で同じ値かを返します。試験が使い、手間は表を作るのと同じほどです。
+    pub fn is_fresh(&self) -> bool {
+        self.listeners.as_ref().is_none_or(PortTable::is_fresh)
+            && self.eps.as_ref().is_none_or(PortTable::is_fresh)
+            && self.events.as_ref().is_none_or(EventList::is_fresh)
+    }
 }
 
 /// 核の表です。作成の途中で確保に失敗したら、確保した分を解放して誤りを返します。
@@ -812,6 +1088,25 @@ struct Tables {
 
 impl Tables {
     fn new(config: &Config, seed: &[u8; 64]) -> Result<Self, AllocError> {
+        let n = config.limits.conns();
+        Self::with_ports(
+            config,
+            seed,
+            PortTable::new()?,
+            PortTable::new()?,
+            EventList::new(EventTargets::count(n))?,
+        )
+    }
+
+    /// ポートの数の行を持つ表 (待ち受けの表 `listeners`、UDP の endpoint の表 `eps`、知らせの list `events`) を
+    /// 使い、ほかの表を作ります。
+    fn with_ports(
+        config: &Config,
+        seed: &[u8; 64],
+        listeners: PortTable<Listener>,
+        eps: PortTable<crate::udp::UdpEp>,
+        events: EventList,
+    ) -> Result<Self, AllocError> {
         let l = &config.limits;
         let n = l.conns();
         let seeds = Seeds::new(seed);
@@ -827,16 +1122,16 @@ impl Tables {
             conn_idx: Index::new(n, seeds.table_key, true)?,
             syn: SynTable::new(l.syn_rows, seeds.table_key)?,
             tw: TwTable::new(l.tw_rows, seeds.table_key, n)?,
-            listeners: PortTable::new()?,
+            listeners,
             out_conns: Dlist::new(n)?,
             out_rows: Dlist::new(l.syn_rows + l.tw_rows)?,
             ctl: CtlRing::new(l.ctl_slots, config.mtu)?,
-            events: EventList::new(EventTargets::count(n))?,
+            events,
             wheel: Wheel::new(n * NUM_TIMERS)?,
             fired: FixedVec::try_with_capacity(n * NUM_TIMERS)?,
             chunks: ChunkPool::new()?,
             frag: frag::Table::new(frag_limits).map_err(|_| AllocError)?,
-            udp: Udp::new(l)?,
+            udp: Udp::with_eps(l, eps)?,
             pings: Pings::new(config.mtu)?,
             seeds,
         })

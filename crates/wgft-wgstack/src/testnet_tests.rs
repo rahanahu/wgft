@@ -17,7 +17,7 @@
 
 use crate::budget::Budget;
 use crate::config::{Config, Limits};
-use crate::stack::{Event, Hook, ListenerId, Stack};
+use crate::stack::{Event, Hook, ListenerId, Stack, TouchedCheck};
 use crate::tcp::conn::ConnId;
 use crate::time::Time;
 use crate::wire::{
@@ -85,6 +85,7 @@ pub(crate) struct TestNet {
     pub(crate) s: Stack<TestHook>,
     pub(crate) now: Time,
     buf: Vec<u8>,
+    touched: TouchedCheck,
 }
 
 /// 相手が送る segment です。
@@ -225,11 +226,29 @@ impl TestNet {
     /// 渡した `Budget` を使う核です。
     pub(crate) fn with_budget(config: Config, seed: [u8; 64], budget: Budget) -> Self {
         let s = Stack::new(config, budget, &seed, TestHook::default()).unwrap();
+        Self::from_stack(s)
+    }
+
+    /// 作った核 `s` を手で進める時計で動かします。
+    pub(crate) fn from_stack(s: Stack<TestHook>) -> Self {
         Self {
             s,
             now: Time::ZERO,
             buf: vec![0; 65536],
+            touched: TouchedCheck::new(),
         }
+    }
+
+    /// 核の不変条件を確かめます。すべての枠を確かめる形 (`check_invariants`) と、前の確かめから書き換えた枠だけを
+    /// 確かめる形 (`check_invariants_touched`) を並べて流し、2 つが同じ答えを返すことも確かめます。
+    pub(crate) fn check(&mut self) {
+        let full = self.s.check_invariants();
+        let part = self.s.check_invariants_touched(&mut self.touched);
+        assert_eq!(
+            part, full,
+            "the touched-slot check disagrees with the full check"
+        );
+        full.unwrap();
     }
 
     pub(crate) fn inject(&mut self, seg: &TSeg) {
@@ -239,7 +258,7 @@ impl TestNet {
 
     pub(crate) fn write(&mut self, pkt: &[u8]) {
         self.s.handle_packet(self.now, pkt);
-        self.s.check_invariants().unwrap();
+        self.check();
     }
 
     /// 核が今送るものをすべて読みます。
@@ -252,7 +271,7 @@ impl TestNet {
         let mut res = Vec::new();
         for _ in 0..100_000 {
             let Some(k) = self.s.poll_transmit(self.now, &mut self.buf) else {
-                self.s.check_invariants().unwrap();
+                self.check();
                 return res;
             };
             assert!(k <= TEST_MTU, "packet of {k} bytes exceeds the MTU");
@@ -265,7 +284,7 @@ impl TestNet {
     pub(crate) fn advance(&mut self, d: Duration) {
         self.now = self.now + d;
         self.s.handle_timeout(self.now);
-        self.s.check_invariants().unwrap();
+        self.check();
     }
 
     pub(crate) fn listen(&mut self, port: u16) -> ListenerId {
@@ -392,7 +411,7 @@ impl TestNet {
             }
             out.extend_from_slice(&b[..n]);
         }
-        self.s.check_invariants().unwrap();
+        self.check();
         out
     }
 }

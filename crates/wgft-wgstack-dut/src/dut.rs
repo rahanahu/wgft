@@ -19,7 +19,7 @@ use wgft_tcpharness::dut::{Accepted, ClockedDut, Datagram, DutError, Op};
 use wgft_tcpharness::frame::{self, BoostEvent, Clock, ErrKind, Handle, Hello, MAX_FRAME, VERSION};
 use wgft_wgstack::{
     BoostPolicy, Budget, Closed, Config, Congestion, ConnId, Error, Held, Hook, Limits, ListenerId,
-    PingId, Stack, Time, UdpId,
+    PingId, Spare, Stack, Time, TouchedCheck, UdpId,
 };
 
 /// `HELLO_OK` が返す engine の名前です。
@@ -180,14 +180,18 @@ impl WgstackDut {
 
     /// fuzz の `replay` の target のために、`HELLO` の上限の組の代わりに表の大きさ `limits` で、渡した `budget`
     /// を持つ核を作ります。作れなければ誤りと `budget` を返します。`HELLO` の版と時計は確かめません。
+    ///
+    /// `spare` は前の核の [`WgstackDut::close_stack_keeping`] が返した表で、新しく作る代わりに使います
+    /// ([`Stack::new_reusing`])。
     pub fn for_fuzz(
         h: &Hello,
         limits: Limits,
         budget: Budget,
+        spare: Spare,
     ) -> Result<Self, (HelloError, Budget)> {
         let config = Self::config(h, limits);
         let hook = DutHook::default();
-        let stack = Stack::new(config, budget, &h.seed, hook.clone())
+        let stack = Stack::new_reusing(config, budget, spare, &h.seed, hook.clone())
             .map_err(|e| (HelloError(format!("wgstack: {e}")), e.into_budget()))?;
         Ok(Self::with_stack(stack, hook, h.addr))
     }
@@ -196,6 +200,21 @@ impl WgstackDut {
     pub fn close_stack(self) -> Closed {
         let now = self.time();
         self.stack.close(now)
+    }
+
+    /// 核を閉じ、`Budget` と最後の会計と、作成の時の値に戻したポートの数の行を持つ表を返します
+    /// ([`Stack::close_keeping`])。
+    pub fn close_stack_keeping(self) -> (Closed, Spare) {
+        let now = self.time();
+        self.stack.close_keeping(now)
+    }
+
+    /// 前の呼び出しから書き換えた接続の枠だけを確かめて、核の不変条件を確かめます
+    /// ([`Stack::check_invariants_touched`])。`c` は同じ核への呼び出しの間で持ち続けます。
+    pub fn check_invariants_touched(&mut self, c: &mut TouchedCheck) -> Result<(), String> {
+        self.stack
+            .check_invariants_touched(c)
+            .map_err(|e| e.to_string())
     }
 
     /// 核の今の保持です。

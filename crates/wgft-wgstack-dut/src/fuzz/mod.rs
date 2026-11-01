@@ -14,7 +14,8 @@
 //! 順序、scoreboard の数え直しなど) は、核の `check_invariants` と、外から見える出力の確かめに替えます。
 //!
 //! 入力ごとの準備を軽くするため、boost の枠の集まり (`Budget`) はスレッドごとに 1 つ作り、核を閉じるたびに
-//! 取り戻して次の入力に渡します。製品と同じく、閉じた核の `Budget` は借りが 0 です。
+//! 取り戻して次の入力に渡します。製品と同じく、閉じた核の `Budget` は借りが 0 です。`Net` を使う target は、
+//! ポートの数の行を持つ表も作成の時の値に戻して次の入力の核に渡します (`Stack::close_keeping`)。
 
 mod adversary;
 mod core;
@@ -25,7 +26,10 @@ mod replay;
 
 pub use adversary::{AdversaryCfg, adversarial_sender, adversarial_sender_seed};
 pub use core::core;
-pub use net::{DUT, MTU, Net, PEER, fuzz_limits, small_limits};
+pub use net::{
+    Check, DUT, MTU, Net, Options, PEER, fuzz_limits, last_digest, put_spare, set_options,
+    small_limits, take_spare,
+};
 pub use peer::{PeerConn, SackPeer};
 pub use raw::{raw_adversary, raw_adversary_input, raw_adversary_seed};
 pub use replay::{replay, replay_seed};
