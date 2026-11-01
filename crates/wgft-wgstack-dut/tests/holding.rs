@@ -30,7 +30,7 @@ use wgft_alloc_count::{CountingAlloc, live_bytes, peak_bytes, reset_peak};
 use wgft_tcpharness::ip;
 use wgft_tcpharness::packet::{ACK, FIN, Options, RST, SYN, SackBlock, Segment};
 use wgft_wgstack::{BoostPolicy, Config, ConnId, Error, Held, Limits, ListenerId, NoHook, UdpId};
-use wgft_wgstack_dut::fuzz::{DUT, Net, PEER, PeerConn, small_limits};
+use wgft_wgstack_dut::fuzz::{self, DUT, Net, PEER, PeerConn, small_limits};
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
@@ -57,6 +57,11 @@ impl Hold {
         let limits = config.limits;
         // Budget はスレッドごとに 1 つ作って使い回すので、測る前にこのスレッドで作っておく
         Net::new(config, NoHook).finish();
+        // 前の核の表を使い回すと、その表が base に入り、核の確保を数えから外してしまいます
+        assert!(
+            fuzz::take_spare().is_none(),
+            "a reused table would hide the stack's allocations from the count"
+        );
         let base = live_bytes();
         reset_peak();
         let n = Net::new(config, NoHook);

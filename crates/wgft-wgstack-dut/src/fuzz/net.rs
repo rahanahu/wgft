@@ -1,12 +1,13 @@
 //! 手で進める時計の核と、トンネルの側の出入り口です。Go の試験の補助 `testNet` に当たります。
 
 use std::cell::{Cell, RefCell};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use wgft_tcpharness::ip::{self, PROTO_TCP};
 use wgft_tcpharness::packet::{self, Segment};
-use wgft_wgstack::{Bound, Budget, Config, Held, Hook, Limits, Stack, Time, TouchedCheck};
+use wgft_wgstack::{Bound, Budget, Config, Held, Hook, Limits, Spare, Stack, Time, TouchedCheck};
 
 /// DUT のアドレスです。Go の試験の `dutAddr` と同じです。
 pub const DUT: Ipv4Addr = Ipv4Addr::new(10, 9, 0, 1);
@@ -55,15 +56,62 @@ pub enum Check {
     Both,
 }
 
+/// 核の作り方と確かめの形です。スレッドごとに持ち、[`set_options`] で変えます。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Options {
+    pub check: Check,
+    /// 前の入力の核のポートの数の行を持つ表を、作成の時の値に戻して使い回します ([`Stack::close_keeping`])。
+    pub reuse: bool,
+    /// 外から見える出力 (送った packet、各段の保持と事象の数と次の起床の時刻、最後の会計) を hash に畳み込み、
+    /// [`last_digest`] で返します。使い回した核と新しい核が同じ入力に同じ出力を返すことの試験が使います。
+    pub digest: bool,
+}
+
+impl Options {
+    /// `Net` の既定です。書き換えた枠だけを確かめ、核を毎回新しく作り、hash を取りません。保持の試験のように
+    /// 核を作った後の確保を数える試験が、前の核の表を数えに入れないためです。
+    pub const DEFAULT: Self = Self {
+        check: Check::Touched,
+        reuse: false,
+        digest: false,
+    };
+
+    /// cargo-fuzz の target が使う形です。書き換えた枠だけを確かめ、表を使い回し、hash を取りません。target の
+    /// 初期化が [`set_options`] で選びます。
+    pub const FUZZ: Self = Self {
+        check: Check::Touched,
+        reuse: true,
+        digest: false,
+    };
+}
+
 thread_local! {
     /// 入力から入力へ渡す boost の枠の集まりです。
     static BUDGET: RefCell<Option<Budget>> = const { RefCell::new(None) };
-    static CHECK: Cell<Check> = const { Cell::new(Check::Touched) };
+    /// 入力から入力へ渡す、作成の時の値に戻したポートの数の行を持つ表です。
+    static SPARE: RefCell<Option<Spare>> = const { RefCell::new(None) };
+    static OPTIONS: Cell<Options> = const { Cell::new(Options::DEFAULT) };
+    static DIGEST: Cell<u64> = const { Cell::new(0) };
 }
 
-/// このスレッドの各段の確かめの形を変え、前の値を返します。
-pub fn set_check(c: Check) -> Check {
-    CHECK.replace(c)
+/// このスレッドの核の作り方と確かめの形を変え、前の値を返します。
+pub fn set_options(o: Options) -> Options {
+    OPTIONS.replace(o)
+}
+
+/// このスレッドで最後に閉じた核の出力の hash です。[`Options::digest`] が偽なら 0 です。
+pub fn last_digest() -> u64 {
+    DIGEST.get()
+}
+
+/// このスレッドが次の核に渡す表を取り出します。試験が、閉じた核の表が作成の時の値に戻ったかを確かめます。
+pub fn take_spare() -> Option<Spare> {
+    SPARE.with_borrow_mut(Option::take)
+}
+
+/// 表を、このスレッドの次の核に渡します。[`take_spare`] で取り出して確かめた表を戻すのに使います。
+pub fn put_spare(s: Spare) {
+    SPARE.with_borrow_mut(|slot| *slot = Some(s));
 }
 
 pub(crate) fn take_budget() -> Budget {
@@ -83,7 +131,7 @@ pub(crate) fn put_budget(b: Budget) {
 
 /// 手で進める時計の核です。時刻は核を作ってからの ns で、Go の `ManualClock` と同じ値です。
 ///
-/// 各段の確かめは [`set_check`] で選んだ形で行います。
+/// 各段の確かめは [`Options::check`] の形で行います。
 #[derive(Debug)]
 pub struct Net<H: Hook> {
     stack: Option<Stack<H>>,
@@ -92,18 +140,25 @@ pub struct Net<H: Hook> {
     limits: Limits,
     bound: Bound,
     slots: usize,
-    check: Check,
+    options: Options,
     touched: TouchedCheck,
+    digest: DefaultHasher,
 }
 
 impl<H: Hook> Net<H> {
-    /// 表の大きさ `limits` の核を、Go の試験と同じ固定の種 (64 byte の 7) で作ります。
+    /// 表の大きさ `limits` の核を、Go の試験と同じ固定の種 (64 byte の 7) で作ります。[`Options::reuse`] が真なら、
+    /// 前の入力の核の表を使い回します。
     pub fn new(config: Config, hook: H) -> Self {
-        let check = CHECK.get();
+        let options = OPTIONS.get();
         let budget = take_budget();
         let slots = budget.slots();
         let limits = config.limits;
-        let mut stack = match Stack::new(config, budget, &[7; 64], hook) {
+        let spare = if options.reuse {
+            take_spare().unwrap_or_default()
+        } else {
+            Spare::new()
+        };
+        let mut stack = match Stack::new_reusing(config, budget, spare, &[7; 64], hook) {
             Ok(s) => s,
             Err(e) => {
                 let kind = e.kind();
@@ -114,7 +169,7 @@ impl<H: Hook> Net<H> {
         let bound = stack.bound();
         // 数えの控えは作成の時に作ります。保持の試験は核を作った後の確保をすべて核の保持と比べるためです。
         let mut touched = TouchedCheck::new();
-        if check != Check::Full
+        if options.check != Check::Full
             && let Err(e) = stack.check_invariants_touched(&mut touched)
         {
             panic!("invariant of a new stack: {e}");
@@ -126,8 +181,9 @@ impl<H: Hook> Net<H> {
             limits,
             bound,
             slots,
-            check,
+            options,
             touched,
+            digest: DefaultHasher::new(),
         }
     }
 
@@ -195,6 +251,9 @@ impl<H: Hook> Net<H> {
             };
             let pkt = &self.buf[..n];
             assert!(n <= MTU, "a packet of {n} bytes exceeds the MTU {MTU}");
+            if self.options.digest {
+                pkt.hash(&mut self.digest);
+            }
             let ip = ip::parse_ipv4(pkt)
                 .unwrap_or_else(|e| panic!("the stack sent a bad IPv4 packet: {e}"));
             if ip.proto != PROTO_TCP {
@@ -219,6 +278,9 @@ impl<H: Hook> Net<H> {
             };
             let pkt = &self.buf[..n];
             assert!(n <= MTU, "a packet of {n} bytes exceeds the MTU {MTU}");
+            if self.options.digest {
+                pkt.hash(&mut self.digest);
+            }
             if let Ok(seg) = packet::parse(pkt) {
                 segs.push(seg);
             }
@@ -235,10 +297,10 @@ impl<H: Hook> Net<H> {
     }
 
     /// 核の不変条件と、保持が表の大きさと上界の内にあることを確かめます。Go の `checkHeld` のうち、公開の
-    /// API で見える部分です。不変条件は [`set_check`] で選んだ形で確かめます。
+    /// API で見える部分です。不変条件は [`Options::check`] の形で確かめます。
     pub fn check(&mut self) {
         let stack = self.stack.as_mut().expect("the stack is open");
-        let result = match self.check {
+        let result = match self.options.check {
             Check::Touched => stack.check_invariants_touched(&mut self.touched),
             Check::Full => stack.check_invariants(),
             Check::Both => {
@@ -253,6 +315,12 @@ impl<H: Hook> Net<H> {
         };
         if let Err(e) = result {
             panic!("invariant: {e}");
+        }
+        if self.options.digest {
+            let h = stack.held();
+            format!("{h:?}").hash(&mut self.digest);
+            format!("{:?}", stack.stats()).hash(&mut self.digest);
+            format!("{:?}", stack.poll_timeout()).hash(&mut self.digest);
         }
         let h = stack.held();
         let l = &self.limits;
@@ -293,12 +361,25 @@ impl<H: Hook> Net<H> {
     }
 
     /// 核を閉じ、最後の会計がすべて 0 であることを確かめ、`Budget` を次の入力のために取り戻します。
+    /// [`Options::reuse`] が真なら、ポートの数の行を持つ表も作成の時の値に戻して取り戻します。
     pub fn finish(mut self) -> Held {
         let now = self.now();
         let stack = self.stack.take().expect("the stack is open");
-        let closed = stack.close(now);
+        if self.options.digest {
+            format!("{:?}", stack.stats()).hash(&mut self.digest);
+            format!("{:?}", self.bound).hash(&mut self.digest);
+        }
+        let (closed, spare) = stack.close_keeping(now);
         let held = closed.held;
         put_budget(closed.budget);
+        if self.options.reuse {
+            put_spare(spare);
+        }
+        DIGEST.set(if self.options.digest {
+            self.digest.finish()
+        } else {
+            0
+        });
         assert!(held.is_zero(), "after close {held:?}");
         held
     }

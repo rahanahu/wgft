@@ -131,6 +131,7 @@ struct EpBudget {
 
 /// endpoint の行です。受信の datagram は行の FIFO に並び、送信の datagram は核の 1 つの FIFO に並びます。
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(any(test, feature = "harness"), derive(PartialEq, Eq))]
 pub(crate) struct UdpEp {
     budget: [EpBudget; 2],
     /// 向きと区分ごとの今の chunk です。
@@ -240,8 +241,9 @@ pub(crate) struct Udp {
 }
 
 impl Udp {
-    /// 表を確保します。
-    pub(crate) fn new(l: &Limits) -> Result<Self, AllocError> {
+    /// endpoint の表 `eps` を使い、ほかの表を確保します。`eps` は新しく作った表か、核を使い回す試験が作成の時の
+    /// 値に戻した表です。
+    pub(crate) fn with_eps(l: &Limits, eps: PortTable<UdpEp>) -> Result<Self, AllocError> {
         let sizes = [l.udp_rx_datagrams, l.udp_tx_datagrams];
         let free = |n: usize| FixedVec::try_filled(n, |i| u16_of(n - 1 - i));
         let dev = |bytes: usize, count: usize| DevBudget {
@@ -255,7 +257,7 @@ impl Udp {
             count: u16_of(count / ENDPOINT_SHARE),
         };
         Ok(Self {
-            eps: PortTable::new()?,
+            eps,
             dg: [
                 FixedVec::try_filled(sizes[RX], |_| Dgram::default())?,
                 FixedVec::try_filled(sizes[TX], |_| Dgram::default())?,
