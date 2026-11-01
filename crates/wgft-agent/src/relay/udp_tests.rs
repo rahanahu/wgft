@@ -179,7 +179,7 @@ async fn sink() -> (
 /// 送り、この間に届かなければ送り直す (ループバックとトンネルでも datagram は落ちうる)。点検の間隔の半分で、
 /// 届いた datagram の間は無通信の期限よりずっと短い。保つことを確かめる長さは期限の 3 倍である。
 fn keep_spacing(idle: Duration) -> Duration {
-    super::sweep_interval(idle) / 2
+    super::udp::sweep_interval(idle) / 2
 }
 
 #[tokio::test]
