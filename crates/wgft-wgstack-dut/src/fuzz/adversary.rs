@@ -22,6 +22,8 @@
 //! - ICMP の frag-needed の MTU は、相手が覚えた値から送るたびに 1 から 100 下げます。DUT が受け入れたかを
 //!   見ないので、値は下がり続け、600 以下で送るのを止めます
 //! - 核がまだ持たない輻輳の制御と boost の方針 (設定の誤りになる選択) は、持つ方に替えます
+//! - 表の大きさは Go と同じ `small_limits` ですが、相手が触れない UDP の datagram の表だけを `fuzz_limits` と
+//!   同じ小ささにします。各段の不変条件の検査が datagram の表をすべてたどるためです
 //! - stream の長さは `2000 + (seed × 7919 mod 2^64) mod 200000` です。Go の元の式は積を符号つきの int に
 //!   してから剰余を取ったので、積が 2^63 以上の種では長さが負になり、`make` が panic しました。Go の
 //!   `adversaryCfg` も同じ符号なしの剰余に直したので、2 つは同じ長さを返します。積が 2^63 より小さい種
@@ -34,9 +36,9 @@ use std::time::Duration;
 
 use wgft_tcpharness::packet::{self, ACK, FIN, RST, SYN, SackBlock, Segment};
 use wgft_tcpharness::rng::Pcg;
-use wgft_wgstack::{BoostPolicy, Config, Congestion, ConnId, Error, Event, Hook};
+use wgft_wgstack::{BoostPolicy, Config, Congestion, ConnId, Error, Event, Hook, Limits};
 
-use super::net::{DUT, MTU, Net, PEER, small_limits};
+use super::net::{DUT, MTU, Net, PEER, fuzz_limits, small_limits};
 use super::peer::{PeerConn, SackPeer, seq_gt};
 
 /// 相手のポートです。
@@ -135,7 +137,12 @@ fn len32(n: usize) -> u32 {
 fn run(cfg: &AdversaryCfg) {
     let seed = cfg.seed;
     let mut rng = Pcg::new(seed, seed.wrapping_mul(7).wrapping_add(1));
-    let base_cfg = Net::<FlipHook>::config(small_limits());
+    // UDP の datagram の表だけを小さくします (module の説明)。TCP の出力は UDP の表の大きさに依りません。
+    let base_cfg = Net::<FlipHook>::config(Limits {
+        udp_rx_datagrams: fuzz_limits().udp_rx_datagrams,
+        udp_tx_datagrams: fuzz_limits().udp_tx_datagrams,
+        ..small_limits()
+    });
     let cubic = supported(Config {
         congestion: Congestion::Cubic,
         ..base_cfg

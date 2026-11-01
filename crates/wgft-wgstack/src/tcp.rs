@@ -9,6 +9,7 @@ pub(crate) mod ack_policy;
 pub(crate) mod boost;
 pub(crate) mod cc;
 pub(crate) mod conn;
+pub(crate) mod cookie;
 pub(crate) mod ctx;
 pub(crate) mod input;
 pub(crate) mod listen;
