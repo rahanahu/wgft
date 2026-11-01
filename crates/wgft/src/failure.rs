@@ -24,6 +24,15 @@ impl Failure {
         }
     }
 
+    /// 標準エラーに書く 1 行。文は server の応答や宛先の誤りを含みうるので、表示できない文字を置き換える。
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "Error: {}",
+            wgft_agent::logging::terminal_safe(&self.message)
+        )
+    }
+
     /// 求められた報告を作れなかった失敗。`agent doctor` だけが使う。
     #[must_use]
     pub fn unavailable(message: impl Into<String>) -> Self {
@@ -34,5 +43,19 @@ impl Failure {
 impl From<AgentError> for Failure {
     fn from(e: AgentError) -> Self {
         Failure::new(e.to_string(), u8::try_from(e.exit_code()).unwrap_or(1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_error_line_escapes_what_a_server_sent() {
+        let f = Failure::new("register: server said \u{1b}]0;title\u{7}\nok", 1);
+        assert_eq!(
+            f.line(),
+            "Error: register: server said \\x1b]0;title\\a\\nok"
+        );
     }
 }

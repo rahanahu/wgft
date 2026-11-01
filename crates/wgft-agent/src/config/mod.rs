@@ -257,7 +257,7 @@ impl LogLine {
     /// 標準エラーに書く。
     pub fn emit(&self) {
         match self {
-            LogLine::Plain(s) => eprintln!("{s}"),
+            LogLine::Plain(s) => eprintln!("{}", crate::logging::terminal_safe(s)),
             LogLine::Stamped(s) => crate::logging::line(s),
         }
     }

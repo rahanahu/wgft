@@ -17,7 +17,7 @@ fn main() -> ExitCode {
     match execute() {
         Ok(()) => ExitCode::SUCCESS,
         Err(f) => {
-            eprintln!("Error: {}", f.message);
+            eprintln!("{}", f.line());
             ExitCode::from(f.code)
         }
     }

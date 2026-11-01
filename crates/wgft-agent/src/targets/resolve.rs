@@ -23,6 +23,22 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use tokio::sync::{Semaphore, watch};
 use tokio::time::Instant;
 
+/// OS の resolver に渡してよい名前か。空でなく、254 byte 以下で、空白と表示できない文字 (Go の
+/// `unicode.IsGraphic` でない文字) を含まない名前である。`getaddrinfo` は `/etc/hosts` などから任意の
+/// 文字列を引けるので、server が配る制御の文字や改行、長い文字列を OS の resolver とその設定のファイルの
+/// 照合に渡さないために断る。Go の `net.isDomainName` の形の全体は求めない。v1 の Go の resolver は
+/// Linux で hosts のファイルを形の判定より先に引き、Windows と macOS では OS の resolver に渡すので、
+/// 全体を求めると Go が引ける名前を断ることになるためである。IP のリテラル (IPv6 の zone の付いた形を
+/// 含む) もこの判定を通る。
+#[must_use]
+pub fn is_lookup_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 254
+        && !s
+            .chars()
+            .any(|c| c.is_whitespace() || wgft_proto::textsafe::is_unsafe(c))
+}
+
 /// 宛先の名前を同時に引く数。
 pub const TARGET_PERMITS: usize = 8;
 /// WireGuard のエンドポイントの名前を同時に引く数。引き直しは同じ名前で相乗りするので、応答しない
@@ -167,6 +183,9 @@ impl Resolver {
     }
 
     async fn lookup(&self, kind: Kind, host: &str, deadline: Instant) -> Outcome {
+        if !is_lookup_name(host) {
+            return Err(format!("lookup {host}: no such host"));
+        }
         let mut rx = self.join(kind, host);
         // Go の resolver が期限で打ち切ったときと同じ語にする
         match tokio::time::timeout_at(deadline, rx.wait_for(Option::is_some)).await {
@@ -565,6 +584,70 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    /// 空白、表示できない文字、長すぎる名前と空の名前は、OS の resolver に渡さずに断る。
+    #[tokio::test]
+    async fn names_with_unsafe_characters_are_not_looked_up() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let r = Resolver::with_lookup(
+            8,
+            1,
+            Arc::new(move |_h: &str, _| {
+                counter.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(vec![ip("192.0.2.1")])
+            }),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let long = "a".repeat(255);
+        for name in ["evil\nname", "a b", "x\u{1b}[2J", "a\u{a0}b", "", &long] {
+            assert_eq!(
+                r.lookup_target(name, deadline).await,
+                Err(format!("lookup {name}: no such host"))
+            );
+            assert_eq!(
+                r.lookup_endpoint(name, deadline).await,
+                Err(format!("lookup {name}: no such host"))
+            );
+        }
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+        assert!(r.lookup_target("nas.lan", deadline).await.is_ok());
+        assert!(r.lookup_target("127.0.0.1", deadline).await.is_ok());
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    /// 形の判定は安全に要る分だけで、Go の `net.isDomainName` が偽でも hosts のファイルや OS の resolver
+    /// が答えうる名前は通す。
+    #[test]
+    fn lookup_names_need_only_safe_characters() {
+        let ok = [
+            "foo.com",
+            "_xmpp-server._tcp.google.com",
+            "foo.com.",
+            "-foo.com",
+            "a..b",
+            "ex\u{e4}mple.com",
+            "123",
+            "fe80::1%eth0",
+            &"a".repeat(254),
+        ];
+        for n in ok {
+            assert!(is_lookup_name(n), "{n}");
+        }
+        let bad = [
+            "",
+            "foo bar",
+            "foo\tbar",
+            "foo\nbar",
+            "\u{1b}[2J",
+            "a\u{200b}b",
+            "fe80::1%eth0\n",
+            &"a".repeat(255),
+        ];
+        for n in bad {
+            assert!(!is_lookup_name(n), "{n:?}");
+        }
     }
 
     /// Go の `TestSortByRFC6724` の例 (RFC 6724 の 10.2 節と Go の issue 13283)。
