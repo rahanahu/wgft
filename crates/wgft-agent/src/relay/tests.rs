@@ -414,6 +414,35 @@ async fn listener_stats_and_rule_reasons_follow_go_s_key_order() {
     assert_eq!(m.status_of(&st), rs);
 }
 
+/// 適用が排他の中で待つ試し接続は [`super::APPLY_PROBES`] 件までで、残りのリスナーは誤りを持たないまま
+/// 次の見回りで試される。
+#[tokio::test]
+async fn an_apply_probes_a_bounded_number_of_new_listeners() {
+    let peer = Peer::start().await;
+    let mut m = manager_with(&peer, targets("", vec![]), Limits::default());
+    let n = u16::try_from(super::APPLY_PROBES).unwrap() + 4;
+    let last = 30000 + n - 1;
+    // 名前の表に無い名前なので、試し接続は名前の解決ですぐに失敗する
+    m.apply(&[rule(
+        "r_a",
+        Proto::Tcp,
+        &format!("30000-{last}"),
+        "nas.invalid:1",
+        true,
+    )])
+    .await;
+    assert_eq!(m.listening(), usize::from(n));
+    let failed = |m: &Manager| {
+        m.listener_stats()
+            .iter()
+            .filter(|s| s.err.is_some())
+            .count()
+    };
+    assert_eq!(failed(&m), super::APPLY_PROBES);
+    m.retry().await;
+    assert_eq!(failed(&m), usize::from(n));
+}
+
 #[tokio::test]
 async fn an_ip_literal_outside_the_allowlist_is_not_opened() {
     let peer = Peer::start().await;

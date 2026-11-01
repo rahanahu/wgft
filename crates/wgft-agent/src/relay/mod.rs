@@ -103,6 +103,12 @@ impl fmt::Display for Key {
     }
 }
 
+/// 適用が排他の中で待つ試し接続の数の上限。新しく開いた TCP のリスナーのうち、ポートの順で先のこの数だけを
+/// 適用の中で試し、残りは状態の誤りを持たないまま次の 30 秒ごとの見回りに任せる。試し接続は同時に 32 件、
+/// 1 件 2 秒なので、適用の中の試し接続は 16 秒までで終わる。範囲の広いルールで応えない宛先が多くても、
+/// agent の排他を server のハートビートの期限 (90 秒) に近い長さで持たないためである。
+pub const APPLY_PROBES: usize = 256;
+
 /// 試し接続の 1 周。[`Manager`] を借りずに走らせる。
 #[derive(Debug)]
 pub struct ProbeRound {
@@ -130,6 +136,13 @@ impl ProbeRound {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// 先の `n` 件だけを試す 1 周にする。
+    #[must_use]
+    fn limit(mut self, n: usize) -> Self {
+        self.entries.truncate(n);
+        self
     }
 
     /// 試し接続を走らせる。同時に 32 件まで、1 件 2 秒。
@@ -419,7 +432,8 @@ impl Manager {
     /// 宣言に合わせる。ポートごとに実効宛先を比べ、変わったリスナーだけを閉じてから開き直す。
     /// 実効宛先が同じならルールの ID だけを置き換える。開けなかったリスナーは状態の誤りに出し、
     /// [`Manager::retry`] が開き直す。開いたリスナーの宛先へ試し接続し、その結果を待ってから戻るので、
-    /// 最初の状態は適用の直後のハートビートに載る。戻り値は操作の数。
+    /// 最初の状態は適用の直後のハートビートに載る。試すのは [`APPLY_PROBES`] 件までで、残りのリスナーの
+    /// 最初の状態は誤りを持たず、次の見回りで決まる。戻り値は操作の数。
     pub async fn apply(&mut self, rules: &[AgentRule]) -> usize {
         let mut want: BTreeMap<Key, Wanted> = BTreeMap::new();
         self.unsupported.clear();
@@ -491,7 +505,7 @@ impl Manager {
             actions += 1;
         }
         self.open_listeners(&opened).await;
-        let done = self.probe_round(&opened).run().await;
+        let done = self.probe_round(&opened).limit(APPLY_PROBES).run().await;
         self.finish_probes(done);
         actions
     }
