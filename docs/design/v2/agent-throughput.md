@@ -514,11 +514,46 @@ byte あたりの CPU が 0.8 倍なら、速さは約 1.25 倍です。
 | 送る向きの 1 stream の速さ (`MBITRATIO`、`rust` / `kernel`、腕 `rust kernel` の組) | 目標にしません (記録します) | 推定が 0.38 以上 |
 
 キャッシュと命令の数の確かめ:ラボの VM は PMU を仮想化しないので、ラボでは数えられません。
-バッチの段の実装は、PMU のあるホストで agent のソケットの経路を動かす道具を作り、変更の前と後で `perf stat` の値を比べて PR に書きます。
-道具は、WireGuard の device の層 (`wgft-wireguard`) とデータプレーンの UDP のソケットの経路 (`recvmmsg`、`sendmmsg`、GSO と GRO を含みます) を、ホストの network namespace の中の 2 つの UDP のソケットの間で動かし、wgstack の核の代わりに決まった大きさの packet を作る相手を置きます。
-root も TUN も要らない形にします。
+バッチの段の実装は、PMU のあるホストで道具を流し、変更の前と後の値を PR に書きます。
+道具は crate `crates/wgft-agent-perf` (試験の道具で、製品の build に入りません) と、それを `perf stat` の下で流す `scripts/agent-perf-stat.sh` です。
+道具は、WireGuard の device の層 (`wgft-wireguard`) とデータプレーンと同じ開き方の UDP のソケットを、ホストの network namespace の loopback の中の 2 つのソケットの間で動かし、wgstack の核の代わりに決まった大きさの packet を作る相手を置きます。
+network namespace は `unshare -rn` の権限の要らないもので、root も TUN も要りません。
+向きは 2 つで、`send` は測るスレッドが暗号にして `sendto` で送り、`recv` は測るスレッドが `recvfrom` で読んで復号します。
+相手は別のスレッドで、`perf stat --no-inherit` が数えから外します。
+packet の大きさは device の層が運ぶ最大の内側の packet (MTU 1420 で 1408 byte) と小さな packet (64 byte) です。
+バッチの段が使う `recvmmsg`、`sendmmsg`、GSO、GRO は、今の道具には入っていません。
+今の道具は、今のデータプレーンと同じく datagram を 1 つずつ `sendto` と `recvfrom` で運びます。
+段がそれらを入れるときに、道具の差し替える場所と数え方を道具の doc comment に書いてあります。
+
 測る値は、packet あたりのキャッシュの miss (`cache-misses`、`L1-dcache-load-misses`)、byte あたりの命令の数 (`instructions`)、packet あたりの system call の数、byte あたりの CPU の時間です。
-この道具は今は作りません。
+system call の数は道具が自分で数え、データの経路の `sendto` と `recvfrom` と、burst ごとの起床の確認 1 回です。
+CPU の時間は測るスレッドの値で、burst の間の待ちを含みません。
+
+```sh
+# 変更した commit の作業ツリーで。--base を付けると <base> を一時的な worktree で build し、
+# base と head を交互に (base、head、base、head) 流して、中央値と比を出す
+notes/scripts/wgft-heavy --timing --vm-mem 0 -- scripts/agent-perf-stat.sh --base <base>
+```
+
+出力は、向き、packet の大きさ、値ごとに 1 行です。
+`--base` が無ければ head の中央値と範囲、あれば base と head の中央値と範囲、`ratio=head/base` を出します。
+測る側と相手に、車線の最初の 2 つの CPU を使います。
+E コアの車線は `L1-dcache-load-misses` を数えないので、そこでは同じ意味の `mem_load_uops_retired.l1_miss` を数えて、同じ名前で出します。
+
+道具の限界は次のとおりです。
+
+- `perf_event_paranoid` が 2 のホストでは、権限の無い `perf stat` はユーザー空間だけを数えます。
+  命令の数とキャッシュの miss にカーネルの UDP と loopback の処理は入らず、system call の数と CPU の時間には入ります。
+  そのためバッチの段の `sendmmsg` と `recvmmsg` の効果は、前者の 2 つより後者の 2 つに現れます
+- ソケットのバッファは、`CAP_NET_ADMIN` の要る `FORCE` の指定を使わないので、新しい network namespace の `net.core.rmem_max` で頭打ちになります。burst の大きさはそれに収まる値にしてあります
+- loopback は送り手の `sendto` の中で受け手のキューに入れるので、`send` の CPU の時間に受信側のキューへの積みが入ります。ラボの veth の経路が送った後の softirq を数えるのと同じ形です
+- 道具の socket の loop は、データプレーンの経路の写しです。`dataplane::socket` は `pub(crate)` で tokio を使うので、道具から呼べません。前と後の値は、道具の loop と本物の device の層を合わせたものを測ります。PR には、どちらが変わったかを書きます
+- `--base` は、道具を持たない base に head の道具を重ねます。device の層の API が base と head で違えば build に失敗するので、道具の差し替えが要る API の変更は、比べる base より前の commit に分けます
+- ゆらぎ:同じ commit の base と head を比べた結果は、L1 の miss と `cache-misses` の比が 0.97 から 1.32 まで揺れ、命令の数、system call の数、byte あたりの CPU の時間は約 1% で収まりました。L1 と `cache-misses` の差は、出力の範囲より大きいときだけ読みます
+- E コアの車線の `L1-dcache-load-misses` は `mem_load_uops_retired.l1_miss` なので、P コアの値とは比べられません。比べるのは同じ車線の base と head だけです
+- `syscalls/packet` が数えるのは `sendto` と `recvfrom` (最後の `WouldBlock` を含みます) と burst ごとの `poll` 1 回で、futex、`clock_gettime`、`getrusage` を含みません
+- 準備 (握手と thread の起動) は `perf stat` の数えに入りますが、packet と byte の数には入りません。定数で小さい分です
+- burst ごとの `clock_gettime` と `getrusage` の費用は `cpu-ns/byte` に入るので、64 byte の packet では比を少し 1 に近づけます
 
 ### 判定の手順
 

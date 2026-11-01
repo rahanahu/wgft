@@ -441,7 +441,7 @@ jobs:
       - name: product tree
         run: |
           tree=$(cargo tree -p wgft -e normal,build --target all --all-features --prefix none --locked)
-          if printf '%s\n' "$tree" | grep -E '^(wgft-(tcpharness|wgstack-dut)|flate2|miniz_oxide) '; then
+          if printf '%s\n' "$tree" | grep -E '^(wgft-(tcpharness|wgstack-dut|agent-perf)|flate2|miniz_oxide) '; then
             echo "the wgft binary depends on a test tooling crate" >&2
             exit 1
           fi

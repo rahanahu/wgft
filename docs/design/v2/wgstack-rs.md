@@ -118,6 +118,7 @@ Go の `internal/ipv4frag` は gVisor の経路と共有する葉の package で
 | `crates/wgft-wgstack` | sans-IO の核 | 標準ライブラリだけ | 実装の担当 |
 | `crates/wgft-netstack` | 核を tokio の上で使う handle の層。TCP、UDP、ping の非同期の handle、waker の表、操作の知らせ | `wgft-wgstack`、tokio | 実装の担当 |
 | `crates/wgft-wgstack-bench` | 核の segment ごとの受信と送信の経路の criterion のベンチ。配布せず、`wgft` のバイナリにも入りません | `wgft-wgstack`、dev 依存の `criterion` | 実装の担当 |
+| `crates/wgft-agent-perf` | agent の tunnel のソケットの経路を、ホストの network namespace の中で `perf stat` の下で測る道具。配布せず、ワークスペースの既定の member に入りません。[agent-throughput.md](agent-throughput.md#目的byte-あたりの-cpu-と速さ)に使い方があります | `wgft-wireguard` | 実装の担当 |
 | `crates/wgft-wgstack/fuzz` | cargo-fuzz の target。ワークスペースの member に入りません | `wgft-wgstack`、`libfuzzer-sys` | target ごとに[fuzz](#fuzz)の表が決めます |
 | `crates/wgft-tcpharness`、`crates/wgft-wgstack-dut` | 試験の道具と DUT のバイナリ。配布せず、`wgft` のバイナリにも入りません | `wgft-wgstack` | 試験の担当 |
 
