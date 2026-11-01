@@ -46,11 +46,13 @@ impl<T> FixedVec<T> {
     }
 
     /// 長さと容量が `n` の配列を、`f(i)` の値で埋めて確保します。
-    pub(crate) fn try_filled(n: usize, mut f: impl FnMut(usize) -> T) -> Result<Self, AllocError> {
+    ///
+    /// 埋めるのは長さの分かる iterator の `extend` です。容量は先に取ってあるので確保し直さず、要素ごとの容量の
+    /// 比べも無いので、同じ値で埋める配列は vector の命令の書き込みになります。`push` を繰り返すと要素ごとに容量を
+    /// 比べるので、ポートの数の表のような大きな配列では核を作る手間の多くを占めていました。
+    pub(crate) fn try_filled(n: usize, f: impl FnMut(usize) -> T) -> Result<Self, AllocError> {
         let mut s = Self::try_with_capacity(n)?;
-        for i in 0..n {
-            s.v.push(f(i));
-        }
+        s.v.extend((0..n).map(f));
         Ok(s)
     }
 

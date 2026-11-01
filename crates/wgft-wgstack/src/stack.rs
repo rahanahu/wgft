@@ -23,13 +23,13 @@ use crate::rng::Seeds;
 use crate::tcp::conn::{ConnBufs, ConnId, ConnSlots, QLink, State, Tcb, new_free_list};
 use crate::tcp::ctx::Conn;
 use crate::tcp::listen::{self, Listener, PORTS, PortTable};
-use crate::tcp::syn::SynTable;
+use crate::tcp::syn::{RowVerdict, SynTable};
 use crate::tcp::timewait::TwTable;
 use crate::tcp::{NUM_TIMERS, NUM_TIMERS32};
 use crate::time::Time;
 use crate::udp::{Udp, UdpId};
 use crate::wheel::{NO_TICK, TICK_NS, Wheel};
-use crate::wire::{self, FLAG_ACK, FLAG_RST, FLAG_SYN, Ipv4Drop, PayloadDrop};
+use crate::wire::{self, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, Ipv4Drop, PayloadDrop};
 pub use api::{Error, Event, ListenerId};
 use core::fmt;
 pub use shared::{LogKind, LogLine, Stats};
@@ -189,6 +189,8 @@ impl<H: Hook> Stack<H> {
                     now: 0,
                     isn_key: t.seeds.isn_key,
                     ts_key: t.seeds.ts_key,
+                    cookie_key: t.seeds.cookie_key,
+                    cookie_sent: None,
                     ip_id: t.seeds.ip_id,
                     rng: t.seeds.rng,
                     conn_free: t.conn_free,
@@ -505,36 +507,90 @@ impl<H: Hook> Stack<H> {
             }
             // 行を外したら、SYN を待ち受けに渡します。
             if let Some(r) = self.s.syn.find(seg.tup) {
-                if self.s.syn_input(r, seg, now) {
-                    self.promote(r, seg, now);
+                match self.s.syn_input(r, seg, now) {
+                    RowVerdict::Done => {}
+                    RowVerdict::Promote => self.promote(r, seg, now),
+                    RowVerdict::Cookie => {
+                        if !self.establish_cookie(seg, now, Some(r)) {
+                            self.s.reply_rst(seg);
+                        }
+                    }
                 }
                 return;
             }
             let listening = self.s.listeners.by_port(seg.tup.lport).is_some();
-            if listening && seg.flags & (FLAG_SYN | FLAG_ACK | FLAG_RST) == FLAG_SYN {
+            if listening && seg.flags & (FLAG_SYN | FLAG_ACK | FLAG_RST | FLAG_FIN) == FLAG_SYN {
                 self.s.new_syn_row(seg, now, reuse);
                 return;
             }
             if listening && seg.has(FLAG_SYN) && !seg.has(FLAG_ACK) {
-                return; // SYN と RST の両方を持つ segment は捨てます
+                // SYN と RST、SYN と FIN の組を持つ segment は捨てます。SYN と FIN の組は凍結した Go の
+                // wgstack と違います (wgstack-rs.md の「待ち受けへの SYN と FIN の組」)。
+                return;
+            }
+            if listening
+                && seg.flags & (FLAG_SYN | FLAG_ACK | FLAG_RST) == FLAG_ACK
+                && self.s.cookie_window(now)
+            {
+                if self.establish_cookie(seg, now, None) {
+                    return;
+                }
+                if seg.seq_len() > 0 {
+                    // 中身か FIN を持つ ACK は RST を返さずに捨てます。最後の ACK と最初の中身を失った相手の
+                    // 次の segment は cookie が通らないので、RST で切らずに、最初の中身の再送を待ちます。
+                    return;
+                }
             }
             self.s.reply_rst(seg);
             return;
         }
     }
 
+    /// 待ち受けへの ACK を cookie として確かめ、通れば接続を作って accept の待ち行列に入れます。cookie が
+    /// 通ったかを返します。偽なら呼び手が捨てるか RST を返します。`row` は同じ 4 つ組の握手の途中の行で、
+    /// 接続を作れたら外します。
+    ///
+    /// accept の待ち行列か接続の枠が満杯なら、握手の途中の行の最後の ACK と同じく ACK を捨てて真を返します。
+    /// 相手が ACK かデータを送り直した時に cookie がまだ通れば、その時に接続を作ります。
+    fn establish_cookie(&mut self, seg: &wire::Segment<'_>, now: i64, row: Option<u32>) -> bool {
+        let Some(r) = self.s.check_cookie(seg, now) else {
+            return false;
+        };
+        if !self.s.reserve_accept(r.listener, now) {
+            return true;
+        }
+        if self.open_from_row(&r, row, seg, now) {
+            self.s.stats.syn_cookies_accepted += 1;
+        }
+        true
+    }
+
     /// 握手の途中の行 `row` を空きの接続の枠に移し、accept の待ち行列に入れ、最後の ACK が運んだ
     /// データと FIN を処理します (Go の `promote`)。
     fn promote(&mut self, row: u32, seg: &wire::Segment<'_>, now: i64) {
         let r = *self.s.syn.row(row);
+        self.open_from_row(&r, Some(row), seg, now);
+    }
+
+    /// 握手の途中の行の値 `r` から接続を作り、作れたかを返します。accept の待ち行列の枠は呼び手が予約済み
+    /// です。`row` は表の行の番号で、cookie から取り戻した値は `None` です。
+    fn open_from_row(
+        &mut self,
+        r: &crate::tcp::syn::SynRow,
+        row: Option<u32>,
+        seg: &wire::Segment<'_>,
+        now: i64,
+    ) -> bool {
         // floor の配列を確保できなければ、accept の待ち行列が満杯の時と同じく ACK を捨てて行を残します。
         let Ok(Some(slot)) = self.conns.alloc(&mut self.s.conn_free) else {
             self.s.unreserve_accept(r.listener, now);
-            return;
+            return false;
         };
         let mut c = self.conn(slot);
-        c.establish(&r, seg, now);
-        c.s.remove_syn_row(row);
+        c.establish(r, seg, now);
+        if let Some(row) = row {
+            c.s.remove_syn_row(row);
+        }
         let generation = c.t.generation;
         c.s.conn_idx.insert(c.t.tup, slot, generation);
         c.t.in_index = true;
@@ -545,6 +601,7 @@ impl<H: Hook> Stack<H> {
         c.s.signal_listener(port);
         c.input_data(seg, now);
         c.after_input(now);
+        true
     }
 
     /// 期限の来たタイマーと行の期限を、新しい `now` の時刻で 1 回ずつ処理します (Go の `advance`)。

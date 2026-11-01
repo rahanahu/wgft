@@ -1726,7 +1726,10 @@ dependencies = [
  "libtest-mimic",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
  "wgft-alloc-count",
+ "wgft-netstack",
  "wgft-tcpharness",
  "wgft-wgstack",
 ]
