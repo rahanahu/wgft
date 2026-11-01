@@ -1381,7 +1381,12 @@ wgstack の口が前提と違えば、wgstack の上の agent と UDP の中継�
   受け付ける値と誤りの文面は今の仕様のままです
 - インタフェースの一覧の取り方:決めました。
   Unix で `getifaddrs`、Windows で `GetAdaptersAddresses` を `hostaddr` が呼びます。
-  追加の crate は使わず、`windows-sys` だけです
+  追加の crate は使わず、`windows-sys` だけです。
+  `getifaddrs` の sockaddr は参照を作らずに読みます。
+  BSD 系 (macOS を含む) の netmask は `sa_len` が `sockaddr_in` より短いことがあるので (`255.255.0.0` を 6 byte で表すなど)、`sa_len` と型の大きさの小さい方の byte だけを 0 で埋めた構造体へ写し、足りない byte は 0 とします。
+  型の大きさの参照として読むと、確保の外を読んで帯の長さを誤るためです。
+  `sa_len` を持たない Linux は族の大きさの sockaddr を返すので、型の大きさを写します。
+  macOS の build と試験は macOS の CI に任せ、手元では build していません
 
 ## 未確認の点
 
