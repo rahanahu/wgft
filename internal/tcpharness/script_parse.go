@@ -584,9 +584,8 @@ func lexString(s string) ([]byte, int, error) {
 // Expressions.
 
 type exprParser struct {
-	toks  []token
-	i     int
-	depth int // bracket depth, for atom
+	toks []token
+	i    int
 }
 
 func (p *exprParser) done() bool { return p.i >= len(p.toks) }
@@ -791,7 +790,7 @@ func (p *exprParser) postfix() (*Expr, error) {
 		switch {
 		case p.accept("."):
 			if p.done() || p.toks[p.i].kind != tIdent {
-				return nil, fmt.Errorf("a field name follows .")
+				return nil, fmt.Errorf("a field name follows the dot")
 			}
 			x = &Expr{Kind: "field", Name: p.next().text, Args: []*Expr{x}}
 		case p.accept("["):
