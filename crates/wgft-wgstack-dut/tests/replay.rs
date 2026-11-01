@@ -4,8 +4,8 @@
 //! 渡し、応答の frame を記録と byte の単位で比べ、最初に食い違った所で止めます。
 //!
 //! 照らすのは、印がすべて Rust の wgstack が入れた段 (`stages.json` の `landed`) の印の中にある記録だけです。
-//! 残りの記録は ignored の試験として数え、`cargo nextest run --run-ignored all` (`cargo test` では
-//! `-- --include-ignored`) で照らせます。意図した違いの一覧 (`testdata/wgstack-rec/divergences.json`) と同じ
+//! 残りの記録は ignored の試験として数え、`cargo nextest run -p wgft-wgstack-dut --run-ignored all`
+//! (`cargo test -p wgft-wgstack-dut` では `-- --include-ignored`) で照らせます。意図した違いの一覧 (`testdata/wgstack-rec/divergences.json`) と同じ
 //! 位置で同じ応答に食い違った記録は、既知の違いとして通します。
 //!
 //! 環境変数 `WGFT_WGSTACK_REPLAY_DIR` で、git の集まりの代わりに手元の cache の集まりを照らせます。Go の
