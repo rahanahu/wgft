@@ -1248,11 +1248,15 @@ mod tests {
     ) {
         use wgft_proto::{AgentRule, Proto};
         let (targets, gate) = gated_targets();
+        // 範囲のルールは宛先のポートを待ち受けの順にずらし、65535 を越える宛先のルールは待ち受けを開かない。
+        // OS が割り当てるポートは 65535 に近いことがある (Windows は 49152 から) ので、最後の待ち受けが
+        // 閉じたポートを指すように始めを下げる
+        let first = closed_port().saturating_sub(299).max(1);
         let rules = vec![AgentRule {
             id: "r_a".into(),
             proto: Proto::Tcp,
             listen_port: "20000-20299".parse().unwrap(),
-            target: format!("nas.lan:{}", closed_port()),
+            target: format!("nas.lan:{first}"),
             enabled: true,
         }];
         let peer = crate::relay::testpeer::Peer::start().await;
