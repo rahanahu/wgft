@@ -442,7 +442,11 @@ byte あたりの CPU が 0.8 倍なら、速さは約 1.25 倍です。
   数は device を通った datagram の数で割り、datagram の数は台本の相手の側で数えます。
   ACK の数は起床の時機で変わるので、message ごとの数は決まった値になりません。
   遅延 ACK のタイマーが切れた後に数を読み、最後の ACK の分を含めます。
-  commit fdbf7e86 に試しの実装があり、参考にできます (使わなくても構いません)
+  PR #771 (マージせずに閉じた) に試しの実装があり、参考にできます (使わなくても構いません)
+- device の層の使い回しのバッファ:バッチの段が入るとき、wgstack-rs.md の device の層の使い回し (E の形) のバッファがバッチの置き場になります。
+  起動の時に 1 回、`WGFT_AGENT_BATCH_MIB` の内の上限のある置き場として確保し、`batch` の項に正確な項として数えます。
+  バッチの段の前 (1 packet ずつ) は、小さな使い回しの組を `device` の項に数えます。
+  この数え方はこの文書が決め、[wgstack-rs.md](wgstack-rs.md#決めたこと) と [agent-parity.md](agent-parity.md) はこの節を参照します
 - buffer は起動の時の有限の置き場から:buffer はすべて起動の時に確保する上限のある置き場から借り、置き場はそれぞれメモリの上界の行の `batch` の項に正確な項として数えます
 - 写さない:借用か、その場での復号と組み立てで済む所では写しをやめます。
   sanstun の復号と暗号化は呼び手の buffer を受けるので、受け手が読む buffer に直接復号することと、核の segment から送信のバッチの buffer に直接暗号化することは、sanstun を直さずにできます
@@ -487,7 +491,7 @@ byte あたりの CPU が 0.8 倍なら、速さは約 1.25 倍です。
   同じ遅れの道具 (`lab/lab paired --tool iperf3 --udp-ping --rounds 8 --direction up`) で測ります。
   比べる値は、同じ仕事の中で受信のバッファの上限を 1 MiB に下げて測ったカーネルモードの値で、この段はそのための設定を測定の道具に足します。
   線は、Rust の agent の p50 と p99 がそれぞれその値の 1.5 倍以下、`base:rust` との `MBITRATIO` の推定が 0.95 以上で `ci95_high` が 1.00 以上です。
-  線の値はこの文書の監督の提案で、確かめていません
+  線の値はこの文書の提案で、確かめていません
 - 凍結した Go の wgstack との関係:窓を変えると核の出力が変わり、凍結した Go の wgstack の記録との bit の一致が崩れます。
   [置き換えの後の作業](wgstack-rs.md#置き換えの後の作業)の不要な再送の取り消しと同じく、bit の一致を求める期間との関係をこの段の始めに決めます
 - 既存の目標:[wgstack の性能の段階](../userspace/wgstack-performance.md#目標と制約)の 4 つの目標を、その行列で満たし続けます
@@ -509,7 +513,7 @@ byte あたりの CPU が 0.8 倍なら、速さは約 1.25 倍です。
 | 送る向きの 1 stream の速さ (`MBITRATIO`、`rust` / `kernel`、腕 `rust kernel` の組) | 目標にしません (記録します) | 推定が 0.38 以上 |
 
 キャッシュと命令の数の確かめ:ラボの VM は PMU を仮想化しないので、ラボでは数えられません。
-バッチの段の担当は、PMU のあるホストで agent のソケットの経路を動かす道具を作り、変更の前と後で `perf stat` の値を比べて PR に書きます。
+バッチの段の実装は、PMU のあるホストで agent のソケットの経路を動かす道具を作り、変更の前と後で `perf stat` の値を比べて PR に書きます。
 道具は、WireGuard の device の層 (`wgft-wireguard`) とデータプレーンの UDP のソケットの経路 (`recvmmsg`、`sendmmsg`、GSO と GRO を含みます) を、ホストの network namespace の中の 2 つの UDP のソケットの間で動かし、wgstack の核の代わりに決まった大きさの packet を作る相手を置きます。
 root も TUN も要らない形にします。
 測る値は、packet あたりのキャッシュの miss (`cache-misses`、`L1-dcache-load-misses`)、byte あたりの命令の数 (`instructions`)、packet あたりの system call の数、byte あたりの CPU の時間です。

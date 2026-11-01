@@ -405,12 +405,12 @@ fn set_endpoint(shared: &Mutex<Reading>, ep: Result<SocketAddrV4, String>) {
 /// 使ったことのある接続の枠の数を書く行の刻みの下限です。
 const SLOT_STEP_MIN: usize = 64;
 
-/// 行が1プロセスで最大何行になるかの上限です。刻みは接続の枠の数をこの値で割って決めます。
+/// 行がトンネルを立てるたび (`slot_watch` は `Tunnel::start` ごとに行の数 0 から始まる) に最大何行になるかの上限です。刻みは接続の枠の数をこの値で割って決めます。
 const SLOT_LINES_MAX: usize = 32;
 
 /// 使ったことのある接続の枠の数を書く行の刻みです。接続の枠の数を [`SLOT_LINES_MAX`] で割って切り上げた値と
 /// [`SLOT_STEP_MIN`] の大きい方を、64 の倍数に切り上げます。行は数をこの倍数に切り上げて書くので、行の値は
-/// 数の上界で、行の数は上限によらず [`SLOT_LINES_MAX`] までです (洪水で数が一気に増えても行が増えすぎない)。
+/// 数の上界で、行の数は 1 回のトンネルの起動あたり、上限によらず [`SLOT_LINES_MAX`] までです (洪水で数が一気に増えても行が増えすぎない)。
 const fn slot_step(conns: usize) -> usize {
     let want = conns.div_ceil(SLOT_LINES_MAX);
     let want = if want > SLOT_STEP_MIN {

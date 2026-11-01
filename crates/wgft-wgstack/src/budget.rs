@@ -118,6 +118,12 @@ impl From<AllocError> for BudgetError {
 }
 
 impl Budget {
+    /// 試験と fuzz の build だけにある欄 `dirty` の byte です。[`crate::stack::HARNESS_BYTES`] との一致を試験が確かめます。
+    #[cfg(test)]
+    pub(crate) fn harness_bytes(&self) -> usize {
+        size_of_val(&self.dirty)
+    }
+
     /// 枠と boost の配列をすべて確保します。
     pub fn new() -> Result<Self, BudgetError> {
         let mut slots = FixedVec::try_with_capacity(BOOST_SLOTS)?;
