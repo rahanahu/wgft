@@ -341,6 +341,27 @@ impl Conn<'_> {
         self.t.resend_cause = cause;
     }
 
+    /// 中身が `payload` byte を超える、SACK 済みでも損失の待ち行列にもない記録を損失にします (PMTU の引き下げ)。
+    /// 手間は記録の数に比例しますが、PMTU は下がる向きにしか変わらず 552 の下限で止まるので、接続ごとに起きる
+    /// 回数は限られます。
+    pub(crate) fn mark_lost_longer(&mut self, payload: u32, cause: u8) {
+        for i in 0..self.b.recs.len() {
+            let length = u32::from(self.b.recs.at(i).length);
+            if length <= payload || self.is_sacked(i) || !self.gen_flag(i, REC_IN_T) {
+                continue;
+            }
+            if i == 0 {
+                // 先頭を古い大きさで分けて送っていた位置は捨て、新しい大きさで初めから送り直します。
+                if self.t.lost_q.n > 0 && self.t.lost_q.head == self.rec_abs(0) {
+                    (self.t.q_off, self.t.q_mid) = (0, false);
+                }
+                self.reset_rxt();
+            }
+            self.mark_rack_lost(i);
+        }
+        self.t.resend_cause = cause;
+    }
+
     /// SACK の取り消しで、すべての記録の SACK 済みの印を世代の番号で消します。
     pub(crate) fn clear_sack(&mut self) {
         let t = &mut *self.t;

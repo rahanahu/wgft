@@ -3,7 +3,6 @@
 //! 上界の式の項と規則は Go と同じです。項の大きさは、作成の時の設定と Rust の型の大きさだけから決め、確保した
 //! 配列の要求の大きさで数えます。割り当て器の丸めの係数は含みません。上界の表は試験が生成します
 //! (`docs/design/v2/wgstack-bound.md`)。
-//! UDP と ping の項は、その表を作る段 (PR 6) が足します。
 
 use crate::budget::Budget;
 use crate::buf::chunk::{CHUNK_SIZE, Chunk, POOL_KEEP};
@@ -15,6 +14,7 @@ use crate::buf::{
 };
 use crate::config::Limits;
 use crate::frag;
+use crate::icmp::{PING_ENDPOINTS, Pings};
 use crate::index;
 use crate::stack::{EventTargets, NoHook, Stack};
 use crate::tcp::NUM_TIMERS;
@@ -22,12 +22,13 @@ use crate::tcp::conn;
 use crate::tcp::listen::{Listener, PORTS, PortRow};
 use crate::tcp::syn::SynRow;
 use crate::tcp::timewait::TwRow;
+use crate::udp::{self, Udp, UdpEp};
 
 /// 上界の式の値です。単位は byte です。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Bound {
-    /// M_fix:核の構造、接続の枠、hash の表、行の表、待ち受けの表、タイマーの輪、出力の list と制御の輪、
-    /// 知らせの list、chunk の置き場です。
+    /// M_fix:核の構造、接続の枠、hash の表、行の表、待ち受けの表、UDP の endpoint の表、タイマーの輪、出力の
+    /// list と制御の輪、知らせの list、chunk の置き場です。
     pub fix: u64,
     /// N_c × (f_s + f_r + r_f + h_f) です。
     pub floor_conn: u64,
@@ -36,6 +37,12 @@ pub struct Bound {
     pub boost: u64,
     /// M_frag:再組み立ての表の保持 byte の上限です。
     pub frag: u64,
+    /// M_udp_rx:UDP の受信の byte の予算と、受信の datagram の管理の配列と、chunk の管理の配列の半分です。
+    pub udp_rx: u64,
+    /// M_udp_tx:UDP の送信の byte の予算と、送信の datagram の管理の配列と、chunk の管理の配列の残りの半分です。
+    pub udp_tx: u64,
+    /// N_ping × c_ping:ping の endpoint の行と応答の置き場です。
+    pub ping: u64,
     /// 項の和です。
     pub total: u64,
     /// 段を変える間の一時の保持で、式に含めない項です。1 本の接続の操作の中で起きるので、同時に起きる数は boost の
@@ -52,6 +59,7 @@ pub(crate) struct FixParts {
     pub(crate) syn: u64,
     pub(crate) tw: u64,
     pub(crate) listeners: u64,
+    pub(crate) udp_endpoints: u64,
     pub(crate) wheel: u64,
     pub(crate) output: u64,
     pub(crate) events: u64,
@@ -66,6 +74,7 @@ impl FixParts {
             + self.syn
             + self.tw
             + self.listeners
+            + self.udp_endpoints
             + self.wheel
             + self.output
             + self.events
@@ -107,6 +116,7 @@ pub(crate) fn fix_parts(l: &Limits, mtu: usize, stack_size: usize) -> FixParts {
             + index::capacity_for(l.tw_rows) * ent
             + n * size_of::<u32>()),
         listeners: b(PORTS * size_of::<PortRow<Listener>>()),
+        udp_endpoints: b(PORTS * size_of::<PortRow<UdpEp>>()),
         wheel: b(
             nodes * (size_of::<u64>() + 2 * size_of::<u32>() + size_of::<u16>())
                 + nodes * size_of::<u32>(),
@@ -133,12 +143,19 @@ impl Bound {
         let floor_conn = b(l.conns()) * floor_per_conn();
         let boost = b(BOOST_SLOTS) * boost_per_slot() + b(Budget::slot_bytes());
         let frag = b(frag::LIMITS.bytes);
+        let ck = b(udp::CHUNKS * Udp::chunk_rec_size());
+        let udp_rx = b(udp::RX_BYTES) + b(l.udp_rx_datagrams * Udp::dgram_size()) + ck.div_ceil(2);
+        let udp_tx = b(udp::TX_BYTES) + b(l.udp_tx_datagrams * Udp::dgram_size()) + ck / 2;
+        let ping = b(PING_ENDPOINTS * (mtu + Pings::ep_size()));
         Self {
             fix,
             floor_conn,
             boost,
             frag,
-            total: fix + floor_conn + boost + frag,
+            udp_rx,
+            udp_tx,
+            ping,
+            total: fix + floor_conn + boost + frag + udp_rx + udp_tx + ping,
             transient: b(BOOST_SLOTS) * (SEND_FLOOR + RECV_FLOOR),
         }
     }
@@ -171,6 +188,14 @@ pub struct Held {
     pub reserved: u64,
     /// 再組み立ての表が保持する断片の写しの byte です。固定の管理領域は含みません。
     pub frag_bytes: usize,
+    /// UDP の受信が持つ chunk の byte と datagram の数です。
+    pub udp_rx_bytes: usize,
+    pub udp_rx_datagrams: usize,
+    /// UDP の送信が持つ chunk の byte と datagram の数です。
+    pub udp_tx_bytes: usize,
+    pub udp_tx_datagrams: usize,
+    /// 使っている ping の endpoint です。
+    pub ping_endpoints: usize,
     /// 知らせることのある対象の数です。
     pub events: usize,
 }

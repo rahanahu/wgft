@@ -27,8 +27,9 @@ fn stack_allocations_stay_within_the_bound() {
             "K {k}: the budget allocates {budget_bytes} bytes over its term {}",
             bound.boost
         );
-        // 作ったばかりの核の確保は、固定の項と boost の配列と再組み立ての表の項の内にあります。
-        let fixed = bound.fix + bound.boost + bound.frag;
+        // 作ったばかりの核の確保は、固定の項と boost の配列と再組み立ての表と UDP と ping の項の内にあります。
+        // UDP の項の中身の予算は chunk を受けた時に使うので、作った時は管理の配列だけを持ちます。
+        let fixed = bound.fix + bound.boost + bound.frag + bound.udp_rx + bound.udp_tx + bound.ping;
         assert!(used as u64 <= fixed, "K {k}: {used} bytes over {fixed}");
         assert!(
             (peak_bytes() - base) as u64 <= bound.total,

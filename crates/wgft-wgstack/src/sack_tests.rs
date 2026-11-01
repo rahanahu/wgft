@@ -852,8 +852,7 @@ fn check_loss_frontier(c: &mut crate::tcp::ctx::Conn<'_>) {
 
 /// 損失、並べ替え、SACK の取り消し、RTO を無作為に起こす相手に対して、scoreboard の欄が記録を数え直した値と
 /// 一致し続け、境目が RFC 6675 の範囲より手前に留まらないことを確かめます (Go の
-/// `TestScoreboardAgainstRecount`)。Go の PMTU の引き下げの手順は PR 6 の段で足すので、この試験の乱数の分岐からは
-/// 外れています。
+/// `TestScoreboardAgainstRecount`)。
 #[test]
 fn scoreboard_against_recount() {
     for seed in 1..=40u64 {
@@ -908,7 +907,13 @@ fn scoreboard_recount_seed(seed: u64) {
             q.ivs.clear();
             q.ack(&mut n);
         } else if r < 83 {
-            // Go ではここで PMTU を引き下げます。
+            let now = crate::stack::ns(n.now);
+            let mut cs = n.s.conn(i);
+            if cs.t.snd_una != cs.t.snd_max && cs.t.pmtu > 700 {
+                let mtu = cs.t.pmtu - 100 - rng.below(200) as u32;
+                let una = cs.t.snd_una;
+                cs.pmtu_drop(una, mtu, now);
+            }
         } else {
             n.advance(Duration::from_millis(1 + rng.below(60) as u64));
         }

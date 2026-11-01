@@ -182,6 +182,8 @@ pub(crate) struct Table {
     base_cost: usize,
     /// `base_cost` と保持する断片の写しの容量の和です。
     used: usize,
+    /// 使っている項目の数です。核が掃除の期限を毎回の待ちで調べるので、数えて持ちます。
+    live: usize,
     evicted: u64,
 }
 
@@ -436,6 +438,7 @@ impl Table {
             pieces: FixedVec::try_filled(l.fragments, |_| Piece::default())?,
             base_cost: base,
             used: base,
+            live: 0,
             evicted: 0,
         })
     }
@@ -446,6 +449,9 @@ impl Table {
                 self.used -= p.data.capacity();
                 *p = Piece::default();
             }
+        }
+        if self.entries[i].used {
+            self.live -= 1;
         }
         self.entries[i] = Assembly::default();
     }
@@ -499,6 +505,11 @@ impl Table {
                 self.clear_entry(i);
             }
         }
+    }
+
+    /// 使っている項目があるかを返します。
+    pub(crate) fn has_entries(&self) -> bool {
+        self.live > 0
     }
 
     /// 保持 byte (`base_cost` を含む)、項目の数、断片の数を返します。
@@ -588,6 +599,7 @@ impl Table {
             let Some(i) = free.or_else(|| self.evict_oldest(None)) else {
                 return Outcome::Capacity;
             };
+            self.live += 1;
             self.entries[i] = Assembly {
                 used: true,
                 key,
@@ -837,5 +849,6 @@ const _: () = {
     assert!(size_of::<Table>() <= TABLE_CHARGE);
 };
 
+mod entry;
 #[cfg(test)]
 mod tests;

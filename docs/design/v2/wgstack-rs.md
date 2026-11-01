@@ -5,7 +5,7 @@ wgstack は wgft 自身の TCP/IP の stack です。
 agent のユーザー空間モードは、トンネルの中の TCP、UDP、ICMP をこの stack で終えます。
 このため Rust の agent は root の権限も TUN も要りません。
 段を踏んで実装しています。
-PR 5 の範囲 (受動の open、閉じる手順と TIME_WAIT、アプリケーションの操作と知らせ、データの送受信、RTO、窓の probe、SACK による回復と D-SACK、RACK-TLP、不要な再送の取り消し、CUBIC と NewReno、boost の取得と回収) まで実装しました。
+PR 6 の範囲 (受動の open、閉じる手順と TIME_WAIT、アプリケーションの操作と知らせ、データの送受信、RTO、窓の probe、SACK による回復と D-SACK、RACK-TLP、不要な再送の取り消し、CUBIC と NewReno、boost の取得と回収、UDP の endpoint と予算、echo と ping、ICMP の誤りと PMTU、断片の入口) まで実装しました。
 構造、境目、メモリ、作業の順をここで決め、値と細部は[実装の時に決めること](#実装の時に決めること)に残します。
 
 ## この文書の読み方
@@ -226,7 +226,7 @@ IPv4 でない packet は device の層が捨てます。
   Go の `WriteTo` が予約できるまで待つ挙動は、handle の層の待ちになります
 - keepalive の ping:`open_ping(now, Ipv4Addr) -> Result<PingId>`、`send_ping`、`recv_ping`、`close_ping`。
   表は Go と同じ固定の大きさで、満杯なら誤りを返します
-- 会計の故障:`udp_receive_fault() -> Option<Fault>` が、`agent doctor` の `tunnel.udp_accounting` に使う最初の違反を返します ([会計の不整合](../userspace/udp-accounting.md#会計の不整合))
+- 会計の故障:`udp_receive_fault() -> Option<UdpFault>` が、`agent doctor` の `tunnel.udp_accounting` に使う最初の違反を返します ([会計の不整合](../userspace/udp-accounting.md#会計の不整合))
 - 状態:`stats() -> Stats`、`bound() -> Bound`、`held() -> Held`
 - 不変条件の確かめ:`check_invariants() -> Result<(), InvariantError>` が、予約の和が `Bound` 以下であること、表の数と予約が一致すること、chunk と配列の持ち主が 1 つであることを確かめます。
   公開の API として文書に書き、試験の担当の fuzz と敵対的な試験が使います。
@@ -581,7 +581,8 @@ I1 から I7 の不変条件もそのまま守ります ([不変条件](../users
   受け付けるアドレスは 1 つなので、表は 1 つです。
   `ListenerId` と `UdpId` の世代は 32 bit です。
   ポートを開き直す回数は接続の枠の使い直しよりずっと少なく、行を小さく保つためです。
-  UDP の endpoint の表は同じポートごとの行の表を使い、行の型と項 N_ue × c_ue は UDP の段 (PR 6) が足します
+  UDP の endpoint の表は同じポートごとの行の表を使います。
+  行の型と項 N_ue × c_ue は PR 6 で足しました ([PR 6 で決めたこと](#pr-6-で決めたこと))
 - 枠と共に持つ配列:floor の送信の記録の輪と区間の表は、Go と同じく枠を初めて使う時に確保し、枠と共に持ちます。
   上界は作成の時に数えるので、確保の時機は上界を変えません
 - boost の配列:提案として、B 本の枠の分の boost の記録の輪と区間の表を `Budget` の作成の時に確保し、`Budget` の中に置きます。
@@ -677,7 +678,7 @@ Go の `-update` の形に当たります。
 試験だけの欄を型に足さないのはこのためで、確保の失敗の注入は型の外に置きます。
 Linux、Windows、macOS の CI で同じ表になることを確かめました。
 核の値の大きさは hook の無い核で数え、`Stack::bound` は使う hook の核の大きさで数えます。
-UDP と ping の項は、その表を作る段 (PR 6) が足します。
+UDP と ping の項は PR 6 で足しました。
 
 ### 需要で育つバッファとの関係
 
@@ -995,7 +996,8 @@ Go の試験を変える PR は、規則どおり wgstack の関門を流しま�
   上界の `tw` の項は、行ごとの節と枠ごとの先頭を数えます
 - 接続の枠の確保の失敗:握手の最後の ACK で floor の記録の輪と区間の表を確保できなければ、accept の待ち行列が
   満杯の時と同じく ACK を捨てて行を残し、`accept_overflow` を数えます
-- 断片、UDP、ICMP:PR 6 までは捨てて理由ごとに数えます (`fragments_dropped`、`udp_dropped`、`icmp_dropped`)
+- 断片、UDP、ICMP:PR 6 までは捨てて理由ごとに数えました (`fragments_dropped`、`udp_dropped`、`icmp_dropped`)。
+  PR 6 で入口を足しました
 - chunk の確保の失敗:受信のバッファが chunk を確保できなければ、segment を状態を変えずに捨てて
   `recv_no_memory` を数えます。
   書き込みは `Error::NoMemory` を返します
@@ -1042,8 +1044,8 @@ Go の試験を変える PR は、規則どおり wgstack の関門を流しま�
 - 書き込みと boost:Go の `Write` は boost を得た後に、同じ呼び出しの中で広がった空きに書き続けます。
   Rust の `write` は 1 回で書けた量を返し、広がった空きは次の `write` が使います。
   待つことは handle の層が持つためです ([アプリケーションの操作](#アプリケーションの操作))
-- PMTU:Fragmentation Needed による PMTU の引き下げ (Go の `pmtuDrop` と `markLostLonger`) は ICMP を入れる PR 6 が足します。
-  Go の PMTU の試験もその段が移します
+- PMTU:Fragmentation Needed による PMTU の引き下げ (Go の `pmtuDrop` と `markLostLonger`) は、ICMP を入れる PR 6 で足しました。
+  Go の PMTU の試験もその段で移しました
 - 不変条件:`check_invariants` は、使っている接続ごとに scoreboard を記録から数え直して比べ (`tcp::sack::check_scoreboard`)、boost の無い接続が floor の受信の予約を持つことを確かめます。
   Go の試験は数え直しを `checkScoreboard` で行います。
   Rust は Go の試験が見逃した 2 つの変異 (最も右の SACK 済みの byte を更新しないことと、損失の境目を越えた記録を送った時刻の順の list に残すこと) も捉えるよう、SACK 済みの byte があれば最も右の SACK 済みの記録の端が `high_sack` と等しいこと、境目より手前の SACK 済みでない記録が list にあるなら今の世代で再送したものであることも確かめます。
@@ -1064,6 +1066,84 @@ Go の試験を変える PR は、規則どおり wgstack の関門を流しま�
 - 記録の照合:`crates/wgft-wgstack-dut/stages.json` の `landed` に 5 を足し、SACK、timestamp、CUBIC、boost の印の記録を照合に入れました。
   4b と 5 の段の印の記録はすべて Go の応答と byte の単位で一致し、2 節の台本もすべて通ります。
   意図した違いの一覧に足した行はありません
+
+### PR 6 で決めたこと
+
+実装の担当が決めた点です。
+理由と共に挙げ、所有者か監督が変えるときはこの節を直します。
+
+- UDP の endpoint の行:行は endpoint の 2 つの向きの予算、向きと大きさの区分ごとの今の chunk、受信の FIFO の先頭と末尾、送信の空きを待つ list の節を持ち、待ち受けと同じポートごとの行の表 (`PortTable`) に置きます。
+  endpoint の byte の予算はいつも chunk の倍数なので chunk の数で持ち、datagram の番号は 16 bit にしました。
+  このため `Limits` の UDP の datagram の数は 1 から 65,535 です。
+  行はポートの表の世代と印を含めて 36 byte で、表は 2.3 MiB です ([上界の表](wgstack-bound.md))。
+  受け付けるアドレス 1 つの agent の固定の項としては小さいので、密な表と番号の引き当ての 2 段にはしませんでした
+- `Limits` の UDP の数:Go の試験だけが小さくする `udpRxDgrams` と `udpTxDgrams` に当たる `udp_rx_datagrams` と `udp_tx_datagrams` を `Limits` に足しました。
+  試験の担当の `core` の fuzz と記録の `HELLO` の上限の組が使います。
+  既定は Go の本番の値 (4096 と 1024) です。
+  試験の `small_limits` は Go の `smallLimits` と同じく、再組み立ての表と UDP の予算を本番の値にしました
+- 知らせの対象:UDP の endpoint は、同じポートの TCP の待ち受けと知らせの対象を分け合い、印 (`EV_ACCEPT`、`EV_UDP_READ`、`EV_UDP_WRITE`) で分けます。
+  待ち受けと endpoint の開閉は自分の印だけを消します (`EventList::clear_bits`)。
+  ポートの対象を別に並べると知らせの表が 65,536 個の対象の分だけ大きくなるためです。
+  ping の endpoint の対象はポートの後に並べます
+- `UdpWritable`:`send_to` が `WouldBlock` を返した endpoint だけを、行に通した待ちの list に入れます。
+  送信の予約が 1 つでも返ったら、list の endpoint すべてに知らせて list を空にします。
+  Go の `wakeTx` が、どの予約が返っても待つ書き手をすべて起こし、待つ書き手がいなければ何もしないのと同じです。
+  Go の `Close` は待つ書き手をすべて起こしますが、Rust の `close_udp` は閉じた endpoint を list から外すだけで、ほかの endpoint に知らせません。
+  閉じても送信の予約は返らないので、ほかの endpoint の `send_to` の結果は変わらないためです
+- 閉じた endpoint の送り残し:Go では閉じた endpoint の値を送り残しの datagram が持ち続け、送り終えた時にその値の予算を返します。
+  同じポートを開き直した endpoint の予算はその値と別です。
+  Rust の datagram は持ち主のポートと開いた時の世代を持ち、送り終えた時に世代が違えば核の予算だけを返します
+- chunk の確保の失敗:Go の chunk の置き場は確保に失敗しませんが、Rust の chunk の確保は失敗しえます。
+  予約は要る chunk を先に揃え、揃わなければ取った chunk と datagram の番号を戻し、何も変えずに断ります。
+  受信では核の予算で断ったことにして `udp_tunnel_full` に数えます。
+  送信の `send_to` は、TCP の `write` と同じく待たずに `Error::NoMemory` を返し、endpoint を待ちの list に入れません。
+  `UdpWritable` は送信の予約が返った時にだけ出すので、送信の FIFO が空のまま `WouldBlock` を返すと、知らせが来ずに待ち続けるためです
+- 捨てた数とログ:受信の予算で断った datagram は、Go と同じく `udp_dropped` に数え、加えて endpoint の上限で断った数 (`udp_endpoint_full`) と核の予算で断った数 (`udp_tunnel_full`) に分けて数えます。
+  1 分に 1 回までの門は 1 つで、`LogKind::UdpDropped` の数は予算で断った数の和です。
+  Go のログの行は 2 つの数を書きますが、`LogLine` は 1 つの数だけを運ぶので、内訳は `stats` で読みます。
+  ログの文面は記録の照合の対象ではありません。
+  会計の不整合は門を通さずに 1 回だけ `LogKind::UdpFault` を出し、中身は `udp_receive_fault` が返します。
+  ICMP の誤りの速さの制限で送らなかった数は `icmp_limited` に数えます
+- 断片の数:`fragments_dropped` は、Go の `FragmentsDropped` と同じく、datagram を完成させなかった断片 (保持した断片、重なった断片、捨てた断片) を数えます
+- 再組み立ての表の掃除の期限:`poll_timeout` は、表が項目を持つ間だけ次の掃除の時刻を返します (Go の `nextDeadline`)。
+  呼び手の待ちのたびに表の全体をたどらないよう、表は使っている項目の数を持ちます
+- 誤り:`Error` に `InvalidAddress`、`MessageTooLong`、`UdpStopped`、`TableFull`、`InvalidMessage`、`NoBufferSpace` を足しました。
+  制御の輪が満杯の時の `send_ping` は、Go と同じく IP の ID を 1 つ使ってから `NoBufferSpace` を返します。
+  Go と同じく、この拒否は `ctl_dropped` に数えません
+- まれにしか触らない状態の置き場:UDP の状態、ping の表、ICMP の誤りの速さの制限、再組み立ての表の掃除の時刻は、核の共有の状態 (`Shared`) の中に置きます。
+  `Shared` は 464 byte 大きくなり、segment ごとの経路が触る欄のキャッシュの行の中の位置がずれます。
+  これらを作成の時に確保する別の値に移す形も試しましたが、`send_segment/1024` の L1 の miss は減らずに増えたので採りませんでした ([PR 6 の測定](#pr-6-の測定))
+- ping の表:応答の置き場は作成の時に確保する配列です。
+  応答の置き場は Go と同じく MTU の大きさで、Go は最初に使う時に確保しますが、Rust は 16 個すべてを作成の時に確保します。
+  上界はどちらも 16 個の分を数えます
+- PMTU:`pmtu_drop` を `tcp::input` に、`mark_lost_longer` を `tcp::sack` に Go と同じ形で写しました。
+  `scoreboard_against_recount` の試験は、Go と同じく乱数の分岐で PMTU を引き下げます
+- 試験:Go の `udp_test.go`、`frag_test.go`、`fragidle_test.go`、`checksum_test.go` の UDP の試験、`sack_test.go` と `observe_test.go` の PMTU の試験を移しました。
+  Go の試験の読み書きの期限と、`Close` で待ちが解けることは handle の層の試験に移ります。
+  `TestIdleDeviceSweepsAHeldFragment` は、Device のタイマーの goroutine の代わりに、`poll_timeout` の時刻を追う駆動が寿命の後に Time Exceeded を送ることを確かめます。
+  受信の洪水の試験は 1 つの datagram ごとに `check_invariants` を呼ぶと遅いので、間を置いて呼びます。
+  Go の試験に無い試験も足しました。
+  送信の chunk の確保の失敗と取った chunk と番号の戻し、同じポートの待ち受けと endpoint が知らせの対象を分け合うこと、endpoint の chunk の上限と核の件数の上限の境目、ICMP の誤りへの誤りと multicast の送信元と引用の大きさの守り、断片を保持した時の掃除の時刻の張り直し、中身がちょうど新しい MSS の記録、PMTU の引き下げが損失の境目を数え直すこと、ログの数です
+- 検出力:変異の試験で残った変異のうち、次のものは出力を変えないことを確かめ、Go と同じ形のために守りを残しました。
+  核の datagram の件数の予算の比べ (空きの list が先に尽きます)、閉じた endpoint の送り残しが今の chunk を外す時の世代の比べ (その chunk は送り残しが持つ間ほかの endpoint に渡りません)、checksum の 0 を 0xffff にする所 (`write_udp_header` も同じ置き換えをします)、Fragmentation Needed の引用の送信元の比べ (接続の表を引用の送信元で引くので見つかりません)、ICMP の誤りの後続の断片の守り (呼び手は後続の断片を渡しません)、再組み立ての知らせの後続の断片の守りと最初の断片の有無 (`param_problem_ok` と `timeout_quote` が同じ条件で断ります)
+- 不変条件:`check_invariants` は、UDP の chunk と datagram の空きの list、核と endpoint の予算と保持する chunk と datagram の一致、区分の枠の使っている数、受信と送信の FIFO、待ちの list、ping の行を確かめます。
+  核の chunk の置き場の数は、接続の輪と UDP の chunk の和と比べます
+
+#### PR 6 の測定
+
+2026-11-01 に、E コアの車線 (`wgft-heavy --class tool --timing`、release の build) で、PR 5 の頭、PR 6 (UDP の状態を `Shared` の中に置く形)、UDP の状態を作成の時に確保する別の値に移した形の 3 つを比べました。
+`perf stat` で `send_segment/1024` を 4 秒ずつ 4 回流し、1,000 命令あたりの L1 の miss (`mem_load_uops_retired.l1_miss`) と IPC を数えました。
+
+| build | 1,000 命令あたりの L1 の miss | IPC |
+| --- | --- | --- |
+| PR 5 の頭 | 12.81、11.21、11.20、11.31 | 2.163 から 2.171 |
+| PR 6 | 11.44、13.09、11.73、11.31 | 2.163 から 2.215 |
+| 別の値に移した形 | 14.61、13.36、14.61、12.90 | 2.183 から 2.214 |
+
+決まった時間に流した命令の数と IPC は 3 つで同じ程度でした。
+`send_segment/1024` の criterion の中央の推定は、同じ build でも 631 ns と 677 ns の間で回ごとに変わり、3 つの差はこの揺れの内でした。
+L1 の miss は別の値に移した形だけが多く、PR 6 の形と PR 5 の頭の差は回ごとの揺れの内でした。
+別の値に移した形で増えた理由は調べていません。
 
 ### 後の段
 
@@ -1091,6 +1171,5 @@ agent の置き換えが終わった後に、次の段を順に決めます。
 - 1 つのスレッドのデータプレーンが、Windows と macOS の時計の分解能とスケジューラの下で、遅延 ACK と RTO の規則を保てるかは確かめていません
 - FMA を使わない build で作った記録の浮動小数点の値に、Rust が同じ値で並べるかは、記録を作るまで分かりません
 - 確保の数えで測る保持と RSS の比は、Rust の agent では測っていません
-- UDP の endpoint の表をポートの数で持つ費用は、UDP の段で行の大きさを決めるまで分かりません
 
 [v2: Rust への移行](README.md)

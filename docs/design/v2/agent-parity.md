@@ -144,7 +144,7 @@ UDP の中継は、[wgstack の Rust 版の設計 (#681)](https://github.com/rah
 | `bind_udp` | トンネルのアドレスとポートで、接続しない endpoint を開きます。同じポートが使用中なら誤りを返し、中継はルールを `error` にして理由を `udp/<port>: bind ...` の形で報告します |
 | `recv_from` | 呼び手のバッファに中身を写し、長さと送信元を返します。写した時点で、核はその datagram の受信の予約を返します。handle の層は読む物が無ければ `UdpReadable` を待ちます |
 | `send_to` | 送信の予算 (Device の全体と endpoint 1 つの上限) を予約できなければ `WouldBlock` を返し、handle の層は `UdpWritable` を待ちます。MTU を超える datagram は核が DF を立てずに断片に分けます |
-| `close_udp` | endpoint を閉じ、予約をすべて返します。handle の層は待っている受け取りと送るを解きます |
+| `close_udp` | endpoint を閉じ、受けて読まれていない datagram の予約を返します。送り残しの datagram は、Go と同じく送り終えた時に予約を返します。handle の層は待っている受け取りと送るを解きます |
 | `stats` と `poll_log` | 理由ごとの捨てた数と、1 分に 1 回までの門を通ったログの知らせです。agent が英語の 1 行にしてログに出し、`agent doctor` にも使います。MSS の下限で捨てた数もここから取ります |
 | `udp_receive_fault` | Device の UDP の会計が不変条件の違反で止まっていれば、最初の違反を返します。`agent doctor` の `tunnel.udp_accounting` に使います |
 

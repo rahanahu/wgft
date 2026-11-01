@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::event::{Bits, EventList};
 use crate::fixed_vec::FixedVec;
 use crate::frag;
+use crate::icmp::Pings;
 use crate::index::Index;
 use crate::output::{CtlRing, Dlist};
 use crate::rng::ChaCha8;
@@ -21,6 +22,7 @@ use crate::tcp::listen::{Listener, PortTable};
 use crate::tcp::syn::SynTable;
 use crate::tcp::timewait::TwTable;
 use crate::tcp::{IP_TCP_HEADERS, TS_OPTION_LEN};
+use crate::udp::Udp;
 use crate::wheel::Wheel;
 use crate::wire::{self, FLAG_ACK, FLAG_RST, Segment, TcpHeader, Tuple};
 use core::fmt;
@@ -37,8 +39,12 @@ pub(crate) const NUM_CLASSES: usize = 4;
 pub(crate) const EV_READ: Bits = 1;
 pub(crate) const EV_WRITE: Bits = 2;
 pub(crate) const EV_CLOSED: Bits = 4;
-/// 待ち受けの知らせの印です。
+/// ポートの知らせの印です。TCP の待ち受けと UDP の endpoint は同じポートの対象を分け合います。
 pub(crate) const EV_ACCEPT: Bits = 1;
+pub(crate) const EV_UDP_READ: Bits = 2;
+pub(crate) const EV_UDP_WRITE: Bits = 4;
+/// ping の endpoint の知らせの印です。
+pub(crate) const EV_PING: Bits = 1;
 
 /// 出力の組の状態です (Go の `output`)。
 #[derive(Debug)]
@@ -48,6 +54,8 @@ pub(crate) struct Output {
     /// 送るもののある行です。握手の途中の行は 0 から、TIME_WAIT の行は握手の途中の表の大きさから数えます。
     pub(crate) rows: Dlist,
     pub(crate) ctl: CtlRing,
+    /// UDP の送信の FIFO にある datagram の数です。
+    pub(crate) udp_queued: usize,
     pub(crate) cur: usize,
     pub(crate) deficit: [i64; NUM_CLASSES],
 }
@@ -58,7 +66,7 @@ impl Output {
             CLASS_CONN => self.conns.is_empty(),
             CLASS_ROW => self.rows.is_empty(),
             CLASS_CTL => self.ctl.len() == 0,
-            // UDP の送信の FIFO は PR 6 が足します。
+            CLASS_UDP => self.udp_queued == 0,
             _ => true,
         }
     }
@@ -102,9 +110,18 @@ pub struct Stats {
     pub recv_trimmed: u64,
     pub recv_no_memory: u64,
     pub challenge_limited: u64,
+    /// 再組み立ての表が保持したか捨てた断片です。datagram を完成させた断片は数えません (Go の
+    /// `FragmentsDropped` と同じ数え方です)。
     pub fragments_dropped: u64,
+    /// 捨てた UDP の datagram です。予算で断ったものと、壊れたものと、会計の不整合の後に届いたものを含みます。
     pub udp_dropped: u64,
+    /// endpoint 1 つの上限で断った受信の datagram です。
+    pub udp_endpoint_full: u64,
+    /// 核の全体の予算で断った受信の datagram です。
+    pub udp_tunnel_full: u64,
     pub icmp_dropped: u64,
+    /// 速さの制限で送らなかった ICMP の誤りです。
+    pub icmp_limited: u64,
     pub malformed: u64,
     pub bad_checksum: u64,
     pub not_local: u64,
@@ -170,9 +187,15 @@ pub enum LogKind {
     OooDropped,
     /// 会計の不整合で接続を閉じました。
     AccountingFault,
+    /// 受信の socket が読まれず、UDP の予算で datagram を捨てました。`count` は予算で断った数です。
+    UdpDropped,
+    /// UDP の会計が不変条件の違反を見つけ、核の UDP をすべて止めました。1 回だけ出します。違反の中身は
+    /// [`crate::Stack::udp_receive_fault`] が返します。
+    UdpFault,
 }
 
-const LOG_KINDS: [LogKind; 7] = [
+/// 門を通るログの種類です。`UdpFault` は 1 回だけ出すので門を持ちません。
+const LOG_KINDS: [LogKind; 8] = [
     LogKind::MssFloor,
     LogKind::SynFull,
     LogKind::AcceptOverflow,
@@ -180,6 +203,7 @@ const LOG_KINDS: [LogKind; 7] = [
     LogKind::CtlDropped,
     LogKind::OooDropped,
     LogKind::AccountingFault,
+    LogKind::UdpDropped,
 ];
 
 /// 門を通った 1 行の材料です。`count` は核を作ってからの数です。
@@ -221,6 +245,17 @@ impl fmt::Display for LogLine {
                 f,
                 "wgstack: closed a connection after an internal accounting error; {n} since the tunnel was built"
             ),
+            LogKind::UdpDropped => write!(
+                f,
+                "wgstack: dropped UDP datagrams because receiving sockets are not read fast enough; {n} over the per-socket limit of {} bytes and {} datagrams or the tunnel budget of {} bytes and {} datagrams since the tunnel was built",
+                crate::udp::RX_BYTES / crate::udp::ENDPOINT_SHARE,
+                crate::udp::RX_DATAGRAMS / crate::udp::ENDPOINT_SHARE,
+                crate::udp::RX_BYTES,
+                crate::udp::RX_DATAGRAMS,
+            ),
+            LogKind::UdpFault => f.write_str(
+                "wgstack: UDP accounting found an internal inconsistency and stopped all UDP on this tunnel; restart the agent to recover",
+            ),
         }
     }
 }
@@ -241,7 +276,7 @@ pub(crate) struct Gates {
 }
 
 impl Gates {
-    fn allow(&mut self, kind: LogKind, now: i64, count: u64) {
+    pub(crate) fn allow(&mut self, kind: LogKind, now: i64, count: u64) {
         let Some(i) = LOG_KINDS.iter().position(|&k| k == kind) else {
             return;
         };
@@ -292,6 +327,13 @@ pub(crate) struct Shared {
     pub(crate) fired: FixedVec<u32>,
     pub(crate) chunks: ChunkPool,
     pub(crate) frag: frag::Table,
+    /// 再組み立ての表を次に掃除する時刻 (ns) です。
+    pub(crate) frag_next_sweep: i64,
+    pub(crate) udp: Udp,
+    pub(crate) pings: Pings,
+    /// ICMP の誤りの速さの制限の秒と、その秒に残る数です。
+    pub(crate) icmp_sec: i64,
+    pub(crate) icmp_count: i64,
     pub(crate) budget: Budget,
     /// challenge ACK の token bucket です。
     pub(crate) ch_sec: i64,
@@ -312,6 +354,8 @@ impl Shared {
             LogKind::CtlDropped => &mut st.ctl_dropped,
             LogKind::OooDropped => &mut st.ooo_dropped,
             LogKind::AccountingFault => &mut st.accounting_faults,
+            // UDP の数は入口が数えます。
+            LogKind::UdpDropped | LogKind::UdpFault => return,
         };
         *c += 1;
         let n = *c;
@@ -501,6 +545,7 @@ mod tests {
             conns: Dlist::new(2).unwrap(),
             rows: Dlist::new(2).unwrap(),
             ctl: CtlRing::new(2, 64).unwrap(),
+            udp_queued: 0,
             cur: 0,
             deficit: [0; NUM_CLASSES],
         };

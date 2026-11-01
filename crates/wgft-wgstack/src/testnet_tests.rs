@@ -32,7 +32,8 @@ pub(crate) const DUT: Ipv4Addr = Ipv4Addr::new(10, 9, 0, 1);
 pub(crate) const PEER: Ipv4Addr = Ipv4Addr::new(10, 9, 0, 2);
 pub(crate) const TEST_MTU: usize = 1420;
 
-/// 試験の表の大きさです。上界の試験は表が満ちるところを見るので小さくします。
+/// 試験の表の大きさです。上界の試験は表が満ちるところを見るので小さくします。再組み立ての表と UDP の予算は、
+/// Go の試験の `smallLimits` と同じく本番の値です。
 pub(crate) fn small_limits() -> Limits {
     Limits {
         max_flows: 16,
@@ -40,8 +41,7 @@ pub(crate) fn small_limits() -> Limits {
         syn_rows: 16,
         tw_rows: 32,
         ctl_slots: 16,
-        frag_entries: 4,
-        frag_pieces: 8,
+        ..Limits::default()
     }
 }
 
@@ -462,4 +462,72 @@ impl PeerConn {
         }
         data
     }
+}
+
+/// 相手 `src` から核の `dport` への UDP の datagram を作ります (Go の `buildUDP`)。
+pub(crate) fn build_udp(src: SocketAddrV4, dport: u16, payload: &[u8]) -> Vec<u8> {
+    let ulen = wire::UDP_HEADER_LEN + payload.len();
+    let mut b = vec![0u8; IP_HEADER_LEN + ulen];
+    let total = b.len();
+    wire::write_ipv4_header(
+        &mut b,
+        total,
+        7,
+        wire::PROTO_UDP,
+        src.ip().to_bits(),
+        DUT.to_bits(),
+    );
+    let u = &mut b[IP_HEADER_LEN..];
+    u[0..2].copy_from_slice(&src.port().to_be_bytes());
+    u[2..4].copy_from_slice(&dport.to_be_bytes());
+    u[4..6].copy_from_slice(&(ulen as u16).to_be_bytes());
+    u[8..].copy_from_slice(payload);
+    let sum = wire::pseudo_sum(src.ip().to_bits(), DUT.to_bits(), wire::PROTO_UDP, ulen);
+    let mut cs = !wire::checksum(sum, u);
+    if cs == 0 {
+        cs = 0xffff;
+    }
+    u[6..8].copy_from_slice(&cs.to_be_bytes());
+    b
+}
+
+/// 相手 `src` から核への ICMP の message `msg` を作ります。checksum を書きます (Go の `buildICMP`)。
+pub(crate) fn build_icmp(src: Ipv4Addr, msg: &[u8]) -> Vec<u8> {
+    let mut b = vec![0u8; IP_HEADER_LEN + msg.len()];
+    let total = b.len();
+    wire::write_ipv4_header(
+        &mut b,
+        total,
+        9,
+        wire::PROTO_ICMP,
+        src.to_bits(),
+        DUT.to_bits(),
+    );
+    b[IP_HEADER_LEN..].copy_from_slice(msg);
+    wire::finish_icmp(&mut b[IP_HEADER_LEN..]);
+    b
+}
+
+/// option の無い IPv4 の packet を、中身 `size` byte ごとの断片に分けます (Go の `splitIPv4`)。
+pub(crate) fn split_ipv4(pkt: &[u8], size: usize, id: u16) -> Vec<Vec<u8>> {
+    let payload = &pkt[IP_HEADER_LEN..];
+    let mut out = Vec::new();
+    let mut off = 0;
+    while off < payload.len() {
+        let end = (off + size).min(payload.len());
+        let mut f = pkt[..IP_HEADER_LEN].to_vec();
+        f.extend_from_slice(&payload[off..end]);
+        let len = f.len() as u16;
+        f[2..4].copy_from_slice(&len.to_be_bytes());
+        f[4..6].copy_from_slice(&id.to_be_bytes());
+        let mut fl = (off / 8) as u16;
+        if end < payload.len() {
+            fl |= 0x2000;
+        }
+        f[6..8].copy_from_slice(&fl.to_be_bytes());
+        wire::set_ipv4_checksum(&mut f[..IP_HEADER_LEN]);
+        out.push(f);
+        off = end;
+    }
+    out
 }
