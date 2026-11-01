@@ -13,8 +13,22 @@ name = "wgstack-dut"
 path = "src/main.rs"
 
 [dependencies]
+flate2.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 wgft-tcpharness.workspace = true
 wgft-wgstack.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "replay"
+harness = false
+
+[[test]]
+name = "scenarios"
+harness = false
+
+[dev-dependencies]
+libtest-mimic.workspace = true

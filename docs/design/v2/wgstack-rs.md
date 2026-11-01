@@ -780,6 +780,8 @@ Go の wgstack の記録がすべて一致することは、ラボの一式で�
   受信の窓の自動調整と受け手の ACK の規則を PR 4b に入れるのはこのためです。
   timestamp に頼る不要な再送の取り消しと boost の取得は PR 5 で入るので、timestamp と boost を使う記録は PR 5 から照らします
 - 照らす範囲の広がり:PR 5 で SACK、timestamp、CUBIC、boost の印の記録、PR 6 で UDP と ICMP と断片と ping の印の記録が加わります
+- 段の表:核に入った段は `crates/wgft-wgstack-dut/stages.json` の `landed` が持ちます。
+  段を入れる PR は `landed` にその段を足し、その段の印の記録が一致することと、その段の台本が通ることを同じ PR で確かめます
 - 前の条件:すべての記録が一致することを、#680 の「wgstack の上の agent」の段と、agent の置き換えをラボの一式で判定することの前の条件にします
 
 #### bit の一致の条件
