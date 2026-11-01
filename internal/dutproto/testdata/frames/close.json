@@ -1,0 +1,8 @@
+{
+  "kind": "CLOSE",
+  "kind_byte": 11,
+  "msg": {
+    "h": 2
+  },
+  "display": "CLOSE h=2"
+}

@@ -1,0 +1,8 @@
+{
+  "kind": "TIME",
+  "kind_byte": 133,
+  "msg": {
+    "now": 35000000000
+  },
+  "display": "TIME now=35s"
+}

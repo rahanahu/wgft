@@ -1,0 +1,9 @@
+{
+  "kind": "PING_SEND",
+  "kind_byte": 21,
+  "msg": {
+    "h": 4,
+    "data": "0800000000010001"
+  },
+  "display": "PING_SEND h=4 data=8:0800000000010001"
+}

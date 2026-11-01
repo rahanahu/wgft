@@ -1,0 +1,9 @@
+{
+  "kind": "PING_RECV",
+  "kind_byte": 22,
+  "msg": {
+    "h": 4,
+    "max": 1500
+  },
+  "display": "PING_RECV h=4 max=1500"
+}

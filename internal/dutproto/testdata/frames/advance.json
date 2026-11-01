@@ -1,0 +1,8 @@
+{
+  "kind": "ADVANCE",
+  "kind_byte": 4,
+  "msg": {
+    "d": 1500000
+  },
+  "display": "ADVANCE d=1.5ms"
+}

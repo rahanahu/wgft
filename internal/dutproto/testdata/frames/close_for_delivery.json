@@ -1,0 +1,8 @@
+{
+  "kind": "CLOSE_FOR_DELIVERY",
+  "kind_byte": 14,
+  "msg": {
+    "h": 2
+  },
+  "display": "CLOSE_FOR_DELIVERY h=2"
+}

@@ -2,7 +2,7 @@
 
 この文書は、Rust に移る wgstack を確かめる試験の道具の設計を定めます。
 対象は、適合の台本をデータにする言語、台本を流す 2 つの runner、Rust の DUT を別のプロセスとして叩く標準入出力の口、凍結した Go の wgstack の記録との照合、qbench、fuzz、関門です。
-1 節の台本の言語と 2 節の Go の runner は実装済みで、ほかの節は未実装です。
+1 節の台本の言語と 2 節の Go の runner、3 節の口の符号と `dutserve` と `rustdut` は実装済みで、ほかの節は未実装です。
 実装は 8 節の順に積んだ PR で行い、各 PR がこの文書の該当する節を実装に合わせて直します。
 
 Rust の wgstack そのもの (sans-IO の API、crate の分け方、bit の一致の条件、実装の PR の順) は、wgstack の Rust 版の設計 (`docs/design/v2/wgstack-rs.md`) が決めます。
@@ -493,12 +493,17 @@ Rust の wgstack ができた後は、`wgstack-dut` のバイナリを両方の 
 
 | 分け方 | 要求 | 扱い |
 | --- | --- | --- |
-| 状態を変える要求 | `INJECT`、`ADVANCE`、`POLL`、`TCP_LISTEN`、`UDP_LISTEN`、`CLOSE`、`CLOSE_WRITE`、`ABORT`、`CLOSE_FOR_DELIVERY`、`BOOST_POLICY`、`EVENTS`、`UDP_SEND`、`PING_OPEN`、`PING_SEND`、`PING_CLOSE`。結果を返した `ACCEPT`、`READ`、`WRITE`、`UDP_RECV`、`PING_RECV` | 送るたびに、それまでの問い合わせの応答を使えなくする |
-| 問い合わせ | `NOW`、`DELIVERED`、`STATS`、`BOUND`、`HELD`。`WOULD_BLOCK` か 0 byte を返した `ACCEPT`、`READ`、`WRITE`、`UDP_RECV`、`PING_RECV` | 状態を変える要求が間に無ければ送り直さない |
+| 状態を変える要求 | `INJECT`、`ADVANCE`、`POLL`、`TCP_LISTEN`、`UDP_LISTEN`、`CLOSE`、`CLOSE_WRITE`、`ABORT`、`CLOSE_FOR_DELIVERY`、`BOOST_POLICY`、`EVENTS`、`PING_OPEN`、`PING_SEND`、`PING_CLOSE`。結果か `ERROR` を返した `ACCEPT`、`READ`、`WRITE`、`UDP_RECV`、`UDP_SEND`、`PING_RECV` | 送るたびに、それまでの問い合わせの応答を使えなくする |
+| 問い合わせ | `NOW`、`DELIVERED`、`STATS`、`BOUND`、`HELD`。`WOULD_BLOCK` を返した `ACCEPT`、`READ`、`UDP_RECV`、`UDP_SEND`、`PING_RECV`。`WROTE 0` を返した `WRITE`。空の `DATA` を返した `READ` | 状態を変える要求が間に無ければ送り直さない |
 
 `ACCEPT` などは応答を見るまで分け方が決まりません。
-`rustdut` は、`WOULD_BLOCK` の応答を得た要求を問い合わせとして覚え、同じ要求を次に送る前にこの規則を当てます。
-DUT の側は、`WOULD_BLOCK` を返す要求で engine の状態を変えません (3 節)。
+`rustdut` は、問い合わせになった要求の frame の bytes と応答を覚え、同じ bytes の要求を次に送る前にこの規則を当てます。
+DUT の側は、`WOULD_BLOCK` と `WROTE 0` と空の `DATA` を返す要求で engine の状態を変えません (3 節)。
+
+`NOW` の答えは、ほかの問い合わせと違い、`ADVANCE` だけが変えます。
+`rustdut` は `ADVANCE` と `NOW` の応答の時刻を覚え、時刻を一度知った後は `NOW` を送りません。
+手で進める時計の待ちは 1 ms ごとに `POLL`、`NOW`、`ADVANCE` を呼ぶので、`POLL` の後の `NOW` を送り直すと往復が 3 割増えるためです。
+Rust の `ProcessDut` も同じ規則を持ちます。
 
 ## 3. DUT の口 (標準入出力)
 
@@ -528,22 +533,22 @@ packet は binary なので、JSON でなく binary の frame にします。
 
 | 要求 | 本体 | 応答 |
 | --- | --- | --- |
-| `HELLO` | 口の版、時計の形、アドレス、MTU、64 byte の乱数の種、上限の組、boost の与え方、輻輳の制御の試験の選択 | `HELLO_OK` (engine の名前、口の版) か誤り |
+| `HELLO` | 口の版、時計の形、アドレス、MTU、64 byte の乱数の種、上限の組 (空なら既定)、boost の与え方、輻輳の制御の試験の選択 | `HELLO_OK` (engine の名前、口の版) か誤り |
 | `INJECT` | packet の list (1 回の書き込みのバッチ) | `OK` か誤り |
 | `POLL` | 最大の数 | packet の list (空なら何も無い) |
 | `ADVANCE` | 進める時間 | `NOW` |
 | `NOW` | なし | `NOW` |
 | `TCP_LISTEN`、`UDP_LISTEN` | ポート | `HANDLE` か誤り |
 | `ACCEPT` | 待ち受けの handle | `HANDLE` と相手の addrport か `WOULD_BLOCK` |
-| `READ` | 接続、最大の byte 数 | `DATA`、`WOULD_BLOCK`、`EOF`、`RESET`、`CLOSED`、誤り |
-| `WRITE` | 接続、bytes | `WROTE` (受け取った byte 数。0 なら待つ必要がある) か誤り |
+| `READ` | 接続、最大の byte 数 | `DATA`、`WOULD_BLOCK`、誤り (EOF、reset、closed などは誤りの種類)。最大が 0 なら空の `DATA` か誤り |
+| `WRITE` | 接続、bytes | `WROTE` (受け取った byte 数。0 なら待つ必要がある) か誤り。空の bytes なら `WROTE 0` か誤り |
 | `CLOSE`、`CLOSE_WRITE`、`ABORT`、`CLOSE_FOR_DELIVERY` | handle | `OK` か誤り |
 | `DELIVERED` | 接続 | bool |
 | `BOOST_POLICY` | 接続、floor に戻る時の答え | 今 boost を持つか |
 | `EVENTS` | なし | boost の変化の list |
-| `UDP_RECV` | handle | 送り手と bytes か `WOULD_BLOCK` |
-| `UDP_SEND` | handle、宛先、bytes | `OK` か誤り |
-| `PING_OPEN`、`PING_SEND`、`PING_RECV`、`PING_CLOSE` | 宛先、handle、bytes | handle、`OK`、返事か `WOULD_BLOCK`、誤り |
+| `UDP_RECV` | handle、最大の byte 数 | 送り手と bytes (最大で切る)、`WOULD_BLOCK`、誤り |
+| `UDP_SEND` | handle、宛先、bytes | `OK`、`WOULD_BLOCK` (送信の予算が尽きている)、誤り |
+| `PING_OPEN`、`PING_SEND`、`PING_RECV`、`PING_CLOSE` | 宛先、handle と bytes、handle と最大の byte 数、handle | handle、`OK`、返事か `WOULD_BLOCK`、誤り |
 | `STATS` | なし | `key=value` の文字列 |
 | `BOUND`、`HELD` | なし | 上界の式の値と、今の保持の量の `key=value` の文字列 |
 | `RTO_AT` | 接続、時刻 | その時刻に使っていた RTO か不明 (`--clock real` だけ) |
@@ -554,6 +559,9 @@ packet は binary なので、JSON でなく binary の frame にします。
 `WOULD_BLOCK` は締め切りを過ぎた時に `Timeout()` が真の誤り、reset は `connection reset` を含む誤り、closed は `net.ErrClosed`、EOF は `io.EOF` です。
 今の台本の `errKind` は、この形で同じ文字列を返します。
 
+`UDP_RECV` と `PING_RECV` が最大の byte 数を持つのは、`ReadFrom` が buffer の長さで datagram を切る意味を保つためです。
+`UDP_SEND` が `WOULD_BLOCK` を返せるのは、Go の wgstack の `WriteTo` が送信の予算の空きを待つためです。
+
 `POLL` の最大の数は、手で進める時計の台本では 1 にします。
 1 つずつ引き取る `ClockedDUT.Poll` と同じ意味を保つためです。
 `WOULD_BLOCK` を返す要求は engine の状態を変えません。
@@ -563,8 +571,11 @@ DUT の側はこれを守り、2 節の送り直さない規則はこれに頼�
 Rust の wgstack では、これが hook の `may_return` に当たります。
 口をまたいで同期の呼び返しはできないので、`BOOST_POLICY` で答えを先に渡し、`wgstack-dut` の hook がその答えを返し、変化を `EVENTS` で渡します。
 
-frame の種類の番号と本体の並びの正本は、T2a の PR が `internal/dutproto` の Go の定義と、この節に足す付録の表で持ちます。
+frame の種類の番号と本体の並びの正本は、`internal/dutproto` の Go の定義と[付録](#付録-frame-の種類と本体)の表です。
 Rust の符号は同じ表から書き、2 つの符号が同じ bytes を作ることを、Go の試験が書き出した frame の例 (`internal/dutproto/testdata/frames/`) で照らします。
+例は種類ごとに、frame の bytes の `.bin` と、欄の値と表示の文字列の `.json` の対です。
+`.json` の bytes の欄は小文字の 16 進、アドレスは `10.200.0.2` と `10.200.0.1:40001` の形、時間は nanosecond の整数です。
+Go の試験は `-update` で例を書き直し、`.bin` と `.json` が今の符号と一致することを確かめます。
 
 ### Go の DUT の adapter (`rustdut`)
 
@@ -578,8 +589,33 @@ Go の wgstack は作成の時に乱数の源から 64 byte だけを読むの�
 待つ操作は `rustdut` が壁時計で待ちます。
 `Read` は `READ` を送り、`WOULD_BLOCK` なら 2 節の規則で締め切りまで待ち、締め切りで timeout を返します。
 `Write` は受け取られなかった残りを同じ規則で送り直します。
-`Accept(ctx)` は `ACCEPT` を同じ規則で送り直します。
+`Accept(ctx)` は `ACCEPT` を同じ規則で送り直し、`ctx` が終わると `wgstackdut` と同じく待ち受けを閉じます。
 これは `wgstackdut` の `Conn` が締め切りを壁時計で測るのと同じ意味です。
+
+待つ間に送り直す時期は、別の goroutine が状態を変える要求を送った時と、締め切りの時です。
+状態を変える要求のたびに、待っている操作を起こします。
+1 つの goroutine の台本では、待つ操作の間に状態を変える者がいないので、`READ` を 1 回送った後は締め切りまで送りません。
+
+締め切りを過ぎた操作は、Go の wgstack と同じ順で誤りを選びます。
+Go の wgstack の `Read` と `Write` は、閉じた接続と書けない接続の誤りを締め切りより先に返し、締め切りをデータの有無より先に確かめます。
+`rustdut` は締め切りを過ぎると、最大 0 の `READ` か空の `WRITE` を送り、誤りが返ればそれを、返らなければ timeout を返します。
+どちらの要求も engine の状態を変えません。
+UDP の `ReadFrom` と `WriteTo` は、`rustdut` が覚えている `Close` の有無で閉じた誤りと timeout を選びます。
+
+`Engine` の名前は `rustdut` で、DUT の `Name` は `HELLO_OK` の engine の名前です。
+`OnBoost` は floor に戻ることを許す hook を置き、登録の時の状態を 1 回渡します。
+その後の変化は `EVENTS` を送らないので渡しません。
+今の台本は `OnBoost` を使いません。
+使う台本を足すときに、`EVENTS` を送る時期を決めます。
+
+`Config.Transcript` を与えると、要求と応答の frame をそのまま順に書きます。
+2 節の transcript と 4 節の記録は、これを使います。
+
+`rustdut` 自身の確かめは `TestSameAsWgstackdut` です。
+すべての台本を、同じ種で `wgstackdut` と `rustdut` で `dutserve` に流し、`tcpharness.RecordChecks` が返す確かめの ID、結果、観察の文字列、`MEASURE` の値、失敗の文の列が一致することを求めます。
+別の goroutine で読み書きする台本は、`MEASURE` の値を除いて照らします。
+その値は goroutine の進み方で変わるためです (例:`window-scale` の受信の窓の最大)。
+この試験と `TestTranscriptRepeats` は、`WGFT_TEST_WGSTACK_DUT` が `dutserve` を指す時だけ流れます。
 
 ### Go の server (`dutserve`)
 
@@ -595,15 +631,52 @@ package の中に置く理由は、待たずに戻る操作を正しく作るた
 Go の wgstack の公開の `Read`、`Write`、`Accept` は待つ操作で、締め切りを過ぎた `Read` と `Write` はデータの有無より先に timeout を返し、`Accept` は締め切りを持ちません。
 `dutserve` は、`FuzzCore` と同じ package の中の確かめで、操作が待たずに戻ると分かった時だけ公開の操作を呼び、待つ場合は呼ばずに `WOULD_BLOCK` を返します。
 
-- `ACCEPT`:待ち受けの列に接続がある時だけ `Accept` を呼びます
-- `READ`:`readable` が真の時だけ `Read` を呼びます。データ、EOF、誤りのどれでも待たずに戻ります
-- `WRITE`:`room` が 0 より大きい時は、その量までを `Write` に渡します。接続が書けない状態 (閉じた後、誤りの後、送信の向きを閉じた後) なら `Write` を呼んで誤りを受け取ります。どちらでもなければ `WOULD_BLOCK` を返します
-- `UDP_RECV` と `PING_RECV`:同じ形の受信の列の確かめを `_test.go` に足して使います
+確かめは `internal/wgstack/dutready_test.go` にあり、それぞれ公開の操作の冒頭の分岐を同じ順で写します。
+
+- `ACCEPT`:`acceptReady` が真の時だけ `Accept` を呼びます。待ち受けの列に接続がある時と、待ち受けか Device を閉じた後 (誤りで戻る) が真です
+- `READ`:`readReady` が真の時だけ `Read` を呼びます。`FuzzCore` の `readable` に、閉じた Device と締め切りを足した形です。データ、EOF、誤りのどれでも待たずに戻ります
+- `WRITE`:`writeRoom` が空きと書ける状態を返します。空きがあればその量までを `Write` に渡し、書けない状態 (閉じた後、誤りの後、送信の向きを閉じた後) なら `Write` を呼んで誤りを受け取ります。書ける状態で空きが 0 なら `WROTE 0` を返します
+- `UDP_RECV`、`UDP_SEND`、`PING_RECV`:`udpRecvReady`、`udpSendReady`、`pingRecvReady` が真の時だけ呼びます。`udpSendReady` は `udpReserve` の予約の判定を状態を変えずに写します。予約できない `WriteTo` は待つ前に印を立てるので、呼ばずに `WOULD_BLOCK` を返します
+
+確かめが操作の振る舞いとちょうど一致することは、`TestDutserveReadyMatchesBlocking` が確かめます。
+この試験は `FuzzCore` に似た操作の列で Device を動かし、毎回、確かめを読んでから操作を締め切りつきで流します。
+確かめが真なら操作は締め切りを待たずに戻り、偽なら締め切りまで待つことを求めます。
+`Accept` は締め切りを持たないので、偽の時は `Accept` が待っていることを見た後、相手の新しい接続で待ちを解きます。
+Device を閉じた後は、すべての確かめが真であることも求めます。
+各確かめが真と偽の両方を見たことを数え、どちらかを見なければ試験を落とします。
+列は、件数の予算を尽くす小さな datagram、予算の尽きた socket を閉じた後の送信、大きすぎる datagram も流し、5 つの socket で Device の件数の予算にも届きます。
+
+検出力は、確かめから条件を 1 つずつ抜いた変異を `go test -overlay` で流して見ました。
+試験が落ちた変異は次のとおりです。
+
+- `acceptReady`:閉じた待ち受け、待ち受けの列
+- `readReady`:未読のデータ、相手の FIN
+- `writeRoom`:CLOSE-WAIT を書ける状態に数えること
+- `udpRecvReady`:閉じた endpoint
+- `udpSendReady`:閉じた endpoint、大きすぎる datagram、endpoint の件数と byte の予算、Device の件数と byte の予算、今の chunk の枠の空き
+- `pingRecvReady`:閉じた endpoint、閉じた Device、応答の有無
+
+試験が通った変異は次のとおりです。
+
+- 同じ場面でほかの条件が真になるもの:`acceptReady` の閉じた Device (Device の `Close` が待ち受けを閉じる)、`readReady` の閉じた Device (`Close` が接続の枠を返す)、`udpRecvReady` の閉じた UDP の状態 (`Close` が endpoint を閉じる)、`udpCanReserve` の chunk の置き場の空き (Device の 2 つの向きの予算の和が置き場の大きさである)、`udpCanReserve` の空きの datagram の list と Device の件数の予算の片方 (2 つは同じ数を見る)
+- 列が区別する状態に届いたかを確かめていないもの:`readReady` の CLOSED と誤り、`writeRoom` の誤りと送信の向きを閉じた印。どちらも状態の確かめ (ESTABLISHED か CLOSE-WAIT) が同じ場面で偽になると見ていますが、確かめていません
+
+`ADVANCE` は手で進める時計を進めた後に `Tick` を 1 回呼び、新しい時刻を返します。
+`RTO_AT` と `CONN_SOCKET` は `--clock real` だけの要求なので、誤りを返します。
+`EVENTS` は `BOOST_POLICY` の hook が登録の後に呼ばれた順の変化を返し、返した分を消します。
+`STATS` と `BOUND` は Go の `Stats` と `Bound` の欄を宣言の順に `名前=値` で並べ、`HELD` は `Stats` のうち保持の量の欄だけを並べます。
 
 `dutserve` は壁時計で待たず、受け入れの goroutine も持たないので、transcript は要求の列だけで決まります。
+同じ台本を同じ種で 2 回流した transcript が byte の単位で一致することは、`rustdut` の `TestTranscriptRepeats` が確かめます。
+
+起動の引数は `--clock fake` だけを受け付けます。
+口の誤り (壊れた frame、知らない種類、最初の要求が `HELLO` でない、知らない handle、2 回目の `HELLO`) では、`ERROR` を書いて終了コード 2 で終わります。
+標準入力が frame の境目で閉じたら、終了コード 0 で終わります。
 
 `dutserve` は Go の wgstack を公開の `New` で作り、既定の上限だけを受け付けます。
-既定でない上限の組を持つ `HELLO` は誤りで断ります。
+既定でない上限の組を持つ `HELLO` は誤りで断り、終了コード 2 で終わります。
+乱数の源は `HELLO` の 64 byte だけを返し、その後は読めない Reader です。
+Go の wgstack が作成の後に乱数を読むようになれば、`New` の誤りか応答の違いで分かります。
 小さな上限の記録 (`FuzzCore` など) は、4 節の `testNet` の記録だけが作ります。
 boost の枠の集まりはプロセスで 1 つですが、`dutserve` は DUT ごとに新しいプロセスなので、別の DUT の状態は混ざりません。
 
@@ -777,7 +850,9 @@ cargo と Go の両方が要り、`crates/**`、`internal/tcpharness/**`、`inte
 [テストの規範](../../development/testing.md)は Rust の job を `rust-*` の名前で数えてラボの一式を省くので、この job は `rust-` で始めない名前にします。
 job を足す PR は、同じ PR で testing.md の B 類の表と振り分けに `harness-rust-go` を足し、この job を変える PR がラボを省けないことを書きます。
 
-ホストの関門 (`scripts/wgstack-gate.sh`) には、Rust の段 (Rust の台本と記録の照合、`rustdut` の適合の種 1 から 5、fuzz の smoke) を足します。
+ホストの関門 (`scripts/wgstack-gate.sh`) には、T2a で `rustdut-dutserve` の段を足しました。
+この段は `dutserve` を作り、`rustdut` を通した適合と輻輳の制御 (`wgstackdut` の package の `TestRustdutConformance` と `TestRustdutCongestion`。凍結した Go の wgstack の期待した差の一覧がその package にあるため)、`wgstackdut` との一致、transcript の繰り返しを種 1 から 5 で流します。
+今後、Rust の段 (Rust の台本と記録の照合、`wgstack-dut` に対する `rustdut` の適合の種 1 から 5、fuzz の smoke) を足します。
 対象の crate やバイナリが無い木では、今の段と同じく SKIP にします。
 凍結した Go の wgstack の段は、Go の wgstack を消すまで残します。
 別の script にせず今の script に段を足すのは、1 つの表で全部の段の結果と時間を見られ、並列の数の上限を共有できるためです。
@@ -821,8 +896,9 @@ Rust の wgstack を相手にするのは T3c からで、実装の 4 の API �
 
 ## 9. 未決の点
 
-- 口の往復の費用:1 往復を数 µs から数十 µs と見込んでいますが、測っていません。`rustdut` で 30 秒の待ちを持つ台本は、1 ms ごとに 2 往復します。遅すぎる場合は、`POLL` が空の時に時計を 1 ms 進めて次の packet を返す要求を足します
-- `dutserve` の待たない操作:`FuzzCore` の確かめ (`readable`、`room`、待ち受けの列) が、公開の操作が待たずに戻る条件と一致することはコードから読みましたが、試験で確かめていません。T2a で、確かめが真の時に操作が待たないことを試験にします
+- 口の往復の費用:1 往復を数 µs から数十 µs と見込んでいますが、測っていません。`rustdut` で 30 秒の待ちを持つ台本は、1 ms ごとに `POLL` と `ADVANCE` の 2 往復をします。遅すぎる場合は、`POLL` が空の時に時計を 1 ms 進めて次の packet を返す要求を足します
+- `dutserve` の待たない操作の検出力:3 節の変異のうち `readReady` の CLOSED と誤り、`writeRoom` の誤りと送信の向きを閉じた印を抜いた変異は試験が通ります。ほかの条件と同じ場面で偽になるためと見ていますが、確かめていません
+- `rustdut` の往復の費用:`dutserve` を相手に全部の台本を 1 つの種で流すと、適合と輻輳の制御の実行で 5 秒ほどでした (1 回の測り)。1 往復の時間は測っていません
 - 記録の大きさ:git に入れる上限の 5 MiB は測る前の値です。T2b で測って直します
 - 乱数の写し:Go の PCG と `IntN` の写しと、Go の `%q` と `%.0f` の丸めの写しは、Go の試験が書き出した値との照合で確かめます。照合の値の数は T3b で決めます
 - 実時間の Rust の DUT:`--clock real` の外側の層が製品の層と同じものになるかは、Rust の wgstack の外側の層の設計で決まります
@@ -859,3 +935,71 @@ wgstack の Rust 版の設計 (`docs/design/v2/wgstack-rs.md`) の「検証」�
 
 wgstack の Rust 版の設計が「実装の時に決めること」に置いた試験の項目のうち、frame の形式、データの台本の語彙の線引き、関門の組み方、記録の分け方は、この文書の 3 節、1 節、7 節、4 節が決めます。
 記録の量の上限は 4 節の仮の値で、T2b で測って決めます。
+
+## 付録 frame の種類と本体
+
+この表と `internal/dutproto` の Go の定義が、3 節の frame の正本です。
+番号を変える時は、この表、Go の定義、`internal/dutproto/testdata/frames/` を同じ commit で直します。
+
+本体の欄の書き方は次のとおりです。
+
+- 整数:`u8`、`u16`、`u32`、`u64` で、little endian です
+- `bool`:`u8` の 0 か 1 です。ほかの値は口の誤りです
+- `handle`:`u32` です。DUT が作った順に 1 から番号を付け、使い直しません。0 は handle ではありません
+- `bytes`:`u32` の長さと中身です
+- `string`:`u16` の長さと UTF-8 です
+- `addr`:IPv4 の 4 byte で、ネットワークの順です
+- `addrport`:`addr` と `u16` のポートです
+- `dur`:`u64` の nanosecond です。時刻は DUT を作ってからの時間です
+- `list<T>`:`u32` の要素の数と、`T` の並びです
+
+要求の番号は 0x80 より小さく、応答の番号は 0x80 以上です。
+
+| 種類 | 番号 | 本体 |
+| --- | --- | --- |
+| `HELLO` | 0x01 | `u16` 口の版 (1)、`u8` 時計 (0 は fake、1 は real)、`addr` DUT のアドレス、`u32` MTU、64 byte の種 (長さを前に置かない)、`list<string 名前, u64 値>` 上限の組 (空なら既定)、`u8` boost (0 は需要に応じる、1 は受け入れの時、2 は与えない)、`u8` 輻輳の制御 (0 は CUBIC、1 は NewReno) |
+| `INJECT` | 0x02 | `list<bytes>` packet |
+| `POLL` | 0x03 | `u32` 最大の数 |
+| `ADVANCE` | 0x04 | `dur` 進める時間 |
+| `NOW` | 0x05 | なし |
+| `TCP_LISTEN` | 0x06 | `u16` ポート |
+| `UDP_LISTEN` | 0x07 | `u16` ポート |
+| `ACCEPT` | 0x08 | `handle` 待ち受け |
+| `READ` | 0x09 | `handle` 接続、`u32` 最大の byte 数 |
+| `WRITE` | 0x0a | `handle` 接続、`bytes` データ |
+| `CLOSE` | 0x0b | `handle` 待ち受け、接続、UDP の socket |
+| `CLOSE_WRITE` | 0x0c | `handle` 接続 |
+| `ABORT` | 0x0d | `handle` 接続 |
+| `CLOSE_FOR_DELIVERY` | 0x0e | `handle` 接続 |
+| `DELIVERED` | 0x0f | `handle` 接続 |
+| `BOOST_POLICY` | 0x10 | `handle` 接続、`bool` floor に戻ることを許すか |
+| `EVENTS` | 0x11 | なし |
+| `UDP_RECV` | 0x12 | `handle` socket、`u32` 最大の byte 数 |
+| `UDP_SEND` | 0x13 | `handle` socket、`addrport` 宛先、`bytes` データ |
+| `PING_OPEN` | 0x14 | `addr` 宛先 |
+| `PING_SEND` | 0x15 | `handle` endpoint、`bytes` ICMP の echo request の message |
+| `PING_RECV` | 0x16 | `handle` endpoint、`u32` 最大の byte 数 |
+| `PING_CLOSE` | 0x17 | `handle` endpoint |
+| `STATS` | 0x18 | なし |
+| `BOUND` | 0x19 | なし |
+| `HELD` | 0x1a | なし |
+| `RTO_AT` | 0x1b | `handle` 接続、`dur` 時刻 |
+| `CONN_SOCKET` | 0x1c | `handle` 接続、`string` Unix ソケットのパス |
+| `HELLO_OK` | 0x80 | `string` engine の名前、`u16` 口の版 |
+| `OK` | 0x81 | なし |
+| `ERROR` | 0x82 | `u8` 種類 (0 はその他、1 は timeout、2 は EOF、3 は closed、4 は reset、5 は broken pipe)、`string` engine の誤りの文 |
+| `WOULD_BLOCK` | 0x83 | なし |
+| `PACKETS` | 0x84 | `list<bytes>` packet |
+| `TIME` | 0x85 | `dur` 今の時刻 |
+| `HANDLE` | 0x86 | `handle` |
+| `ACCEPTED` | 0x87 | `handle` 接続、`addrport` 相手 |
+| `DATA` | 0x88 | `bytes` データ |
+| `WROTE` | 0x89 | `u32` 受け取った byte 数 |
+| `BOOL` | 0x8a | `bool` |
+| `EVENT_LIST` | 0x8b | `list<handle 接続, bool boost を持つか>` |
+| `DATAGRAM` | 0x8c | `addrport` 送り手、`bytes` データ |
+| `TEXT` | 0x8d | `string` 空白で区切った `名前=値` |
+| `RTO` | 0x8e | `bool` 分かるか、`dur` RTO |
+
+3 節の表の応答の名前は、この表の種類に次のとおり当たります。
+`NOW` の応答は `TIME`、`HANDLE` は `HANDLE`、送り手と bytes は `DATAGRAM`、`key=value` の文字列は `TEXT`、boost の変化の list は `EVENT_LIST`、`RTO_AT` の応答は `RTO` です。

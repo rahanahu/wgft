@@ -260,6 +260,9 @@ step cpu1-wgstack 'go test -count=1 -cpu 1 ./internal/wgstack'
 # runs on a copy of the tree, so the go.mod edit cannot reach the steps running beside it.
 step staticcheck 'copy_tree && cd "$tmp" && go mod edit -go=1.27.1 && GOTOOLCHAIN=go1.27.1 go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...'
 step conformance-seeds 'for s in 1 2 3 4 5; do WGFT_TEST_WGSTACK_CONFORMANCE=1 WGFT_TEST_TCPHARNESS_SEED=$s go test -count=1 ./internal/tcpharness/wgstackdut || exit 1; done'
+# rustdut drives the Go wgstack's dutserve, a mode of its test binary, over the DUT frames and must
+# give wgstackdut's results on every scenario (docs/design/v2/test-tooling.md section 3).
+step rustdut-dutserve 'need_test ./internal/tcpharness/rustdut TestSameAsWgstackdut; go test -c -o "$logdir/wgstack-dutserve.test" ./internal/wgstack || exit 1; for s in 1 2 3 4 5; do WGFT_TEST_WGSTACK_DUT="$logdir/wgstack-dutserve.test" WGFT_TEST_TCPHARNESS_SEED=$s go test -count=1 ./internal/tcpharness/rustdut ./internal/tcpharness/wgstackdut || exit 1; done'
 step stream-seeds-full 'WGFT_WGSTACK_STREAM_SEEDS=full go test -count=1 ./internal/wgstack -run "Stream|Scoreboard|RecvBuf"'
 step adversarial-seeds 'need_test ./internal/wgstack TestAdversarialSender; WGFT_WGSTACK_AUDIT_SEEDS=3000 go test -count=1 ./internal/wgstack -run TestAdversarialSender'
 # FuzzCore runs as 4 single-worker shards, which finish the same executions sooner than one process with

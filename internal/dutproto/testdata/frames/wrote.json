@@ -1,0 +1,8 @@
+{
+  "kind": "WROTE",
+  "kind_byte": 137,
+  "msg": {
+    "n": 1000
+  },
+  "display": "WROTE n=1000"
+}

@@ -1,0 +1,8 @@
+{
+  "kind": "DELIVERED",
+  "kind_byte": 15,
+  "msg": {
+    "h": 2
+  },
+  "display": "DELIVERED h=2"
+}
