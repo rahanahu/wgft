@@ -777,11 +777,11 @@ pub fn read_frame(r: &mut impl Read) -> Result<(u8, Vec<u8>), FrameError> {
     if n == 0 || n > MAX_FRAME {
         return Err(ProtoError(format!("frame length {n} out of range 1 to {MAX_FRAME}")).into());
     }
-    let mut buf = vec![0u8; n];
-    r.read_exact(&mut buf).map_err(FrameError::Io)?;
-    let kind = buf[0];
-    buf.remove(0);
-    Ok((kind, buf))
+    let mut kind = [0u8; 1];
+    r.read_exact(&mut kind).map_err(FrameError::Io)?;
+    let mut body = vec![0u8; n - 1];
+    r.read_exact(&mut body).map_err(FrameError::Io)?;
+    Ok((kind[0], body))
 }
 
 /// 1 つの frame を読んで復号します。

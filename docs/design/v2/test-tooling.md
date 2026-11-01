@@ -455,6 +455,7 @@ pub trait ClockedDut {
 ```
 
 trait の操作は 3 節の要求と 1 つずつ対応し、`dut::answer` が要求を操作に写して応答を作ります。
+既定の実装を持つ `exchange_frame` は、要求 1 つの応答とその frame の bytes を返し、次節の transcript の包みが使います。
 `now` が `&mut self` を取るのは、`ProcessDut` の `now` が `NOW` の要求を送るためです。
 `advance` が新しい時刻を返すのは、`ADVANCE` の応答が時刻を運ぶためです。
 `poll` が最大の数を取るのは、`POLL` の要求をそのまま写すためで、runner は 1 を渡します。
@@ -483,16 +484,24 @@ Rust の runner は 1 つの流れで動き、待っている間に DUT の状�
 Go の `rustdut` も、1 つの goroutine の台本では待つ間に要求を送らず、締め切りの後に次の要求を送ります。
 Rust の runner はその要求を同じ順で送ります。
 
-- 読む文 (`read`):`READ` が `WOULD_BLOCK` を返したら、最大 0 の `READ` を送り、誤りが返ればその誤りを、返らなければ timeout を結果にします。締め切りが 0 なら最初の `READ` を送りません
+- 読む文 (`read`):`READ` が `WOULD_BLOCK` か空の `DATA` を返したら、最大 0 の `READ` を送り、誤りが返ればその誤りを、返らなければ timeout を結果にします。締め切りが 0 なら最初の `READ` を送りません
 - 受け入れ (`connect` と `accept`):`ACCEPT` が `WOULD_BLOCK` を返したら、`CLOSE` で待ち受けを閉じ、timeout を結果にします。Go の `Accept` が `ctx` の終わりで待ち受けを閉じるのと同じです
 - UDP の読み (`udp_read`):`UDP_RECV` が `WOULD_BLOCK` を返したら、要求を送らず、閉じた socket なら closed の誤り、ほかは timeout を結果にします
+
+最大が 0 より大きい `READ` への空の `DATA` も、Go と同じ frame の列になります。
+Go の `rustdut` の `Read` は 0 byte を返し、締め切りを持つ Go の `readFull` は締め切りまで `Read` を呼び直します。
+呼び直しは前の応答を使って要求を送らず (送り直さない規則)、締め切りの後に最大 0 の `READ` を送ります。
 
 締め切りの無い書き込みが `WROTE 0` を返すと、Go の `rustdut` は状態が変わるまで待ち続けます。
 1 つの流れの Rust の runner では状態が変わらないので、待ち続ける代わりに台本を失敗にします。
 送信の予算が尽きた `UDP_SEND` の `WOULD_BLOCK` も同じです。
-最大が 0 より大きい `READ` が空の `DATA` を返した時は、Go の `rustdut` は同じ問い合わせを繰り返します。
-Rust の runner は待つ必要がある時と同じに扱います。
-どちらの場合も今の台本と `dutserve` では起きません。
+どちらも今の台本と `dutserve` では起きません。
+
+この扱いは DUT が次の 2 つを守ることに頼ります。
+`dutserve` は守っていて、T3c の `wgstack-dut` の adapter も守ります。
+
+- 最大 0 の `READ` (`read(c, 0)`) は空の `DATA` か誤りを返し、`WOULD_BLOCK` を返しません (3 節の表)。`WOULD_BLOCK` が返ると、2 つの runner は読む文の結果を timeout でなく応答の誤り (`rustdut: read answered WOULD_BLOCK`) にします
+- 閉じた待ち受けの `CLOSE` は、`OK` か engine の誤りを返し、口の誤りにしません。受け入れの timeout で閉じた待ち受けを、台本の `close` と台本の終わりの後始末がもう一度閉じるためです
 
 台本の乱数は Go と同じ値にします。
 台本の種は `ScenarioSeed` (実行の種と、台本の名前の FNV-1a の xor) で、相手のポート、ISN、timestamp の起点は Go の `math/rand/v2` の PCG から `Uint32` と `IntN` で取ります。
@@ -526,7 +535,7 @@ DUT の engine の名前が `wgstack` (`dutserve`) なら次節の一致の確�
 台本の言語の台本を、同じ DUT と同じ種と手で進める時計で 2 つの runner が流すと、3 節の口の要求と応答の列 (transcript) が byte の単位で一致することを求めます。
 
 - Go の runner の transcript は、`rustdut` が pipe に書いた要求と読んだ応答です
-- Rust の runner の transcript は、`ClockedDut` の呼び出しを同じ符号で書き出す包み (`dut::Recorded`) が作ります。包みは DUT を作った `HELLO` とその応答を先頭に書き、`rustdut` と同じ送り直さない規則 (下の表) を持ちます
+- Rust の runner の transcript は、`ClockedDut` の呼び出しを同じ符号で書き出す包み (`dut::Recorded`) が作ります。包みは DUT を作った `HELLO` とその応答を先頭に書き、`rustdut` と同じ送り直さない規則 (下の表) を持ちます。応答は中の DUT の `exchange_frame` が返した bytes で、`ProcessDut` では pipe から読んだ bytes そのもの、同じプロセスの DUT では `dut::answer` の応答を符号化したものです
 
 transcript に加えて、確かめの結果、失敗の文、log の行 (Go の `CheckTrace`) の一致も求めます。
 transcript が同じでも、観察の文字列の作り方がずれうるためです。
@@ -702,6 +711,8 @@ UDP の `ReadFrom` と `WriteTo` は、`rustdut` が覚えている `Close` の�
 `ProcessDut` そのものは送り直さない規則を持たず、呼ばれた操作をすべて送ります。
 規則は transcript を書く包み `Recorded` が持ち、Rust の runner は `Recorded` で包んだ `ProcessDut` を叩きます。
 T3c の `wgstack-dut` の adapter も同じ包みで transcript を書けるように、規則を DUT の外に置きました。
+`Recorded` が書く応答は、`ProcessDut` の `exchange_frame` が返す、pipe から読んだ frame の bytes です。
+`rustdut` と同じく、応答の種類の frame なら本体が読めなくても書き、`WRITE` への `WOULD_BLOCK` や要求に合わない種類の応答も書き換えずに残します。
 口の誤りや応答の読み書きの誤りの後は、`rustdut` と同じく、以後のすべての操作が同じ誤り (`DutError::Broken`) を返します。
 
 ### Go の server (`dutserve`)

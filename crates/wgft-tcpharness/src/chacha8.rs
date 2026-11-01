@@ -4,7 +4,7 @@
 //! その先頭の 64 byte だけを読みます。`rustdut` はその 64 byte を HELLO の種にします ([`hello_seed`])。
 //! 鍵の作り方は Go の `rustdut.Seed` と `wgstackdut.RandSource`、block の関数は Go の
 //! `internal/chacha8rand` (c2sp.org/chacha8rand) です。Go の試験が書き出した値
-//! (`internal/tcpharness/rustdut/testdata/seeds.json`) と照らします。
+//! (`internal/tcpharness/rustdut/testdata/vectors.json`) と照らします。
 
 use crate::frame::SEED_LEN;
 

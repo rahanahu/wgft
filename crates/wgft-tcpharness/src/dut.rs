@@ -135,6 +135,34 @@ pub trait ClockedDut {
     fn bound(&mut self) -> Result<String, DutError>;
     /// 今の保持の量の `key=value` の文字列です。
     fn held(&mut self) -> Result<String, DutError>;
+
+    /// 3 節の要求 `req` を 1 つ DUT に渡し、応答とその frame の bytes を返します。[`Recorded`] が transcript を
+    /// 書くのに使います。
+    ///
+    /// 既定は [`answer_frame`] で、[`answer`] が作った応答を符号化します。別のプロセスを叩く DUT
+    /// ([`ProcessDut`]) は、pipe から読んだ応答の bytes をそのまま返します。
+    fn exchange_frame(&mut self, req: &Msg) -> Result<Answered, DutError> {
+        answer_frame(self, req)
+    }
+}
+
+/// 要求 1 つの応答の frame です ([`ClockedDut::exchange_frame`])。
+#[derive(Debug)]
+pub struct Answered {
+    /// 応答の frame の bytes (長さ、種類、本体)。transcript にはこれを書きます
+    pub frame: Vec<u8>,
+    /// 応答を読んだもの。応答の種類の frame でも本体が読めなければ誤り (`DutError::Broken`) です
+    pub msg: Result<Msg, DutError>,
+}
+
+/// [`answer`] で応答を作り、その frame の bytes と組にします。[`ClockedDut::exchange_frame`] の既定です。
+pub fn answer_frame<D: ClockedDut + ?Sized>(d: &mut D, req: &Msg) -> Result<Answered, DutError> {
+    let resp = answer(d, req)?;
+    let frame = resp.frame().map_err(|e| DutError::Broken(e.to_string()))?;
+    Ok(Answered {
+        frame,
+        msg: Ok(resp),
+    })
 }
 
 fn u32_of(n: usize) -> u32 {
@@ -338,7 +366,11 @@ trait Exchange {
 
 macro_rules! clocked_via_exchange {
     (impl[$($gen:tt)*] $t:ty) => {
+        clocked_via_exchange!(impl[$($gen)*] $t {});
+    };
+    (impl[$($gen:tt)*] $t:ty { $($extra:item)* }) => {
         impl<$($gen)*> ClockedDut for $t {
+            $($extra)*
             fn now(&mut self) -> Result<Duration, DutError> {
                 back::time("NOW", self.exchange(Msg::Now)?)
             }
@@ -459,6 +491,10 @@ pub fn is_query(req: &Msg, resp: &Msg) -> bool {
 /// 2 節の送り直さない規則を持ちます。問い合わせの要求は、前の同じ bytes の問い合わせの後に状態を変える
 /// 要求が無ければ中の DUT を呼ばずに前の応答を返し、書き出しません。`NOW` は時刻を一度知った後は送りません。
 /// Go の `rustdut` と同じ規則なので、同じ呼び出しの列から同じ bytes の transcript ができます。
+///
+/// 応答は中の DUT の [`ClockedDut::exchange_frame`] が返した bytes をそのまま書きます。[`ProcessDut`] では
+/// pipe から読んだ bytes なので、`WRITE` への `WOULD_BLOCK` や要求に合わない種類の応答も `rustdut` と同じく
+/// そのまま残ります。
 pub struct Recorded<D, W> {
     inner: D,
     sink: W,
@@ -529,13 +565,13 @@ impl<D: ClockedDut, W: Write> Exchange for Recorded<D, W> {
         if let Some(r) = self.cache.get(&frame) {
             return Ok(r.clone());
         }
-        let resp = answer(&mut self.inner, &req)?;
-        let rf = resp.frame().map_err(|e| DutError::Broken(e.to_string()))?;
+        let Answered { frame: rf, msg } = self.inner.exchange_frame(&req)?;
         self.sink
             .write_all(&frame)
             .and_then(|()| self.sink.write_all(&rf))
             .map_err(|e| DutError::Broken(format!("writing the transcript: {e}")))?;
         self.frames += 2;
+        let resp = msg?;
         if let Msg::Time(t) = resp {
             self.now = Some(t);
         }
@@ -692,8 +728,10 @@ impl ProcessDut {
     }
 }
 
-impl Exchange for ProcessDut {
-    fn exchange(&mut self, req: Msg) -> Result<Msg, DutError> {
+impl ProcessDut {
+    /// 要求を 1 つ送り、応答の frame を読みます。Go の `rustdut` の `roundTrip` と同じく、応答の種類の frame
+    /// なら本体が読めなくても bytes を返し、読めない時は [`Answered::msg`] を誤りにします。
+    fn round_trip(&mut self, req: &Msg) -> Result<Answered, DutError> {
         if let Some(b) = &self.broken {
             return Err(DutError::Broken(b.clone()));
         }
@@ -702,7 +740,7 @@ impl Exchange for ProcessDut {
         };
         let kind = req.kind();
         let res = (|| {
-            frame::write_msg(stdin, &req)?;
+            frame::write_msg(stdin, req)?;
             stdin.flush().map_err(frame::FrameError::Io)?;
             let (k, body) = frame::read_frame(&mut self.stdout)?;
             if k < 0x80 {
@@ -710,17 +748,36 @@ impl Exchange for ProcessDut {
                     "the DUT answered with a request frame 0x{k:02x}"
                 ))));
             }
-            Ok(Msg::decode(k, &body)?)
+            Ok((k, body))
         })();
-        res.map_err(|e| {
-            let msg = format!("rustdut: {kind}: {e}");
-            self.broken = Some(msg.clone());
-            DutError::Broken(msg)
-        })
+        let (k, body) = res.map_err(|e| self.fail(kind, &e))?;
+        let len = u32::try_from(1 + body.len()).expect("read_frame bounds the length");
+        let mut raw = Vec::with_capacity(5 + body.len());
+        raw.extend_from_slice(&len.to_le_bytes());
+        raw.push(k);
+        raw.extend_from_slice(&body);
+        let msg = Msg::decode(k, &body).map_err(|e| self.fail(kind, &e.into()));
+        Ok(Answered { frame: raw, msg })
+    }
+
+    fn fail(&mut self, kind: Kind, e: &frame::FrameError) -> DutError {
+        let msg = format!("rustdut: {kind}: {e}");
+        self.broken = Some(msg.clone());
+        DutError::Broken(msg)
     }
 }
 
-clocked_via_exchange!(impl[] ProcessDut);
+impl Exchange for ProcessDut {
+    fn exchange(&mut self, req: Msg) -> Result<Msg, DutError> {
+        self.round_trip(&req)?.msg
+    }
+}
+
+clocked_via_exchange!(impl[] ProcessDut {
+    fn exchange_frame(&mut self, req: &Msg) -> Result<Answered, DutError> {
+        self.round_trip(req)
+    }
+});
 
 impl Drop for ProcessDut {
     fn drop(&mut self) {
@@ -730,9 +787,288 @@ impl Drop for ProcessDut {
     }
 }
 
+/// 試験の DUT です。runner の試験も使います。
+#[cfg(test)]
+pub(crate) mod stub {
+    use super::{Accepted, BoostEvent, ClockedDut, Datagram, Handle, Op, back, u32_of};
+    use super::{Answered, DutError, Exchange, Kind, Msg, answer_frame};
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::time::Duration;
+
+    /// 決めた応答を返す DUT です。受けた要求を数え、`raw` なら応答を [`super::answer`] を通さずにそのまま返します
+    /// ([`super::ProcessDut`] と同じ道)。
+    pub(crate) struct Stub {
+        pub(crate) respond: fn(&Msg) -> Msg,
+        pub(crate) raw: bool,
+        pub(crate) seen: Vec<Kind>,
+    }
+
+    impl Stub {
+        pub(crate) fn new(respond: fn(&Msg) -> Msg) -> Self {
+            Self {
+                respond,
+                raw: false,
+                seen: Vec::new(),
+            }
+        }
+    }
+
+    impl Exchange for Stub {
+        fn exchange(&mut self, req: Msg) -> Result<Msg, DutError> {
+            self.seen.push(req.kind());
+            Ok((self.respond)(&req))
+        }
+    }
+
+    clocked_via_exchange!(impl[] Stub {
+        fn exchange_frame(&mut self, req: &Msg) -> Result<Answered, DutError> {
+            if !self.raw {
+                return answer_frame(self, req);
+            }
+            self.seen.push(req.kind());
+            let resp = (self.respond)(req);
+            let frame = resp.frame().map_err(|e| DutError::Broken(e.to_string()))?;
+            Ok(Answered { frame, msg: Ok(resp) })
+        }
+    });
+
+    /// 読みは待つ必要を、書き込みは 0 byte を、時計は 5 ms を返す応答です。
+    pub(crate) fn idle(req: &Msg) -> Msg {
+        match req {
+            Msg::Read { .. } | Msg::Accept(_) | Msg::UdpRecv { .. } => Msg::WouldBlock,
+            Msg::Write { .. } => Msg::Wrote(0),
+            Msg::Now | Msg::Advance(_) => Msg::Time(Duration::from_millis(5)),
+            Msg::Stats | Msg::Bound | Msg::Held => Msg::Text("x=1".to_owned()),
+            Msg::Delivered(_) => Msg::Bool(false),
+            Msg::Poll { .. } => Msg::Packets(Vec::new()),
+            _ => Msg::Ok,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::stub::{Stub, idle};
     use super::*;
+    use crate::frame::{Boost, Clock, Congestion, SEED_LEN, VERSION};
+
+    fn hello() -> Hello {
+        Hello {
+            version: VERSION,
+            clock: Clock::Fake,
+            addr: Ipv4Addr::new(10, 200, 0, 2),
+            mtu: 1420,
+            seed: [7; SEED_LEN],
+            limits: Vec::new(),
+            boost: Boost::OnDemand,
+            congestion: Congestion::Cubic,
+        }
+    }
+
+    fn recorded(stub: Stub) -> Recorded<Stub, Vec<u8>> {
+        let ok = Msg::HelloOk {
+            engine: "stub".to_owned(),
+            version: VERSION,
+        };
+        Recorded::new(stub, Vec::new(), &hello(), &ok).unwrap()
+    }
+
+    /// transcript を frame に分け、種類の列にします。
+    fn kinds(t: &[u8]) -> Vec<Kind> {
+        let mut r = t;
+        let mut out = Vec::new();
+        loop {
+            match frame::read_frame(&mut r) {
+                Ok((k, _)) => out.push(Kind::from_byte(k).unwrap()),
+                Err(frame::FrameError::Eof) => return out,
+                Err(e) => panic!("{e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn query_answers_come_from_the_cache() {
+        let c = Handle(3);
+        let mut r = recorded(Stub::new(idle));
+        for _ in 0..3 {
+            assert_eq!(r.read(c, 10), Op::WouldBlock);
+            assert_eq!(r.write(c, b"ab"), Op::Ready(0));
+            assert_eq!(r.accept(Handle(1)), Op::WouldBlock);
+            assert_eq!(r.stats().unwrap(), "x=1");
+            assert!(!r.delivered(c).unwrap());
+        }
+        // 違う bytes の要求は別の問い合わせです。
+        assert_eq!(r.read(c, 11), Op::WouldBlock);
+        assert_eq!(
+            r.inner().seen,
+            [
+                Kind::Read,
+                Kind::Write,
+                Kind::Accept,
+                Kind::Stats,
+                Kind::Delivered,
+                Kind::Read
+            ]
+        );
+        assert_eq!(r.frames(), 2 + 2 * 6);
+        let (_, t) = r.into_parts();
+        let k = kinds(&t);
+        assert_eq!(k.len(), 14);
+        assert_eq!(
+            &k[..4],
+            [Kind::Hello, Kind::HelloOk, Kind::Read, Kind::WouldBlock]
+        );
+    }
+
+    #[test]
+    fn a_state_change_clears_the_cache() {
+        let c = Handle(3);
+        let mut r = recorded(Stub::new(idle));
+        assert_eq!(r.read(c, 10), Op::WouldBlock);
+        r.inject(&[b"p"]).unwrap();
+        assert_eq!(r.read(c, 10), Op::WouldBlock);
+        r.poll(1).unwrap();
+        assert_eq!(r.read(c, 10), Op::WouldBlock);
+        r.close(Handle(9)).unwrap();
+        assert_eq!(r.read(c, 10), Op::WouldBlock);
+        assert_eq!(
+            r.inner().seen,
+            [
+                Kind::Read,
+                Kind::Inject,
+                Kind::Read,
+                Kind::Poll,
+                Kind::Read,
+                Kind::Close,
+                Kind::Read
+            ]
+        );
+    }
+
+    #[test]
+    fn a_result_changes_state() {
+        // 結果を返した READ と ACCEPT は状態を変える要求で、問い合わせの答えを使えなくします。
+        fn data(req: &Msg) -> Msg {
+            match req {
+                Msg::Read { .. } => Msg::Data(b"hi".to_vec()),
+                Msg::Accept(_) => Msg::Accepted {
+                    h: Handle(4),
+                    remote: "10.200.0.1:40001".parse().unwrap(),
+                },
+                other => idle(other),
+            }
+        }
+        let mut r = recorded(Stub::new(data));
+        r.stats().unwrap();
+        assert_eq!(r.read(Handle(3), 10), Op::Ready(b"hi".to_vec()));
+        r.stats().unwrap();
+        assert!(matches!(r.accept(Handle(1)), Op::Ready(_)));
+        r.stats().unwrap();
+        assert_eq!(r.read(Handle(3), 10), Op::Ready(b"hi".to_vec()));
+        assert_eq!(
+            r.inner().seen,
+            [
+                Kind::Stats,
+                Kind::Read,
+                Kind::Stats,
+                Kind::Accept,
+                Kind::Stats,
+                Kind::Read
+            ]
+        );
+    }
+
+    #[test]
+    fn now_is_sent_until_the_time_is_known() {
+        let mut r = recorded(Stub::new(idle));
+        assert_eq!(r.cached_now(), Duration::ZERO);
+        assert_eq!(r.now().unwrap(), Duration::from_millis(5));
+        assert_eq!(r.now().unwrap(), Duration::from_millis(5));
+        // 状態を変える要求の後も、時刻を変えるのは ADVANCE だけなので NOW を送りません。
+        r.inject(&[b"p"]).unwrap();
+        assert_eq!(r.now().unwrap(), Duration::from_millis(5));
+        assert_eq!(r.inner().seen, [Kind::Now, Kind::Inject]);
+
+        // ADVANCE の応答の時刻を覚え、その後の NOW を送りません。
+        let mut r = recorded(Stub::new(|req| match req {
+            Msg::Advance(d) => Msg::Time(*d),
+            other => idle(other),
+        }));
+        assert_eq!(
+            r.advance(Duration::from_millis(1)).unwrap(),
+            Duration::from_millis(1)
+        );
+        assert_eq!(r.now().unwrap(), Duration::from_millis(1));
+        assert_eq!(r.cached_now(), Duration::from_millis(1));
+        assert_eq!(
+            r.advance(Duration::from_millis(2)).unwrap(),
+            Duration::from_millis(2)
+        );
+        assert_eq!(r.now().unwrap(), Duration::from_millis(2));
+        assert_eq!(r.inner().seen, [Kind::Advance, Kind::Advance]);
+        assert_eq!(r.frames(), 2 + 2 * 2);
+    }
+
+    #[test]
+    fn empty_data_is_a_query() {
+        fn empty(req: &Msg) -> Msg {
+            match req {
+                Msg::Read { .. } => Msg::Data(Vec::new()),
+                other => idle(other),
+            }
+        }
+        let c = Handle(3);
+        let mut r = recorded(Stub::new(empty));
+        // 最大 0 の READ も、最大が 0 より大きい READ も、空の DATA なら問い合わせです。
+        assert_eq!(r.read(c, 0), Op::Ready(Vec::new()));
+        assert_eq!(r.read(c, 0), Op::Ready(Vec::new()));
+        assert_eq!(r.read(c, 8), Op::Ready(Vec::new()));
+        assert_eq!(r.read(c, 8), Op::Ready(Vec::new()));
+        r.stats().unwrap();
+        assert_eq!(r.inner().seen, [Kind::Read, Kind::Read, Kind::Stats]);
+    }
+
+    #[test]
+    fn the_answer_frame_is_written_as_given() {
+        // 既定の道は answer を通すので、WRITE への待つ必要は WROTE 0 として書きます。
+        fn would_block(req: &Msg) -> Msg {
+            match req {
+                Msg::Write { .. } => Msg::WouldBlock,
+                Msg::Stats => Msg::Ok,
+                other => idle(other),
+            }
+        }
+        let c = Handle(3);
+        let mut r = recorded(Stub::new(would_block));
+        assert_eq!(r.write(c, b"ab"), Op::Ready(0));
+        assert_eq!(r.write(c, b"ab"), Op::Ready(0));
+        let (_, t) = r.into_parts();
+        assert_eq!(&kinds(&t)[2..], [Kind::Write, Kind::Wrote]);
+
+        // 応答の bytes を返す DUT では、その bytes を書きます。WRITE への WOULD_BLOCK は rustdut と同じく
+        // 状態を変える応答なので送り直し、要求に合わない応答も書いてから壊れたものとして返します。
+        let mut stub = Stub::new(would_block);
+        stub.raw = true;
+        let mut r = recorded(stub);
+        assert_eq!(r.write(c, b"ab"), Op::WouldBlock);
+        assert_eq!(r.write(c, b"ab"), Op::WouldBlock);
+        assert_eq!(
+            r.stats(),
+            Err(DutError::Broken("STATS answered Ok".to_owned()))
+        );
+        let (_, t) = r.into_parts();
+        assert_eq!(
+            &kinds(&t)[2..],
+            [
+                Kind::Write,
+                Kind::WouldBlock,
+                Kind::Write,
+                Kind::WouldBlock,
+                Kind::Stats,
+                Kind::Ok
+            ]
+        );
+    }
 
     #[test]
     fn query_table() {
