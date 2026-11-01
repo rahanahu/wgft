@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
-# agentdoctor.sh runs `wgft agent doctor` against a kernel-mode agent inside the lab VM (design
-# section 10.2c, the part on the kernel-mode agent) and prints PASS/FAIL per check. The server runs in
-# the vps namespace in the given mode; the agent runs in the home namespace with WGFT_MODE=kernel as
-# the unprivileged user wgftlab holding only an ambient CAP_NET_ADMIN, the way a systemd unit with
-# AmbientCapabilities=CAP_NET_ADMIN would run it.
+# agentdoctor.sh runs `wgft agent doctor` against a kernel-mode agent and against a userspace-mode
+# agent inside the lab VM (design section 10.2c) and prints PASS/FAIL per check. The server runs in
+# the vps namespace in the mode of the first argument. The second argument picks the sections by the
+# agent's mode, both when it is left out:
 #
-#   lab/lab exec vm bash /wgft/lab/agentdoctor.sh kernel      # server in kernel mode (the default)
-#   lab/lab exec vm bash /wgft/lab/agentdoctor.sh userspace   # server in userspace mode
+#   lab/lab exec vm bash /wgft/lab/agentdoctor.sh kernel             # server in kernel mode, both sections
+#   lab/lab exec vm bash /wgft/lab/agentdoctor.sh userspace kernel   # server in userspace mode, kernel-mode agent
+#   lab/lab exec vm bash /wgft/lab/agentdoctor.sh kernel userspace   # server in kernel mode, userspace-mode agent
+#
+# The kernel section runs the Go wgft in any configuration: the agent runs in the home namespace with
+# WGFT_MODE=kernel as the unprivileged user wgftlab holding only an ambient CAP_NET_ADMIN, the way a
+# systemd unit with AmbientCapabilities=CAP_NET_ADMIN would run it. The userspace section runs
+# $AGENT_WGFT (lab/sandbox.sh), the agent and its doctor alike, so lab/suite.txt lists the sections
+# as separate jobs and runs the kernel one with the Go agent only (agent=go).
 #
 # The doctor runs as three principals: root, wgftlab through runuser, which carries no capability,
 # and wgftlab with an ambient CAP_NET_ADMIN through setpriv.
 #
-# Checks, in order:
+# Checks, in order (all but the last in the kernel section):
 #   running    the running agent reports its kernel state itself: the user without capabilities gets
 #              exit 0 with interface, table and forwarding OK, and the relay items NOT TESTED; root
 #              gets running_as_root with the agent's uid and user named.
@@ -38,14 +44,21 @@
 #              interface_down; a restart
 #              repairs all of it.
 #   userspace  a userspace-mode agent reads the three items NOT TESTED with userspace_mode and its
-#              listeners OK. With AGENTDOCTOR_BASELINE set to an older wgft binary, the ids, states and
-#              reasons that binary reports for the same agent, running and stopped, must be unchanged.
+#              listeners OK. With AGENTDOCTOR_BASELINE set to another wgft binary, the ids, states and
+#              reasons that binary reports for the same agent, running and stopped, must be unchanged,
+#              the kernel-mode items aside. AGENTDOCTOR_BASELINE is an older wgft, or, when
+#              $AGENT_WGFT is the Rust build, the Go wgft by default: the Go CLI then reads the Rust
+#              agent's control socket.
 #
 # Requires `lab/lab build` and the netns topology (`lab/lab net up`). Leftovers of earlier runs are
 # removed first.
 set -u
 . "$(dirname "$0")/sandbox.sh"
 MODE=${1:-kernel}
+SECTIONS=${2:-kernel userspace}
+case "$MODE" in kernel|userspace) ;; *) echo "usage: agentdoctor.sh kernel|userspace [kernel|userspace]" >&2; exit 2;; esac
+case "$SECTIONS" in kernel|userspace|"kernel userspace") ;; *) echo "usage: agentdoctor.sh kernel|userspace [kernel|userspace]" >&2; exit 2;; esac
+section() { [[ " $SECTIONS " == *" $1 "* ]]; }
 DATA=$W/wgft-ad-server
 ADATA=$W/wgft-ad-agent
 UDATA=$W/wgft-ad-agent-us
@@ -90,7 +103,7 @@ agent_pids() { # agent_pids <data dir>
 agent_up() { [ -n "$(agent_pids "$1")" ]; }
 agent_down() { [ -z "$(agent_pids "$1")" ]; }
 start_kernel_agent() {
-  WGFT_MODE=kernel WGFT_JOIN="${JOIN:-}" home setsid nohup $WITH_CAP wgft agent run --data-dir "$ADATA" >> "$ALOG" 2>&1 < /dev/null &
+  WGFT_MODE=kernel WGFT_JOIN="${JOIN:-}" home setsid nohup $WITH_CAP wgft agent run --data-dir "$ADATA" >> "$ALOG" 2>&1 < /dev/null &  # lab: go agent
   disown
   wait_until 20 agent_up "$ADATA"
 }
@@ -101,7 +114,10 @@ stop_agent() { # stop_agent <data dir>
 }
 
 # doctor <principal> <data dir>: runs agent doctor --json and prints "exit=N" and one line per check:
-# "<id> <status> <reason> [unreachable]", then "detail <id>: <detail>" for every check.
+# "<id> <status> <reason> [unreachable]", then "detail <id>: <detail>" for every check. The binary is
+# DOCTOR_BIN, or the section's own: the Go wgft for the kernel-mode agent, $AGENT_WGFT for the
+# userspace-mode one.
+DOCTOR_DEFAULT=wgft
 doctor() {
   local who=$1 dir=$2 out code pre
   case "$who" in
@@ -110,7 +126,7 @@ doctor() {
     usercap) pre=$WITH_CAP ;;
     *) pre="$who" ;;
   esac
-  out=$(home $pre ${DOCTOR_BIN:-wgft} agent doctor --data-dir "$dir" --json 2>/dev/null)
+  out=$(home $pre "${DOCTOR_BIN:-$DOCTOR_DEFAULT}" agent doctor --data-dir "$dir" --json 2>/dev/null)
   code=$?
   echo "exit=$code"
   printf '%s' "$out" | python3 -c '
@@ -159,7 +175,7 @@ cleanup() {
   rm -rf "$DATA" "$ADATA" "$UDATA"
 }
 
-echo "== agent doctor, server in $MODE mode: setup"
+echo "== agent doctor, server in $MODE mode, $SECTIONS: setup"
 cleanup
 id "$USER_NAME" >/dev/null 2>&1 || useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin "$USER_NAME"
 mkdir -p "$DATA" "$ADATA" "$UDATA"
@@ -185,6 +201,10 @@ while True:
     c, _ = ls.accept(); c.sendall(b"private-service\n"); c.close()
 ' > /dev/null 2>&1 < /dev/null &
 disown
+
+if section kernel; then
+DOCTOR_DEFAULT=wgft
+echo "== kernel-mode agent: start"
 JOIN=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
 start_kernel_agent || echo "!! the agent did not start"
 wait_until 30 registered home || echo "!! the agent did not register"
@@ -214,7 +234,7 @@ check "root: the agent's uid and user are named" "the running agent runs as uid 
   "$(line "$out" "detail host.privileges:")"
 
 echo "INFO  the report of the running agent for $USER_NAME:"
-home runuser -u "$USER_NAME" -- wgft agent doctor --data-dir "$ADATA" | sed 's/^/INFO  | /'
+home runuser -u "$USER_NAME" -- wgft agent doctor --data-dir "$ADATA" | sed 's/^/INFO  | /'  # lab: go agent
 echo "== rules"
 R_LO=$(add_rule --tcp 39975 --to 127.0.0.1:25565)
 wait_until 30 caught_up
@@ -284,7 +304,7 @@ check "user, stopped: table needs CAP_NET_ADMIN" "dataplane.table unknown needs_
 check "user, stopped: forwarding needs CAP_NET_ADMIN" "host.forwarding unknown needs_cap_net_admin unreachable" "$(line "$out" host.forwarding)"
 check "user, stopped: the route is still read" "goes through wgft0" "$(line "$out" "detail dataplane.interface:")"
 echo "INFO  the report of the stopped agent for root:"
-home wgft agent doctor --data-dir "$ADATA" | sed 's/^/INFO  | /'
+home wgft agent doctor --data-dir "$ADATA" | sed 's/^/INFO  | /'  # lab: go agent
 out=$(doctor usercap "$ADATA")
 check "user with CAP_NET_ADMIN, stopped: exit 0" "exit=0" "$out"
 check "user with CAP_NET_ADMIN, stopped: table UNKNOWN" "dataplane.table unknown agent_not_running" "$(line "$out" dataplane.table)"
@@ -429,10 +449,15 @@ check "after the restart: table OK" "dataplane.table ok" "$(line "$out" dataplan
 stop_agent "$ADATA"
 home ip link del wgft0 2>/dev/null
 home nft delete table inet wgft_agent 2>/dev/null
+fi
 
+if section userspace; then
+DOCTOR_DEFAULT=$AGENT_WGFT
+# with the Rust agent, the Go CLI is the baseline: it reads the Rust agent's control socket
+[ "$AGENT_WGFT" != wgft ] && : "${AGENTDOCTOR_BASELINE:=wgft}"
 echo "== userspace"
 JOIN=$(vps wgft agent join-string --name home-us --admin "$ADMIN" 2>/dev/null | head -1)
-WGFT_JOIN="$JOIN" home setsid nohup runuser -u "$USER_NAME" -- wgft agent run --data-dir "$UDATA" >> "$ULOG" 2>&1 < /dev/null &
+WGFT_JOIN="$JOIN" home setsid nohup runuser -u "$USER_NAME" -- "$AGENT_WGFT" agent run --data-dir "$UDATA" >> "$ULOG" 2>&1 < /dev/null &
 disown
 wait_until 20 agent_up "$UDATA"
 wait_until 30 registered home-us || echo "!! the userspace agent did not register"
@@ -446,10 +471,12 @@ check "userspace: interface NOT TESTED" "dataplane.interface not_tested userspac
 check "userspace: table NOT TESTED" "dataplane.table not_tested userspace_mode" "$(line "$out" dataplane.table)"
 check "userspace: forwarding NOT TESTED" "host.forwarding not_tested userspace_mode" "$(line "$out" host.forwarding)"
 check "userspace: listeners OK" "relay.listeners ok" "$(line "$out" relay.listeners)"
-baseline_compare() { # baseline_compare <label>
+# baseline_compare <label>: the kernel-mode items are left out on both sides; an older baseline has
+# none, and the checks above read them in this section
+baseline_compare() {
   local now old
   now=$(doctor user "$UDATA" | grep -vE '^(detail |dataplane\.|host\.forwarding )' | grep -v '^exit=')
-  old=$(DOCTOR_BIN=$AGENTDOCTOR_BASELINE doctor user "$UDATA" | grep -v '^detail ' | grep -v '^exit=')
+  old=$(DOCTOR_BIN=$AGENTDOCTOR_BASELINE doctor user "$UDATA" | grep -vE '^(detail |dataplane\.|host\.forwarding )' | grep -v '^exit=')
   if [ "$now" = "$old" ]; then echo "PASS  userspace, $1: the same ids, states and reasons as the baseline"
   else echo "FAIL  userspace, $1: differs from the baseline"; diff <(echo "$old") <(echo "$now"); fail=1; fi
 }
@@ -459,8 +486,9 @@ out=$(doctor user "$UDATA")
 check "userspace, stopped: exit 1, as before" "exit=1" "$out"
 check "userspace, stopped: process FAILED" "agent.process failed agent_not_running" "$(line "$out" agent.process)"
 if [ -n "${AGENTDOCTOR_BASELINE:-}" ]; then baseline_compare stopped; else echo "SKIP  userspace baseline: AGENTDOCTOR_BASELINE is not set"; fi
+fi
 
 echo "== agent doctor: cleanup"
 cleanup
-if [ "$fail" = 0 ]; then echo "== agent doctor, server in $MODE mode: ALL PASS"; else echo "== agent doctor, server in $MODE mode: FAILURES"; fi
+if [ "$fail" = 0 ]; then echo "== agent doctor, server in $MODE mode, $SECTIONS: ALL PASS"; else echo "== agent doctor, server in $MODE mode, $SECTIONS: FAILURES"; fi
 exit "$fail"

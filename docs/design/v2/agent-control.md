@@ -369,23 +369,10 @@ serde_json はどれも書き換えず、JSON の値は同じです。
 
 ## ラボでの確認
 
-`lab/rust-agent.sh` は、使い捨てのラボの VM で、変更していない Go の v1 の server に対して Rust の agent を動かします。
-手順は [lab/README.md](../../../lab/README.md#v2-の-rust-の-agent-の試作) にあります。
-server のカーネルモードで流すと、Rust の agent は Linux のカーネルの WireGuard と組みます。
-ユーザー空間モードで流すと、wireguard-go と組みます。
-確認する項目は次のとおりで、結果は PR に記録します。
-
-- 登録:Rust の agent が接続文字列で自分を登録し、server が agent の作った鍵を持つこと
-- stream:server が版 1 を選び、適用の後のハートビートで、トンネルとルールの状態が server に届くこと
-- トンネル:TUN にトンネルのアドレスが付き、server が WireGuard のハンドシェイクを観測すること
-- keepalive の ping:ユーザー空間モードの server は答えること。
-  カーネルモードの server では、ping が server の `wgft0` に届き、答えが返らないこと
-- 中継:server の公開の側からの TCP の接続で、ルールの宛先へ 8 MiB を送り、宛先から 8 MiB を受け、SHA-256 が一致すること
-- 入口の検査:カーネルモードの server から、agent のホストの 0.0.0.0 で待ち受けるルールの無いポートへの接続が、RST で拒まれること
-- 停止:止めると TUN が消えること
-- Go の agent:同じ server に Go の v1 の agent を登録し、同じ確認で転送できること
-- 認証情報の引き継ぎ:Go の agent が登録して書いた `agent.json` から、接続文字列なしで Rust の agent が起動し、同じ鍵で転送できること。
-  逆に、Rust の agent が書いた `agent.json` から Go の agent が起動して転送できること
+ラボでの確認は、ラボの一式を Rust の agent で流す形に移りました ([Rust の agent の置き換えの設計のラボの切り替え](agent-parity.md#ラボの切り替え))。
+手順は [lab/README.md](../../../lab/README.md#rust-の-agent-で流す) にあります。
+試作の台本 `lab/rust-agent.sh` は、Go の agent と Rust の agent の間の `agent.json` の引き継ぎだけを確かめる `lab/agent-handover.sh` になりました。
+試作の台本が確かめていた登録、stream、トンネル、keepalive の ping、中継、入口の検査は、一式の `rust` の組が確かめます。
 
 ## 未確認の点
 

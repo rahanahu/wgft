@@ -327,7 +327,7 @@ func planDigest(in shardInput, l shardLayout) string {
 }
 
 // mergeSummaries は shard ごとの summary を 1 つにまとめる。取りこぼしや重複を verdict に
-// 混ぜないため、台の揃い方、同じ計画と同じ netstack であること、仕事の Index が計画の全体を
+// 混ぜないため、台の揃い方、同じ計画と同じ netstack と同じ agent の実装であること、仕事の Index が計画の全体を
 // 過不足なく覆うことを確かめ、問題は MergeProblems に入れる。wall は台の中で最も長いもの
 // (台は並行に流れる)。
 func mergeSummaries(parts []*summary) *summary {
@@ -335,7 +335,7 @@ func mergeSummaries(parts []*summary) *summary {
 	m := &summary{}
 	seenShard := map[string]bool{}
 	seenIdx := map[int]string{}
-	want, digest, netstack, first := 0, "", "", true
+	want, digest, netstack, impl, first := 0, "", "", "", true
 	var plan []string
 	name := func(i int) string {
 		if i >= 0 && i < len(plan) {
@@ -349,7 +349,8 @@ func mergeSummaries(parts []*summary) *summary {
 			continue
 		}
 		if first {
-			want, digest, netstack, plan, first = p.PlanJobs, p.PlanDigest, p.Netstack, p.PlanScenarios, false
+			want, digest, netstack, impl, plan, first = p.PlanJobs, p.PlanDigest, p.Netstack, implOrGo(p.AgentImpl), p.PlanScenarios, false
+			m.FromGo = p.FromGo
 		}
 		if seenShard[p.Shard] {
 			problems = append(problems, "shard "+p.Shard+" given twice")
@@ -363,6 +364,9 @@ func mergeSummaries(parts []*summary) *summary {
 		}
 		if netstack != p.Netstack {
 			problems = append(problems, fmt.Sprintf("shard %s ran with netstack %s, not %s", p.Shard, p.Netstack, netstack))
+		}
+		if impl != implOrGo(p.AgentImpl) {
+			problems = append(problems, fmt.Sprintf("shard %s ran with agent %s, not %s", p.Shard, implOrGo(p.AgentImpl), impl))
 		}
 		if n := shardCount(p.Shard); n != len(parts) {
 			problems = append(problems, fmt.Sprintf("shard %s, but %d parts given", p.Shard, len(parts)))
@@ -418,7 +422,7 @@ func mergeSummaries(parts []*summary) *summary {
 		problems = append(problems, fmt.Sprintf("job %d is outside the plan of %d jobs", i, want))
 	}
 	sort.Slice(m.Results, func(i, j int) bool { return m.Results[i].Index < m.Results[j].Index })
-	m.PlanJobs, m.PlanDigest, m.PlanScenarios, m.Netstack = want, digest, plan, netstack
+	m.PlanJobs, m.PlanDigest, m.PlanScenarios, m.Netstack, m.AgentImpl = want, digest, plan, netstack, impl
 	m.Shard = fmt.Sprintf("merged/%d", len(parts))
 	finishSummary(m)
 	m.MergeProblems = problems
