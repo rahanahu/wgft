@@ -101,8 +101,14 @@ fn parse(p: &[u8]) -> (u16, u32, usize) {
 }
 
 impl Rig {
-    /// 待ち受けを開き、相手から `conns` 本の接続を確立して accept します。
+    /// 待ち受けを開き、相手から `conns` 本の接続を確立して accept します。相手は SACK を示しません。
     pub fn new(conns: usize) -> Self {
+        Self::with_sack(conns, false)
+    }
+
+    /// `new` と同じで、`sack` が真なら相手が SACK-permitted を示し、SACK を交渉した接続の経路 (RACK の状態の更新と
+    /// TLP の期限) を通ります。
+    pub fn with_sack(conns: usize, sack: bool) -> Self {
         let config = Config::new(DUT, MTU);
         let stack =
             Stack::new(config, Budget::new().expect("budget"), &[7; 64], NoHook).expect("stack");
@@ -118,11 +124,15 @@ impl Rig {
             .stack
             .listen_tcp(r.now, SocketAddrV4::new(DUT, 80))
             .expect("listen");
-        // MSS 1380 と窓の scale 7 です。
-        let opts = [2, 4, 0x05, 0x64, 1, 3, 3, 7];
+        // MSS 1380 と窓の scale 7 と、NOP NOP SACK-permitted です。
+        let opts: &[u8] = if sack {
+            &[2, 4, 0x05, 0x64, 1, 3, 3, 7, 1, 1, 4, 2]
+        } else {
+            &[2, 4, 0x05, 0x64, 1, 3, 3, 7]
+        };
         for i in 0..conns {
             let port = 10_000 + u16::try_from(i).expect("port");
-            build(&mut r.pkt, port, 1000, 0, SYN, &opts, &[]);
+            build(&mut r.pkt, port, 1000, 0, SYN, opts, &[]);
             r.stack.handle_packet(r.now, &r.pkt);
             let n = r.stack.poll_transmit(r.now, &mut r.out).expect("SYN-ACK");
             let (_, iss, _) = parse(&r.out[..n]);
@@ -230,14 +240,16 @@ mod tests {
 
     #[test]
     fn the_rig_moves_data_both_ways() {
-        let mut r = Rig::new(4);
-        r.rig_only(0);
-        for i in 0..200 {
-            r.recv_one(i % 4);
-            r.send_one(i % 4);
+        for sack in [false, true] {
+            let mut r = Rig::with_sack(4, sack);
+            r.rig_only(0);
+            for i in 0..200 {
+                r.recv_one(i % 4);
+                r.send_one(i % 4);
+            }
+            r.check();
+            assert_eq!(r.conns(), 4);
         }
-        r.check();
-        assert_eq!(r.conns(), 4);
     }
 
     /// 確認を受けながら送り続け、1 回ごとに 1 segment を送ります。
