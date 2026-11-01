@@ -1196,7 +1196,8 @@ Rust の側は、agent のホストのコマンドのフラグが Go と同じ�
 - `go` のとき:書き換えは機械的で、挙動は変わりません
 - 一式の外の台本:`version-skew.sh` と `upgrade.sh` の「今のビルドの agent」、`scale.sh` と `rcvwin.sh` のユーザー空間モードの agent も `AGENT_WGFT` にします。
   `version-skew.sh` は今のビルドの agent の版を `"$AGENT_WGFT" version` で確かめます。
-  Go の netstack を比べる `tcpquality.sh` と、Go のメモリの probe を読む `agentmem.sh` は、Go の `wgft` のままにします
+  Go の netstack を比べる `tcpquality.sh` と、Go のメモリの probe を読む `agentmem.sh` は、Go の `wgft` のままにします。
+  `tcpquality.sh` は Rust の agent を `AGENT_WGFT` でなくモード `rust` で起動し、Go の agent の `gvisor` と `wgstack` と同じ実行で比べます
 
 ### 確認の分け方
 

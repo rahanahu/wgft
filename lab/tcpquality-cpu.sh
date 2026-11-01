@@ -14,17 +14,26 @@
 # netstack goes first every round, so both netstacks see the same periods of the VM. It then prints
 # tcpquality.py cpuratio's lines: per netstack the median, quartiles and range of the agent's CPU
 # seconds per GB, and the ratio of the wgstack and gVisor medians with a bootstrap 95% interval.
-# The defaults, 3 rounds of 3 runs, give the 9 runs per case of the design's gate. Run it alone in
-# the VM. Requires `lab/lab build` and the netns topology (`lab/lab net up`).
+# The defaults are 3 rounds of 3 runs. This in-VM ratio is a quick estimate: the design's CPU gate
+# and before/after comparisons use `lab/lab paired`, whose ratio is not comparable with this one.
+# Run it alone in the VM. Requires `lab/lab build` and the netns topology (`lab/lab net up`).
+#
+# With a mode of tcpquality.sh after the path, it runs only that mode, RUNS runs on the path, and
+# prints tcpquality.sh's lines without the ratio; `lab/lab paired` runs it so in two VMs at once:
+#
+#   lab/lab exec vm env SYNC=1 bash /wgft/lab/tcpquality-cpu.sh fast wgstack
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 case "${1:-}" in
   fast) export DELAY_MS=0 LOSS_PCT=0 BYTES=${BYTES:-1073741824}; unset RATE_MBIT ;;
   rate) export DELAY_MS=25 LOSS_PCT=0 RATE_MBIT=20 QUEUE_PKTS=200 BYTES=${BYTES:-33554432} ;;
-  *) echo "usage: tcpquality-cpu.sh fast|rate" >&2; exit 2 ;;
+  *) echo "usage: tcpquality-cpu.sh fast|rate [mode]" >&2; exit 2 ;;
 esac
 export CPU=1 OUTAGE_S=0 RUNS=${RUNS:-3} DIRECTION=${DIRECTION:-down}
 ROUNDS=${ROUNDS:-3}
+if [ -n "${2:-}" ]; then
+  exec bash "$HERE/tcpquality.sh" "$2"
+fi
 
 . "$HERE/sandbox.sh"
 log=$W/wgft-tqcpu.log

@@ -256,6 +256,56 @@ lab/lab exec vm bash /wgft/lab/agent-handover.sh userspace
 今の Rust の agent は Rust の wgstack の上で動き、root も TUN も要りません。
 `rust` の組の扱いは [テストの規範](../docs/development/testing.md#マージの前に流すテスト) にあります。
 
+## byte あたりの CPU を組にして比べる
+
+`lab/lab paired` は、2 つの腕のエージェントの byte あたりの CPU を、一時的な VM 2 台で同時に測って比べます。
+変更の前後と、2 つの netstack や実装の比べに使います。
+測り方の理由と参照の値は[CPU の比べ方](../docs/design/userspace/wgstack-performance.md#cpu-の比べ方)にあります。
+
+```sh
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired fast wgstack gvisor
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --direction up rate rust wgstack
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --base origin/main fast wgstack base:wgstack
+```
+
+経路は `lab/tcpquality-cpu.sh` の `fast` か `rate` で、`--direction up` でエージェントが受ける向きにします。
+腕は `lab/tcpquality.sh` のユーザー空間モードの `gvisor`、`wgstack`、`rust` です。
+`gvisor` と `wgstack` は Go の agent をその netstack で動かし、`rust` は Rust の agent を動かします。
+`kernel` は WireGuard と TCP の仕事がエージェントのプロセスの外にあって byte あたりの CPU がほぼ 0 になり、`userspace` は `gvisor` と同じなので、腕にできません。
+`base:<モード>` は、`--base` の commit の build で同じモードを動かします。
+`--base` は commit をホストの `~/.cache/wgft-lab/` の一時的な worktree に取り出し、`wgft` を `bin/base/` に作ります。
+腕に `rust` があれば、Rust の `wgft` も作ります。
+比は 1 つ目の腕 x の値を 2 つ目の腕 y の値で割ったものです。
+
+手順は次のとおりです。
+
+- 用意:ビルドはホストで 1 回行い、2 台の VM にインストールします。
+  VM は `lab suite` と同じく `WGFT_LAB_TEMPLATE` のスナップショット `clean` の複製で、5 秒ずらして起動します。
+  2 台を同時に起動すると片方が上がらないことがあったためで、上がらない VM は 1 回だけ作り直します
+- 固定:`WGFT_LAB_PAIR_CPUS` に VM a と VM b の CPU の集合を空白で区切って指定すると、各 VM の vCPU を集合の先頭の `--vcpus` 個 (既定 4) に固定します。
+  2 つの集合が重なれば止まります。
+  ハイブリッドの CPU では、2 つの集合を同じ種類のコアにします。
+  未設定なら固定しません
+- round:各 round で 2 台が同時に `tcpquality-cpu.sh <経路> <モード>` を `SYNC=1` で流します。
+  奇数の round は x が VM a、偶数の round は x が VM b です。
+  `--rounds` (既定 4) は偶数で、round ごとにエージェントを起動し直して `--runs` (既定 3) 回流します
+- 始まりの同期:`tcpquality.sh` は実行ごとに `SYNC ready` を出して待ちます。
+  ホストは 2 台がそろうと、1 秒先の時刻をそれぞれの VM の時計に直して書き、2 台はその時刻に client を繋ぎます。
+  VM の時計はホストの時計と 1 秒ほどずれることがあり、2 台の間でも違ったので、ホストは round の始めに `incus exec` の往復の中点で各 VM の時計の差を測ります。
+  時計の差が round の間に 50 ms を超えて動いた場合と、始まりの時刻が過ぎてから届いた実行は、警告を出します。
+  片方の VM の `tcpquality-cpu.sh` が途中で終了した場合は、残りの VM だけを進め、その実行は組になりません
+- 解析:`tcpquality.py cpupaired` が、同じ round と実行の番号の 2 つの実行を組にし、x の値を y の値で割ります。
+  x が VM a の組の比の中央値と、x が VM b の組の比の中央値の幾何平均を比として出し、組を引き直す bootstrap の 95% の区間を付けます。
+  2 台の CPU の差は `vm_a_over_b` に出ます。
+  失敗した実行、始まりの同期を待ちきれなかった実行、送り手が 1 つの CPU の 0.7 以上を使った実行を含む組は除き、予定の組の数に対する理由ごとの数を出します。
+  どちらかの側で予定の組の半分より少なくしか残らなければ、比を出さずに失敗します。
+  round ごとの比の中央値と、組の 2 つの実行が重なった割合も出し、重なりが 0.9 より小さければ警告します
+
+結果は `--out` (既定は `/tmp/wgft-lab-paired-<日時>`) の `result.txt`、組の行の `paired.log`、round と VM ごとのログです。
+`FAIL` の行があるか組が足りない場合は、終了コードが 0 以外になります。
+VM は終わると消し、`--keep` を付けると残します。
+残った VM は `lab/lab suite-gc` が消します。
+
 ## 対応する VPS の環境
 
 カーネルと nftables の対応範囲は[セットアップの前提](../docs/manual/setup.md)に従います。

@@ -1656,8 +1656,10 @@ qbench の速さは、20 Mbit/s の経路では経路で決まります。
 - 比べに使わない値:速さを外した経路の送る向きの Mbit/s。
   25 ms では窓で、1 ms では試験の道具で止まるとみられるので、engine の速さの順位には使いません
 
-agent の水準の比べ (提案、未実施):ラボの `lab/tcpquality.sh` と `lab/tcpquality-cpu.sh` は、WireGuard を通した agent の転送の速さ、回復、byte あたりの CPU (プロセスごとの cgroup) を測ります。
-`WGFT_LAB_AGENT_IMPL` を `go` と `rust` にして、同じ VM、同じ server (kernel と userspace の両方のモード) で交互に流すと、Rust の agent と Go の agent を同じ経路で比べられます。
+agent の水準の比べ (一部を実施):ラボの `lab/tcpquality.sh` と `lab/tcpquality-cpu.sh` は、WireGuard を通した agent の転送の速さ、回復、byte あたりの CPU (プロセスごとの cgroup) を測ります。
+`tcpquality.sh` のモード `rust` は Rust の agent を、`gvisor` と `wgstack` は Go の agent を、カーネルモードの server と同じ経路で動かします。
+byte あたりの CPU は `lab/lab paired` で 2 つの腕を同時に流して比べます ([CPU の比べ方](../userspace/wgstack-performance.md#cpu-の比べ方))。
+server のユーザー空間モードを相手にした比べは、まだ道具がありません。
 経路は `tcpquality-cpu.sh` の `fast` (netem なし、1 GiB) と `rate` (片道 25 ms、20 Mbit/s) で、`DIRECTION=up` と既定の down の両方です。
 細い stream の遅れは今の `tcpquality.sh` が測らないので、qbench の `runThin` と同じ 20 ms ごとの 200 byte の流れを足すことを提案します。
 `fast` の速さは VM の vCPU の数と WireGuard の暗号に左右されるので、CPU の数を固定し (`wgft-heavy` の車線)、byte あたりの CPU を主な値にします。

@@ -663,6 +663,261 @@ cmd_suite() {
   return $rc
 }
 
+# ---- lab paired:2 つの腕を 2 台の VM で同時に流し、round ごとに VM を入れ替えて byte あたりの CPU を比べる ----
+# 腕は tcpquality.sh のモード (gvisor、wgstack、rust、userspace、kernel) か、--base の commit の build で流す
+# base:<モード>。VM は lab suite と同じく WGFT_LAB_TEMPLATE のスナップショット clean の複製で、
+# WGFT_LAB_PAIR_CPUS ("<VM a の集合> <VM b の集合>") があれば、各 VM の vCPU を集合の先頭の --vcpus 個に固定する。
+# round ごとに 2 台が同時に lab/tcpquality-cpu.sh <経路> <モード> を SYNC=1 で流し、ホストが実行ごとに
+# 2 台の始まりをそろえる。奇数の round は x が VM a、偶数の round は x が VM b で、2 台の CPU の差を打ち消す。
+# 解析は tcpquality.py cpupaired。設計は docs/design/userspace/wgstack-performance.md の「CPU の比べ方」
+PAIRED_BASE_WT=""
+paired_cleanup() {
+  suite_cleanup || true
+  if [[ -n $PAIRED_BASE_WT ]]; then
+    git -C "$REPO" worktree remove --force "$PAIRED_BASE_WT" >/dev/null 2>&1 || true
+  fi
+}
+
+# paired_build_base <ref> <rust 0|1>:ref の wgft を bin/base/ に、rust が 1 なら Rust の wgft を bin/base/rust/ に作る。
+# ref は ~/.cache の一時的な worktree に取り出し、build の後すぐに消す。Go の build は lab build と同じく
+# WGFT_LAB_BUILD_TAGS を付ける。Rust の target は ~/.cache/wgft-lab/paired-base-target に置き、作業ツリーの target に
+# base の binary を残さない。この置き場は消さずに次の --base の build で依存を使い回す
+paired_build_base() {
+  local ref=$1 rust=$2 commit
+  commit=$(git -C "$REPO" rev-parse --verify "$ref^{commit}") || die "--base $ref is not a commit"
+  PAIRED_BASE_WT=${XDG_CACHE_HOME:-$HOME/.cache}/wgft-lab/paired-base-$$
+  mkdir -p "$(dirname "$PAIRED_BASE_WT")"
+  git -C "$REPO" worktree add -q --detach "$PAIRED_BASE_WT" "$commit" || die "cannot check out --base $ref"
+  rm -rf "$REPO/bin/base"
+  mkdir -p "$REPO/bin/base"
+  (cd "$PAIRED_BASE_WT" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ${WGFT_LAB_BUILD_TAGS:+-tags "$WGFT_LAB_BUILD_TAGS"} -o "$REPO/bin/base/" ./cmd/wgft) \
+    || die "cannot build wgft of --base $ref"
+  if ((rust)); then
+    command -v cargo-zigbuild >/dev/null || die "the Rust build needs cargo-zigbuild and zig on the host"
+    local target=${XDG_CACHE_HOME:-$HOME/.cache}/wgft-lab/paired-base-target
+    mkdir -p "$target"
+    # 置き場はすべての作業ツリーと実行で共有する。cargo の錠は build の後の install を覆わないので、build から
+    # install までを置き場の flock で 1 つにし、同時の --base の build が互いの binary を入れないようにする
+    (
+      flock 9
+      (cd "$PAIRED_BASE_WT" && CARGO_TARGET_DIR="$target" cargo zigbuild --release --locked --target x86_64-unknown-linux-musl -p wgft) \
+        && install -D -m 0755 "$target/x86_64-unknown-linux-musl/release/wgft" "$REPO/bin/base/rust/wgft"
+    ) 9>"$target.lock" || die "cannot build the Rust wgft of --base $ref"
+  fi
+  git -C "$REPO" worktree remove --force "$PAIRED_BASE_WT" >/dev/null 2>&1 || true
+  PAIRED_BASE_WT=""
+  info "built --base $ref ($commit) into $REPO/bin/base/"
+}
+
+# paired_make_vm <name> <limits.cpu> <log>:VM を作り、build を入れる。2 台を同時に起こすと 1 台が上がらないことが
+# あったので、失敗したら消して 1 回だけ作り直す
+paired_make_vm() {
+  local name=$1 pin=$2 log=$3 try
+  for try in 1 2; do
+    if (SUITE_PIN=$pin; suite_make_vm "$name" && vm_install && {
+      [[ ! -f $REPO/bin/base/wgft ]] || in_vm sh -c 'rm -rf /usr/local/lib/wgft-base && install -D -m 0755 /wgft/bin/base/wgft /usr/local/lib/wgft-base/wgft && if [ -f /wgft/bin/base/rust/wgft ]; then install -D -m 0755 /wgft/bin/base/rust/wgft /usr/local/lib/wgft-base/rust/wgft; fi'
+    }) >>"$log" 2>&1; then
+      return 0
+    fi
+    echo "lab: VM $name did not come up, try $try" >>"$log"
+    inc delete "$name" --force >/dev/null 2>&1 || true
+  done
+  return 1
+}
+
+# paired_offset <name>:VM の時計からホストの時計を引いた秒。VM の時計はホストから 1 秒ほどずれることがあり、
+# 2 台の間でも違う (2026-11-01 の試し)。incus exec の往復の中点と比べ、3 回のうち往復の短い回の値を出す
+paired_offset() {
+  local i h0 v h1 best="" out=""
+  for i in 1 2 3; do
+    h0=$(date +%s.%N)
+    v=$(inc exec "$1" -- date +%s.%N) || continue
+    h1=$(date +%s.%N)
+    out=$(awk -v h0="$h0" -v v="$v" -v h1="$h1" -v best="$best" -v out="$out" \
+      'BEGIN { r = h1 - h0; if (best == "" || r < best) printf "%.6f %.4f", r, v - (h0 + h1) / 2; else printf "%s %s", best, out }')
+    best=${out%% *} out=${out#* }
+  done
+  echo "${out:-0}"
+}
+
+# paired_sync <runs> <name a> <mode a> <log a> <pid a> <off a> <name b> <mode b> <log b> <pid b> <off b>:実行ごとに、
+# 2 台が "SYNC ready" を出すか終わるまで待ち、待っている VM に PAIR_LEAD_S 秒先の始まりの時刻を、その VM の時計に
+# 直して書く。片方が途中で終われば、残りの VM だけを放す。その実行は組にならず、解析が除く
+paired_sync() {
+  local runs=$1 k t side
+  local -a names=("$2" "$7") modes=("$3" "$8") logs=("$4" "$9") pids=("$5" "${10}") offs=("$6" "${11}") ready w
+  for ((k = 1; k <= runs; k++)); do
+    while :; do
+      ready=()
+      for side in 0 1; do
+        if grep -qx "SYNC ready mode=${modes[side]} run=$k" "${logs[side]}" 2>/dev/null; then
+          ready+=("$side")
+        elif kill -0 "${pids[side]}" 2>/dev/null; then
+          ready=(wait)
+          break
+        fi
+      done
+      if [[ ${ready[0]:-} != wait ]]; then break; fi
+      sleep 0.1
+    done
+    t=$(date +%s.%N)
+    w=()
+    for side in "${ready[@]}"; do
+      inc exec "${names[side]}" -- sh -c "echo $(awk -v n="$t" -v l="$PAIR_LEAD_S" -v o="${offs[side]}" 'BEGIN { printf "%.3f", n + l + o }') > /tmp/wgft-tq-go-${modes[side]}-$k" &
+      w+=($!)
+    done
+    if ((${#w[@]})); then wait "${w[@]}" || true; fi
+  done
+}
+
+cmd_paired() {
+  local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes=""
+  local usage="usage: lab paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--base REF] [--vcpus N] [--out DIR] [--keep] fast|rate ARM_X ARM_Y"
+  while (($#)); do
+    case $1 in
+      --rounds) rounds=${2:?--rounds N}; shift 2 ;;
+      --runs) runs=${2:?--runs N}; shift 2 ;;
+      --direction) direction=${2:?--direction down|up}; shift 2 ;;
+      --bytes) bytes=${2:?--bytes N}; shift 2 ;;
+      --base) base=${2:?--base REF}; shift 2 ;;
+      --vcpus) vcpus=${2:?--vcpus N}; shift 2 ;;
+      --out) out=${2:?--out DIR}; shift 2 ;;
+      --keep) keep=1; shift ;;
+      -*) die "$usage" ;;
+      *) break ;;
+    esac
+  done
+  (($# == 3)) || die "$usage"
+  local path=$1 spec_x=$2 spec_y=$3 s m uses_base=0 rust=0
+  [[ $path == fast || $path == rate ]] || die "the path is fast or rate; $usage"
+  [[ $rounds =~ ^[1-9][0-9]*$ ]] && ((rounds % 2 == 0)) || die "--rounds wants an even number, so that each arm runs as often in each VM"
+  [[ $runs =~ ^[1-9][0-9]*$ ]] || die "--runs wants a whole number of 1 or more"
+  ((rounds / 2 * runs >= 2)) || die "--rounds $rounds with --runs $runs plans $((rounds / 2 * runs)) pair per side; the ratio needs at least 2 on each side, so raise --rounds or --runs"
+  [[ $vcpus =~ ^[1-9][0-9]*$ ]] || die "--vcpus wants a whole number of 1 or more"
+  [[ $direction == down || $direction == up ]] || die "--direction wants down or up"
+  [[ -z $bytes || $bytes =~ ^[1-9][0-9]*$ ]] || die "--bytes wants a whole number of bytes"
+  [[ $spec_x != "$spec_y" ]] || die "the two arms are the same: $spec_x"
+  for s in "$spec_x" "$spec_y"; do
+    m=${s#base:}
+    [[ $s != base:* ]] || uses_base=1
+    case $m in
+      gvisor | wgstack) ;;
+      rust) rust=1 ;;
+      # kernel は agent のプロセスが WireGuard と TCP を持たず byte あたりの CPU がほぼ 0 で、userspace は gvisor と同じ
+      kernel | userspace) die "arm $s: lab paired compares the userspace agents gvisor, wgstack and rust; a kernel-mode agent spends almost no CPU in its process, and userspace is gvisor" ;;
+      *) die "unknown arm $s; an arm is gvisor, wgstack or rust, or base:<one of them> with --base" ;;
+    esac
+  done
+  ((!uses_base)) || [[ -n $base ]] || die "an arm base:<mode> needs --base REF"
+  ((uses_base)) || [[ -z $base ]] || die "--base is given, but no arm is base:<mode>"
+  # VM ごとの固定:WGFT_LAB_PAIR_CPUS の 2 つの集合の先頭から --vcpus 個ずつ。無ければ固定せず、vCPU の数だけ決める
+  local pins=() sets=() used="" dup
+  if [[ -n ${WGFT_LAB_PAIR_CPUS:-} ]]; then
+    read -ra sets <<<"$WGFT_LAB_PAIR_CPUS"
+    ((${#sets[@]} == 2)) || die "WGFT_LAB_PAIR_CPUS='$WGFT_LAB_PAIR_CPUS' wants two CPU sets, one for each VM, like '16-23 8-15'"
+    for s in "${sets[@]}"; do
+      CPUS=$s
+      cpus_expand
+      ((${#CPU_LIST[@]} >= vcpus)) || die "the CPU set $s of WGFT_LAB_PAIR_CPUS has ${#CPU_LIST[@]} CPUs, fewer than --vcpus $vcpus"
+      pins+=("$(cpus_join "${CPU_LIST[@]:0:vcpus}")")
+      used+=" ${CPU_LIST[*]:0:vcpus}"
+    done
+    CPUS=""
+    dup=$(tr ' ' '\n' <<<"$used" | sed '/^$/d' | sort | uniq -d | head -1)
+    [[ -z $dup ]] || die "the two VMs would share CPU $dup; give WGFT_LAB_PAIR_CPUS two sets that do not overlap"
+  else
+    pins=("$vcpus" "$vcpus")
+    info "note: WGFT_LAB_PAIR_CPUS is unset, so the two VMs are not pinned"
+  fi
+  out=${out:-${TMPDIR:-/tmp}/wgft-lab-paired-$(date +%Y%m%d-%H%M%S)}
+  mkdir -p "$out"
+  out=$(cd "$out" && pwd)
+  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction" > "$out/paired.log"
+  SUITE_KEEP=$keep
+  SUITE_TEMPLATE=${WGFT_LAB_TEMPLATE:-$VM}
+  PAIR_LEAD_S=${PAIR_LEAD_S:-1}
+  WGFT_LAB_AGENT_NETSTACK=""
+  WGFT_LAB_AGENT_IMPL=""
+  local t0=$SECONDS
+  SUITE_T0=$t0
+  trap paired_cleanup EXIT
+  trap 'info "interrupted; deleting the paired VMs"; exit 130' INT TERM HUP
+  cmd_suite_gc
+  if ((rust)); then LAB_BUILD_RUST=1; fi
+  host_build
+  if [[ -n $base ]]; then paired_build_base "$base" "$rust"; else rm -rf "$REPO/bin/base"; fi
+  local names=("wgft-paired-$$-a" "wgft-paired-$$-b") vms=(a b) mk=() i
+  SUITE_VMS=("${names[@]}")
+  # 2 台を少しずらして起こす。同時に起こした 2 台の片方が上がらないことがあった
+  for i in 0 1; do
+    if ((i)); then sleep "${PAIR_STAGGER_S:-5}"; fi
+    paired_make_vm "${names[i]}" "${pins[i]}" "$out/vm-${vms[i]}.log" &
+    mk+=($!)
+  done
+  for i in 0 1; do
+    wait "${mk[i]}" || die "VM ${names[i]} did not come up in two tries; see $out/vm-${vms[i]}.log"
+  done
+  local kern dirty=""
+  kern=$(VM=${names[0]}; in_vm uname -r)
+  git -C "$REPO" diff --quiet HEAD 2>/dev/null || dirty=-dirty
+  {
+    echo "lab paired: path $path, direction $direction, x=$spec_x y=$spec_y, $rounds rounds of $runs runs"
+    echo "lab paired: head $(git -C "$REPO" rev-parse HEAD)$dirty${base:+, base $(git -C "$REPO" rev-parse "$base^{commit}") ($base)}"
+    echo "lab paired: VM a ${names[0]} limits.cpu=${pins[0]}, VM b ${names[1]} limits.cpu=${pins[1]}, kernel $kern, template $SUITE_TEMPLATE"
+    echo "lab paired: VMs ready after $((SECONDS - t0)) s"
+  } | tee "$out/header.txt"
+  local r side spec mode rc=0 fails=0 run_timeout prev_offs=()
+  # 1 つの round の上限:起動と後片付けに 300 秒、実行ごとに転送の時間 (fast は 100 Mbit/s、rate は経路の 20 Mbit/s で
+  # 見積もる) と 60 秒の余裕。既定の fast は約 740 秒、rate は約 520 秒
+  run_timeout=$(awk -v b="${bytes:-$([[ $path == fast ]] && echo 1073741824 || echo 33554432)}" -v r="$runs" \
+    -v bps="$([[ $path == fast ]] && echo 100000000 || echo 20000000)" 'BEGIN { printf "%d", 300 + r * (b * 8 / bps + 60) }')
+  local -A spec_of=([x]=$spec_x [y]=$spec_y)
+  for ((r = 1; r <= rounds; r++)); do
+    local arms=(x y) logs=() pids=() modes=() env=() offs=()
+    ((r % 2)) || arms=(y x)
+    for side in 0 1; do
+      offs+=("$(paired_offset "${names[side]}")")
+      # 時計の差が round の間に 50 ms を超えて動けば、始まりの同期がその分ずれうるので知らせる
+      if [[ -n ${prev_offs[side]:-} ]] && awk -v a="${prev_offs[side]}" -v b="${offs[side]}" 'BEGIN { d = a - b; exit !(d > 0.05 || d < -0.05) }'; then
+        echo "lab paired: warning: the clock of VM ${vms[side]} moved from ${prev_offs[side]} s to ${offs[side]} s off the host since the last round"
+      fi
+    done
+    prev_offs=("${offs[@]}")
+    for side in 0 1; do
+      spec=${spec_of[${arms[side]}]}
+      mode=${spec#base:}
+      env=(SYNC=1 RUNS="$runs" DIRECTION="$direction")
+      [[ -z $bytes ]] || env+=(BYTES="$bytes")
+      [[ $spec != base:* ]] || env+=(WGFT_BIN_DIR=/usr/local/lib/wgft-base)
+      logs+=("$out/round-$r-${vms[side]}.log")
+      modes+=("$mode")
+      (VM=${names[side]}; suite_timeout "$run_timeout" in_vm env "${env[@]}" bash "$SHARE/lab/tcpquality-cpu.sh" "$path" "$mode") >"${logs[side]}" 2>&1 &
+      pids+=($!)
+    done
+    paired_sync "$runs" "${names[0]}" "${modes[0]}" "${logs[0]}" "${pids[0]}" "${offs[0]}" "${names[1]}" "${modes[1]}" "${logs[1]}" "${pids[1]}" "${offs[1]}"
+    for side in 0 1; do
+      wait "${pids[side]}" || rc=1
+      if grep -q '^SYNC go .* wait_s=-' "${logs[side]}"; then
+        echo "lab paired: warning: round $r VM ${vms[side]}: $(grep -c '^SYNC go .* wait_s=-' "${logs[side]}") runs got the start time after it had passed"
+      fi
+      if grep -q '^FAIL' "${logs[side]}"; then
+        grep '^FAIL' "${logs[side]}" | sed "s/^/round $r VM ${vms[side]}: /"
+        fails=1
+      fi
+      # 窓の時刻は VM の時計なので、ホストの時計に直して 2 台の窓の重なりを比べられるようにする
+      { grep '^RESULT ' "${logs[side]}" || true; } \
+        | sed "s/^RESULT /PAIRED round=$r vm=${vms[side]} arm=${arms[side]} name=${spec_of[${arms[side]}]} clock_offset_s=${offs[side]} /" \
+        | awk -v o="${offs[side]}" '{ for (i = 1; i <= NF; i++) if ($i ~ /^t_(start|end)=/) { split($i, kv, "="); $i = sprintf("%s=%.3f", kv[1], kv[2] - o) } print }' >>"$out/paired.log"
+    done
+    echo "lab paired: round $r of $rounds done, x in VM $([[ ${arms[0]} == x ]] && echo a || echo b), $((SECONDS - t0)) s"
+  done
+  python3 "$REPO/lab/tcpquality.py" cpupaired "$out/paired.log" >"$out/result.txt" || rc=1
+  cat "$out/result.txt"
+  ((!fails)) || rc=1
+  echo "lab paired: wall time $((SECONDS - t0)) s before deleting the VMs; logs in $out"
+  return $rc
+}
+
 # lab test <pkg> [ns] [go test flags...]:ホストで build tag lab 付きのテストバイナリを作り、VM の ns(既定 vps)で実行する
 cmd_test() {
   [[ $# -ge 1 ]] || die "usage: lab test <pkg> [ns] [-test.run ...]"
@@ -722,7 +977,10 @@ usage: lab <command>
   suite [--vms N] [--netstack default|wgstack|both] [--agent-impl go|rust|both] [--durations FILE] [--parallel N] [--shard-timeout SEC] [--out DIR] [--keep]
                       一時 VM を N 台 (既定 3) 立てて一式を shard に分けて同時に流し、1 つの判定にまとめて VM を消す。
                       組 (agent の実装と netstack) ごとに N 台。結果は <out>/<実装>/<netstack>/
-  suite-gc            持ち主のいない一時 VM(lab suite が残したもの)を消す
+  suite-gc            持ち主のいない一時 VM(lab suite と lab paired が残したもの)を消す
+  paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--base REF] [--vcpus N] [--out DIR] [--keep] fast|rate ARM_X ARM_Y
+                      一時 VM を 2 台立て、2 つの腕 (gvisor、wgstack、rust か base:<それ>) の byte あたりの CPU を
+                      同時に流して round ごとに VM を入れ替えて比べ、VM を消す。固定は WGFT_LAB_PAIR_CPUS="<集合 a> <集合 b>"
   host-fix            ホストの firewalld / Docker を設定して VM の IPv4 を通す(sudo)
 
 ns: ${NAMESPACES[*]}
@@ -744,6 +1002,7 @@ case "$sub" in
   test) cmd_test "$@" ;;
   suite) cmd_suite "$@" ;;
   suite-gc) cmd_suite_gc ;;
+  paired) cmd_paired "$@" ;;
   host-fix) cmd_host_fix ;;
   "" | -h | --help | help) usage ;;
   *) usage >&2; exit 2 ;;
