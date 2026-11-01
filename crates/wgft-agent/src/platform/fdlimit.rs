@@ -104,7 +104,7 @@ mod imp {
         let hard = if raw_hard == libc::RLIM_INFINITY {
             u64::MAX
         } else {
-            hard
+            raw_hard
         };
         let to = target(hard, os_cap(hard));
         // soft が無制限か、既に目標以上なら触らない
