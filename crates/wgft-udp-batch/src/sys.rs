@@ -46,6 +46,11 @@ pub(crate) struct Headers {
     ctrl: Box<[Ctrl]>,
 }
 
+// SAFETY: 見出しの raw pointer は、自分の配列と呼び手の buffer を指し、system call のたびにその呼び出しの
+// 間生きている先を書き直してから使う。呼び出しの外では読まないので、持ち主のスレッドが変わっても指す先を
+// 共有しない
+unsafe impl Send for Headers {}
+
 impl std::fmt::Debug for Headers {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Headers")
