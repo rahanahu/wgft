@@ -18,7 +18,7 @@ use crate::frag;
 use crate::icmp::{PING_ENDPOINTS, Pings};
 use crate::index;
 use crate::output::Dlist;
-use crate::stack::{EventTargets, NoHook, Stack};
+use crate::stack::{EventTargets, NoHook};
 use crate::tcp::NUM_TIMERS;
 use crate::tcp::conn;
 use crate::tcp::listen::{Listener, PortTable};
@@ -176,7 +176,7 @@ pub(crate) fn fix_parts(l: &Limits, mtu: usize, stack_size: usize) -> FixParts {
 impl Bound {
     /// 表の大きさ `limits` と MTU `mtu` の核の上界です。核の値の大きさは hook の無い核で数えます。
     pub fn for_limits(limits: &Limits, mtu: usize) -> Self {
-        Self::with_stack_size(limits, mtu, size_of::<Stack<NoHook>>())
+        Self::with_stack_size(limits, mtu, crate::stack::stack_size::<NoHook>())
     }
 
     pub(crate) fn with_stack_size(l: &Limits, mtu: usize, stack_size: usize) -> Self {

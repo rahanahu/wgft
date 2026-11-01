@@ -1107,7 +1107,7 @@ Linux の TUN の上で Rust の engine を動かす確かめは、qbench でな
 
 試験の担当の target の本体は `crates/wgft-wgstack-dut` の `fuzz` module に置き、`crates/wgft-wgstack/fuzz/` の target はその関数を呼ぶだけにします。
 stable の試験が同じ本体で seed と見つけた落ちる入力を流せるためと、試験の担当のコードを核の crate に置かないためです。
-本体は核の公開の API (`check_invariants`、`held`、`bound` を含みます) だけを使うので、核の `#[cfg(fuzzing)]` の口は要りません。
+本体は核の公開の API (`check_invariants`、`check_invariants_touched`、`held`、`bound` を含みます) だけを使うので、核の `#[cfg(fuzzing)]` の口は要りません。
 
 `core` は `FuzzCore` の解釈器 (`op%8` で操作を選び、相手の模型 `peerConn` が packet を作る) を同じ byte の読み方で写します。
 同じ読み方なので Go の corpus はそのまま seed になります。
@@ -1116,7 +1116,10 @@ stable の試験が同じ本体で seed と見つけた落ちる入力を流せ�
 Go と違う所が 1 つあります。
 Go は書ける量が 1000 byte を超える時だけ書き、読める時だけ読みます。
 核の公開の API は書ける量と読めるかを返さないので、`core` は書き込みと読み取りをそのまま呼び、`WouldBlock` と一部だけの書き込みを受け入れます。
-各段の後に `check_invariants` と、保持が表の大きさと上界の内にあることを確かめ、最後に核を閉じて会計が 0 に戻ることを確かめます。
+各段の後に不変条件と、保持が表の大きさと上界の内にあることを確かめ、最後に核を閉じて会計が 0 に戻ることを確かめます。
+不変条件は、前の段から書き換えた接続の枠だけを確かめる `check_invariants_touched` で確かめます ([wgstack の Rust 版の書き換えた所だけの確かめ](wgstack-rs.md#書き換えた所だけの確かめ))。
+`core`、`adversarial_sender`、`raw_adversary` の本体が使う `Net` は、`set_check` で確かめの形 (書き換えた枠だけ、すべての枠、両方を並べて答えを比べる) を選べます。
+試験の道具の crate は核の crate を feature `harness` を付けて使い、書き換えた枠だけの確かめはこの feature の build だけにあります。
 
 `raw_adversary` は状態を持つ生の packet の敵で、Go に元の試験はありません。
 入力の byte を選択の列として読み、相手の番号を追いながら、option の端の値を持つ SYN、乱れた flag と番号と窓と timestamp と SACK の block、ICMP の frag-needed とほかの種類、UDP、順を混ぜて重ねた断片、アプリケーションの操作、25 日までの時刻の跳びを混ぜます。
@@ -1175,6 +1178,7 @@ git には `fuzzcore` の記録の分を、要求の frame を 4096 byte (libFuz
 
 stable の試験 `crates/wgft-wgstack-dut/tests/fuzz_corpus.rs` が、3 つの target の `corpus` と `regressions` のファイルを 1 つずつ流します。
 nightly の無い CI でも、見つけた入力の回帰を確かめるためです。
+`Net` を使う target の入力は、各段で書き換えた枠だけの確かめとすべての枠の確かめを並べ、答えが同じことも確かめます。
 Go の `TestAdversarialSender` と同じ種の範囲を、同じ試験に環境変数 `WGFT_WGSTACK_AUDIT_SEEDS` と `WGFT_WGSTACK_AUDIT_START` で足せます。
 既定では足さず、seed の種 1 から 8 だけを流します。
 1 つの種は debug の build で 3 秒ほど、release の build で 0.1 秒ほどかかるので、多くの種はホストの関門が release の build で流します (7 節)。
@@ -1224,11 +1228,12 @@ Rust の関門は長さの制御を切って全長 (最大 500 段) の入力で
 - 核の作成と確かめの手間:表を埋める処理、輪の容量の外の確かめ、ポートの表の bit の集合の数え上げを速くします ([作成と確かめの細部](wgstack-rs.md#作成と確かめの細部))。
   小さな表の核を作って閉じる手間は約 0.1 ms です
 
-残る手間の内訳は次のとおりです (`core` の libFuzzer の入力、1 回の測り)。
-各段の確かめは約 3.7 µs で、接続の枠の確かめ (輪の chunk の位置、送り手と scoreboard) が約 1.2 µs、知らせの印の数え上げ (ポートの数の対象) が約 0.8 µs、UDP の確かめが約 0.5 µs です。
+残る手間の内訳は次のとおりです (`core` の libFuzzer の入力)。
+各段の確かめは、書き換えた枠だけを確かめる形で約 1.8 µs で、ほとんどが毎段すべてを確かめる共有の表の確かめです ([wgstack の Rust 版の書き換えた所だけの確かめ](wgstack-rs.md#書き換えた所だけの確かめ))。
 核の作成の約 0.1 ms は、ほとんどがポートの数の行を持つ UDP の endpoint の表と待ち受けの表を埋める手間です。
 ポートの数の行は v1 がルールの範囲の幅に上限を置かないことから来るので ([上界の式の写し方](wgstack-rs.md#上界の式の写し方))、この手間は表の設計を変えない限り残ります。
-k 段に 1 回だけ確かめる形と、入力の間で核を使い回す形は採っていません。
+k 段に 1 回だけ確かめる形は採っていません。
+入力の間で核を使い回す形も採っていません。
 使い回しは、作り直した核と同じ状態に戻すために、ポートの表の世代を含めて表の全体を書き直すことになり、作成と同じ手間がかかるためです。
 
 ## 7. 関門と CI
@@ -1379,8 +1384,9 @@ Rust の側は核の crate の中の試験の補助を使うので、書き手�
 - qbench の Unix ソケットの 1 段:`TestQBenchRelayStage` が測りました。細い stream の遅れの p50 に約 0.1 ms が加わり、CPU は約 0.1 ns/byte です ([wgstack の Rust 版の設計の qbench での測定](wgstack-rs.md#qbench-での測定))
 - 実時間の Rust の DUT:`--clock real` の外側の層は、製品と同じ `wgft-netstack` の handle と、agent のデータプレーンと同じ順の駆動の写しです。駆動は agent の `dataplane::driver` を共有せず、`wgstack-dut` の中に同じ順で書きました。agent の駆動は WireGuard の device の層と UDP のソケットを持つためです
 - fuzz の速さ:6 節の表のとおり測り、関門の回数を決めました。
-  `core` と `replay` の 1 回の時間の多くは `check_invariants` です。
-  確かめを軽くできるか (使っていない範囲を飛ばすなど) は、実装の担当の判断で、未確認です
+  `core` の各段の確かめは書き換えた接続の枠だけを確かめ直し、残りの多くは毎段すべてを確かめる共有の表です。
+  共有の表にも書き換えの印を足すかは未決です。
+  `replay` は adapter の `check_invariants` のままで、書き換えた枠だけの確かめを使っていません
 - 関門の時間:7 節の時間は、道具の照合の `dutserve` を相手にした分のほかは推定です
 
 ## 10. wgstack の Rust 版の設計との対応

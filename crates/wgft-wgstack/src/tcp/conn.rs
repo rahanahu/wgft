@@ -389,11 +389,19 @@ impl Default for QLink {
 }
 
 /// 接続の枠の表です。3 つの配列は同じ番号で 1 つの枠を表します。
+///
+/// 試験と fuzz の build (`cfg(test)` か feature `harness`) では、配列を書き換える口 (`*_mut`、`alloc`、`release`、
+/// `free_all`) がどれも書き換える枠の印を `touched` に付けます。配列はこの型の外から見えないので、印の無い枠は
+/// 印を外した時から変わっていません。書き換えた枠だけを確かめる試験がこの性質に依ります (wgstack-rs.md の
+/// 「書き換えた所だけの確かめ」)。製品の build に印と印を付ける処理はありません。
 #[derive(Debug)]
 pub(crate) struct ConnSlots {
     hot: FixedVec<Tcb>,
     cold: FixedVec<ConnCold>,
     bufs: FixedVec<ConnBufs>,
+    /// 前に [`ConnSlots::take_touched`] を呼んでから書き換えた枠の印です。
+    #[cfg(any(test, feature = "harness"))]
+    touched: crate::bitset::BitSet,
     /// floor の配列を持つ枠の数です。枠は初めて使う時に配列を確保して持ち続けるので、作ってから使ったことのある
     /// 枠の数で、[`ConnSlots::free_all`] で 0 に戻ります。
     with_arrays: usize,
@@ -421,6 +429,8 @@ impl ConnSlots {
             cold: FixedVec::try_filled(n, |_| ConnCold::default())?,
             bufs: FixedVec::try_filled(n, |_| ConnBufs::new())?,
             with_arrays: 0,
+            #[cfg(any(test, feature = "harness"))]
+            touched: crate::bitset::BitSet::new(n)?,
         })
     }
 
@@ -439,6 +449,8 @@ impl ConnSlots {
     }
 
     pub(crate) fn tcb_mut(&mut self, i: u32) -> &mut Tcb {
+        #[cfg(any(test, feature = "harness"))]
+        self.touched.set(i);
         &mut self.hot[i as usize]
     }
 
@@ -447,11 +459,15 @@ impl ConnSlots {
     }
 
     pub(crate) fn bufs_mut(&mut self, i: u32) -> &mut ConnBufs {
+        #[cfg(any(test, feature = "harness"))]
+        self.touched.set(i);
         &mut self.bufs[i as usize]
     }
 
     /// 枠 `i` の 3 つの部分です。
     pub(crate) fn parts_mut(&mut self, i: u32) -> (&mut Tcb, &mut ConnCold, &mut ConnBufs) {
+        #[cfg(any(test, feature = "harness"))]
+        self.touched.set(i);
         let i = i as usize;
         (&mut self.hot[i], &mut self.cold[i], &mut self.bufs[i])
     }
@@ -462,6 +478,8 @@ impl ConnSlots {
         let Some(i) = free.pop() else {
             return Ok(None);
         };
+        #[cfg(any(test, feature = "harness"))]
+        self.touched.set(i);
         let s = &mut self.bufs[i as usize];
         if s.recs.capacity() == 0 && s.spare_recs.capacity() == 0 {
             let (Ok(recs), Ok(iv)) = (
@@ -485,6 +503,7 @@ impl ConnSlots {
     /// floor の配列は持ち続けます。呼び手は先に表と待ち行列と boost の枠から外します。
     #[cfg(test)]
     pub(crate) fn release(&mut self, i: u32, free: &mut FixedVec<u32>, pool: &mut ChunkPool) {
+        self.touched.set(i);
         let t = &mut self.hot[i as usize];
         if t.state == State::Free {
             return;
@@ -535,6 +554,10 @@ impl ConnSlots {
 
     /// 枠をすべて返し、floor の配列も解放します。核を閉じる時に呼びます。
     pub(crate) fn free_all(&mut self, pool: &mut ChunkPool) {
+        #[cfg(any(test, feature = "harness"))]
+        for i in 0..self.hot.len() {
+            self.touched.set(u32::try_from(i).unwrap_or(u32::MAX));
+        }
         for (t, b) in self.hot.iter_mut().zip(self.bufs.iter_mut()) {
             b.snd.release(pool);
             b.rcv.r.release(pool);
@@ -553,8 +576,26 @@ impl ConnSlots {
         self.with_arrays
     }
 
+    /// 前の呼び出しから書き換えた枠の番号を小さい順に `f` に渡し、印を外します。
+    #[cfg(any(test, feature = "harness"))]
+    pub(crate) fn take_touched(&mut self, mut f: impl FnMut(u32)) {
+        self.touched.for_each(&mut f);
+        self.touched.clear();
+    }
+
     /// 空きの list `free` と使っている印が一致し、輪と段が合うことを確かめます。
+    #[cfg(test)]
     pub(crate) fn check(&self, free: &[u32], links: &[QLink]) -> Result<(), &'static str> {
+        self.check_free(free, links)?;
+        for i in 0..self.hot.len() {
+            self.check_slot(u32::try_from(i).unwrap_or(u32::MAX))?;
+        }
+        Ok(())
+    }
+
+    /// 空きの list `free` と使っている印が一致し、floor の配列を持つ枠の数が合うことを確かめます。手間は枠の数に
+    /// 比例します。
+    pub(crate) fn check_free(&self, free: &[u32], links: &[QLink]) -> Result<(), &'static str> {
         // 印は 1 枠 1 bit で、検査の間だけ確保します (wgstack-rs.md の「不変条件の検査の手間」)。
         let mut seen = crate::bitset::BitSet::new(self.hot.len())
             .map_err(|_| "allocation failed while checking")?;
@@ -586,13 +627,17 @@ impl ConnSlots {
         if self.bufs.iter().filter(|b| b.has_floor_arrays()).count() != self.with_arrays {
             return Err("the count of slots with floor arrays disagrees with the slots");
         }
-        for (_, t, b) in self.iter_bufs() {
-            b.snd.check()?;
-            b.rcv.r.check()?;
-            b.rcv.check()?;
-            check_stage(t, b)?;
-        }
         Ok(())
+    }
+
+    /// 枠 `i` の輪、受信の区間の表、段が合うことを確かめます。枠 `i` の 3 つの配列の要素と、それが持つ配列だけを
+    /// 読みます。
+    pub(crate) fn check_slot(&self, i: u32) -> Result<(), &'static str> {
+        let (t, b) = (&self.hot[i as usize], &self.bufs[i as usize]);
+        b.snd.check()?;
+        b.rcv.r.check()?;
+        b.rcv.check()?;
+        check_stage(t, b)
     }
 }
 
