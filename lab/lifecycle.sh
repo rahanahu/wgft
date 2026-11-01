@@ -1910,7 +1910,10 @@ agent_isolation_case() {
     "$([ "$heldA" -ge $((a_hold - 24)) ] && [ "$heldA" -le "$a_hold" ] && echo 1 || echo 0)"
   okcheck "$tag: rule B opens new connections up to its minimum while A is flooded" \
     "$([ "$heldB" -ge $((m - 24)) ] && [ "$heldB" -le "$m" ] && echo 1 || echo 0)"
-  eqcheck "$tag: rule A's held connections are not evicted by rule B's admission" "$heldA" "$heldA_after"
+  # "Not evicted" means the count did not go down. The "before" sample can land while rule A's last
+  # relays are still dialing their target, so the count may still rise; it must not pass A's stop.
+  okcheck "$tag: rule A's held connections are not evicted by rule B's admission" \
+    "$([ "$heldA_after" -ge "$heldA" ] && [ "$heldA_after" -le "$a_hold" ] && echo 1 || echo 0)"
   spare_refusals_only "$tag: rule A's refusal is logged with reason spare" "$LOG" "$idA"
 
   addrs_del 10 30
