@@ -1182,7 +1182,8 @@ round ごとに腕と VM を入れ替えるので、2 つの CPU の集合の速
 重なりは長い方の実行の窓のうち 2 つの実行が重なった割合で、解析は組ごとの値の中央値を出し、0.9 より小さければ警告します。
 参照の値の `fast` の経路の送る向きでは重なりが 0.76 から 0.78 で、速い wgstack と Rust の agent の比は約 1% 高めに出ている見込みです。
 偏りは速い腕を不利にする向きなので、判定する腕が速い場合は、目標の判定では控えめな側です。
-決まった時間だけ転送する形に替えれば重なりは 1 になりますが、byte の数が腕ごとに変わるので、今は替えず、選べる案として残します。
+`--tool iperf3` は決まった時間だけ転送するので、組の重なりは 1 になります。
+`tcpquality.py` の転送は byte の数を決めるので、この偏りが残ります。
 
 #### round の間の揺れ
 
@@ -1206,8 +1207,9 @@ round ごとの実行の数でこの分の重みが変わり、2026-11-01 の同
 `tcpquality.sh` のモード `gvisor` と `wgstack` は、Go の agent をその netstack で動かします。
 モード `rust` は Rust の agent を動かし、netstack は Rust の wgstack だけです。
 server はどのモードでも Go の `wgft` のカーネルモードです。
+モード `kernel` (エージェントのカーネルモード) はエージェントのプロセスが WireGuard と TCP の仕事をしないので、`--tool iperf3` で流し、VM 全体の byte あたりの CPU (`VMRATIO`) だけで比べます。
 [目標と制約](#目標と制約)の CPU の目標は、Go の agent の wgstack と gVisor の比として決めました。
-ユーザー空間モードの製品のエージェントは Rust の agent に替わったので、Rust の agent の目標は性能の測定の段で決めます。
+ユーザー空間モードの製品のエージェントは Rust の agent に替わったので、Rust の agent の速さを制限しない経路の目標は [速さを制限しない経路の agent の性能](../v2/agent-throughput.md#目標) で決めます。
 参照の表は、Rust の agent と Go の agent の gVisor の比も記録します。
 
 #### 参照の値
@@ -1231,8 +1233,8 @@ gVisor の値は 2 つの測定のそれぞれの中央値で、範囲で示し�
 Go の agent の wgstack は 4 つの場合のどれでも 0.6 倍を満たしません。
 Rust の agent は 4 つの場合のどれでも gVisor の 0.6 倍を下回ります。
 ただしこの比は、Rust の agent の全体と Go の agent の全体の比で、wireguard-go と Rust の WireGuard の層の違いを含みます。
-Rust の agent の値は、ラボの build(musl の静的 binary で、musl の既定の malloc)の値です。
-ほかの libc や allocator の build に同じ値が当てはまるかは、確かめていません。
+Rust の agent の値は、ラボの build (`cargo zigbuild` の `x86_64-unknown-linux-musl` の静的 binary で、zig が同梱する libc と割り当て器) の値です。
+glibc の build との比べは [割り当て器と libc](../v2/agent-throughput.md#割り当て器と-libc) にあります。
 区間は、前述の round の間の揺れのため狭めに出ています。
 
 参照は、測った実装、`tcpquality.sh` の経路、VM の大きさ、カーネルのどれかが変わった時に測り直します。

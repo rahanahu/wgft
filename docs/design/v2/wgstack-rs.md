@@ -1773,6 +1773,7 @@ server のユーザー空間モードを相手にした比べは、まだ道具�
 経路は `tcpquality-cpu.sh` の `fast` (netem なし、1 GiB) と `rate` (片道 25 ms、20 Mbit/s) で、`DIRECTION=up` と既定の down の両方です。
 細い stream の遅れは今の `tcpquality.sh` が測らないので、qbench の `runThin` と同じ 20 ms ごとの 200 byte の流れを足すことを提案します。
 `fast` の速さは VM の vCPU の数と WireGuard の暗号に左右されるので、CPU の数を固定し (`wgft-heavy` の車線)、byte あたりの CPU を主な値にします。
+速さを制限しない経路の速さ、byte あたりの CPU、UDP の往復の遅れの基準の値と、CPU の行き先の profile は [速さを制限しない経路の agent の性能](agent-throughput.md) にあります。
 
 ## 置き換えの後の作業
 
@@ -1783,7 +1784,13 @@ agent の置き換えが終わった後に、次の作業を順に決めます�
 - 参照の Linux が 7.2 に移ったことで生じた受け手の変更の候補。
   候補の一覧は `docs/design/userspace/wgstack-receive-linux72.md` にあります
 - dial の側と server の Device ([dial の側を足す継ぎ目](#dial-の側を足す継ぎ目))
-- 送信の経路の system call のまとめ (Linux の `sendmmsg` と UDP の GSO) と、受信の経路のまとめ
+- 送信の経路の system call のまとめ (Linux の `sendmmsg` と UDP の GSO) と、受信の経路のまとめ。
+  目標と制約は [速さを制限しない経路の agent の性能](agent-throughput.md#目標) にあります
+- 受ける向きの大きな転送の間の UDP の遅れ:速さを制限しない経路で、client から LAN へ大きな TCP の転送が走る間、UDP の中継の往復の p50 が約 7 ms で、gVisor の約 3 ms より長くなります。
+  本番のゲームの UDP の流れに対する gVisor からの後退です。
+  UDP の datagram は、WireGuard のソケットの受信の待ち行列に溜まった TCP のデータの後ろに並びます。
+  待ち行列の量は wgstack の受信の窓と、その上はソケットの受信のバッファで頭を打ちます ([UDP の往復の遅れ](agent-throughput.md#udp-の往復の遅れ))。
+  直し方は、遅れの目標で受信の窓を頭打ちにする変更として、バッチの作業の [受信の窓の段](agent-throughput.md#受信の窓の段) で行います
 - 不要な速い再送の取り消し:再送を確認した最初の ACK で判定する Eifel の検出 (RFC 3522) と、RFC 4015 の応答。
   同じ TSval の刻みの中で再送した回復も取り消せるようにします ([qbench での測定](#qbench-での測定)の `send/reorder`)。
   凍結した Go の wgstack と出力が変わるので、Go の記録との bit の一致を求める期間が終わった後に入れます
