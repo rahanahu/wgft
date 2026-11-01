@@ -126,7 +126,15 @@ Go の v1 の agent と仕様に対して、今の Rust の agent に無いも�
 | ロック | `flock` と `LockFileEx` | `File::try_lock` で同じ方式 | 済み。Windows の試験は「platform の層」で足した |
 | 一時ファイルの片付け | ロックを取った後に消す | 消す | 済み |
 | 時刻の印の水位 | Go の agent には無い | `agent.json.clock` に残す | 済み。Rust だけのファイルで、Go の agent は読まない |
+| Windows のデータディレクトリの持ち主 | Go の agent は確かめない。仕様は警告を許す | 持ち主が SYSTEM、Administrators、実行中の利用者のどれでもなければ、起動の時に警告を 1 行出す (`winsec::data_dir_owner_warning`)。拒まない | 済み。Windows の CI の試験だけで、実機では確かめていない |
 | ファイル記述子の上限 | Go の性質:Go の実行環境は Unix で起動の時に soft の `RLIMIT_NOFILE` を hard の値まで上げる。macOS では `kern.maxfilesperproc` で頭を打つ。同梱の unit と plist は `LimitNOFILE` を書かず、これに頼る | 済み (`platform::fdlimit`)。`wgft` の起動で呼ぶ | 「platform の層」 |
+
+Windows のデータディレクトリの持ち主は、拒まずに警告にしました。
+既定の `%ProgramData%\wgft` は権限の無い利用者も先に作れ、その持ち主はディレクトリの DACL を書き換えて `agent.json` を差し替えられます。
+一方で、配備の道具が別の管理用の利用者でディレクトリを作る構成もありうるので、拒むと正しい構成の起動を止めます。
+警告の文は、管理者で作り直すことを促します。
+持ち主の判定は `GetNamedSecurityInfoW` で読んだ持ち主の SID を、SYSTEM (`S-1-5-18`)、Administrators (`S-1-5-32-544`)、実行中の利用者の SID と比べます。
+読めなければ何も出しません。
 
 ## UDP の中継
 

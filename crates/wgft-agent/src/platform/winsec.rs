@@ -24,8 +24,8 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-    TOKEN_USER, TokenUser,
+    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT,
@@ -295,6 +295,62 @@ pub fn read_dacl_sddl(path: &Path) -> io::Result<String> {
     Ok(unsafe { super::utf16z_to_string(s.0) })
 }
 
+/// `path` の持ち主の SID の文字列 (`S-1-...`)。
+pub fn owner_sid(path: &Path) -> io::Result<String> {
+    let w = wide(path.as_os_str());
+    let mut owner: PSID = ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: w は NUL で終わり、owner と sd は書き込める場所を指す
+    let rc = unsafe {
+        GetNamedSecurityInfoW(
+            w.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &raw mut owner,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &raw mut sd,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(rc.cast_signed()));
+    }
+    // owner は sd の中を指すので、sd を解放するまでに写す
+    let sd = LocalMem(sd);
+    let mut s: *mut u16 = ptr::null_mut();
+    // SAFETY: owner は sd の中の有効な SID で、s は書き込める場所を指す
+    if unsafe { ConvertSidToStringSidW(owner, &raw mut s) } == FALSE {
+        return Err(io::Error::last_os_error());
+    }
+    let s = LocalMem(s);
+    drop(sd);
+    // SAFETY: 成功した呼び出しが返した NUL で終わる文字列
+    Ok(unsafe { super::utf16z_to_string(s.0) })
+}
+
+/// 持ち主 `owner` が、データディレクトリを任せてよい者 (SYSTEM、BUILTIN\Administrators、実行中の
+/// 利用者 `user`) か。
+pub fn trusted_owner(owner: &str, user: &str) -> bool {
+    owner == SID_SYSTEM || owner == SID_ADMINS || owner == user
+}
+
+/// データディレクトリ `dir` の持ち主が任せてよい者でなければ、警告の文を返す。読めなければ何も
+/// 返さない。持ち主は自分のディレクトリの DACL を書き換えられ、中の `agent.json` を差し替えられるので、
+/// 権限の無い利用者が先に作った `%ProgramData%\wgft` を agent が使うと、その利用者が agent の接続先と
+/// 秘密を差し替えられるためである。
+pub fn data_dir_owner_warning(dir: &Path) -> Option<String> {
+    let owner = owner_sid(dir).ok()?;
+    let user = current_user_sid().ok()?;
+    if trusted_owner(&owner, &user) {
+        return None;
+    }
+    Some(format!(
+        "warning: the data directory {} is owned by {owner}, not by SYSTEM, Administrators or the user running the agent; its owner can change its permissions and replace agent.json. Recreate the directory as an administrator unless that owner is trusted",
+        dir.display()
+    ))
+}
+
 /// `path` の DACL が 3 者だけの継承なしの形かを確かめる。ACE の並びの違いや、継承の印の書き方の差は
 /// 許し、保護 (`P`) と ACE の集合を見る。
 pub fn dacl_is_private(path: &Path, inherit: bool) -> io::Result<bool> {
@@ -364,6 +420,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn trusted_owners_are_system_administrators_and_the_user() {
+        let me = "S-1-5-21-1-2-3-1001";
+        assert!(trusted_owner(SID_SYSTEM, me));
+        assert!(trusted_owner(SID_ADMINS, me));
+        assert!(trusted_owner(me, me));
+        assert!(!trusted_owner("S-1-5-21-1-2-3-1002", me));
+        assert!(!trusted_owner("S-1-1-0", me));
+    }
+
+    /// agent が作ったデータディレクトリは任せてよい者のもので、警告を出さない。
+    #[test]
+    fn a_directory_the_agent_created_needs_no_warning() {
+        let d = tmpdir("owner");
+        let dir = d.join("data");
+        create_private_dir(&dir).unwrap();
+        let owner = owner_sid(&dir).unwrap();
+        assert!(
+            trusted_owner(&owner, &current_user_sid().unwrap()),
+            "{owner}"
+        );
+        assert_eq!(data_dir_owner_warning(&dir), None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
