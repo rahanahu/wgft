@@ -19,8 +19,8 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, SDDL_REVISION_1,
-    SE_FILE_OBJECT, SetSecurityInfo,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
+    GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, SetSecurityInfo,
 };
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
@@ -319,10 +319,33 @@ fn split_dacl(s: &str) -> Option<(bool, Vec<String>)> {
     let mut v: Vec<String> = aces
         .split('(')
         .filter(|a| !a.is_empty())
-        .map(|a| a.trim_end_matches(')').to_ascii_uppercase())
+        .map(|a| canonical_ace(a.trim_end_matches(')')))
         .collect();
     v.sort();
     Some((flags.contains('P'), v))
+}
+
+/// ACE の trustee を SID の文字列に揃える。読み返しの SDDL は、既知の SID を別名 (`LA` は組み込みの
+/// Administrator など) で書くので、別名と SID の違いで落とさない。読めなければ大文字にして返す。
+fn canonical_ace(ace: &str) -> String {
+    let ace = ace.to_ascii_uppercase();
+    let Some((head, trustee)) = ace.rsplit_once(';') else {
+        return ace;
+    };
+    let w = wide(OsStr::new(trustee));
+    let mut sid: *mut core::ffi::c_void = ptr::null_mut();
+    // SAFETY: w は NUL で終わり、sid は書き込める場所を指す
+    if unsafe { ConvertStringSidToSidW(w.as_ptr(), &raw mut sid) } == FALSE {
+        return ace;
+    }
+    let sid = LocalMem(sid);
+    let mut out: *mut u16 = ptr::null_mut();
+    // SAFETY: sid は有効な SID で、out は書き込める場所を指す
+    if unsafe { ConvertSidToStringSidW(sid.0, &raw mut out) } == FALSE {
+        return ace;
+    }
+    let out = LocalMem(out);
+    format!("{head};{}", wide_ptr_to_string(out.0))
 }
 
 fn same_dacl(got: &str, want: &str) -> bool {
