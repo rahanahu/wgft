@@ -119,6 +119,13 @@
 #      (lab/suite.txt's exclusive-global). The lab's own sysctl file from `lab/lab net up`, which
 #      sets the same values, is moved aside for the check, so that only the guide's file can make
 #      sysctl --system raise them.
+#   13. the userspace agent's WireGuard session is rekeyed against the server's WireGuard, Linux
+#      WireGuard in kernel mode and wireguard-go in userspace mode: with a TCP session and a UDP
+#      exchange kept busy through a rule past REKEY_AFTER_TIME (120 s), the server reports a newer
+#      handshake 100 s or more after the first, and every TCP byte and every UDP round trip,
+#      before and after the new handshake, arrives. The agent initiates the rekey, since it is the
+#      side that knows the endpoint; it runs with whichever agent the run uses, so a rust run checks
+#      the Rust device's rekey with both server implementations.
 #
 # Requires `lab/lab build` (wgft and echo in /usr/local/bin of the VM) and the netns topology
 # (`lab/lab net up`). Leftovers from earlier runs are killed first. Wherever a step waits on
@@ -134,8 +141,8 @@ ulimit -n 100000 2>/dev/null || true  # check 5 floods thousands of sockets from
 mode=${1:-kernel}
 case "$mode" in kernel|userspace) ;; *) echo "usage: lifecycle.sh kernel|userspace [check...]" >&2; exit 2;; esac
 shift || true
-# Optional check names after the mode (1 2 3 3b 4 5 6 7 8 9 10 11 12) run only those checks; none runs all.
-ALL_CHECKS="1 2 3 3b 4 5 5b 5c 5d 5e 5f 5g 6 7 8 9 10 11 12"
+# Optional check names after the mode (1 2 3 3b 4 5 6 7 8 9 10 11 12 13) run only those checks; none runs all.
+ALL_CHECKS="1 2 3 3b 4 5 5b 5c 5d 5e 5f 5g 6 7 8 9 10 11 12 13"
 CHECKS="${*:-$ALL_CHECKS}"
 for c in $CHECKS; do
   case " $ALL_CHECKS " in *" $c "*) ;; *) echo "lifecycle.sh: unknown check '$c' (use: $ALL_CHECKS)" >&2; exit 2;; esac
@@ -3379,6 +3386,69 @@ check12_body() {
   check "rotate-key's new sockets read FAILED" "failed socket_buffer_below_requirement" "$out"
   okcheck "rotate-key's new sockets are on another port: $port1 then $port2" "$([ -n "$port2" ] && [ "$port1" != "$port2" ] && echo 1 || echo 0)"
   check "the agent warns after rotate-key" "warning: the WireGuard UDP sockets on port $port2" "$(cat "$ALOG2")"
+}
+
+check13() {
+  echo "== $mode: check 13: the agent's WireGuard session is rekeyed past REKEY_AFTER_TIME without losing traffic"
+  local DATA=$W/wgft-lifecycle-c13 ADATA=$W/wgft-lifecycle-c13-agent
+  kill_all; vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1; reset_kernel_state
+  rm -rf "$DATA" "$ADATA"; mkdir -p "$DATA"
+
+  start_server "$DATA" $W/wgft-lifecycle-c13-server.log
+  if ! wait_admin; then echo "FAIL  check13 setup: admin api never came up"; fail=1; return; fi
+  local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c13-agent.log 2>&1 < /dev/null &
+  disown
+  ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25541 -udp 19141 > $W/wgft-lifecycle-c13-echo.log 2>&1 < /dev/null &
+  disown
+  if ! wait_agent home; then echo "FAIL  check13 setup: agent never registered"; fail=1; return; fi
+  vps wgft rule add --agent home --tcp 39941 --to 192.168.50.3:25541 --admin "$ADMIN" >/dev/null
+  vps wgft rule add --agent home --udp 39942 --to 192.168.50.3:19141 --admin "$ADMIN" >/dev/null
+  must_wait "check13: the tcp rule answers" 10 tcp_probe_ok 39941 || return
+  must_wait "check13: the udp rule answers" 10 udp_probe_ok 39942 || return
+
+  # handshake_epoch: the server's last handshake with the agent in Unix seconds, from agent ls
+  # --json, which reads the live WireGuard device in both modes. Empty without one.
+  handshake_epoch() {
+    vps wgft agent ls --admin "$ADMIN" --json 2>/dev/null | python3 -c "
+import datetime, json, re, sys
+try:
+    a = next((x for x in json.load(sys.stdin) if x.get('name') == 'home'), {})
+except ValueError:
+    sys.exit(0)
+t = a.get('last_handshake') or ''
+t = re.sub(r'\.\d+', '', t).replace('Z', '+00:00')
+if t:
+    print(int(datetime.datetime.fromisoformat(t).timestamp()))
+"
+  }
+  local hs0; hs0=$(handshake_epoch)
+  if [ -z "$hs0" ]; then echo "FAIL  check13 setup: the server reports no handshake"; fail=1; return; fi
+  # handshake_newer: the server reports a handshake after hs0. A miss sleeps 2 s, so the wait reads
+  # agent ls about every 2 s instead of every 0.2 s for two minutes.
+  handshake_newer() { local h; h=$(handshake_epoch); [ -n "$h" ] && [ "$h" -gt "$hs0" ] && return 0; sleep 2; return 1; }
+
+  # 140 rounds of 1 s from a few seconds after the first handshake: the rekey falls about 120 s
+  # in, and some 20 s of traffic follow it.
+  local rounds=140 interval=1
+  ip netns exec "$CLIENT_NS" python3 "$PY/tcpprobe.py" 198.51.100.1 39941 "$rounds" "$interval" \
+    > $W/wgft-lifecycle-c13-tcp.log 2>&1 < /dev/null &
+  local tcp_pid=$!
+  ip netns exec "$CLIENT_NS" python3 "$PY/udpprobe.py" 198.51.100.1 39942 "$rounds" "$interval" \
+    > $W/wgft-lifecycle-c13-udp.log 2>&1 < /dev/null &
+  local udp_pid=$!
+  # The new handshake has to land while the probes still run; the timeout is their length.
+  wait_until "$rounds" handshake_newer
+  local seen; seen=$(date +%s)
+  wait "$tcp_pid" "$udp_pid" 2>/dev/null
+  local ended; ended=$(date +%s)
+  local hs1; hs1=$(handshake_epoch)
+
+  okcheck "the server reports a new handshake after the first one ($hs0 then ${hs1:-none})" "$([ -n "$hs1" ] && [ "$hs1" -gt "$hs0" ] && echo 1 || echo 0)"
+  okcheck "the new handshake is a rekey, 100 s or more after the first ($(( ${hs1:-0} - hs0 )) s)" "$([ -n "$hs1" ] && [ $((hs1 - hs0)) -ge 100 ] && echo 1 || echo 0)"
+  okcheck "the probes ran on for 10 s or more after the new handshake was seen ($((ended - seen)) s)" "$([ $((ended - seen)) -ge 10 ] && echo 1 || echo 0)"
+  check "the tcp session delivers every byte across the rekey" "got=$((rounds * 10));" "$(cat $W/wgft-lifecycle-c13-tcp.log)"
+  check "every udp round trip answers across the rekey" "oks=$rounds fails=0" "$(cat $W/wgft-lifecycle-c13-udp.log)"
 }
 
 # ---------------------------------------------------------------------------------------------

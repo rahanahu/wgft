@@ -3,9 +3,8 @@
 v2 は、agent と server の両方を Rust で書き直し、製品から Go を取り除く版です。
 この文書は移行の決定事項を定めます。
 Rust のコードは `crates/` 以下にあり、ビルドと検査は[テストの規範](../../development/testing.md)の B13 から B15 に従います。
-実装済みのものはワークスペース、CI、wire の版 1 の型 (`crates/wgft-proto`)、WireGuard の device の層です。
-設計の制約のうち、WireGuard の隔離と sans-IO の核は device の層で実装しました。
-ほかの決定は未実装です。
+実装済みのものは agent のユーザー空間モードとその周りのコマンドで、wire の版 1 の型、WireGuard の device の層、wgstack の Rust 版、データプレーン、中継、制御プレーンを含みます。
+server と agent のカーネルモードは未実装です。
 
 ## 動機
 
@@ -28,7 +27,7 @@ Go 製の v1 系は、この移行の間も動作を変えません。
 Rust の agent は、v1 の `agent.json` をそのまま読み、wire の版 1 を話します。
 形式は言語に依らない仕様として定めます。
 仕様は[境目の仕様 (wire の版 1)](../spec/README.md)にあります。
-server と話す制御の部分の試作の設計は [Rust の agent の制御プレーン](agent-control.md) にあります。
+server と話す制御の部分の設計は [Rust の agent の制御プレーン](agent-control.md) にあります。
 WireGuard の通信を暗号化する層の設計は [agent の WireGuard の device の層](wireguard-device.md) にあります。
 
 ## 配布
@@ -40,7 +39,7 @@ v1.x は Go のまま保守だけを続けます。
 
 ## agent の置き換え
 
-Rust の agent が Go の v1 の agent のユーザー空間モードを置き換えるまでに要るものと段の計画は、[Rust の agent が Go の agent を置き換えるための設計](agent-parity.md)にあります。
+Rust の agent が Go の v1 の agent のユーザー空間モードを置き換えるための設計は、[Rust の agent が Go の agent を置き換えるための設計](agent-parity.md)にあります。
 
 ## 設計の制約
 
@@ -58,8 +57,7 @@ Rust の agent が Go の v1 の agent のユーザー空間モードを置き�
 ## Go の wgstack
 
 Go の wgstack は参照実装として凍結し、移行の間に機能を足さず、Rust の実装が追いついた後に消します。
-v2 では `WGFT_AGENT_NETSTACK=gvisor` を受け付け、wgstack の Rust 版を動かして 1 行の通知を出します。
-この挙動は未実装です。
-Rust 版の構造、API、メモリ、検証、作業の順は [wgstack の Rust 版](wgstack-rs.md) にあります。
+v2 の Rust の agent は `WGFT_AGENT_NETSTACK=gvisor` を受け付け、wgstack の Rust 版を動かして 1 行の通知を出します。
+Rust 版の構造、API、メモリ、検証は [wgstack の Rust 版](wgstack-rs.md) にあります。
 
 [日本語の設計の索引](../README.ja.md)

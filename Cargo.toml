@@ -13,7 +13,6 @@ publish = false
 [workspace.dependencies]
 # 版はここだけに書き、各 crate は `name.workspace = true` で継ぐ
 wgft-wireguard = { path = "crates/wgft-wireguard" }
-wgft-wireguard-tun = { path = "crates/wgft-wireguard-tun" }
 wgft-proto = { path = "crates/wgft-proto" }
 wgft-agent = { path = "crates/wgft-agent" }
 wgft-wgstack = { path = "crates/wgft-wgstack" }
