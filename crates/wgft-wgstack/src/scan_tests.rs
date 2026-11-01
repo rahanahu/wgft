@@ -147,7 +147,10 @@ fn clippy_config_keeps_the_lists() {
 
 #[test]
 fn manifest_has_no_dependencies() {
-    let text = std::fs::read_to_string(crate_dir().join("Cargo.toml")).unwrap();
+    // Windows の checkout は改行を CRLF にしえます。
+    let text = std::fs::read_to_string(crate_dir().join("Cargo.toml"))
+        .unwrap()
+        .replace("\r\n", "\n");
     let mut table = String::new();
     for line in text.lines().map(str::trim) {
         if line.starts_with('[') {
