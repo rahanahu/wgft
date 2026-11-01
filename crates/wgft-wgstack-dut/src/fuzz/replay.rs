@@ -15,13 +15,17 @@
 //! 各要求の後に不変条件を確かめ、最後に核を閉じて会計が 0 に戻ることを確かめます。adapter が口の誤りとする
 //! 要求 (知らない handle など) は飛ばします。
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::time::Duration;
 
 use wgft_tcpharness::dut::{DutError, answer};
 use wgft_tcpharness::frame::{self, Clock, Hello, Msg, VERSION};
-use wgft_wgstack::{BoostPolicy, Config, Congestion, MAX_MTU, MIN_MTU};
+use wgft_wgstack::{BoostPolicy, Config, Congestion, MAX_MTU, MIN_MTU, Spare, TouchedCheck};
 
-use super::net::{DUT, MTU, fuzz_limits, put_budget, take_budget};
+use super::net::{
+    Check, DUT, MTU, fuzz_limits, options, put_budget, put_spare, set_digest, take_budget,
+    take_spare,
+};
 use crate::dut::WgstackDut;
 use crate::rec::Recording;
 
@@ -186,14 +190,22 @@ pub fn replay(data: &[u8]) {
         Some(Msg::Hello(h)) => sanitize(h),
         _ => default_hello(),
     };
+    let options = options();
+    let spare = || {
+        if options.reuse {
+            take_spare().unwrap_or_default()
+        } else {
+            Spare::new()
+        }
+    };
     let mut budget = take_budget();
-    let mut dut = match WgstackDut::for_fuzz(&hello, fuzz_limits(), budget) {
+    let mut dut = match WgstackDut::for_fuzz(&hello, fuzz_limits(), budget, spare()) {
         Ok(d) => d,
         Err((_, b)) => {
             // アドレスが核の受け付けない値なら、既定のアドレスで作り直す
             budget = b;
             let h = Hello { addr: DUT, ..hello };
-            match WgstackDut::for_fuzz(&h, fuzz_limits(), budget) {
+            match WgstackDut::for_fuzz(&h, fuzz_limits(), budget, spare()) {
                 Ok(d) => d,
                 Err((e, b)) => {
                     put_budget(b);
@@ -203,6 +215,8 @@ pub fn replay(data: &[u8]) {
         }
     };
     let mut packets = 0usize;
+    let mut touched = TouchedCheck::new();
+    let mut digest = DefaultHasher::new();
     for mut msg in frames.take(MAX_REQUESTS) {
         match &mut msg {
             Msg::Hello(_) | Msg::RtoAt { .. } | Msg::ConnSocket { .. } => continue,
@@ -219,13 +233,33 @@ pub fn replay(data: &[u8]) {
             _ => {}
         }
         // engine の誤りは応答の 1 つで、口の誤り (知らない handle など) は飛ばす
-        let _: Result<Msg, DutError> = answer(&mut dut, &msg);
-        if let Err(e) = dut.check_invariants() {
+        let reply: Result<Msg, DutError> = answer(&mut dut, &msg);
+        if options.digest {
+            format!("{reply:?} {:?}", dut.held()).hash(&mut digest);
+        }
+        let result = match options.check {
+            Check::Touched => dut.check_invariants_touched(&mut touched),
+            Check::Full => dut.check_invariants(),
+            Check::Both => {
+                let full = dut.check_invariants();
+                assert_eq!(
+                    dut.check_invariants_touched(&mut touched),
+                    full,
+                    "the touched-slot check and the full check disagree"
+                );
+                full
+            }
+        };
+        if let Err(e) = result {
             panic!("invariant after {}: {e}", msg.kind());
         }
     }
-    let closed = dut.close_stack();
+    let (closed, spare) = dut.close_stack_keeping();
     let held = closed.held;
     put_budget(closed.budget);
+    if options.reuse {
+        put_spare(spare);
+    }
+    set_digest(if options.digest { digest.finish() } else { 0 });
     assert!(held.is_zero(), "after close {held:?}");
 }
