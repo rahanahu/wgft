@@ -118,7 +118,7 @@ async fn rebuild_with_new_key(a: &mut Agent) {
     let last = a.creds.last_state.clone();
     a.close().await;
     if let Some(st) = last {
-        match a.apply(&st).await {
+        match a.apply(st).await {
             Ok(()) => logf!("wireguard: tunnel rebuilt with the new key"),
             Err(e) => logf!("wireguard: rebuild tunnel with the new key: {e}"),
         }
@@ -322,7 +322,7 @@ fn rules(states: &[wgft_proto::RuleStatus], listeners: &[ListenerStat]) -> Vec<D
         .map(|(i, s)| (s.id.as_str(), i))
         .collect();
     for l in listeners {
-        let Some(r) = at.get(l.rule_id.as_str()).map(|&i| &mut out[i]) else {
+        let Some(r) = at.get(&*l.rule_id).map(|&i| &mut out[i]) else {
             continue;
         };
         l.key.kind.as_str().clone_into(&mut r.proto);

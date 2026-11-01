@@ -33,24 +33,38 @@ pub const PROBE_CONCURRENCY: usize = 32;
 /// 宛先へ接続しなかった理由か、接続の失敗。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetError {
-    /// ルールの理由とログに出す文。
-    pub text: String,
+    /// ルールの理由とログに出す文。待ち受けごとに持つので、長さちょうどの確保にし、同じ文の待ち受けは
+    /// 1 つの値を分け合う ([`Targets::probe_all`])。
+    pub text: Arc<str>,
     /// 許可一覧か、ブロードキャストとマルチキャストの拒否で接続しなかった。中継はトンネルの側を RST で
     /// 閉じ、ルールの状態に載せる。偽なら接続を試みて失敗した。
     pub denied: bool,
 }
 
 impl TargetError {
-    fn failed(text: String) -> Self {
+    pub(crate) fn failed(text: String) -> Self {
         TargetError {
-            text,
+            text: clip(text),
             denied: false,
         }
     }
 
     fn denied(text: String) -> Self {
-        TargetError { text, denied: true }
+        TargetError {
+            text: clip(text),
+            denied: true,
+        }
     }
+}
+
+/// 誤りの文を、ハートビートの理由の長さの上限で切り、長さちょうどの確保に移す。文は宛先のホストを含み、
+/// 待ち受けごとに持つので、長いホストの範囲のルールで待ち受けの数だけ長い文や `format!` の余った容量を
+/// 持たないためである。理由とログに出す文は、この長さより後ろを出さないので変わらない。
+fn clip(text: String) -> Arc<str> {
+    if text.len() <= wgft_proto::REASON_MAX_BYTES {
+        return text.into();
+    }
+    wgft_proto::textsafe::clip_text(&text, wgft_proto::REASON_MAX_BYTES).into()
 }
 
 impl fmt::Display for TargetError {
@@ -236,20 +250,33 @@ impl Targets {
     }
 
     /// 試し接続をまとめて行う。同時に試すのは 32 件までで、結果は `list` と同じ順で返す。試し接続の
-    /// future は走らせる分だけを作るので、待ち受けの数によらず保持は 32 件分である。
+    /// future は走らせる分だけを作るので、待ち受けの数によらず保持は 32 件分である。誤りの文が直前の
+    /// 結果と同じなら、その値を分け合う。範囲のルールの待ち受けは並びで隣り合い、名前の解決の失敗のように
+    /// ポートを含まない文や、長いホストでポートの前で切った文は、ルールの待ち受けの間で同じになるため
+    /// である。
     pub async fn probe_all(
         self: Arc<Self>,
-        list: Vec<(String, u16)>,
+        list: impl ExactSizeIterator<Item = (Arc<str>, u16)> + Send,
     ) -> Vec<Result<(), TargetError>> {
+        let mut out: Vec<Result<(), TargetError>> = Vec::with_capacity(list.len());
         // 値を持ち込む閉包にする。借用を持つ閉包では、future の Send の判定が寿命について一般化できない
-        futures_util::stream::iter(list)
-            .map(move |(h, p)| {
-                let t = Arc::clone(&self);
-                async move { t.probe(&h, p).await }
-            })
-            .buffered(PROBE_CONCURRENCY)
-            .collect()
-            .await
+        let mut results = std::pin::pin!(
+            futures_util::stream::iter(list)
+                .map(move |(h, p)| {
+                    let t = Arc::clone(&self);
+                    async move { t.probe(&h, p).await }
+                })
+                .buffered(PROBE_CONCURRENCY)
+        );
+        while let Some(mut r) = results.next().await {
+            if let (Err(e), Some(Err(last))) = (&mut r, out.last())
+                && e.text == last.text
+            {
+                e.text = Arc::clone(&last.text);
+            }
+            out.push(r);
+        }
+        out
     }
 }
 
@@ -353,8 +380,8 @@ mod tests {
         let e = t.connect_tcp("outside", up.port()).await.unwrap_err();
         assert!(e.denied);
         assert_eq!(
-            e.text,
-            format!(
+            *e.text,
+            *format!(
                 "target 10.9.9.9:{} is not in WGFT_AGENT_ALLOW_TARGETS",
                 up.port()
             )
@@ -364,7 +391,7 @@ mod tests {
         // 名前の解決の失敗は `lookup ` の語を持ち、拒否ではない
         let e = t.connect_tcp("nope", up.port()).await.unwrap_err();
         assert!(!e.denied);
-        assert_eq!(e.text, "lookup nope: Name or service not known");
+        assert_eq!(&*e.text, "lookup nope: Name or service not known");
     }
 
     #[tokio::test]
@@ -397,10 +424,9 @@ mod tests {
         let t = Targets::with(None, unicast_lan(), table(vec![]));
         let t = Arc::new(t);
         let got = t
-            .probe_all(vec![
-                ("127.0.0.1".into(), up.port()),
-                ("127.0.0.1".into(), dead),
-            ])
+            .probe_all(
+                vec![("127.0.0.1".into(), up.port()), ("127.0.0.1".into(), dead)].into_iter(),
+            )
             .await;
         assert_eq!(got[0], Ok(()));
         let e = got[1].clone().unwrap_err();
@@ -408,8 +434,8 @@ mod tests {
         // Windows はループバックの拒否にも SYN を送り直すので、2 秒の期限に届くことがある
         #[cfg(not(windows))]
         assert_eq!(
-            e.text,
-            format!("dial tcp 127.0.0.1:{dead}: connect: connection refused")
+            *e.text,
+            *format!("dial tcp 127.0.0.1:{dead}: connect: connection refused")
         );
     }
 
@@ -445,15 +471,30 @@ mod tests {
             }),
         ));
         let t = Arc::new(Targets::with(None, unicast_lan(), resolver));
-        let list: Vec<(String, u16)> = ups
+        let host: Arc<str> = "nas.lan".into();
+        let list: Vec<(Arc<str>, u16)> = ups
             .iter()
-            .map(|l| ("nas.lan".to_owned(), l.local_addr().unwrap().port()))
+            .map(|l| (Arc::clone(&host), l.local_addr().unwrap().port()))
             .collect();
-        let got = t.probe_all(list).await;
+        let got = t.probe_all(list.into_iter()).await;
         assert_eq!(lookups.load(Ordering::SeqCst), 1);
         for g in got {
             assert_eq!(g, Ok(()));
         }
+    }
+
+    /// 隣り合う試し接続の同じ失敗の文は、1 つの確保を分け合う。
+    #[tokio::test]
+    async fn neighbouring_probes_share_an_identical_failure_text() {
+        let t = Arc::new(Targets::with(None, unicast_lan(), table(vec![])));
+        let host: Arc<str> = "nope".into();
+        let got = t.probe_all((1..=3).map(|p| (Arc::clone(&host), p))).await;
+        let texts: Vec<Arc<str>> = got.into_iter().map(|r| r.unwrap_err().text).collect();
+        assert_eq!(&*texts[0], "lookup nope: Name or service not known");
+        assert!(
+            texts.windows(2).all(|w| Arc::ptr_eq(&w[0], &w[1])),
+            "{texts:?}"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -473,7 +514,7 @@ mod tests {
         ));
         let t = Targets::with(allow("10.0.0.0/8"), unicast_lan(), r);
         let e = t.probe("nas.lan", 80).await.unwrap_err();
-        assert_eq!(e.text, "target nas.lan:80 did not answer within 2s");
+        assert_eq!(&*e.text, "target nas.lan:80 did not answer within 2s");
         assert!(!e.denied);
         release.store(true, Ordering::Release);
     }

@@ -1052,7 +1052,7 @@ fn single_flood_maximum() {
     for (t, n) in cases {
         let p = Pool::new(t);
         let l = p.listener("r0");
-        let _others: Vec<Listener> = (1..n).map(|i| p.listener(&format!("r{i}"))).collect();
+        let _others: Vec<Listener> = (1..n).map(|i| p.listener(format!("r{i}"))).collect();
         let mut held = Vec::new();
         while let Ok(x) = l.take() {
             held.push(x);

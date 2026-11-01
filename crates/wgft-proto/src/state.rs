@@ -185,6 +185,17 @@ impl AgentRule {
         let eff = u16::try_from(eff).ok()?;
         Some((host.to_owned(), eff))
     }
+
+    /// 宛先のホストと、範囲の各ポートとその実効宛先のポートの組。[`AgentRule::effective_target`] を範囲の
+    /// すべてのポートに当てた結果と同じで、どれか 1 つでも `None` になるなら `None`。ホストは `target`
+    /// を借り、ポートごとに写さない。
+    #[must_use]
+    pub fn effective_ports(&self) -> Option<(&str, impl Iterator<Item = (u16, u16)> + use<>)> {
+        let (host, port) = split_target(&self.target)?;
+        let PortRange { lo, hi } = self.listen_port;
+        u16::try_from(u32::from(port) + u32::from(hi - lo)).ok()?;
+        Some((host, (lo..=hi).map(move |p| (p, port + (p - lo)))))
+    }
 }
 
 /// Go の `splitTarget`。IPv4 に写した IPv6 でない IPv6 のアドレスは拒む (Go の `net.ParseIP` と `To4`)。
@@ -286,6 +297,37 @@ mod tests {
             ..r
         };
         assert_eq!(v6.effective_target(2456), None);
+    }
+
+    #[test]
+    fn effective_ports_match_effective_target_on_every_port() {
+        for (ports, target) in [
+            ("2456-2458", "192.168.1.10:3000"),
+            ("1", "h:1"),
+            ("65530-65535", "nas.lan:65530"),
+            ("2456-2458", "h:65534"),
+            ("2456", "[2001:db8::1]:80"),
+            ("2456", "[::ffff:192.0.2.1]:80"),
+            ("2456", ":80"),
+            ("2456", "h:0"),
+        ] {
+            let r = AgentRule {
+                id: "r".into(),
+                proto: Proto::Tcp,
+                listen_port: ports.parse().unwrap(),
+                target: target.into(),
+                enabled: true,
+            };
+            let each: Option<Vec<(String, u16, u16)>> = r
+                .listen_port
+                .ports()
+                .map(|p| r.effective_target(p).map(|(h, t)| (h, p, t)))
+                .collect();
+            let got = r
+                .effective_ports()
+                .map(|(h, it)| it.map(|(p, t)| (h.to_owned(), p, t)).collect::<Vec<_>>());
+            assert_eq!(got, each, "{ports} {target}");
+        }
     }
 
     #[test]
