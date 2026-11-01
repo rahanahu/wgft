@@ -418,6 +418,11 @@ async fn run_async(opts: Options) -> Result<(), AgentError> {
     credentials::ensure_data_dir(&opts.data_dir).map_err(|e| {
         AgentError::Other(format!("create data dir {}: {e}", opts.data_dir.display()))
     })?;
+    // Windows の既定のデータディレクトリは利用者が先に作れる場所にあるので、持ち主を確かめて警告する
+    #[cfg(windows)]
+    if let Some(w) = crate::platform::winsec::data_dir_owner_warning(&opts.data_dir) {
+        logf!("{w}");
+    }
     let _lock = credentials::acquire(&path).map_err(|e| AgentError::Other(e.to_string()))?;
     credentials::remove_leftover_temps(&path);
     let (creds, private_key) = prepare(&opts).await?;

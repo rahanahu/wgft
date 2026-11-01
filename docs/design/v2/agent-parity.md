@@ -124,7 +124,20 @@ Go の v1 の agent と仕様の項目ごとに、Rust の agent の扱いを挙
 | ロック | `flock` と `LockFileEx` | `File::try_lock` で同じ方式 |
 | 一時ファイルの片付け | ロックを取った後に消す | 消す |
 | 時刻の印の水位 | Go の agent には無い | `agent.json.clock` に残す。Rust だけのファイルで、Go の agent は読まない |
+| Windows のデータディレクトリの持ち主 | Go の agent は確かめない。仕様は警告を許す | 持ち主が SYSTEM、Administrators、実行中の利用者のどれでもないか、ディレクトリが junction か symbolic link なら、起動の時に警告を 1 行出す (`winsec::data_dir_owner_warning`)。拒まない。Windows の CI の試験だけで、実機では確かめていない |
 | ファイル記述子の上限 | Go の性質:Go の実行環境は Unix で起動の時に soft の `RLIMIT_NOFILE` を hard の値まで上げる。macOS では `kern.maxfilesperproc` で頭を打つ。同梱の unit と plist は `LimitNOFILE` を書かず、これに頼る | 済み (`platform::fdlimit`)。`wgft` の起動で呼ぶ |
+
+Windows のデータディレクトリの持ち主は、拒まずに警告にします。
+既定の `%ProgramData%\wgft` は権限の無い利用者も先に作れ、その持ち主はディレクトリの DACL を書き換えて `agent.json` を差し替えられます。
+一方で、配備の道具が別の管理用の利用者でディレクトリを作る構成もありうるので、拒むと正しい構成の起動を止めます。
+警告の文は、管理者で作り直すことを促します。
+持ち主の判定は、ディレクトリを `FILE_FLAG_OPEN_REPARSE_POINT` と `FILE_FLAG_BACKUP_SEMANTICS` で辿らずに開き、同じ handle から属性と持ち主 (`GetSecurityInfo`) を読みます。
+名前で引く `GetNamedSecurityInfoW` は junction を辿り、先のディレクトリの持ち主を読むので、利用者が作った junction が管理者のディレクトリを指すと判定を抜けるためです。
+reparse point なら、先を確かめずに警告します。
+そうでなければ持ち主の SID を、SYSTEM (`S-1-5-18`)、Administrators (`S-1-5-32-544`)、実行中の利用者の SID と比べます。
+警告の文は持ち主の口座の名前 (`LookupAccountSidW`) と SID を両方示し、名前を引けなければ SID だけを示します。
+読めなければ何も出しません。
+持ち主だけを見るので、持ち主が管理者でも、継承した DACL が権限の無い利用者にファイルの作成を許すディレクトリは対象外です。
 
 ## UDP の中継
 

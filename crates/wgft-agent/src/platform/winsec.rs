@@ -20,15 +20,17 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
-    GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT, SetSecurityInfo,
+    GetNamedSecurityInfoW, GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SetSecurityInfo,
 };
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-    TOKEN_USER, TokenUser,
+    LookupAccountSidW, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SID_NAME_USE, TOKEN_QUERY, TOKEN_USER,
+    TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OPEN_REPARSE_POINT,
+    CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
     FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS, READ_CONTROL, WRITE_DAC,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -295,6 +297,148 @@ pub fn read_dacl_sddl(path: &Path) -> io::Result<String> {
     Ok(unsafe { super::utf16z_to_string(s.0) })
 }
 
+/// `dir` そのものの持ち主。reparse point (junction と symbolic link) は辿らず、その点の持ち主を読む。
+#[derive(Debug)]
+struct DirOwner {
+    /// `dir` が reparse point か。
+    reparse: bool,
+    /// 持ち主の SID の文字列 (`S-1-...`)。
+    sid: String,
+    /// 持ち主の口座の名前 (`DOMAIN\name`)。引けなければ無い。
+    account: Option<String>,
+}
+
+/// `dir` を辿らずに開き、属性と持ち主を同じ handle から読む。名前で 2 度引くと、その間に差し替えられた
+/// 別のものを読みうるためである。
+fn dir_owner(dir: &Path) -> io::Result<DirOwner> {
+    use std::os::windows::fs::MetadataExt;
+    let f = OpenOptions::new()
+        .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)?;
+    let reparse = f.metadata()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    let mut owner: PSID = ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    // SAFETY: f は READ_CONTROL つきで開いた handle で、owner と sd は書き込める場所を指す
+    let rc = unsafe {
+        GetSecurityInfo(
+            f.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &raw mut owner,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &raw mut sd,
+        )
+    };
+    if rc != ERROR_SUCCESS {
+        return Err(io::Error::from_raw_os_error(rc.cast_signed()));
+    }
+    // owner は sd の中を指すので、sd を解放するまでに読み終える
+    let sd = LocalMem(sd);
+    let mut s: *mut u16 = ptr::null_mut();
+    // SAFETY: owner は sd の中の有効な SID で、s は書き込める場所を指す
+    if unsafe { ConvertSidToStringSidW(owner, &raw mut s) } == FALSE {
+        return Err(io::Error::last_os_error());
+    }
+    let s = LocalMem(s);
+    // SAFETY: 成功した呼び出しが返した NUL で終わる文字列
+    let sid = unsafe { super::utf16z_to_string(s.0) };
+    // SAFETY: owner は sd の中の有効な SID で、sd はまだ解放していない
+    let account = unsafe { account_name(owner) };
+    drop(sd);
+    Ok(DirOwner {
+        reparse,
+        sid,
+        account,
+    })
+}
+
+/// SID の口座の名前を `DOMAIN\name` の形で引く。引けなければ無い。
+///
+/// # Safety
+///
+/// `sid` は呼び出しの間有効な SID を指すこと。
+unsafe fn account_name(sid: PSID) -> Option<String> {
+    let (mut n, mut d) = (0u32, 0u32);
+    let mut kind: SID_NAME_USE = 0;
+    // 1 回目は長さを知るためで、失敗が正しい
+    // SAFETY: 長さの問い合わせでは名前の buffer を null にできる。sid は呼び手が保証する
+    unsafe {
+        LookupAccountSidW(
+            ptr::null(),
+            sid,
+            ptr::null_mut(),
+            &raw mut n,
+            ptr::null_mut(),
+            &raw mut d,
+            &raw mut kind,
+        )
+    };
+    if n == 0 {
+        return None;
+    }
+    let mut name = vec![0u16; n as usize];
+    let mut domain = vec![0u16; d.max(1) as usize];
+    // SAFETY: name と domain は n と d の長さの書き込める領域で、sid は呼び手が保証する
+    if unsafe {
+        LookupAccountSidW(
+            ptr::null(),
+            sid,
+            name.as_mut_ptr(),
+            &raw mut n,
+            domain.as_mut_ptr(),
+            &raw mut d,
+            &raw mut kind,
+        )
+    } == FALSE
+    {
+        return None;
+    }
+    let name = String::from_utf16_lossy(&name[..n as usize]);
+    let domain = String::from_utf16_lossy(&domain[..d as usize]);
+    Some(if domain.is_empty() {
+        name
+    } else {
+        format!("{domain}\\{name}")
+    })
+}
+
+/// 持ち主 `owner` が、データディレクトリを任せてよい者 (SYSTEM、BUILTIN\Administrators、実行中の
+/// 利用者 `user`) か。
+pub fn trusted_owner(owner: &str, user: &str) -> bool {
+    owner == SID_SYSTEM || owner == SID_ADMINS || owner == user
+}
+
+/// データディレクトリ `dir` の持ち主が任せてよい者でないか、`dir` が reparse point なら、警告の文を返す。
+/// 読めなければ何も返さない。持ち主は自分のディレクトリの DACL を書き換えられ、中の `agent.json` を
+/// 差し替えられるので、権限の無い利用者が先に作った `%ProgramData%\wgft` を agent が使うと、その利用者が
+/// agent の接続先と秘密を差し替えられるためである。junction と symbolic link は先のディレクトリの持ち主を
+/// 確かめないので、それ自体を警告する。
+pub fn data_dir_owner_warning(dir: &Path) -> Option<String> {
+    let o = dir_owner(dir).ok()?;
+    if o.reparse {
+        return Some(format!(
+            "warning: the data directory {} is a junction or symbolic link, so the owner of its target was not checked; whoever controls the target can replace agent.json. Use a plain directory created by an administrator",
+            dir.display()
+        ));
+    }
+    let user = current_user_sid().ok()?;
+    if trusted_owner(&o.sid, &user) {
+        return None;
+    }
+    let owner = match &o.account {
+        Some(a) => format!("{a} with SID {}", o.sid),
+        None => o.sid.clone(),
+    };
+    Some(format!(
+        "warning: the data directory {} is owned by {owner}, not by SYSTEM, Administrators or the user running the agent; its owner can change its permissions and replace agent.json. Recreate the directory as an administrator unless that owner is trusted",
+        dir.display()
+    ))
+}
+
 /// `path` の DACL が 3 者だけの継承なしの形かを確かめる。ACE の並びの違いや、継承の印の書き方の差は
 /// 許し、保護 (`P`) と ACE の集合を見る。
 pub fn dacl_is_private(path: &Path, inherit: bool) -> io::Result<bool> {
@@ -364,6 +508,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn trusted_owners_are_system_administrators_and_the_user() {
+        let me = "S-1-5-21-1-2-3-1001";
+        assert!(trusted_owner(SID_SYSTEM, me));
+        assert!(trusted_owner(SID_ADMINS, me));
+        assert!(trusted_owner(me, me));
+        assert!(!trusted_owner("S-1-5-21-1-2-3-1002", me));
+        assert!(!trusted_owner("S-1-1-0", me));
+    }
+
+    /// agent が作ったデータディレクトリは任せてよい者のもので、警告を出さない。
+    #[test]
+    fn a_directory_the_agent_created_needs_no_warning() {
+        let d = tmpdir("owner");
+        let dir = d.join("data");
+        create_private_dir(&dir).unwrap();
+        let owner = dir_owner(&dir).unwrap();
+        assert!(!owner.reparse);
+        assert!(
+            trusted_owner(&owner.sid, &current_user_sid().unwrap()),
+            "{owner:?}"
+        );
+        assert!(owner.account.is_some(), "{owner:?}");
+        assert_eq!(data_dir_owner_warning(&dir), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// junction のデータディレクトリは、先のディレクトリを辿らずに警告する。
+    #[test]
+    fn a_junction_data_directory_is_warned_about() {
+        let d = tmpdir("junction");
+        let target = d.join("target");
+        create_private_dir(&target).unwrap();
+        let link = d.join("data");
+        // junction は権限の無い利用者でも作れる。作れない環境では確かめない
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&target)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !made {
+            eprintln!("skipped: mklink /J failed");
+            return;
+        }
+        assert!(dir_owner(&link).unwrap().reparse);
+        let w = data_dir_owner_warning(&link).unwrap();
+        assert!(w.contains("is a junction or symbolic link"), "{w}");
+        assert_eq!(data_dir_owner_warning(&target), None);
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
