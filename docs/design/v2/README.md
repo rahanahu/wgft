@@ -40,6 +40,7 @@ v1.x は Go のまま保守だけを続けます。
 ## agent の置き換え
 
 Rust の agent が Go の v1 の agent のユーザー空間モードを置き換えるための設計は、[Rust の agent が Go の agent を置き換えるための設計](agent-parity.md)にあります。
+速さを制限しない経路の基準の値と、送受信をまとめる段の目標は、[速さを制限しない経路の agent の性能](agent-throughput.md)にあります。
 
 ## 設計の制約
 
