@@ -84,3 +84,13 @@ allow_attributes_without_reason = "deny"
 # the core in dev and test builds keeps them fast; overflow checks and debug assertions stay on.
 [profile.dev.package.wgft-wgstack]
 opt-level = 2
+
+# Release builds keep overflow checks in the two crates that parse what the network sends: the TCP/IP
+# core and the WireGuard device. An arithmetic overflow there is a bug an attacker may reach, and a
+# panic is the bounded outcome: the data plane thread unwinds and the agent rebuilds the tunnel, which needs
+# panic = "unwind" (the default). The per-segment cost is in docs/design/v2/wgstack-rs.md.
+[profile.release.package.wgft-wgstack]
+overflow-checks = true
+
+[profile.release.package.wgft-wireguard]
+overflow-checks = true
