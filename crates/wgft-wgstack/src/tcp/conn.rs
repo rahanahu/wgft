@@ -43,7 +43,7 @@ impl ConnId {
 }
 
 /// 接続の枠の状態です。握手の途中 (SYN-RCVD) は握手の途中の表の行が、行に移った TIME_WAIT と FIN_WAIT_2 は
-/// TIME_WAIT の表が持ちます。dial の側を足す段で SYN-SENT を足します。
+/// TIME_WAIT の表が持ちます。dial の側を持たないので SYN-SENT はありません。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum State {
     /// 枠は空きです。

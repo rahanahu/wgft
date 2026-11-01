@@ -658,7 +658,7 @@ async fn prepare(opts: &Options) -> Result<(Credentials, Zeroizing<String>), Age
         return Err(Refusal::mode_gate(
             "WGFT_MODE",
             format!(
-                "agent.json records {} mode, and this Rust agent prototype runs userspace mode only; start the Go agent for this data directory",
+                "agent.json records {} mode, and this build of the agent runs userspace mode only; start the Go agent for this data directory",
                 creds.recorded_mode()
             ),
         )

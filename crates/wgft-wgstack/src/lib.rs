@@ -5,10 +5,10 @@
 //! 設計は `docs/design/v2/wgstack-rs.md` にあり、振る舞いの正本は凍結した Go の wgstack
 //! (`internal/wgstack`) とその設計文書です。移行の間は Go の wgstack と同じ入力に同じ packet を返します。
 //!
-//! 核は段を踏んで作ります。今の段は、受動の open、閉じる手順と TIME_WAIT、アプリケーションの操作と知らせ、
-//! データの送受信 (受け手の ACK と窓の自動調整、RTO、窓の probe)、SACK による回復と D-SACK、RACK-TLP、不要な
-//! 再送の取り消し、CUBIC と NewReno、boost の取得と回収、UDP の endpoint と予算、echo と ping、ICMP の誤りと PMTU、
-//! 断片の再組み立ての入口までです。
+//! 核が持つのは、受動の open、閉じる手順と TIME_WAIT、アプリケーションの操作と知らせ、データの送受信 (受け手の
+//! ACK と窓の自動調整、RTO、窓の probe)、SACK による回復と D-SACK、RACK-TLP、不要な再送の取り消し、CUBIC と
+//! NewReno、boost の取得と回収、UDP の endpoint と予算、echo と ping、ICMP の誤りと PMTU、断片の再組み立てです。
+//! dial の側 (能動の open) はまだ持ちません。
 //!
 //! 依存と確保の規則:この crate は標準ライブラリだけに依り、unsafe を使いません。
 //! 可変長の保持は容量を作成の時に決める配列だけで持ち、容量を自動で伸ばす API を使いません。

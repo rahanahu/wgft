@@ -38,7 +38,7 @@ pub(crate) use shared::{Output, Shared};
 /// 核が呼び手に伝える boost の変化と問い合わせです (wgstack-rs.md の「boost の hook」)。
 ///
 /// hook は核への参照を受け取らないので、核を呼び返せません。製品の hook は中継の層が渡し、試験は決まった
-/// 答えを返す hook を渡します。種類は後の段で足すことがあり、足す方法は既定の実装を持つメソッドです。
+/// 答えを返す hook を渡します。種類を足すときは、既定の実装を持つメソッドで足します。
 pub trait Hook {
     /// 接続が boost を得た時に呼びます。
     fn boost_granted(&mut self, _conn: ConnId) {}
