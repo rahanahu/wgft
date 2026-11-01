@@ -275,7 +275,8 @@ impl Shared {
     }
 
     /// 待ち受けへの SYN から行を作り、SYN-ACK を送ります。表が満杯か、待ち受けが N_syn の半分を使っていれば、
-    /// 行を作らずに cookie の SYN-ACK で応えます (`cookie`)。`reuse` は TIME_WAIT の 4 つ組を使い直す時の前の
+    /// 行を作らずに cookie の SYN-ACK で応えます (`cookie`)。accept の待ち行列に空きが無ければ cookie でも
+    /// 応えずに捨てます。`reuse` は TIME_WAIT の 4 つ組を使い直す時の前の
     /// 接続の SND.NXT で、呼び手は行を作れる時だけ渡します。
     pub(crate) fn new_syn_row(&mut self, seg: &Segment<'_>, now: i64, reuse: Option<u32>) {
         let port = seg.tup.lport;
@@ -283,9 +284,14 @@ impl Shared {
             return;
         };
         if self.use_cookie(l) {
-            if reuse.is_some() {
-                // 呼び手が行を作れることを確かめた後なので来ません。cookie の ISN は前の接続の番号の先に
-                // 置けないので、来ても cookie で応えません。
+            // `reuse` は呼び手が行を作れることを確かめた後なので来ません。cookie の ISN は前の接続の番号の
+            // 先に置けないので、来ても cookie で応えません。
+            //
+            // accept の待ち行列に空きが無ければ、cookie で応えずに SYN を捨てます。cookie の接続は SYN-ACK を
+            // 再送しないので、最後の ACK を待ち行列が満杯で捨てると、先に送るものの無い相手 (相手が話し始める
+            // 前に待つ protocol) の接続は相手の側だけで開いたまま、こちらに届きません。SYN を捨てれば、相手は
+            // SYN を送り直し、その時に空きがあれば握手を終えます。
+            if reuse.is_some() || !self.accept_room(l) {
                 self.refused(LogKind::SynFull, now);
             } else {
                 self.send_cookie(seg, now);
@@ -398,12 +404,11 @@ impl Shared {
     /// 待ち受け `port` の accept の待ち行列の枠を 1 つ予約し、予約できたかを返します。待ち受けの分 (Q の半分)、
     /// 全体の Q、空きの接続の枠のどれかが尽きていれば、数えて偽を返します。
     pub(crate) fn reserve_accept(&mut self, port: u16, now: i64) -> bool {
-        let q = self.config.limits.accept_queue;
-        let full = self
+        let room = self
             .listeners
             .by_port(port)
-            .is_none_or(|l| usize::from(l.qlen) >= q / 2);
-        if full || self.queued >= q || self.conn_free.is_empty() {
+            .is_some_and(|l| self.accept_room(l));
+        if !room {
             self.refused(LogKind::AcceptOverflow, now);
             return false;
         }
@@ -412,6 +417,13 @@ impl Shared {
             l.qlen += 1;
         }
         true
+    }
+
+    /// 待ち受け `l` の accept の待ち行列に 1 つ入る空きがあるかです。待ち受けの分 (Q の半分)、全体の Q、空きの
+    /// 接続の枠のどれも尽きていない時に真です。
+    pub(crate) fn accept_room(&self, l: &Listener) -> bool {
+        let q = self.config.limits.accept_queue;
+        usize::from(l.qlen) < q / 2 && self.queued < q && !self.conn_free.is_empty()
     }
 
     /// 予約した accept の待ち行列の枠を返します。接続の枠を取れなかったときに使います。

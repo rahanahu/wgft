@@ -267,7 +267,7 @@ fn replayed_cookie_acks_make_no_second_connection() {
 }
 
 #[test]
-fn cookie_ack_waits_for_room_in_the_accept_queue() {
+fn syn_past_a_full_accept_queue_is_dropped_not_answered_with_a_cookie() {
     let (mut n, l) = flooded();
     // 待ち受けの分 (Q の半分) を cookie の接続で埋めます。
     let half = small_limits().accept_queue / 2;
@@ -275,8 +275,44 @@ fn cookie_ack_waits_for_room_in_the_accept_queue() {
         cookie_syn(&mut n, 41000 + i as u16, false, false, false);
     }
     assert_eq!(n.s.held().accept_queued, half);
+    // 待ち行列が満杯の間の SYN には cookie で応えません。応えると、先に送るものの無い相手の最後の ACK は
+    // 捨てられたまま送り直されず、接続は相手の側だけで開いたままになります。
+    let (sent, full) = (n.s.stats().syn_cookies_sent, n.s.stats().syn_table_full);
+    n.inject(&TSeg {
+        sport: 42000,
+        dport: 80,
+        seq: 1000,
+        flags: FLAG_SYN,
+        wnd: 65535,
+        mss: 1380,
+        ..TSeg::default()
+    });
+    let outs = n.drain();
+    assert!(outs.is_empty(), "the SYN is dropped: {}", show(&outs));
+    assert_eq!(n.s.stats().syn_cookies_sent, sent);
+    assert_eq!(n.s.stats().syn_table_full, full + 1);
+    // accept で空いた後、相手が送り直した SYN に cookie で応え、中身の無い最後の ACK で接続を作ります。
+    let _ = n.accept(l);
+    cookie_syn(&mut n, 42000, false, false, false);
+    assert_eq!(n.s.held().accept_queued, half);
+    assert_eq!(n.s.stats().syn_cookies_accepted, half as u64 + 1);
+    n.s.check_invariants().unwrap();
+}
+
+#[test]
+fn cookie_ack_waits_for_room_in_the_accept_queue() {
+    let (mut n, l) = flooded();
+    // 待ち受けの分 (Q の半分) を 1 つ残して cookie の接続で埋め、空きのある間に cookie を受けます。
+    let half = small_limits().accept_queue / 2;
+    for i in 0..half - 1 {
+        cookie_syn(&mut n, 41000 + i as u16, false, false, false);
+    }
+    let mut p = n.syn_sack(42000, 80, true, false, false);
+    // 最後の ACK が届く前に、ほかの相手が残りの 1 つを埋めます。
+    cookie_syn(&mut n, 42001, false, false, false);
+    assert_eq!(n.s.held().accept_queued, half);
     let overflow = n.s.stats().accept_overflow;
-    let mut p = n.handshake_sack(42000, 80, true, false, false);
+    n.peer_ack(&mut p, &[]);
     assert!(
         n.drain().is_empty(),
         "an ACK past the queue is dropped quietly"

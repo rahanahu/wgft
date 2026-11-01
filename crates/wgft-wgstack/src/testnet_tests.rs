@@ -307,6 +307,20 @@ impl TestNet {
         sack: bool,
         ws: bool,
     ) -> PeerConn {
+        let mut p = self.syn_sack(sport, dport, ts, sack, ws);
+        self.peer_ack(&mut p, &[]);
+        p
+    }
+
+    /// 相手の SYN を送り、核の SYN-ACK を 1 つ受けます。最後の ACK は返しません。
+    pub(crate) fn syn_sack(
+        &mut self,
+        sport: u16,
+        dport: u16,
+        ts: bool,
+        sack: bool,
+        ws: bool,
+    ) -> PeerConn {
         let mut p = PeerConn {
             sport,
             dport,
@@ -343,7 +357,6 @@ impl TestNet {
         p.snd = p.iss + 1;
         p.rcv = sa.seq.wrapping_add(1);
         p.dut_ts = sa.ts.map_or(0, |(v, _)| v);
-        self.peer_ack(&mut p, &[]);
         p
     }
 
