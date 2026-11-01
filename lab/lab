@@ -682,8 +682,10 @@ paired_cleanup() {
 # ref は ~/.cache の一時的な worktree に取り出し、build の後すぐに消す。Go の build は lab build と同じく
 # WGFT_LAB_BUILD_TAGS を付ける。Rust の target は ~/.cache/wgft-lab/paired-base-target に置き、作業ツリーの target に
 # base の binary を残さない。この置き場は消さずに次の --base の build で依存を使い回す
+# PAIRED_BASE_RUST_TARGET (--base-rust-target) は base の Rust の wgft の target で、既定は x86_64-unknown-linux-musl。
+# x86_64-unknown-linux-gnu.2.41 のような glibc の target にすると、同じ commit の割り当て器と libc の違いを比べられる
 paired_build_base() {
-  local ref=$1 rust=$2 commit
+  local ref=$1 rust=$2 commit target=${PAIRED_BASE_RUST_TARGET:-x86_64-unknown-linux-musl}
   commit=$(git -C "$REPO" rev-parse --verify "$ref^{commit}") || die "--base $ref is not a commit"
   PAIRED_BASE_WT=${XDG_CACHE_HOME:-$HOME/.cache}/wgft-lab/paired-base-$$
   mkdir -p "$(dirname "$PAIRED_BASE_WT")"
@@ -694,15 +696,16 @@ paired_build_base() {
     || die "cannot build wgft of --base $ref"
   if ((rust)); then
     command -v cargo-zigbuild >/dev/null || die "the Rust build needs cargo-zigbuild and zig on the host"
-    local target=${XDG_CACHE_HOME:-$HOME/.cache}/wgft-lab/paired-base-target
-    mkdir -p "$target"
+    local tdir=${XDG_CACHE_HOME:-$HOME/.cache}/wgft-lab/paired-base-target
+    mkdir -p "$tdir"
     # 置き場はすべての作業ツリーと実行で共有する。cargo の錠は build の後の install を覆わないので、build から
     # install までを置き場の flock で 1 つにし、同時の --base の build が互いの binary を入れないようにする
     (
       flock 9
-      (cd "$PAIRED_BASE_WT" && CARGO_TARGET_DIR="$target" cargo zigbuild --release --locked --target x86_64-unknown-linux-musl -p wgft) \
-        && install -D -m 0755 "$target/x86_64-unknown-linux-musl/release/wgft" "$REPO/bin/base/rust/wgft"
-    ) 9>"$target.lock" || die "cannot build the Rust wgft of --base $ref"
+      # zigbuild の target の glibc の版 (.2.41) は出力の置き場の名前に入らない
+      (cd "$PAIRED_BASE_WT" && CARGO_TARGET_DIR="$tdir" cargo zigbuild --release --locked --target "$target" -p wgft) \
+        && install -D -m 0755 "$tdir/${target%%.*}/release/wgft" "$REPO/bin/base/rust/wgft"
+    ) 9>"$tdir.lock" || die "cannot build the Rust wgft of --base $ref for $target"
   fi
   git -C "$REPO" worktree remove --force "$PAIRED_BASE_WT" >/dev/null 2>&1 || true
   PAIRED_BASE_WT=""
@@ -771,15 +774,21 @@ paired_sync() {
 }
 
 cmd_paired() {
-  local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes=""
-  local usage="usage: lab paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--base REF] [--vcpus N] [--out DIR] [--keep] fast|rate ARM_X ARM_Y"
+  local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes="" tool="" streams="" udpping="" bulkmbit="" agentgso=""
+  local usage="usage: lab paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--out DIR] [--keep] fast|rate ARM_X ARM_Y"
   while (($#)); do
     case $1 in
       --rounds) rounds=${2:?--rounds N}; shift 2 ;;
       --runs) runs=${2:?--runs N}; shift 2 ;;
       --direction) direction=${2:?--direction down|up}; shift 2 ;;
       --bytes) bytes=${2:?--bytes N}; shift 2 ;;
+      --tool) tool=${2:?--tool tcpquality|iperf3}; shift 2 ;;
+      --streams) streams=${2:?--streams N}; shift 2 ;;
+      --udp-ping) udpping=1; shift ;;
+      --bulk-mbit) bulkmbit=${2:?--bulk-mbit N}; shift 2 ;;
+      --agent-gso) agentgso=${2:?--agent-gso on|off}; shift 2 ;;
       --base) base=${2:?--base REF}; shift 2 ;;
+      --base-rust-target) PAIRED_BASE_RUST_TARGET=${2:?--base-rust-target TRIPLE}; shift 2 ;;
       --vcpus) vcpus=${2:?--vcpus N}; shift 2 ;;
       --out) out=${2:?--out DIR}; shift 2 ;;
       --keep) keep=1; shift ;;
@@ -796,6 +805,12 @@ cmd_paired() {
   [[ $vcpus =~ ^[1-9][0-9]*$ ]] || die "--vcpus wants a whole number of 1 or more"
   [[ $direction == down || $direction == up ]] || die "--direction wants down or up"
   [[ -z $bytes || $bytes =~ ^[1-9][0-9]*$ ]] || die "--bytes wants a whole number of bytes"
+  [[ -z $tool || $tool == tcpquality || $tool == iperf3 ]] || die "--tool wants tcpquality or iperf3"
+  [[ -z $streams || $streams =~ ^[1-9][0-9]*$ ]] || die "--streams wants a whole number of 1 or more"
+  [[ -z $streams || $streams == 1 || $tool == iperf3 ]] || die "--streams above 1 needs --tool iperf3"
+  [[ -z $udpping || $tool == iperf3 ]] || die "--udp-ping needs --tool iperf3"
+  [[ -z $bulkmbit || ( $bulkmbit =~ ^[1-9][0-9]*$ && $tool == iperf3 ) ]] || die "--bulk-mbit wants a whole number of Mbit/s and --tool iperf3"
+  [[ -z $agentgso || $agentgso == off || ( $agentgso == on && $path == fast ) ]] || die "--agent-gso wants off, or on with the fast path"
   [[ $spec_x != "$spec_y" ]] || die "the two arms are the same: $spec_x"
   for s in "$spec_x" "$spec_y"; do
     m=${s#base:}
@@ -803,13 +818,18 @@ cmd_paired() {
     case $m in
       gvisor | wgstack) ;;
       rust) rust=1 ;;
-      # kernel は agent のプロセスが WireGuard と TCP を持たず byte あたりの CPU がほぼ 0 で、userspace は gvisor と同じ
-      kernel | userspace) die "arm $s: lab paired compares the userspace agents gvisor, wgstack and rust; a kernel-mode agent spends almost no CPU in its process, and userspace is gvisor" ;;
-      *) die "unknown arm $s; an arm is gvisor, wgstack or rust, or base:<one of them> with --base" ;;
+      # kernel は agent のプロセスが WireGuard と TCP を持たず、agent の byte あたりの CPU がほぼ 0 になる。
+      # 比べられるのは VM 全体の byte あたりの CPU (VMRATIO) だけで、その値は測る道具の CPU も含むので、道具の CPU が
+      # 小さい --tool iperf3 で流す。
+      # userspace は gvisor と同じ
+      kernel) [[ $tool == iperf3 ]] || die "arm $s: a kernel-mode agent spends almost no CPU in its process, so it is compared by the whole VM's CPU per byte only; use it with --tool iperf3" ;;
+      userspace) die "arm $s: userspace runs the same agent as gvisor; name gvisor" ;;
+      *) die "unknown arm $s; an arm is gvisor, wgstack, rust or, with --tool iperf3, kernel, or base:<one of them> with --base" ;;
     esac
   done
   ((!uses_base)) || [[ -n $base ]] || die "an arm base:<mode> needs --base REF"
   ((uses_base)) || [[ -z $base ]] || die "--base is given, but no arm is base:<mode>"
+  [[ -z ${PAIRED_BASE_RUST_TARGET:-} || -n $base ]] || die "--base-rust-target needs --base REF"
   # VM ごとの固定:WGFT_LAB_PAIR_CPUS の 2 つの集合の先頭から --vcpus 個ずつ。無ければ固定せず、vCPU の数だけ決める
   local pins=() sets=() used="" dup
   if [[ -n ${WGFT_LAB_PAIR_CPUS:-} ]]; then
@@ -832,7 +852,7 @@ cmd_paired() {
   out=${out:-${TMPDIR:-/tmp}/wgft-lab-paired-$(date +%Y%m%d-%H%M%S)}
   mkdir -p "$out"
   out=$(cd "$out" && pwd)
-  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction" > "$out/paired.log"
+  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus" > "$out/paired.log"
   SUITE_KEEP=$keep
   SUITE_TEMPLATE=${WGFT_LAB_TEMPLATE:-$VM}
   PAIR_LEAD_S=${PAIR_LEAD_S:-1}
@@ -861,8 +881,8 @@ cmd_paired() {
   kern=$(VM=${names[0]}; in_vm uname -r)
   git -C "$REPO" diff --quiet HEAD 2>/dev/null || dirty=-dirty
   {
-    echo "lab paired: path $path, direction $direction, x=$spec_x y=$spec_y, $rounds rounds of $runs runs"
-    echo "lab paired: head $(git -C "$REPO" rev-parse HEAD)$dirty${base:+, base $(git -C "$REPO" rev-parse "$base^{commit}") ($base)}"
+    echo "lab paired: path $path, direction $direction, x=$spec_x y=$spec_y, $rounds rounds of $runs runs, tool ${tool:-tcpquality}, ${streams:-1} stream(s)${bulkmbit:+, capped at $bulkmbit Mbit/s per stream}${agentgso:+, agent UDP GSO $agentgso}${udpping:+, UDP round trips}"
+    echo "lab paired: head $(git -C "$REPO" rev-parse HEAD)$dirty${base:+, base $(git -C "$REPO" rev-parse "$base^{commit}") ($base)}${PAIRED_BASE_RUST_TARGET:+, base Rust target $PAIRED_BASE_RUST_TARGET}"
     echo "lab paired: VM a ${names[0]} limits.cpu=${pins[0]}, VM b ${names[1]} limits.cpu=${pins[1]}, kernel $kern, template $SUITE_TEMPLATE"
     echo "lab paired: VMs ready after $((SECONDS - t0)) s"
   } | tee "$out/header.txt"
@@ -888,6 +908,11 @@ cmd_paired() {
       mode=${spec#base:}
       env=(SYNC=1 RUNS="$runs" DIRECTION="$direction")
       [[ -z $bytes ]] || env+=(BYTES="$bytes")
+      [[ -z $tool ]] || env+=(TOOL="$tool")
+      [[ -z $streams ]] || env+=(STREAMS="$streams")
+      [[ -z $udpping ]] || env+=(UDPPING=1)
+      [[ -z $bulkmbit ]] || env+=(IPERF_MBIT="$bulkmbit")
+      [[ -z $agentgso ]] || env+=(AGENT_GSO="$agentgso")
       [[ $spec != base:* ]] || env+=(WGFT_BIN_DIR=/usr/local/lib/wgft-base)
       logs+=("$out/round-$r-${vms[side]}.log")
       modes+=("$mode")
@@ -912,6 +937,9 @@ cmd_paired() {
     echo "lab paired: round $r of $rounds done, x in VM $([[ ${arms[0]} == x ]] && echo a || echo b), $((SECONDS - t0)) s"
   done
   python3 "$REPO/lab/tcpquality.py" cpupaired "$out/paired.log" >"$out/result.txt" || rc=1
+  if [[ -n $udpping ]]; then
+    python3 "$REPO/lab/tcpquality.py" latpaired "$out/paired.log" >>"$out/result.txt" || rc=1
+  fi
   cat "$out/result.txt"
   ((!fails)) || rc=1
   echo "lab paired: wall time $((SECONDS - t0)) s before deleting the VMs; logs in $out"

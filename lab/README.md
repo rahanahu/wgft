@@ -267,15 +267,29 @@ lab/lab exec vm bash /wgft/lab/agent-handover.sh userspace
 WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired fast wgstack gvisor
 WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --direction up rate rust wgstack
 WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --base origin/main fast wgstack base:wgstack
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --tool iperf3 --streams 4 fast rust kernel
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --tool iperf3 --udp-ping --direction up fast rust gvisor
 ```
 
 経路は `lab/tcpquality-cpu.sh` の `fast` か `rate` で、`--direction up` でエージェントが受ける向きにします。
 腕は `lab/tcpquality.sh` のユーザー空間モードの `gvisor`、`wgstack`、`rust` です。
 `gvisor` と `wgstack` は Go の agent をその netstack で動かし、`rust` は Rust の agent を動かします。
-`kernel` は WireGuard と TCP の仕事がエージェントのプロセスの外にあって byte あたりの CPU がほぼ 0 になり、`userspace` は `gvisor` と同じなので、腕にできません。
+`kernel` はカーネルの WireGuard とカーネルの TCP で、WireGuard と TCP の仕事がエージェントのプロセスの外にあります。
+エージェントの byte あたりの CPU がほぼ 0 になるので、`kernel` の腕は VM 全体の byte あたりの CPU だけで比べ、`--tool iperf3` を要します。
+`userspace` は `gvisor` と同じなので、腕にできません。
+`--tool iperf3` は転送を iperf3 にし、1 回の実行を 10 秒の転送にします。
+`--streams N` は iperf3 の並行の TCP 接続の数です。
+iperf3 は送り手と受け手の byte あたりの CPU が `tcpquality.py` より小さいので、カーネルの速さの腕でも測る道具の CPU が値を占めません。
+`--udp-ping` は、`--tool iperf3` の実行ごとに、同じエージェントの UDP の規則を通る 100 byte の datagram の往復の時間を、何もしていない時と TCP の転送の間に測ります。
+解析の `LAT` の行が腕ごとの p50、p99、最大、jitter と失った数を、`LATRATIO` の行が p99 と jitter の比を出します。
+`--bulk-mbit N` は iperf3 の stream ごとの速さを N Mbit/s で頭打ちにし、2 つの腕に同じ負荷を掛けます。
+`--agent-gso on` は、`fast` の経路で、エージェントの `eth0` の UDP の segmentation offload を切らずに測ります。
+解析の `MBITRATIO` の行は、組にした速さの比です。
 `base:<モード>` は、`--base` の commit の build で同じモードを動かします。
 `--base` は commit をホストの `~/.cache/wgft-lab/` の一時的な worktree に取り出し、`wgft` を `bin/base/` に作ります。
 腕に `rust` があれば、Rust の `wgft` も作ります。
+`--base-rust-target` は base の Rust の `wgft` の target を変えます (既定は `x86_64-unknown-linux-musl`)。
+`--base HEAD --base-rust-target x86_64-unknown-linux-gnu.2.41` と腕 `rust base:rust` で、同じ commit の musl と glibc の build を比べます。
 比は 1 つ目の腕 x の値を 2 つ目の腕 y の値で割ったものです。
 
 手順は次のとおりです。
@@ -299,8 +313,11 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --base origin/main fast wgstack b
   x が VM a の組の比の中央値と、x が VM b の組の比の中央値の幾何平均を比として出し、組を引き直す bootstrap の 95% の区間を付けます。
   2 台の CPU の差は `vm_a_over_b` に出ます。
   失敗した実行、始まりの同期を待ちきれなかった実行、送り手が 1 つの CPU の 0.7 以上を使った実行を含む組は除き、予定の組の数に対する理由ごとの数を出します。
+  iperf3 の送り手の値は、stream ごとに 1 つのスレッドを使うので stream の数で割ります。
   どちらかの側で予定の組の半分より少なくしか残らなければ、比を出さずに失敗します。
-  round ごとの比の中央値と、組の 2 つの実行が重なった割合も出し、重なりが 0.9 より小さければ警告します
+  round ごとの比の中央値と、組の 2 つの実行が重なった割合も出し、重なりが 0.9 より小さければ警告します。
+  VM 全体の byte あたりの CPU (`/proc/stat` の user、nice、system、irq、softirq の和) も同じ形で比べ、行の名前の頭に `VM` を付けて (`VMRATIO` など) 出します。
+  `kernel` の腕を含む比べには `RATIO` の行が無く、そのことを示す 1 行が出ます
 
 結果は `--out` (既定は `/tmp/wgft-lab-paired-<日時>`) の `result.txt`、組の行の `paired.log`、round と VM ごとのログです。
 `FAIL` の行があるか組が足りない場合は、終了コードが 0 以外になります。
@@ -409,6 +426,7 @@ lab/lab exec vm bash /wgft/lab/upgrade.sh userspace
 ```
 
 これらの直接実行は共有トポロジを使うため、同じ VM の他の実行が終了してから行います。
+`tcpquality.sh` のモードと変数 (`TOOL=iperf3`、`STREAMS`、`IPERF_S`、`CPU=1` の値) はスクリプトの冒頭にあります。
 `tcpquality.sh` は、エージェントの namespace の `eth0` の UDP の segmentation offload を切ってから測り、終了時に元の状態に戻します。
 wireguard-go の Linux のバインドは同じ大きさの datagram の列を 1 つの UDP の GSO の packet で送り、veth はこの packet を分けずにルータへ渡します。
 ルータの netem はこの packet を 1 つとして待ち行列に数え、損失も packet ごとに決めるので、実際の回線の待ち行列には無いまとまった遅れと損失が生じます。
