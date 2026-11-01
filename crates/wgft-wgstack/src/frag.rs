@@ -397,9 +397,10 @@ fn same_copied_shape(a: &[u8], b: &[u8]) -> bool {
     true
 }
 
-impl Table {
-    /// 表を作り、固定の配列をすべて確保します。
-    pub(crate) fn new(l: Limits) -> Result<Self, NewError> {
+impl Limits {
+    /// 上限を確かめ、固定の管理領域と通知の写しの数えた byte を返します。
+    pub(crate) fn base_cost(&self) -> Result<usize, NewError> {
+        let l = self;
         if l.entries == 0
             || l.fragments == 0
             || l.bytes == 0
@@ -421,7 +422,14 @@ impl Table {
         if l.entries > room(base, NOTICE_CHARGE) {
             return Err(NewError::MetadataOverBudget);
         }
-        base += l.entries * NOTICE_CHARGE;
+        Ok(base + l.entries * NOTICE_CHARGE)
+    }
+}
+
+impl Table {
+    /// 表を作り、固定の配列をすべて確保します。
+    pub(crate) fn new(l: Limits) -> Result<Self, NewError> {
+        let base = l.base_cost()?;
         Ok(Self {
             limits: l,
             entries: FixedVec::try_filled(l.entries, |_| Assembly::default())?,

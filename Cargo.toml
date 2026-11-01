@@ -16,6 +16,7 @@ wgft-wireguard = { path = "crates/wgft-wireguard" }
 wgft-wireguard-tun = { path = "crates/wgft-wireguard-tun" }
 wgft-proto = { path = "crates/wgft-proto" }
 wgft-agent = { path = "crates/wgft-agent" }
+wgft-wgstack = { path = "crates/wgft-wgstack" }
 base64 = "0.23.1"
 clap = { version = "4.6.7", features = ["derive"] }
 getrandom = "0.4.3"
@@ -47,8 +48,11 @@ unreachable_pub = "warn"
 unused_must_use = "deny"
 unused_extern_crates = "warn"
 # 製品の build に渡さない cfg。fuzzing は cargo-fuzz が付ける (crates/wgft-wgstack/fuzz)。
+# wgstack_sentinel は置き場に返す chunk を目印の byte で埋める build、wgstack_fault は故障を入れる build で、
+# どちらも RUSTFLAGS の --cfg で選ぶ (docs/design/v2/wgstack-rs.md の「故障の注入と目印の build」)。
+# 故障の名前は故障の点を足す PR が values に足す。
 # crate の [lints] は workspace = true とほかの項目を併せて書けないので、ここで宣言する。
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(wgstack_sentinel)", "cfg(wgstack_fault, values(none()))"] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

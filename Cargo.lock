@@ -1267,6 +1267,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wgft-alloc-count"
+version = "0.1.0"
+dependencies = [
+ "wgft-wgstack",
+]
+
+[[package]]
 name = "wgft-proto"
 version = "0.1.0"
 dependencies = [

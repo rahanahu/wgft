@@ -1,0 +1,16 @@
+[package]
+name = "wgft-alloc-count"
+description = "A counting global allocator for wgstack memory tests; not part of the product"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+wgft-wgstack.workspace = true
+
+[lints]
+workspace = true
