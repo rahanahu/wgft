@@ -280,6 +280,7 @@ impl<H: Hook> Stack<H> {
                 h.reserved += b.snd.cap() + b.rcv.r.cap();
                 if b.boost.is_some() {
                     h.boosted += 1;
+                    h.lent_array_bytes += b.lent_array_bytes();
                 }
             }
         }
@@ -293,6 +294,7 @@ impl<H: Hook> Stack<H> {
         h.ping_endpoints = self.s.pings.used();
         h.events = self.s.events.len();
         h.pool_chunks = self.s.chunks.kept();
+        h.pool_bytes = h.pool_chunks * CHUNK_SIZE;
         h
     }
 

@@ -11,6 +11,7 @@ publish.workspace = true
 
 [dev-dependencies]
 wgft-wgstack.workspace = true
+wgft-wgstack-bench.workspace = true
 
 [lints]
 workspace = true
