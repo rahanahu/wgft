@@ -16,6 +16,8 @@
 //! 中継は [`udp`] にあり、送信元ごとのセッションを無通信の期限で閉じる。
 
 #[cfg(test)]
+mod alloc_tests;
+#[cfg(test)]
 mod held_tests;
 mod lansock;
 mod pipe;

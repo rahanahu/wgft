@@ -4,7 +4,8 @@
 //! [`CountingAlloc`] を置き、核の操作の前後で生きている byte を読みます。GC が無いので、生きている byte の差は
 //! 核が持つ保持をそのまま表します。数えるのは要求の大きさで、割り当て器の丸めは含みません。
 //!
-//! 数えは 2 つあります。
+//! 数えは 2 つあります。どちらも確保の呼び出しの数 ([`alloc_calls`]、[`thread_alloc_calls`]、[`ThreadWindow::calls`]) を
+//! 持ちます。packet ごとの確保の許容を守る試験が使います。
 //!
 //! - プロセスの数え ([`live_bytes`]、[`peak_bytes`]):すべてのスレッドの確保を数えます。並行に動く試験の確保も
 //!   混ざるので、測る試験は 1 つの試験のバイナリに 1 つだけ置くか、cargo-nextest のように試験ごとにプロセスを
@@ -21,17 +22,25 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+static CALLS: AtomicUsize = AtomicUsize::new(0);
 
 // スレッドの数えです。const の初期値で Drop を持たない型なので、読み書きは確保もデストラクタの登録もせず、
 // 割り当て器の中から使えます。他のスレッドが確保した領域をこのスレッドが解放すると負になるので符号付きです。
 std::thread_local! {
     static THREAD_LIVE: Cell<isize> = const { Cell::new(0) };
     static THREAD_PEAK: Cell<isize> = const { Cell::new(0) };
+    static THREAD_CALLS: Cell<usize> = const { Cell::new(0) };
 }
 
 /// システムの割り当て器を包み、生きている byte と最大値を数える割り当て器です。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CountingAlloc;
+
+/// 確保の呼び出し (alloc、alloc_zeroed、realloc) を 1 回数える。解放は数えない。
+fn called() {
+    CALLS.fetch_add(1, Ordering::Relaxed);
+    THREAD_CALLS.set(THREAD_CALLS.get().wrapping_add(1));
+}
 
 fn grew(n: usize) {
     let now = LIVE.fetch_add(n, Ordering::Relaxed) + n;
@@ -55,6 +64,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
         // SAFETY: 呼び手が GlobalAlloc::alloc の約束を守ります。
         let p = unsafe { System.alloc(layout) };
         if !p.is_null() {
+            called();
             grew(layout.size());
         }
         p
@@ -64,6 +74,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
         // SAFETY: 呼び手が GlobalAlloc::alloc_zeroed の約束を守ります。
         let p = unsafe { System.alloc_zeroed(layout) };
         if !p.is_null() {
+            called();
             grew(layout.size());
         }
         p
@@ -79,11 +90,23 @@ unsafe impl GlobalAlloc for CountingAlloc {
         // SAFETY: 呼び手が GlobalAlloc::realloc の約束を守ります。
         let p = unsafe { System.realloc(ptr, layout, new_size) };
         if !p.is_null() {
+            called();
             shrank(layout.size());
             grew(new_size);
         }
         p
     }
+}
+
+/// これまでの確保の呼び出しの数 (alloc、alloc_zeroed、realloc)。すべてのスレッドの和で、解放は数えない。
+pub fn alloc_calls() -> usize {
+    CALLS.load(Ordering::Relaxed)
+}
+
+/// このスレッドのこれまでの確保の呼び出しの数。別のスレッドで動く task の確保を、そのスレッドの上で
+/// 読んで測るときに使う。差を取って使う。
+pub fn thread_alloc_calls() -> usize {
+    THREAD_CALLS.get()
 }
 
 /// 今生きている確保の byte (要求の大きさの和) です。
@@ -108,6 +131,7 @@ pub fn reset_peak() {
 #[derive(Debug)]
 pub struct ThreadWindow {
     base: isize,
+    calls_base: usize,
     /// 開いたスレッドの外へ送らないための印です。
     _not_send: core::marker::PhantomData<*const ()>,
 }
@@ -119,6 +143,7 @@ impl ThreadWindow {
         THREAD_PEAK.set(base);
         Self {
             base,
+            calls_base: THREAD_CALLS.get(),
             _not_send: core::marker::PhantomData,
         }
     }
@@ -130,6 +155,11 @@ impl ThreadWindow {
     /// このスレッドが窓を開いた後に、確保した量より多くを解放していると止まります。
     pub fn grown(&self) -> usize {
         self.since(THREAD_LIVE.get())
+    }
+
+    /// 窓を開いた後にこのスレッドで起きた確保の呼び出し (alloc、alloc_zeroed、realloc) の数です。
+    pub fn calls(&self) -> usize {
+        THREAD_CALLS.get().wrapping_sub(self.calls_base)
     }
 
     /// 窓を開いた後か [`ThreadWindow::reset_peak`] の後の、増分の最大値です。
