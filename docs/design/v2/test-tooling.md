@@ -3,7 +3,7 @@
 この文書は、Rust に移る wgstack を確かめる試験の道具の設計を定めます。
 対象は、適合の台本をデータにする言語、台本を流す 2 つの runner、Rust の DUT を別のプロセスとして叩く標準入出力の口、凍結した Go の wgstack の記録との照合、qbench、fuzz、関門です。
 1 節の台本の言語、2 節の Go の runner と Rust の runner と 2 つの runner の一致の確かめ、Rust の構文解析器と台本の乱数の写し、3 節の口の Go と Rust の符号と `dutserve` と `rustdut` と `ProcessDut` と `wgstack-dut`、4 節の記録とその Rust での照合は実装済みです。
-6 節の fuzz と 7 節の関門は、実装の 4b の段 (8 節) の分まで実装済みです。
+6 節の fuzz と 7 節の関門は、実装の 6 の段 (8 節) の分まで実装済みです。
 5 節は未実装です。
 実装は 8 節の順に積んだ PR で行い、各 PR がこの文書の該当する節を実装に合わせて直します。
 
@@ -1123,10 +1123,9 @@ stable の試験 (`tests/fuzz_corpus.rs`) は同じ作り方の入力を流し�
 入力の先頭の 8 byte を little endian の種として読み、短ければ 0 で埋めます。
 Go の試験は各段で接続の送り手の内部の欄を確かめます。
 SND.UNA ≤ SND.NXT ≤ SND.MAX、cwnd が 0 でないこと、pipe ≤ 2 × flight + 1、scoreboard の数え直し (再送した byte、SACK 済み、その先の欄)、損失の列と再送の位置の範囲、list のつながり、損失の列と再送の途中の位置 (`qMid` と `qOff`、`rxtMid` と `rxtOff`) です。
-今の核の `check_invariants` はこれらを確かめないので、`adversarial_sender` はまだこれらを各段で確かめていません。
-このため、再送した byte の数えのずれのような送り手の会計の故障は段の中では見えず、相手が stream を受け取れなくなった時か、記録の照合で初めて落ちます。
-送り手の確かめは核の `check_invariants` に足す予定で (実装の担当)、入ったら各段で呼びます。
-それまで各段で確かめるのは、`check_invariants` (表、予約、上界) と、外から見える出力の確かめです。
+核の `check_invariants` は使っている接続ごとに送り手の確かめ (`check_sender`) を行い、この送り手の欄の確かめと Go の `checkScoreboard` を写します (wgstack の Rust 版の設計の不変条件の確かめ)。
+`adversarial_sender` は各段の後に `check_invariants` を呼ぶので、Go と同じ確かめを各段で受けます。
+加えて、外から見える出力を確かめます。
 出力の確かめは、DUT の data が書いた byte の範囲の中にあって中身が stream と同じこと、FIN が stream の終わりにあること、接続が生きている間に RST を送らないことです。
 接続が生きているとは、handle が枠を持ち (`local_addr` が値を返す)、その接続の `Event::Closed` がまだ来ていないことです。
 嘘の SACK の block と ICMP が引く番号は、DUT の内部の値でなく、相手が知る値 (累積の確認と、見た DUT の segment の最も先の番号) から取ります。
@@ -1276,10 +1275,16 @@ adapter の側に核の故障の写しを作らないのは、公開の API の�
 | `send_stale_byte` | 再送の segment の中身を送信の輪の 1 byte 先から読む | `adversarial_sender` の中身の確かめ (`fuzz_corpus` と `wgstack-rs-adversarial`) |
 | `fin_before_data` | 送り残しがあっても `close_write` の FIN をすぐ送る | `adversarial_sender` の FIN の位置の確かめ |
 | `close_keeps_held` | `close` が最後の会計に TIME_WAIT の行を残す | 3 つの target と `holding` の、閉じた後の会計が 0 の確かめ |
-| `rtx_bytes_drift` | 送り手の scoreboard の再送した byte の数えを、印を付け直す時に増やしすぎる | 送り手の確かめが入った後の `check_invariants` と `adversarial_sender` の各段の確かめ。それまでは記録の照合 (git の集まりと `wgstack-rs-replay-full`) と `adversarial_sender` の最後の確かめだけが捉えます |
+| `rtx_bytes_drift` | 送り手の scoreboard の再送した byte の数えを、印を付け直す時に増やしすぎる | `adversarial_sender` の各段の `check_invariants` (送り手の確かめ)、記録の照合 (git の集まりと `wgstack-rs-replay-full`) |
+| `boost_never_reclaimed` | 需要の無い保有者の boost の枠を回収しない | `holding` の `idle_boost_holders` |
+| `frag_no_expiry` | 再組み立ての表の期限を外す | `holding` の `fragment_flood` (期限の後に表が空に戻る) |
+| `udp_no_endpoint_bytes_cap` | UDP の endpoint ごとの受信の byte の上限 (予算の 4 分の 1) を外す | `holding` の `udp_flood` (大きな datagram で保持が平らになる) |
+| `udp_no_endpoint_count_cap` | UDP の endpoint ごとの受信の datagram の数の上限 (予算の 4 分の 1) を外す | `holding` の `udp_flood` (小さな datagram で数の上限にちょうど止まる) |
+| `udp_no_tunnel_cap` | 核の全体の UDP の受信の予算を外す | `holding` の `udp_flood` (5 つ以上の endpoint で `udp_tunnel_full` を数える) |
+| `frag_byte_cap_ignored` | 再組み立ての表の byte の上限で追い出さない | `holding` の `fragment_flood` (大きな断片で byte の上限の内に止まる) |
+| `udp_recv_keeps_reservation` | `recv_from` が datagram の予約を返さない | `holding` の `udp_flood` (読むと予約が返る) |
 
 故障を入れた build を流す手順 (故障ごとの別の target directory と、落ちるはずの試験の選び方) は、実装の担当が点を書いた後に試験の担当が足します。
-SACK、boost、UDP、断片の故障は、それぞれの段の入力と一緒に足します。
 
 ### 段階の関門
 
@@ -1302,8 +1307,9 @@ cache の入力は集まりを作る時のもので、その後に増えた入�
 移行の間は Go の wgstack を凍結しているので、作り直しはまれです。
 2026-11-01 の開発のホストの 1 回の測りでは、集まりは 8712 の記録で 1.1 GB ほど、作るのに 4 分半ほど (2 回作って比べる今の手順) でした。
 敵対的な送り手の 3000 の種が 0.8 GB ほどを占めます。
-4b の段の印の記録の照合は、3 つに分けた段のそれぞれが release の build で 40 秒ほどでした。
-段が入ると照らす記録が増えるので、時間は段ごとに測り直します。
+実装の 4b の段だけの核では、照合に入る記録 (4b の段の印の記録) の照合は、3 つに分けた段のそれぞれが release の build で 40 秒ほどでした。
+この時の核は `check_invariants` の 1 回が今より重かったので、今の時間の目安にはなりません。
+実装の 5 と 6 の段と送り手の確かめ (#722) が入った木では、大きな集まりのすべての記録が照合に入り、3 つに分けた段のそれぞれが照らすのに 7 から 11 秒ほどでした (集まりは cache にあり、ほかの段と並べた関門の 1 回の測り)。
 
 Go と Rust の wgstack を同じ反応する相手の前に並べて出力を比べる差分の試験 (レビューで使い捨てに書いたもの) は、T4 に入れません。
 記録の照合が、同じ比べを記録した形で行うためです。

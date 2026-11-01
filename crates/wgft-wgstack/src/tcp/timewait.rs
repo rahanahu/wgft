@@ -218,7 +218,12 @@ impl TwTable {
     }
 
     /// 接続の枠 `origin` の世代 `generation` から移した行を探します。元の枠ごとの list をたどるので、手間はその枠
-    /// から移して表に残る行の数 (1 つの枠が TIME_WAIT の期限の間に閉じた接続の数) です。
+    /// から移して表に残る行のうち `generation` より新しい行の数です。
+    ///
+    /// 枠の世代は使うたびに進み、1 つの世代は高々 1 度だけ行に移り、行は list の先頭に入るので、list は世代の
+    /// 新しい順です (`check` が確かめます)。`generation` より古い行に着いたら、その先にも無いので止めます。
+    /// 表に無い世代の古い handle の abort (行が期限で消えた接続や、行に移らずに閉じた接続) は、その後に同じ枠
+    /// から行に移った接続の数だけたどり、枠の最新の行より新しい世代なら先頭の 1 行で終わります。
     pub(crate) fn find_origin(&self, origin: u32, generation: u64) -> Option<u32> {
         let mut id = *self.oheads.get(origin as usize)?;
         let mut steps = 0;
@@ -226,6 +231,9 @@ impl TwTable {
             let r = &self.rows[id as usize];
             if r.generation == generation {
                 return Some(id);
+            }
+            if r.generation < generation {
+                return None;
             }
             id = self.olinks[id as usize][1];
             steps += 1;
@@ -270,6 +278,7 @@ impl TwTable {
             return Err("the TIME_WAIT list disagrees with the count");
         }
         // 元の枠ごとの list は、使っている行をそれぞれ 1 度だけ、その行の元の枠の list に持ちます。
+        // list は世代の新しい順で、同じ世代を 2 度持ちません (`find_origin` が途中で止まる根拠)。
         let mut chained = 0;
         for (origin, &h) in self.oheads.iter().enumerate() {
             let mut prev = NIL;
@@ -281,6 +290,9 @@ impl TwTable {
                     .ok_or("an origin list link is out of range")?;
                 if !r.used || r.origin as usize != origin || self.olinks[id as usize][0] != prev {
                     return Err("an origin list holds a wrong row");
+                }
+                if prev != NIL && self.rows[prev as usize].generation <= r.generation {
+                    return Err("an origin list is not newest first");
                 }
                 chained += 1;
                 if chained > self.n {
@@ -543,8 +555,45 @@ mod tests {
                 rport,
             },
             state: TwState::TimeWait,
+            // 元の枠の list は世代の新しい順なので、後に入れる行ほど新しい世代にします。
+            generation: u64::from(rport),
             ..TwRow::default()
         }
+    }
+
+    #[test]
+    fn origin_lookup_stops_at_an_older_generation() {
+        // 1 つの枠が TIME_WAIT の期限の間に多くの接続を閉じた表。
+        const N: u32 = 60_000;
+        let mut t = TwTable::new(N as usize, SipKey { k0: 3, k1: 4 }, 2).unwrap();
+        for g in 1..=N {
+            let r = TwRow {
+                tup: Tuple {
+                    laddr: 1,
+                    raddr: 2 + g / 60_000,
+                    lport: 80,
+                    rport: u16::try_from(g % 60_000).unwrap(),
+                },
+                generation: u64::from(g),
+                ..TwRow::default()
+            };
+            t.insert(r);
+        }
+        t.check().unwrap();
+        assert_eq!(t.find_origin(0, u64::from(N)), Some(N - 1));
+        assert_eq!(t.find_origin(0, 1), Some(0));
+        assert_eq!(t.find_origin(0, 0), None);
+        assert_eq!(t.find_origin(1, 1), None);
+        // 先頭の次の節を範囲の外にしても、先頭より新しい世代の探索は先頭で止まり、節をたどりません。
+        let head = t.oheads[0];
+        let second = t.olinks[head as usize][1];
+        t.olinks[head as usize][1] = u32::MAX - 1;
+        assert_eq!(t.find_origin(0, u64::from(N) + 1), None);
+        assert_eq!(t.find_origin(0, u64::MAX), None);
+        t.olinks[head as usize][1] = second;
+        // 世代の順が崩れた list を検査が捉えます。
+        t.rows[head as usize].generation = 1;
+        assert_eq!(t.check(), Err("an origin list is not newest first"));
     }
 
     #[test]
