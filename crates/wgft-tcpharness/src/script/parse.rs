@@ -24,11 +24,13 @@ struct Parser<'a> {
     depth: usize,
 }
 
-/// `if` の中の `if` の段の上限です。Go の `maxIfDepth` と同じ値で、同じ誤りで止めます。
-const MAX_IF_DEPTH: usize = 64;
-/// 括弧、呼び出し、添字、単項の演算子の入れ子の上限です。Go の `maxExprDepth` と同じ値です。
-/// 再帰の深さを入力に依らず抑え、どの入力でも stack が溢れないようにします。
-const MAX_EXPR_DEPTH: usize = 128;
+// 入れ子の上限は Go の `maxIfDepth`、`maxExprDepth` と同じ値で、同じ誤りで止めます。再帰の深さを入力に依らず
+// 抑え、debug の build でも 1 MiB の stack に収めます (`tests/script_stack.rs` が上限の fixture で確かめます)。
+
+/// `if` の中の `if` の段の上限です。
+const MAX_IF_DEPTH: usize = 16;
+/// 式の段の上限です。最上位の式を 1 段と数え、括弧、呼び出し、添字、単項の演算子の入れ子が 1 段ずつ足します。
+const MAX_EXPR_DEPTH: usize = 32;
 
 pub(super) fn parse(file: &str, src: &[u8]) -> Result<Script, ScriptError> {
     let mut p = Parser {

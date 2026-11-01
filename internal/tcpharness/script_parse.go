@@ -153,11 +153,12 @@ type parser struct {
 }
 
 // The nesting limits. Both parsers stop at the same depth with the same error, so the Rust parser,
-// whose stack does not grow like a goroutine's, never overflows it on any input.
+// whose stack does not grow like a goroutine's, stays within a 1 MiB stack in a debug build on any
+// input; a Rust test parses the fixtures at each limit on such a stack.
 const (
-	maxIfDepth   = 64  // if blocks inside if blocks
-	maxExprDepth = 128 // parentheses, calls, index brackets and unary operators inside each other
-	maxTokens    = 512 // tokens in one statement or one {expr}, which bounds the depth of a + b + ...
+	maxIfDepth   = 16  // if blocks inside if blocks
+	maxExprDepth = 32  // levels of an expression, the top level included: parentheses, calls, index brackets and unary operators inside each other
+	maxTokens    = 256 // tokens in one statement or one {expr}, which bounds the depth of a + b + ...
 )
 
 func (p *parser) errf(line int, kind, format string, args ...any) error {
@@ -590,9 +591,9 @@ func lex(s string) ([]token, error) {
 			}
 		}
 		space = false
-	}
-	if len(out) > maxTokens {
-		return nil, fmt.Errorf("more than %d tokens", maxTokens)
+		if len(out) > maxTokens {
+			return nil, fmt.Errorf("more than %d tokens", maxTokens)
+		}
 	}
 	return out, nil
 }

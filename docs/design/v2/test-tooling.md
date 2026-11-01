@@ -110,9 +110,13 @@ attrs   = INDENT "what:" TEMPLATE NL INDENT "got:" TEMPLATE NL
 - 名前つきの引数:同じ名前を 2 度渡すこと、`=` の後に空白を置くこと (`match= x`) は誤りです
 - 文字列:`what:` と `got:` の text の中の `"` は対で書きます。閉じない `"` は、行の終わりまでを文字列とみなす誤りを避けるため、`layout` の誤りです
 - 文字と入れ子の上限:台本は UTF-8 の text で、UTF-8 として読めない行は `layout` の誤りです。
-  `if` の中の `if` は 64 段まで (超えれば `block`)、括弧、呼び出し、添字、単項の演算子の入れ子は 128 段まで、1 つの文か 1 つの `{式}` の字句は 512 個までです (超えれば `syntax` か `template`)。
+  `if` の中の `if` は 16 段まで (超えれば `block`) です。
+  式は最上位の式を 1 段と数え、括弧、呼び出し、添字、単項の演算子の入れ子を含めて 32 段までです。
+  1 つの文か 1 つの `{式}` の字句は 256 個までです (式と字句の上限を超えれば `syntax` か `template`)。
   上限は構文木をたどる再帰の深さを入力に依らず抑えるためのものです。
   Go の goroutine の stack は伸びますが、Rust の stack は伸びず、深い入れ子の入力で溢れます。
+  Rust の試験 (`crates/wgft-tcpharness/tests/script_stack.rs`) は、上限ちょうどと上限を 1 つ超える fixture と、すべての上限を重ねた台本を、debug の build で 1 MiB の stack の thread で構文解析します。
+  1 MiB は Windows の main thread の stack の大きさです。
   2 つの構文解析器が同じ入力に同じ誤りを返すよう、上限は両方に同じ値で置きます
 - `linux:` の行:`tcpharness.Scenario.Linux` と同じく、参照の Linux がこの台本だけに使う sysctl です。`=` の前後の空白は捨てます。今移す台本は使いません
 

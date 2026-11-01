@@ -41,7 +41,7 @@ const DUR_UNITS: &[(&[u8], i64)] = &[
 
 /// 1 つの文か 1 つの `{式}` の字句の数の上限です。Go の `maxTokens` と同じ値です。`a + b + ...` の構文木の
 /// 深さを抑え、構文木をたどる再帰が stack を溢れさせないようにします。
-const MAX_TOKENS: usize = 512;
+const MAX_TOKENS: usize = 256;
 
 pub(super) fn is_ident_byte(c: u8) -> bool {
     c == b'_' || c.is_ascii_alphabetic()
@@ -150,9 +150,9 @@ pub(super) fn lex(s: &[u8]) -> Result<Vec<Token>, String> {
             i += op.len();
         }
         space = false;
-    }
-    if out.len() > MAX_TOKENS {
-        return Err(format!("more than {MAX_TOKENS} tokens"));
+        if out.len() > MAX_TOKENS {
+            return Err(format!("more than {MAX_TOKENS} tokens"));
+        }
     }
     Ok(out)
 }
