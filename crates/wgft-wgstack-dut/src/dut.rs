@@ -19,7 +19,7 @@ use wgft_tcpharness::dut::{Accepted, ClockedDut, Datagram, DutError, Op};
 use wgft_tcpharness::frame::{self, BoostEvent, Clock, ErrKind, Handle, Hello, MAX_FRAME, VERSION};
 use wgft_wgstack::{
     BoostPolicy, Budget, Closed, Config, Congestion, ConnId, Error, Held, Hook, Limits, ListenerId,
-    Stack, Time,
+    PingId, Stack, Time, UdpId,
 };
 
 /// `HELLO_OK` が返す engine の名前です。
@@ -50,6 +50,8 @@ enum Obj {
         local: SocketAddrV4,
         remote: SocketAddrV4,
     },
+    Udp(UdpId, SocketAddrV4),
+    Ping(PingId, Ipv4Addr),
 }
 
 /// boost の hook が見た変化と、`BOOST_POLICY` で渡された答えです。
@@ -140,6 +142,8 @@ pub fn limits_from_hello(ls: &[frame::Limit]) -> Result<Limits, HelloError> {
         ctl_slots: vals[4],
         frag_entries: or_default(vals[7], def.frag_entries),
         frag_pieces: or_default(vals[8], def.frag_pieces),
+        udp_rx_datagrams: or_default(vals[5], def.udp_rx_datagrams),
+        udp_tx_datagrams: or_default(vals[6], def.udp_tx_datagrams),
     })
 }
 
@@ -280,18 +284,14 @@ impl WgstackDut {
     fn listener(&self, h: Handle) -> Result<ListenerId, DutError> {
         match self.obj(h)? {
             Obj::Listener(l) => Ok(l),
-            Obj::Conn { .. } => Err(DutError::Broken(format!(
-                "handle {h} is a connection, not a listener"
-            ))),
+            _ => Err(DutError::Broken(format!("handle {h} is not a listener"))),
         }
     }
 
     fn conn(&self, h: Handle) -> Result<(ConnId, SocketAddrV4, SocketAddrV4), DutError> {
         match self.obj(h)? {
             Obj::Conn { id, local, remote } => Ok((id, local, remote)),
-            Obj::Listener(_) => Err(DutError::Broken(format!(
-                "handle {h} is a listener, not a connection"
-            ))),
+            _ => Err(DutError::Broken(format!("handle {h} is not a connection"))),
         }
     }
 }
@@ -327,11 +327,17 @@ fn listen_err(addr: SocketAddrV4, e: Error) -> DutError {
     DutError::engine(kind, format!("listen tcp {addr}: {e}"))
 }
 
-fn not_yet(what: &str) -> DutError {
-    DutError::engine(
-        ErrKind::Other,
-        format!("{what} is not in this stage of the Rust wgstack"),
-    )
+/// UDP の誤りの理由を Go の wgstack の文にします。会計の不整合は最初の違反の文です。
+fn udp_reason(stack: &Stack<DutHook>, e: Error) -> String {
+    match e {
+        Error::AddrNotLocal | Error::PortZero => {
+            "address is not a local address and port of this tunnel".to_owned()
+        }
+        Error::UdpStopped => stack
+            .udp_receive_fault()
+            .map_or_else(|| e.to_string(), |f| f.to_string()),
+        other => other.to_string(),
+    }
 }
 
 /// `Debug` の形の平らな構造体 (`Name { a: 1, b: [0, 0] }`) を `a=1 b=[0,0]` にします。`STATS`、`BOUND`、`HELD`
@@ -409,8 +415,13 @@ impl ClockedDut for WgstackDut {
         Ok(self.add(Obj::Listener(l)))
     }
 
-    fn udp_listen(&mut self, _port: u16) -> Result<Handle, DutError> {
-        Err(not_yet("UDP"))
+    fn udp_listen(&mut self, port: u16) -> Result<Handle, DutError> {
+        let addr = SocketAddrV4::new(self.addr, port);
+        let id = self.stack.bind_udp(self.time(), addr).map_err(|e| {
+            let why = udp_reason(&self.stack, e);
+            DutError::engine(ErrKind::Other, format!("listen udp {addr}: {why}"))
+        })?;
+        Ok(self.add(Obj::Udp(id, addr)))
     }
 
     fn accept(&mut self, listener: Handle) -> Op<Accepted> {
@@ -495,6 +506,12 @@ impl ClockedDut for WgstackDut {
         match self.obj(h)? {
             Obj::Listener(l) => self.stack.close_listener(t, l),
             Obj::Conn { id, .. } => self.stack.close_conn(t, id),
+            Obj::Udp(id, _) => self.stack.close_udp(t, id),
+            Obj::Ping(..) => {
+                return Err(DutError::Broken(
+                    "an echo endpoint closes with PING_CLOSE".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -538,28 +555,127 @@ impl ClockedDut for WgstackDut {
         Ok(std::mem::take(&mut self.hook.0.borrow_mut().events))
     }
 
-    fn udp_recv(&mut self, _sock: Handle, _max: usize) -> Op<Datagram> {
-        Op::Failed(not_yet("UDP"))
+    fn udp_recv(&mut self, sock: Handle, max: usize) -> Op<Datagram> {
+        let (id, _local) = match self.obj(sock) {
+            Ok(Obj::Udp(id, l)) => (id, l),
+            Ok(_) => {
+                return Op::Failed(DutError::Broken(format!(
+                    "handle {sock} is not a UDP socket"
+                )));
+            }
+            Err(e) => return Op::Failed(e),
+        };
+        if max > MAX_READ {
+            return Op::Failed(DutError::Broken(format!("UDP_RECV asks for {max} bytes")));
+        }
+        let mut b = vec![0; max];
+        match self.stack.recv_from(self.time(), id, &mut b) {
+            Ok((n, from)) => {
+                b.truncate(n);
+                Op::Ready(Datagram { from, data: b })
+            }
+            Err(Error::WouldBlock) => Op::WouldBlock,
+            Err(Error::Closed) => Op::Failed(DutError::engine(
+                ErrKind::Closed,
+                "use of closed network connection",
+            )),
+            Err(e) => Op::Failed(DutError::engine(ErrKind::Other, format!("{e}"))),
+        }
     }
 
-    fn udp_send(&mut self, _sock: Handle, _to: SocketAddrV4, _data: &[u8]) -> Op<()> {
-        Op::Failed(not_yet("UDP"))
+    fn udp_send(&mut self, sock: Handle, to: SocketAddrV4, data: &[u8]) -> Op<()> {
+        let (id, local) = match self.obj(sock) {
+            Ok(Obj::Udp(id, l)) => (id, l),
+            Ok(_) => {
+                return Op::Failed(DutError::Broken(format!(
+                    "handle {sock} is not a UDP socket"
+                )));
+            }
+            Err(e) => return Op::Failed(e),
+        };
+        match self.stack.send_to(self.time(), id, data, to) {
+            Ok(_) => Op::Ready(()),
+            Err(Error::WouldBlock) => Op::WouldBlock,
+            // Go の `WriteTo` は閉じた socket に net.ErrClosed をそのまま返します。
+            Err(Error::Closed) => Op::Failed(DutError::engine(
+                ErrKind::Closed,
+                "use of closed network connection",
+            )),
+            Err(e) => {
+                let why = udp_reason(&self.stack, e);
+                Op::Failed(DutError::engine(
+                    ErrKind::Other,
+                    format!("write udp {local}->{to}: {why}"),
+                ))
+            }
+        }
     }
 
-    fn ping_open(&mut self, _to: Ipv4Addr) -> Result<Handle, DutError> {
-        Err(not_yet("ICMP echo"))
+    fn ping_open(&mut self, to: Ipv4Addr) -> Result<Handle, DutError> {
+        let id = self
+            .stack
+            .open_ping(self.time(), to)
+            .map_err(|e| DutError::engine(ErrKind::Other, format!("dial ping4: {e}")))?;
+        Ok(self.add(Obj::Ping(id, to)))
     }
 
-    fn ping_send(&mut self, _ep: Handle, _data: &[u8]) -> Result<(), DutError> {
-        Err(not_yet("ICMP echo"))
+    fn ping_send(&mut self, ep: Handle, data: &[u8]) -> Result<(), DutError> {
+        let Obj::Ping(id, r) = self.obj(ep)? else {
+            return Err(DutError::Broken(format!(
+                "handle {ep} is not an echo endpoint"
+            )));
+        };
+        let l = self.addr;
+        match self.stack.send_ping(self.time(), id, data) {
+            Ok(_) => Ok(()),
+            Err(Error::Closed) => Err(DutError::engine(
+                ErrKind::Closed,
+                format!("write ping4 {l}->{r}: use of closed network connection"),
+            )),
+            Err(e) => Err(DutError::engine(
+                ErrKind::Other,
+                format!("write ping4 {l}->{r}: {e}"),
+            )),
+        }
     }
 
-    fn ping_recv(&mut self, _ep: Handle, _max: usize) -> Op<Vec<u8>> {
-        Op::Failed(not_yet("ICMP echo"))
+    fn ping_recv(&mut self, ep: Handle, max: usize) -> Op<Vec<u8>> {
+        let (id, r) = match self.obj(ep) {
+            Ok(Obj::Ping(id, r)) => (id, r),
+            Ok(_) => {
+                return Op::Failed(DutError::Broken(format!(
+                    "handle {ep} is not an echo endpoint"
+                )));
+            }
+            Err(e) => return Op::Failed(e),
+        };
+        let l = self.addr;
+        let mut b = vec![0; max];
+        match self.stack.recv_ping(self.time(), id, &mut b) {
+            Ok(n) => {
+                b.truncate(n);
+                Op::Ready(b)
+            }
+            Err(Error::WouldBlock) => Op::WouldBlock,
+            Err(Error::Closed) => Op::Failed(DutError::engine(
+                ErrKind::Closed,
+                format!("read ping4 {l}->{r}: use of closed network connection"),
+            )),
+            Err(e) => Op::Failed(DutError::engine(
+                ErrKind::Other,
+                format!("read ping4 {l}->{r}: {e}"),
+            )),
+        }
     }
 
-    fn ping_close(&mut self, _ep: Handle) -> Result<(), DutError> {
-        Err(not_yet("ICMP echo"))
+    fn ping_close(&mut self, ep: Handle) -> Result<(), DutError> {
+        let Obj::Ping(id, _) = self.obj(ep)? else {
+            return Err(DutError::Broken(format!(
+                "handle {ep} is not an echo endpoint"
+            )));
+        };
+        self.stack.close_ping(self.time(), id);
+        Ok(())
     }
 
     fn stats(&mut self) -> Result<String, DutError> {

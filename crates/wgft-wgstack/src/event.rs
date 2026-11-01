@@ -61,6 +61,16 @@ impl EventList {
         self.order.remove(t);
     }
 
+    /// 対象 `t` の印のうち `mask` の印を外し、印が残らなければ list から外します。1 つの対象を種類の違う
+    /// 持ち主が分け合うとき (同じポートの TCP の待ち受けと UDP の endpoint) に、片方だけを使い直す前に呼びます。
+    pub(crate) fn clear_bits(&mut self, t: u32, mask: Bits) {
+        let bits = &mut self.bits[t as usize];
+        *bits &= !mask;
+        if *bits == 0 {
+            self.order.remove(t);
+        }
+    }
+
     /// すべての対象の印を外します。
     pub(crate) fn clear(&mut self) {
         while let Some((t, _)) = self.pop() {
@@ -97,6 +107,14 @@ mod tests {
         assert_eq!(e.pop(), Some((2, 0b001)));
         assert_eq!(e.pop(), Some((2, 0b010)));
         assert_eq!(e.pop(), Some((0, 0b001)));
+        assert_eq!(e.pop(), None);
+        e.raise(1, 0b011);
+        e.clear_bits(1, 0b001);
+        e.check().unwrap();
+        assert_eq!(e.pop(), Some((1, 0b010)));
+        e.raise(1, 0b001);
+        e.clear_bits(1, 0b001);
+        e.check().unwrap();
         assert_eq!(e.pop(), None);
         e.raise(3, 0b100);
         e.reset(3);

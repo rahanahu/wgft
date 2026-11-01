@@ -44,13 +44,14 @@ fn table() -> String {
         w.push_str(" ---: |");
     }
     w.push('\n');
-    let rows: [(&str, &dyn Fn(usize) -> u64); 16] = [
+    let rows: [(&str, &dyn Fn(usize) -> u64); 20] = [
         ("`stack`", &|i| parts[i].stack),
         ("`conn_slots`", &|i| parts[i].conn_slots),
         ("`conn_index`", &|i| parts[i].conn_index),
         ("`syn`", &|i| parts[i].syn),
         ("`tw`", &|i| parts[i].tw),
         ("`listeners`", &|i| parts[i].listeners),
+        ("`udp_endpoints`", &|i| parts[i].udp_endpoints),
         ("`wheel`", &|i| parts[i].wheel),
         ("`output`", &|i| parts[i].output),
         ("`events`", &|i| parts[i].events),
@@ -59,6 +60,9 @@ fn table() -> String {
         ("`floor_conn`", &|i| bounds[i].floor_conn),
         ("`boost`", &|i| bounds[i].boost),
         ("`frag`", &|i| bounds[i].frag),
+        ("`udp_rx`", &|i| bounds[i].udp_rx),
+        ("`udp_tx`", &|i| bounds[i].udp_tx),
+        ("`ping`", &|i| bounds[i].ping),
         ("`total`", &|i| bounds[i].total),
         ("`transient`", &|i| bounds[i].transient),
     ];
@@ -108,6 +112,8 @@ fn fix_matches_the_allocated_tables() {
             ctl_slots: 2,
             frag_entries: 4,
             frag_pieces: 8,
+            udp_rx_datagrams: 8,
+            udp_tx_datagrams: 4,
         },
     ] {
         let config = Config {
@@ -127,6 +133,7 @@ fn fix_matches_the_allocated_tables() {
         assert_eq!(p.syn, b(sh.syn.heap_bytes()));
         assert_eq!(p.tw, b(sh.tw.heap_bytes()));
         assert_eq!(p.listeners, b(sh.listeners.heap_bytes()));
+        assert_eq!(p.udp_endpoints, b(sh.udp.eps.heap_bytes()));
         assert_eq!(p.wheel, b(sh.wheel.heap_bytes() + sh.fired.heap_bytes()));
         assert_eq!(
             p.output,
@@ -142,9 +149,24 @@ fn fix_matches_the_allocated_tables() {
         assert_eq!(bound, Bound::for_limits(&limits, 1420));
         // boost の項は Budget が確保した配列と管理を覆います。
         assert!(b(sh.budget.heap_bytes()) <= bound.boost);
+        // UDP の項は予算と管理の配列を、ping の項は応答の置き場を覆います。
+        assert_eq!(
+            bound.udp_rx + bound.udp_tx,
+            b(crate::udp::RX_BYTES + crate::udp::TX_BYTES)
+                + b(sh.udp.heap_bytes(crate::udp::RX)
+                    + sh.udp.heap_bytes(crate::udp::TX)
+                    + sh.udp.chunk_heap_bytes())
+        );
+        assert_eq!(bound.ping, b(sh.pings.heap_bytes()));
         assert_eq!(
             bound.total,
-            bound.fix + bound.floor_conn + bound.boost + bound.frag
+            bound.fix
+                + bound.floor_conn
+                + bound.boost
+                + bound.frag
+                + bound.udp_rx
+                + bound.udp_tx
+                + bound.ping
         );
         s.check_invariants().unwrap();
         let closed = s.close(Time::ZERO);
@@ -184,6 +206,8 @@ fn a_full_stack_meets_each_term() {
         ctl_slots: 2,
         frag_entries: 4,
         frag_pieces: 8,
+        udp_rx_datagrams: 8,
+        udp_tx_datagrams: 4,
     };
     let config = Config {
         addr: Ipv4Addr::new(10, 9, 0, 1),

@@ -7,12 +7,15 @@
 //! 同じく振る舞います。`delivered` は真を返し、`close_conn` は何もせず、`read` と `write` は [`Error::Closed`] を返し、
 //! `abort` は元の接続の行が表に残っていれば行を外して RST を送ります。
 
+use super::shared::EV_ACCEPT;
 use super::{Hook, Stack};
 use crate::config::BoostPolicy;
+use crate::icmp::PingId;
 use crate::tcp::boost::Dir;
 use crate::tcp::conn::{ConnError, ConnId, State};
 use crate::tcp::listen;
 use crate::time::Time;
+use crate::udp::UdpId;
 use core::fmt;
 use core::net::{Ipv4Addr, SocketAddrV4};
 
@@ -43,6 +46,12 @@ pub enum Event {
     Closed(ConnId),
     /// accept の待ち行列に接続があります。
     Acceptable(ListenerId),
+    /// UDP の socket に読める datagram があるかもしれません。
+    UdpReadable(UdpId),
+    /// UDP の送信の予算に空きができたかもしれません。`send_to` が `WouldBlock` を返した socket にだけ出します。
+    UdpWritable(UdpId),
+    /// ping の endpoint に応答が届きました。
+    PingReply(PingId),
 }
 
 /// 操作の誤りです。
@@ -69,6 +78,18 @@ pub enum Error {
     PortZero,
     /// ポートは既に使われています。
     AddrInUse,
+    /// 宛先のアドレスかポートが使えません。
+    InvalidAddress,
+    /// datagram が大きすぎます。
+    MessageTooLong,
+    /// UDP の会計の不整合で、この核の UDP は止まっています。
+    UdpStopped,
+    /// 表が満杯です。
+    TableFull,
+    /// ICMP の echo request でないか、MTU に収まりません。
+    InvalidMessage,
+    /// 制御の出力の輪が満杯です。
+    NoBufferSpace,
 }
 
 impl fmt::Display for Error {
@@ -84,6 +105,14 @@ impl fmt::Display for Error {
             Self::AddrNotLocal => "address is not a local address of this tunnel",
             Self::PortZero => "port 0 is not supported",
             Self::AddrInUse => "address already in use",
+            Self::InvalidAddress => "invalid UDP address",
+            Self::MessageTooLong => "message too long",
+            Self::UdpStopped => {
+                "UDP on this tunnel stopped after an internal accounting error; restart the agent to recover"
+            }
+            Self::TableFull => "all ping endpoints are in use",
+            Self::InvalidMessage => "not an ICMP echo request that fits the MTU",
+            Self::NoBufferSpace => "the control output ring is full",
         })
     }
 }
@@ -117,7 +146,7 @@ impl<H: Hook> Stack<H> {
             .open(port)
             .map_err(|listen::OpenError::InUse| Error::AddrInUse)?;
         let target = self.s.listener_target(port);
-        self.s.events.reset(target);
+        self.s.events.clear_bits(target, EV_ACCEPT);
         Ok(ListenerId { port, generation })
     }
 
@@ -185,7 +214,7 @@ impl<H: Hook> Stack<H> {
         }
         self.s.listeners.close(l.port, l.generation);
         let target = self.s.listener_target(l.port);
-        self.s.events.reset(target);
+        self.s.events.clear_bits(target, EV_ACCEPT);
     }
 
     /// 接続 `id` の未読のデータを `dst` に写し、写した byte 数を返します。相手の FIN の後に読み終えたら 0 を返し

@@ -34,6 +34,10 @@ pub struct Limits {
     pub frag_entries: usize,
     /// 再組み立ての表の断片の枠の数です。
     pub frag_pieces: usize,
+    /// UDP の受信の datagram の数の予算です。endpoint 1 つの上限はその 4 分の 1 です。
+    pub udp_rx_datagrams: usize,
+    /// UDP の送信の datagram の数の予算です。endpoint 1 つの上限はその 4 分の 1 です。
+    pub udp_tx_datagrams: usize,
 }
 
 impl Limits {
@@ -54,6 +58,8 @@ impl Limits {
             ctl_slots: 256,
             frag_entries: crate::frag::LIMITS.entries,
             frag_pieces: crate::frag::LIMITS.fragments,
+            udp_rx_datagrams: crate::udp::RX_DATAGRAMS,
+            udp_tx_datagrams: crate::udp::TX_DATAGRAMS,
         }
     }
 
@@ -157,6 +163,8 @@ impl Config {
         };
         // 待ち受け 1 つの accept の待ち行列と握手の途中の行の数は、その半分までで、16 bit の欄に数えます。
         let per_listener = |n: usize| u16::try_from(n / 2).is_ok();
+        // UDP の datagram の番号は 16 bit の欄に入れ、u16::MAX を「無し」に使います。
+        let udp = |n: usize| (1..=usize::from(u16::MAX)).contains(&n);
         let frag = crate::frag::Limits {
             entries: l.frag_entries,
             fragments: l.frag_pieces,
@@ -171,6 +179,8 @@ impl Config {
             || !per_listener(l.accept_queue)
             || !per_listener(l.syn_rows)
             || frag.base_cost().is_err()
+            || !udp(l.udp_rx_datagrams)
+            || !udp(l.udp_tx_datagrams)
         {
             return Err(ConfigError::Limits);
         }

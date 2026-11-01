@@ -33,6 +33,8 @@ fn small() -> Config {
             ctl_slots: 16,
             frag_entries: 4,
             frag_pieces: 8,
+            udp_rx_datagrams: 8,
+            udp_tx_datagrams: 8,
         },
         ..Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420)
     }

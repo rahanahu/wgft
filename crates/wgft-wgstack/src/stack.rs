@@ -16,6 +16,7 @@ use crate::config::{Config, ConfigError};
 use crate::event::EventList;
 use crate::fixed_vec::{AllocError, FixedVec};
 use crate::frag;
+use crate::icmp::{PING_ENDPOINTS, PingId, Pings};
 use crate::index::Index;
 use crate::output::{CtlRing, Dlist};
 use crate::rng::Seeds;
@@ -26,6 +27,7 @@ use crate::tcp::syn::SynTable;
 use crate::tcp::timewait::TwTable;
 use crate::tcp::{NUM_TIMERS, NUM_TIMERS32};
 use crate::time::Time;
+use crate::udp::{Udp, UdpId};
 use crate::wheel::{NO_TICK, TICK_NS, Wheel};
 use crate::wire::{self, FLAG_ACK, FLAG_RST, FLAG_SYN, Ipv4Drop, PayloadDrop};
 pub use api::{Error, Event, ListenerId};
@@ -128,12 +130,13 @@ pub struct Closed {
     pub held: Held,
 }
 
-/// 知らせの対象の番号の始まりです。接続の枠、待ち受けのポートの順に並べます。
+/// 知らせの対象の番号の始まりです。接続の枠、ポート (TCP の待ち受けと UDP の endpoint が分け合います)、ping の
+/// endpoint の順に並べます。
 pub(crate) struct EventTargets;
 
 impl EventTargets {
     pub(crate) fn count(conns: usize) -> usize {
-        conns + PORTS
+        conns + PORTS + PING_ENDPOINTS
     }
 }
 
@@ -199,6 +202,7 @@ impl<H: Hook> Stack<H> {
                         conns: t.out_conns,
                         rows: t.out_rows,
                         ctl: t.ctl,
+                        udp_queued: 0,
                         cur: 0,
                         deficit: [0; shared::NUM_CLASSES],
                     },
@@ -207,6 +211,11 @@ impl<H: Hook> Stack<H> {
                     fired: t.fired,
                     chunks: t.chunks,
                     frag: t.frag,
+                    frag_next_sweep: 0,
+                    udp: t.udp,
+                    pings: t.pings,
+                    icmp_sec: -1,
+                    icmp_count: 0,
                     budget,
                     ch_sec: -1,
                     ch_count: 0,
@@ -279,6 +288,9 @@ impl<H: Hook> Stack<H> {
         h.accept_queued = self.s.queued;
         h.ctl_queued = self.s.out.ctl.len();
         h.frag_bytes = self.s.frag.usage().0 - self.s.frag.base_cost();
+        (h.udp_rx_bytes, h.udp_rx_datagrams) = self.s.udp.held(crate::udp::RX);
+        (h.udp_tx_bytes, h.udp_tx_datagrams) = self.s.udp.held(crate::udp::TX);
+        h.ping_endpoints = self.s.pings.used();
         h.events = self.s.events.len();
         h.pool_chunks = self.s.chunks.kept();
         h
@@ -297,6 +309,11 @@ impl<H: Hook> Stack<H> {
         s.events.check()?;
         s.wheel.check()?;
         s.budget.check()?;
+        s.udp.check()?;
+        s.pings.check()?;
+        if s.udp.held(crate::udp::TX).1 != s.out.udp_queued {
+            return Err("the UDP output count disagrees with the send FIFO".into());
+        }
         // 接続の表の項目は、使っている枠を同じ 4 つ組と世代で指します。
         let mut bad = None;
         s.conn_idx.for_each(|tup, slot| {
@@ -342,7 +359,9 @@ impl<H: Hook> Stack<H> {
                 return Err("a free slot is in the output list".into());
             }
         }
-        if chunks != s.chunks.held() {
+        let (rx, _) = s.udp.held(crate::udp::RX);
+        let (tx, _) = s.udp.held(crate::udp::TX);
+        if chunks + (rx + tx) / CHUNK_SIZE != s.chunks.held() {
             return Err("the chunk pool count disagrees with the rings".into());
         }
         if boosted != s.budget.lent() {
@@ -385,6 +404,9 @@ impl<H: Hook> Stack<H> {
         }
         s.syn.clear();
         s.tw.clear();
+        s.udp.clear(&mut s.chunks);
+        s.out.udp_queued = 0;
+        s.pings.clear();
         self.conns.free_all(&mut s.chunks);
         s.chunks.drain();
         s.frag.clear();
@@ -404,10 +426,16 @@ impl<H: Hook> Stack<H> {
         }
     }
 
-    /// トンネルから届いた IPv4 の packet を 1 つ処理します (Go の `stack.input`)。packet は呼び出しの間だけ
-    /// 読み、保持するものは自分の予約に写します。捨てた packet は理由ごとに数えます。
+    /// トンネルから届いた IPv4 の packet を 1 つ処理します。packet は呼び出しの間だけ読み、保持するものは自分の
+    /// 予約に写します。捨てた packet は理由ごとに数えます。
     pub fn handle_packet(&mut self, now: Time, pkt: &[u8]) {
         let now = self.clock(now);
+        self.input(pkt, now);
+    }
+
+    /// 1 つの IPv4 の packet を処理します (Go の `stack.input`)。再組み立ての表が完成させた datagram もここに
+    /// 戻ります。
+    pub(crate) fn input(&mut self, pkt: &[u8], now: i64) {
         let ip = match wire::parse_ipv4(pkt) {
             Ok(ip) => ip,
             Err(Ipv4Drop::Malformed) => {
@@ -424,8 +452,7 @@ impl<H: Hook> Stack<H> {
             return;
         }
         if ip.fragment {
-            // 再組み立ての表との結合は UDP と ICMP の段 (PR 6) が足します。
-            self.s.stats.fragments_dropped += 1;
+            self.input_fragment(&ip, now);
             return;
         }
         match ip.proto {
@@ -434,9 +461,8 @@ impl<H: Hook> Stack<H> {
                 Err(PayloadDrop::Malformed) => self.s.stats.malformed += 1,
                 Err(PayloadDrop::BadChecksum) => self.s.stats.bad_checksum += 1,
             },
-            // UDP と ICMP は PR 6 が足します。
-            wire::PROTO_UDP => self.s.stats.udp_dropped += 1,
-            wire::PROTO_ICMP => self.s.stats.icmp_dropped += 1,
+            wire::PROTO_UDP => self.s.input_udp(&ip, now),
+            wire::PROTO_ICMP => self.input_icmp(&ip, now),
             _ => self.s.stats.malformed += 1,
         }
     }
@@ -534,6 +560,7 @@ impl<H: Hook> Stack<H> {
         self.s.fired = fired;
         self.s.expire_syn_rows(now);
         self.s.expire_tw_rows(now);
+        self.s.sweep_frag(now);
     }
 
     /// 次に [`Stack::handle_timeout`] を呼ぶ時刻です。
@@ -542,6 +569,13 @@ impl<H: Hook> Stack<H> {
         let tick = self.s.wheel.next_tick();
         if tick != NO_TICK {
             next = Some(i64::try_from(tick * TICK_NS).unwrap_or(i64::MAX));
+        }
+        // 0 は「無し」で、行の期限と同じに扱います (Go の `nextDeadline`)。
+        if let Some(d) = self.s.frag_deadline()
+            && d != 0
+            && next.is_none_or(|n| d < n)
+        {
+            next = Some(d);
         }
         for d in [self.s.syn.next_deadline(), self.s.tw.next_deadline()]
             .into_iter()
@@ -577,6 +611,7 @@ impl<H: Hook> Stack<H> {
                     Some(id) => self.s.poll_row(id, buf, now),
                     None => 0,
                 },
+                shared::CLASS_UDP => self.s.poll_udp(buf),
                 _ => 0,
             };
             if n == 0 {
@@ -610,15 +645,42 @@ impl<H: Hook> Stack<H> {
                 _ => Event::Closed(id),
             });
         }
-        let port = u16::try_from(target as usize - n).unwrap_or(0);
-        Some(Event::Acceptable(ListenerId {
-            port,
-            generation: self.s.listeners.generation(port),
-        }))
+        let t = target as usize - n;
+        if t >= PORTS {
+            let slot = t - PORTS;
+            return Some(Event::PingReply(PingId {
+                slot: u8::try_from(slot).unwrap_or(u8::MAX),
+                generation: self.s.pings.generation(slot),
+            }));
+        }
+        let port = u16::try_from(t).unwrap_or(0);
+        Some(match bit {
+            shared::EV_UDP_READ | shared::EV_UDP_WRITE => {
+                let id = UdpId {
+                    port,
+                    generation: self.s.udp.eps.generation(port),
+                };
+                if bit == shared::EV_UDP_READ {
+                    Event::UdpReadable(id)
+                } else {
+                    Event::UdpWritable(id)
+                }
+            }
+            _ => Event::Acceptable(ListenerId {
+                port,
+                generation: self.s.listeners.generation(port),
+            }),
+        })
     }
 
     /// 1 分に 1 回までの門を通った拒否の数を 1 つ取り出します。駆動の層が英語の 1 行にしてログに出します。
     pub fn poll_log(&mut self) -> Option<LogLine> {
+        if self.s.udp.take_fault_log() {
+            return Some(LogLine {
+                kind: LogKind::UdpFault,
+                count: 1,
+            });
+        }
         self.s.gates.pop()
     }
 }
@@ -661,6 +723,8 @@ struct Tables {
     fired: FixedVec<u32>,
     chunks: ChunkPool,
     frag: frag::Table,
+    udp: Udp,
+    pings: Pings,
 }
 
 impl Tables {
@@ -689,6 +753,8 @@ impl Tables {
             fired: FixedVec::try_with_capacity(n * NUM_TIMERS)?,
             chunks: ChunkPool::new()?,
             frag: frag::Table::new(frag_limits).map_err(|_| AllocError)?,
+            udp: Udp::new(l)?,
+            pings: Pings::new(config.mtu)?,
             seeds,
         })
     }

@@ -60,6 +60,8 @@ pub(crate) const SEC: i64 = 1_000 * MS;
 
 /// SYN の MSS の下限で、MSS の option が無いときの値です (RFC 1122)。
 pub(crate) const MIN_MSS: u32 = 536;
+/// Fragmentation Needed の next-hop MTU の下限です (Linux の min_pmtu)。
+pub(crate) const MIN_PMTU: u32 = 552;
 /// IPv4 と TCP の header の和です。
 pub(crate) const IP_TCP_HEADERS: u32 = 40;
 /// NOP NOP TS の 12 byte です。

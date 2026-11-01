@@ -6,7 +6,7 @@
 use super::conn::{State, TMR_CLOSE, TMR_DELACK};
 use super::ctx::{Conn, lo32};
 use super::timewait::{Reuse, rfc6191};
-use super::{DELACK_TIMEOUT, MS, PAWS_IDLE, TW_TIMEOUT};
+use super::{DELACK_TIMEOUT, MS, PAWS_IDLE, RTX_PMTU, TW_TIMEOUT};
 use crate::seq;
 use crate::stack::shared::LogKind;
 use crate::wire::{FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, Segment};
@@ -303,5 +303,33 @@ impl Conn<'_> {
         // want_output が送るものがあると答え続けます。
         self.cancel_sends();
         self.arm(TMR_CLOSE, now + TW_TIMEOUT);
+    }
+
+    /// Fragmentation Needed による PMTU の引き下げです (RFC 1191)。引用された番号が SND.UNA から SND.NXT の範囲に
+    /// あるときだけ受け入れます (RFC 5927)。送り残しは小さな segment で送り直します。SND.NXT は再送で戻さないので、
+    /// いつも SND.MAX と等しくなります。
+    pub(crate) fn pmtu_drop(&mut self, seq: u32, mtu: u32, now: i64) {
+        if !seq::ge(seq, self.t.snd_una) || !seq::lt(seq, self.t.snd_nxt) {
+            self.s.stats.icmp_dropped += 1;
+            return;
+        }
+        if mtu >= self.t.pmtu {
+            return;
+        }
+        self.t.pmtu = mtu;
+        if self.t.snd_max != self.t.snd_una {
+            // 記録の境目は保ち、新しい大きさに入らない記録だけを損失にして送り直します (Linux の
+            // tcp_simple_retransmit と同じです)。入る記録は届いているかもしれないので、損失の印を付けません。
+            // SACK の無い接続は記録の印を使わないので、今までどおり SND.UNA から送り直します。
+            self.t.fast_rtx = false;
+            if self.t.sack_ok {
+                let payload = self.seg_mss();
+                self.mark_lost_longer(payload, RTX_PMTU);
+                self.advance_loss(); // 小さくなった MSS で DupThresh の byte の規則を数え直します
+            } else {
+                self.mark_all_lost(RTX_PMTU);
+            }
+        }
+        self.after_input(now);
     }
 }
