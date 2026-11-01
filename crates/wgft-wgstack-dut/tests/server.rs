@@ -353,7 +353,11 @@ fn protocol_errors_end_with_code_2() {
         .stderr(Stdio::null())
         .status()
         .expect("spawn");
-    assert_eq!(st.code(), Some(2), "only the fake clock");
+    assert_eq!(
+        st.code(),
+        Some(2),
+        "the real clock needs the packet socketpair on fd 3"
+    );
 }
 
 #[test]

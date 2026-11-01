@@ -7,6 +7,8 @@
 //! - [`core`]:Go の `FuzzCore` の op の解釈器と相手の模型を、同じ byte が同じ op になるように写したもの
 //! - [`adversarial_sender`]:Go の `FuzzAdversarialSender` (`runAudit`) を、核の公開の API で写したもの
 //! - [`replay`]:3 節の要求の列を `wgstack-dut` の adapter に流すもの。種は Go の wgstack の記録の要求の列です
+//! - [`raw_adversary`]:状態を持つ生の packet の敵。Go に元の試験は無く、SYN cookie、断片、ICMP、UDP、
+//!   アプリケーションの操作、長い時刻の跳びを混ぜます
 //!
 //! 核の内部に触れず、公開の API だけを使います。Go の試験が内部の欄で確かめていたこと (SND.UNA と SND.MAX の
 //! 順序、scoreboard の数え直しなど) は、核の `check_invariants` と、外から見える出力の確かめに替えます。
@@ -18,10 +20,12 @@ mod adversary;
 mod core;
 mod net;
 mod peer;
+mod raw;
 mod replay;
 
 pub use adversary::{AdversaryCfg, adversarial_sender, adversarial_sender_seed};
 pub use core::core;
 pub use net::{DUT, MTU, Net, PEER, fuzz_limits, small_limits};
 pub use peer::{PeerConn, SackPeer};
+pub use raw::{raw_adversary, raw_adversary_input, raw_adversary_seed};
 pub use replay::{replay, replay_seed};
