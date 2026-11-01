@@ -53,6 +53,16 @@ name: CI
 #               rule. rust-deny additionally runs on the weekly schedule, because new
 #               RustSec advisories affect code nobody touched.
 #
+#   harness -> crates/**, Cargo.toml, Cargo.lock, rust-toolchain.toml,
+#               internal/tcpharness/**, internal/dutproto/**, internal/wgstack/**,
+#               internal/ipv4frag/**, go.mod, go.sum
+#               -> gates harness-rust-go (B16). It runs the Go and the Rust scenario runners
+#               against the frozen Go wgstack behind the DUT frame protocol and compares their
+#               transcripts (docs/design/v2/test-tooling.md section 2), so it needs both
+#               toolchains and runs Go tests: it is not one of the Rust-only rust-* jobs.
+#               The lab runs neither the job nor the Go test files only it runs, so
+#               docs/development/testing.md lets a PR that changes only those skip the lab suite.
+#
 # A change to .github/workflows/** (the `workflows` filter below) additionally forces every
 # gated job to run, on top of what `build` and `go_code` already cover: a ci.yml change can
 # change how the other jobs behave, so path filtering must not be trusted to judge its own
@@ -115,6 +125,7 @@ jobs:
       docs_only: ${{ steps.decide.outputs.docs_only }}
       go_code: ${{ steps.filter.outputs.go_code }}
       rust: ${{ steps.filter.outputs.rust }}
+      harness: ${{ steps.filter.outputs.harness }}
       build: ${{ steps.filter.outputs.build }}
     steps:
       - uses: actions/checkout@v7
@@ -160,6 +171,18 @@ jobs:
               - 'deny.toml'
               # The scenario scripts and parser fixtures, which the Rust tests read as well.
               - 'internal/tcpharness/scripts/**'
+            harness:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'internal/tcpharness/**'
+              - 'internal/dutproto/**'
+              - 'internal/wgstack/**'
+              # what the frozen Go wgstack builds from
+              - 'internal/ipv4frag/**'
+              - 'go.mod'
+              - 'go.sum'
             build:
               - '.goreleaser.yaml'
               - 'scripts/build-release.sh'
@@ -490,6 +513,46 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: nextest
         run: cargo nextest run --workspace --locked
+
+  harness-rust-go:
+    # B16 (see docs/testing.md). The runner comparison of docs/design/v2/test-tooling.md
+    # section 2: the Go runner through rustdut and the Rust runner through its ProcessDut
+    # both run every scenario script, run seeds 1 to 5, against the frozen Go wgstack's
+    # dutserve, and their request and response transcripts and check traces must be equal
+    # byte for byte. Gated by harness; see the header comment.
+    needs: changes
+    if: >-
+      !cancelled() && github.event_name != 'schedule' && (
+        needs.changes.result != 'success' ||
+        needs.changes.outputs.run_all == 'true' ||
+        needs.changes.outputs.harness == 'true'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+      - name: toolchain from rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: dutserve
+        run: go test -c -o bin/wgstack-dutserve.test ./internal/wgstack
+      - name: Go runner transcripts
+        env:
+          WGFT_TEST_WGSTACK_DUT: ${{ github.workspace }}/bin/wgstack-dutserve.test
+          WGFT_TEST_TCPHARNESS_TRANSCRIPTS: ${{ runner.temp }}/transcripts
+        run: go test ./internal/tcpharness/rustdut -run 'TestWriteTranscripts|TestRustVectors' -count=1
+      # The whole crate, not only tests/scripts.rs: a change that only touches the Go test data
+      # the other tests read (frames, vectors) reaches this job and not rust-check.
+      - name: Rust runner against the same transcripts
+        env:
+          WGFT_TEST_WGSTACK_DUT: ${{ github.workspace }}/bin/wgstack-dutserve.test
+          WGFT_TEST_TCPHARNESS_TRANSCRIPTS: ${{ runner.temp }}/transcripts
+        run: cargo nextest run -p wgft-tcpharness --locked
 
   release-snapshot:
     # .github/workflows/release.yml only runs `goreleaser release --clean` on a `v*` tag push,

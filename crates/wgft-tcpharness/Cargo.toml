@@ -11,3 +11,11 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# 台本ごとに 1 つの試験を見せる試験の入口 (tests/scripts.rs) のため
+libtest-mimic.workspace = true
+
+[[test]]
+name = "scripts"
+harness = false
