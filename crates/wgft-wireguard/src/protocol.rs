@@ -18,7 +18,7 @@ use sanstun::{
 };
 use zeroize::Zeroizing;
 
-use crate::config::{ConfigError, ProtocolTimers};
+use crate::config::{ConfigError, ProtocolTimers, REJECT_AFTER_TIME};
 use crate::drops::DropReason;
 use crate::keys::{PrivateKey, PublicKey};
 
@@ -323,6 +323,21 @@ impl Protocol {
             self.peers[peer].tunnel = tunnel;
             self.peers[peer].used = false;
         }
+    }
+
+    /// 今のセッションでデータを暗号にできるか。sanstun はこの判定を公開しないので、sanstun が送信に
+    /// 使うセッションの条件 (今のセッションがあり、期限切れでなく、開始の側なら `KEEPALIVE_TIMEOUT` を
+    /// 残している) を、公開の値から写す。sanstun はセッションの役を公開しないので、応答の側にも開始の側の
+    /// 条件を当てる。このため応答の側のセッションの最後の `KEEPALIVE_TIMEOUT` の間は偽を返す。
+    /// 送信の数の上限 (2^64 から 2^13 を引いた数) は見ない。真を返した後に暗号にできなかった packet は、
+    /// device がハンドシェイクを待つ待ち行列に入れる。
+    pub(crate) fn has_session(&self, peer: PeerId, now: Instant) -> bool {
+        let tunnel = &self.peers[peer].tunnel;
+        let keepalive_timeout = self.timers.effective_keepalive_timeout();
+        !tunnel.is_expired()
+            && tunnel
+                .time_since_last_handshake(now)
+                .is_some_and(|age| age + keepalive_timeout <= REJECT_AFTER_TIME)
     }
 
     /// 今のセッションのハンドシェイクが済んだ時刻。

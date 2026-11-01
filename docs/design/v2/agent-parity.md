@@ -63,9 +63,9 @@ Go の v1 の agent と仕様に対して、今の Rust の agent に無いも�
 | MSS | MTU から 40 を引いた値を示す | カーネルが決める | wgstack |
 | keepalive の ping | [tunnel.md の keepalive の ping](../spec/tunnel.md#keepalive-の-ping) | カーネルの ICMP のソケット | 「wgstack の上の agent」が wgstack の ping の口に替える |
 | MTU | server は 576 から 9216 を送る。v1 の agent は検査しない | 576 から 9000 の外なら 1420 を使う | 「wgstack の上の agent」が wgstack の受ける範囲に合わせる。未決の点に挙げる |
-| WireGuard のソケットのバッファ | [socket-buffers.md](../userspace/socket-buffers.md)。7 MiB を要求し、FORCE も試し、トンネルを立てるたびに測り、条件に届かなければ英語の 1 行を出す | 無い | 「agent の device の殻」 |
-| 受信の誤りで止まらないこと | [tunnel.md の受信の goroutine の停止](../spec/tunnel.md#go-の性質受信の-goroutine-の停止)。Windows の `WSAECONNRESET` | Linux の殻だけ | 「agent の device の殻」が Windows で `SIO_UDP_CONNRESET` を切る |
-| サスペンドの間の時計 | [tunnel.md のサスペンドの間の時計](../spec/tunnel.md#go-の性質サスペンドの間の時計)。Windows ではスリープの間も進む時計 | `Instant` | 未決の点に挙げる |
+| WireGuard のソケットのバッファ | [socket-buffers.md](../userspace/socket-buffers.md)。7 MiB を要求し、FORCE も試し、トンネルを立てるたびに測り、条件に届かなければ英語の 1 行を出す | データプレーンが持つ。agent の経路には未接続 | 「agent の device の殻」 |
+| 受信の誤りで止まらないこと | [tunnel.md の受信の goroutine の停止](../spec/tunnel.md#go-の性質受信の-goroutine-の停止)。Windows の `WSAECONNRESET` | データプレーンが Windows で `SIO_UDP_CONNRESET` を切り、受信の誤りを数えて読み続ける。agent の経路には未接続 | 「agent の device の殻」 |
+| サスペンドの間の時計 | [tunnel.md のサスペンドの間の時計](../spec/tunnel.md#go-の性質サスペンドの間の時計)。Windows ではスリープの間も進む時計 | データプレーンの時計が持つ ([時計](#時計))。監視はまだ `Instant` | 「agent の device の殻」。監視は「wgstack の上の agent」 |
 | 新しいハンドシェイクで stream の待ちを打ち切ること | [tunnel.md のハンドシェイクの監視と作り直し](../spec/tunnel.md#ハンドシェイクの監視と作り直し) | 待ちの上限を 10 秒にする扱いはある。待ちの途中で打ち切るかは確かめていない | 「agent の device の殻」で確かめ、無ければ足す |
 
 ### 中継
@@ -263,7 +263,91 @@ TCP と UDP の中継の両方がこの pool を使うので、「宛先と予�
 - 起こし方:中継の task が核の操作 (書き込み、close、accept、`send_to`、`close_udp` など) をするたびに、データプレーンのスレッドの local の知らせ (`tokio::sync::Notify` の類) を鳴らし、駆動する task を起こします。
   核の出力は操作の結果として増えるので、ソケットの準備やタイマーを待たずに引くためです
 - 上界:1 回の起床で作る packet の数の上限は #681 の値に従います
-- 時計:device と核に渡す時刻の時計は同じものにします (未決の点のサスペンドの間の時計)
+- 時計:device と核に渡す時刻の時計は同じものにします ([時計](#時計))
+
+agent の device の殻の段は、この節を `crates/wgft-agent/src/dataplane` に実装しました。
+核はまだ無いので、2 つのデータプレーンをループバックの UDP で向かい合わせ、packet を積んで送り返すだけの代わりの層で確かめています。
+agent の経路にはまだ繋いでいません。
+agent は核の段まで TUN の殻で動きます。
+
+### 核との継ぎ目
+
+核と `wgft-netstack` の waker の表は、`Upper` の trait の背後に置きます。
+核の段は、核と waker の表をこの trait で包んで繋ぎます。
+
+- 入力:`handle_packet`、`handle_timeout` です。
+  時刻はデータプレーンの時計の `Instant` で渡し、核の `Time` への変換は包む側が行います
+- 出力:`poll_transmit` は呼び手の MTU の長さの buffer に書きます。
+  `poll_timeout`、`poll_wakers`、`poll_log` が次に起こす時刻、起こす waker、ログの行を出します。
+  駆動の task は waker を借用を返した後に起こし、ログの行に時刻を付けて出します
+- 作成:作成の関数はデータプレーンのスレッドの上で呼び、作成の時刻、MTU、前の世代の `Budget` を受けます。
+  `Budget` が無いときは新しく作ります。
+  作成は失敗しない形にし、核の設定の検査は呼び手が先に済ませます
+- 終わり:`close` が `Budget` を返します
+- 操作:`Local` が核への借用を貸します。
+  `with` は出力を生まない操作に、`operate` は出力を生みうる操作に使い、`operate` は借用を返した後に駆動の task を起こします。
+  借用の間に巻き戻しが起きたら毒の印を付けて駆動の task を起こします。
+  借用の前から巻き戻しの途中だった場合は、巻き戻しで落ちる handle の `Drop` の借用なので印を付けません
+- 命令:制御プレーンは容量 16 の channel で、状態の読み出し、endpoint の変更、データプレーンのスレッドで動かす閉包を送ります。
+  閉包は local の task を立てられるので、待ち受けの開閉と ping の命令はこの形で足します
+
+### 送り出しと受信の値
+
+- 1 回の起床の上限:核から引く packet と、ソケットから読む datagram は、どちらも 1 回の起床で 64 までにします。
+  上限で止まったときは他の task に順を譲ってからすぐに起きます。
+  値は仮の値で、`WGFT_AGENT_BATCH_MIB` から導く式と一緒に送信の経路を測ってから決めます
+- 書けない datagram:ソケットが `WouldBlock` で拒んだ datagram は 1 つだけ持ち、書けるようになるまで何も引きません。
+  ほかの送信の誤りは数えて捨てます
+- 受信の誤り:数えて読み続けます。
+  受信の誤りでデータプレーンを止めません ([受信の goroutine の停止](../spec/tunnel.md#go-の性質受信の-goroutine-の停止))
+- ハンドシェイクを始める時機:セッションが無い起床のたびに `Device::start_handshake` を呼びます。
+  進行中のハンドシェイクがあれば何もしません。
+  server が答えない間は、5 秒ごとの再送が 90 秒続いてピアが期限切れになると、同じ起床で次の再送の組が始まります。
+  device の層だけなら、期限切れの後は keepalive の間隔だけ待ってから始めます。
+  データプレーンは核に送るものがあるかを知らないので、この待ちを置きません。
+  違いは組の間の最大 25 秒の間隔だけで、再送の頻度は 5 秒に 1 回のままです
+- device の event:容量 256 の channel に流し、溢れたものは捨てます
+
+### WireGuard の UDP のソケット
+
+- 開き方:IPv4 の 1 つのソケットを、既定では `0.0.0.0` の任意のポートに bind します。
+  v1 の agent と同じく、ポートはトンネルを立てるたびに変わります
+- バッファ:bind の前に受信と送信のバッファを 7 MiB ずつ要求し、Linux では `SO_RCVBUFFORCE` と `SO_SNDBUFFORCE` でも要求し、どの誤りも無視します。
+  bind の後に Linux だけで `SO_RCVBUF` と `SO_SNDBUF` を読み、どちらも 14680064 に届かなければ Go と同じ文面の警告を 1 分に 1 回までログに出します ([socket-buffers.md](../userspace/socket-buffers.md))。
+  Go はポートの IPv4 と IPv6 のソケットの小さい方を測りますが、Rust の agent のソケットは 1 つで、開いたソケットをそのまま測ります。
+  測った値は状態の読み出しで返し、`agent doctor` の `tunnel.socket_buffers` が使います
+- Windows:bind の前に `SIO_UDP_CONNRESET` を切ります。
+  切れなかったときは英語の 1 行を出して続けます。
+  受信の誤りは数えて読み続けるので、切れなくても受信は止まりません
+
+### 時計
+
+データプレーンの時計は、Linux と macOS では `Instant` で、ホストの一時停止の間に止まります。
+Windows では `QueryInterruptTimePrecise` の経過を最初に読んだ `Instant` に足した値で、スリープの間も進みます。
+v1 と同じ時機で作り直すためです ([サスペンドの間の時計](../spec/tunnel.md#go-の性質サスペンドの間の時計))。
+`QueryInterruptTime` でなく `QueryInterruptTimePrecise` を使うのは、Microsoft の説明では前者の値がタイマーの割り込みごとにしか進まず、既定の間隔の約 15.6 ms が核の RTT の測定と遅延 ACK に粗すぎるためです。
+
+Windows の時計は `Instant` とずれうるので、データプレーンの時刻と比べる時刻もこの時計から取ります。
+待ちは、残りの時間を tokio の `sleep` で待つことを期限に届くまで繰り返します。
+Windows では 1 回の `sleep` を 5 秒までに区切ります。
+tokio の timer が使う `Instant` がスリープの間に止まる場合も、復帰から 5 秒以内にこの時計を読み直して期限を判定するためです。
+トンネルの監視は、データプレーンを agent の経路に繋ぐ段で同じ時計に移します。
+
+### 世代と予算
+
+[世代と予算の受け渡し](wgstack-rs.md#世代と予算の受け渡し)を次の形で実装しました。
+
+- 止め方:`Dataplane::stop` が止める命令を送り、スレッドが駆動の task を終えて実行環境と local の task を落とした後、核の `close` で `Budget` を取り出します。
+  呼び手はスレッドを join し、device の `unix_high_water` と `Budget` を `Carry` で受けます
+- 毒の印の後:核の `close` を呼ばず、`Budget` を返しません
+- 駆動の task の中の panic:駆動の task が呼んだ核の中の panic は、スレッドを巻き戻して終わらせます。
+  join はそれを知って英語の 1 行を出し、`Budget` を返しません
+- 高い水位:データプレーンは起床のたびに `unix_high_water` を共有の値に書きます。
+  スレッドが panic で終わっても、最後に書いた値を次の世代に渡します
+- 受け渡し:`Generations` が `Carry` を持ち、次の世代の作成に渡します。
+  作成に失敗したら、受けた `Carry` を返し、次の試し直しまで持ち続けます。
+  `Generations::exited` は、スレッドがどの理由で終わっても解け、呼び手は作り直しの規則に従って `Generations::start` を呼び直します
+- 作り直しの規則:いつ作り直すかは今の監視 (`run.rs`) の規則のままで、データプレーンを agent の経路に繋ぐ段で `exited` を監視に繋ぎます
 
 ## 名前の解決
 
@@ -773,10 +857,6 @@ wgstack の口が前提と違えば、wgstack の上の agent と UDP の中継�
 
 それぞれ、推奨を採って先へ進め、実装の PR で確かめます。
 
-- サスペンドの間の時計:Linux と macOS の `Instant` はサスペンドの間に止まり、v1 と同じです。
-  Windows の `Instant` は `QueryPerformanceCounter` で、スリープの間に進むかを確かめていません。
-  推奨は、Windows では `QueryInterruptTime` から作る時計を device と監視に渡すことです。
-  これには `windows-sys` の呼び出しが要ります
 - MTU の範囲:server は 576 から 9216 を送ります。
   推奨は、この範囲をそのまま wgstack に渡し、範囲の外だけ 1420 にすることです。
   wgstack の受ける上限が 9216 より小さければ、wgstack の設計に合わせて直します
@@ -801,5 +881,12 @@ wgstack の口が前提と違えば、wgstack の上の agent と UDP の中継�
 - 設定の層の Windows と macOS の挙動:既定のパス、dotenv を権限で読めないときの文面、環境変数の名前の大文字と小文字の区別は、実機で確かめていません
 - 設定の層の Unicode の版の差:`%q` の引用は、Go が新しい版で割り当てた文字の扱いだけが Rust と違います
 - 大きさの目安は、Go の対応するコードと今の Rust の試作の大きさからの見積もりです
+- Windows の実機で、`SIO_UDP_CONNRESET` を切ったソケットが閉じたポートへの送信の後も受信を続けること。
+  単体の試験はありますが、CI の Windows で流すだけです
+- Windows の実機で、`QueryInterruptTimePrecise` がスリープの間も進み、データプレーンの待ちがスリープの後に期限どおりに解けること
+- 1 回の起床の上限の 64 が、送信の速さと他の task の遅れに対して十分かどうか
+- macOS の UDP の `sendto` は、送信の待ち行列が溢れたときに `WouldBlock` でなく `ENOBUFS` を返すことがあると言われます。
+  データプレーンは `ENOBUFS` を送信の誤りとして数えて捨て、引くことを止めません。
+  この場合は書けないときに引かない規則が効かず、詰まりは核の再送で回復する見込みですが、確かめていません
 
 [v2: Rust への移行](README.md)

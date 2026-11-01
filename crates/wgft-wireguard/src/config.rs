@@ -31,7 +31,7 @@ pub const MAX_KEEPALIVE: Duration = Duration::from_secs(65535);
 // WireGuard の論文の timer の既定値と、sanstun が上書きに課す上限
 const REKEY_TIMEOUT: Duration = Duration::from_secs(5);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(10);
-const REJECT_AFTER_TIME: Duration = Duration::from_secs(180);
+pub(crate) const REJECT_AFTER_TIME: Duration = Duration::from_secs(180);
 
 /// An IPv4 network in CIDR form. Host bits are cleared when it is made, as `wg` does.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]

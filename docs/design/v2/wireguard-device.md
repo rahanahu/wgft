@@ -82,6 +82,25 @@ sanstun を別の実装に替える必要が出た場合は、`protocol.rs` を�
 種と Unix 時刻を呼び手が渡す `Device::with_seed` は、試験と crate の feature の `deterministic` だけで使えます。
 試験と fuzz は固定の種を使い、同じ種から同じバイト列が出ることを確かめています。
 
+### セッションの有無とハンドシェイクの開始
+
+データプレーンは、device がピアとの使えるセッションを持つ間だけ上の層から packet を引き、持たない間は device にハンドシェイクを始めさせます ([データプレーンの駆動](wgstack-rs.md#1-回の起床))。
+このための口は次のとおりです。
+送る datagram の待ち行列が空かは、データプレーンが `poll_transmit` で取り出し切ったことで知ります。
+
+- `has_session(peer, now)`:今のセッションで packet を待たせずに暗号にできるかを返します。
+  sanstun はこの判定を公開しないので、sanstun が送信に使うセッションの条件を公開の値から写します。
+  条件は、トンネルが期限切れでなく、今のセッションがあり、その年齢に `KEEPALIVE_TIMEOUT` を足して 180 秒以下であることです。
+  sanstun はセッションの役を公開しないので、開始の側の条件を応答の側にも当てます。
+  このため、応答の側のセッションの最後の `KEEPALIVE_TIMEOUT` の間は、まだ送れても偽を返し、データプレーンは新しいハンドシェイクを始めます。
+  応答の側から新しいハンドシェイクを始めない sanstun の性質 ([起動、再試行、期限切れ](#起動再試行期限切れ)) を、送るものがあるときにも補います。
+  送信の数の上限 (2^64 から 2^13 を引いた数) は見ません。
+  真を返した後に暗号にできなかった packet は、ハンドシェイクを待つ待ち行列に入ります
+- `start_handshake(now, peer)`:セッションの無いピアに packet を送ったときと同じく、ハンドシェイクを始めて開始の message を送る待ち行列に入れます。
+  進行中のハンドシェイクがあるとき、ピアが endpoint を持たないとき、知らない鍵のときは何もしません
+
+試験 `has_session_follows_the_handshake_and_the_session_age` と `a_responder_session_counts_as_gone_before_it_expires` が、開始の側と応答の側の境目の 170 秒の前後の値を確かめています。
+
 ## v1 の設定との対応
 
 v1 の agent は wireguard-go に次の UAPI の設定を渡します (`tunnel.go` の `New`)。
@@ -353,4 +372,5 @@ Linux の WireGuard と wireguard-go との相互運用は、この crate の上
   `Instant::now()` をそのまま渡すと、Linux の `CLOCK_MONOTONIC` と macOS の時計は停止の間に進まず、device は壁時計では 180 秒より古いセッションをまだ新しいとみなし、相手はそれを捨てます。
   この場合は、返事の無いデータの 15 秒後に始まるハンドシェイクで回復すると見込みますが、確かめていません。
   停止の間も数えるには、呼び手が起動の時の `Instant` に、停止の間も進む時計 (Linux の `CLOCK_BOOTTIME`) の経過を足した値を渡します。
-  どちらを選ぶかは制御プレーンの設計で決め、まだ決めていません。
+  agent のデータプレーンは、v1 と同じく Linux と macOS では停止の間に止まる `Instant` を、Windows ではスリープの間も進む時計を渡すと決めました ([agent の置き換えの時計](agent-parity.md#時計))。
+  Linux と macOS の上の回復の見込みは確かめていません。

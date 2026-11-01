@@ -1002,3 +1002,74 @@ fn limits_above_their_bounds_are_refused() {
         Ok(())
     );
 }
+
+#[test]
+fn has_session_follows_the_handshake_and_the_session_age() {
+    let mut n = Net::new();
+    let (a, b) = (n.a_pub(), n.b_pub());
+    assert!(!n.a.has_session(&b, n.now()));
+    assert!(!n.a.has_session(&a, n.now()), "unknown key");
+    n.connect();
+    assert!(n.a.has_session(&b, n.now()));
+    // 応答の側は、開始の側のデータか keepalive を受けて初めてセッションを使う
+    assert!(n.b.has_session(&a, n.now()));
+    n.a_sends(b"x");
+    // 開始の側は KEEPALIVE_TIMEOUT を残してセッションを使わなくなる。keepalive だけでは鍵を替えない
+    n.b_up = false;
+    n.run(Duration::from_secs(169), Duration::from_secs(1));
+    assert!(n.a.has_session(&b, n.now()));
+    // 真の間は、packet はハンドシェイクを待たずに暗号になる
+    let now = n.now();
+    n.a.handle_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, b"late"));
+    assert_eq!(n.a.held().staged_packets_max, 0);
+    assert_eq!(n.a.poll_transmit().unwrap().payload[0], 4, "a data message");
+    n.run(Duration::from_secs(2), Duration::from_secs(1));
+    assert!(!n.a.has_session(&b, n.now()));
+}
+
+#[test]
+fn a_responder_session_counts_as_gone_before_it_expires() {
+    let mut n = Net::with(
+        |a| a.peers[0].endpoint = None,
+        |b| b.peers[0].endpoint = Some(addr("198.51.100.2:40000")),
+    );
+    n.b_sends(b"hello");
+    let b = n.b_pub();
+    assert!(n.a.has_session(&b, n.now()));
+    // A の送信を止め、B の新しい開始も捨てて、最初のセッションの年齢だけを見る
+    n.drop_b_initiations = true;
+    n.b_up = false;
+    n.run(Duration::from_secs(169), Duration::from_secs(1));
+    assert!(n.a.has_session(&b, n.now()));
+    n.run(Duration::from_secs(2), Duration::from_secs(1));
+    assert!(!n.a.has_session(&b, n.now()));
+}
+
+#[test]
+fn start_handshake_sends_one_initiation_and_establishes_a_session() {
+    let mut n = Net::new();
+    let b = n.b_pub();
+    // 作成の時の keepalive の期限より先に、呼び手が始める
+    assert!(n.a.start_handshake(n.now(), &b));
+    assert!(!n.a.start_handshake(n.now(), &b), "already in progress");
+    assert_eq!(n.a.held().transmit_packets, 1);
+    let tx = n.a.poll_transmit().unwrap();
+    assert_eq!(tx.payload.len(), 148);
+    assert_eq!(n.a.held().transmit_packets, 0);
+    n.b.handle_datagram(n.now(), n.a_addr, &tx.payload);
+    n.pump();
+    assert!(n.a.has_session(&b, n.now()));
+    assert_eq!(
+        Net::count(&n.a_events, |e| matches!(
+            e,
+            Event::SessionEstablished { .. }
+        )),
+        1
+    );
+    // endpoint を知らない側と、知らない鍵は始めない
+    let mut m = Net::new();
+    let (a, a_key) = (m.a_pub(), m.a_key.public_key());
+    assert!(!m.b.start_handshake(m.now(), &a));
+    assert!(!m.a.start_handshake(m.now(), &a_key));
+    assert_eq!(m.b.held().transmit_packets, 0);
+}
