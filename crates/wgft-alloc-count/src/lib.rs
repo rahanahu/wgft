@@ -4,8 +4,7 @@
 //! [`CountingAlloc`] を置き、核の操作の前後で生きている byte を読みます。GC が無いので、生きている byte の差は
 //! 核が持つ保持をそのまま表します。数えるのは要求の大きさで、割り当て器の丸めは含みません。
 //!
-//! 数えは 2 つあります。どちらも確保の呼び出しの数 ([`alloc_calls`]、[`thread_alloc_calls`]、[`ThreadWindow::calls`]) を
-//! 持ちます。packet ごとの確保の許容を守る試験が使います。
+//! 数えは 2 つあります。
 //!
 //! - プロセスの数え ([`live_bytes`]、[`peak_bytes`]):すべてのスレッドの確保を数えます。並行に動く試験の確保も
 //!   混ざるので、測る試験は 1 つの試験のバイナリに 1 つだけ置くか、cargo-nextest のように試験ごとにプロセスを
@@ -15,6 +14,9 @@
 //!   遅延して作る pthread の mutex の箱) を確保します。この確保は試験の測りの窓と並行に起こるので、プロセスの
 //!   数えでは測りの値に混ざることがあります。スレッドを持たない核 (wgstack) を試験のスレッドから駆動して測る
 //!   試験はこちらを使います
+//!
+//! 確保の呼び出しの数 ([`thread_alloc_calls`]、[`ThreadWindow::calls`]) はスレッドごとです。データプレーンの
+//! スレッドの外へ移した確保 (`spawn_blocking` など) は見えません。packet ごとの確保の許容を守る試験が使います。
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -22,7 +24,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
-static CALLS: AtomicUsize = AtomicUsize::new(0);
 
 // スレッドの数えです。const の初期値で Drop を持たない型なので、読み書きは確保もデストラクタの登録もせず、
 // 割り当て器の中から使えます。他のスレッドが確保した領域をこのスレッドが解放すると負になるので符号付きです。
@@ -38,7 +39,6 @@ pub struct CountingAlloc;
 
 /// 確保の呼び出し (alloc、alloc_zeroed、realloc) を 1 回数える。解放は数えない。
 fn called() {
-    CALLS.fetch_add(1, Ordering::Relaxed);
     THREAD_CALLS.set(THREAD_CALLS.get().wrapping_add(1));
 }
 
@@ -96,11 +96,6 @@ unsafe impl GlobalAlloc for CountingAlloc {
         }
         p
     }
-}
-
-/// これまでの確保の呼び出しの数 (alloc、alloc_zeroed、realloc)。すべてのスレッドの和で、解放は数えない。
-pub fn alloc_calls() -> usize {
-    CALLS.load(Ordering::Relaxed)
 }
 
 /// このスレッドのこれまでの確保の呼び出しの数。別のスレッドで動く task の確保を、そのスレッドの上で
