@@ -15,8 +15,7 @@
 //! 試験の側の確保が数えに混ざらないように、試験の集まりは測る前に容量を取り、確かめは出力の列を捨てた後に
 //! します。
 //!
-//! 核の段:PR 4b の核 (TCP の受動の open とデータの経路) の入力に、PR 5 の SACK と boost の入力と、PR 6 の
-//! 断片と UDP の入力を足しています。
+//! 試す入力は、TCP の受動の open とデータの経路、SACK と boost、断片と UDP です。
 
 #![expect(
     clippy::many_single_char_names,
