@@ -1119,6 +1119,16 @@ Go は書ける量が 1000 byte を超える時だけ書き、読める時だけ
 各段の後に不変条件と、保持が表の大きさと上界の内にあることを確かめ、最後に核を閉じて会計が 0 に戻ることを確かめます。
 不変条件は、前の段から書き換えた接続の枠だけを確かめる `check_invariants_touched` で確かめます ([wgstack の Rust 版の書き換えた所だけの確かめ](wgstack-rs.md#書き換えた所だけの確かめ))。
 `core`、`adversarial_sender`、`raw_adversary` の本体が使う `Net` は、`set_check` で確かめの形 (書き換えた枠だけ、すべての枠、両方を並べて答えを比べる) を選べます。
+`Net` は DUT が送る TCP の segment を引き取るたびに、接続ごとの広告した右端 (ACK の番号に、scale した窓の欄を足した値) が後ろへ戻らないことも確かめます (RFC 9293 3.8.6 の SHLD-14)。
+窓の欄は scale の単位に切り下げるので、1 単位未満の戻りは許します。
+握手の途中の表の行が送る ACK は、凍結した Go の wgstack と同じく SYN-ACK の scale しない窓の欄を運ぶので、比べから外します。
+RFC 7323 2.2 は SYN でない segment の窓の欄を scale するので、この ACK は相手に大きすぎる窓を示します。
+Go との bit の一致を求める間は直しません。
+握手の後の最初の ACK は比べずに右端を覚え直します。
+SYN cookie の接続は相手の ACK の番号から始まるので、相手が SYN と違う番号で ACK を返すと、SYN-ACK の確認の番号と続かないためです。
+cookie の timestamp の bit を偽った相手の接続は、SYN-ACK が窓の scale を示しても、scale しない窓の欄を運ぶことがあります。
+scale した窓が核の受信の予約の最大 (4 MiB) を超える欄は scale しない欄とみなし、その接続の scale を 0 にして右端を覚え直します。
+`raw_adversary` がこの 2 つを見つけた入力は `regressions/raw_adversary/` に置き、stable の単体の試験 (`fuzz_corpus.rs`) が流します。
 試験の道具の crate は核の crate を feature `harness` を付けて使い、書き換えた枠だけの確かめはこの feature の build だけにあります。
 
 `raw_adversary` は状態を持つ生の packet の敵で、Go に元の試験はありません。

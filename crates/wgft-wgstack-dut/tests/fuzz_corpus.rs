@@ -11,8 +11,8 @@
 //! 種 1 から 8 だけを流します。1 つの種は debug の build で 3 秒ほどかかるので、多くの種はホストの関門が
 //! release の build で流します (`scripts/wgstack-gate.sh` の `wgstack-rs-adversarial`)。
 //!
-//! 生の packet の敵 (`raw_adversary`) は corpus を持たず、決まった種から作った入力を流します。種の数は
-//! `WGFT_WGSTACK_RAW_SEEDS` (既定は 8) で変えられます。
+//! 生の packet の敵 (`raw_adversary`) は corpus を持たず、決まった種から作った入力と、`regressions/raw_adversary/`
+//! の見つけた落ちる入力を流します。種の数は `WGFT_WGSTACK_RAW_SEEDS` (既定は 8) で変えられます。
 //!
 //! `core`、`adversarial_sender`、`raw_adversary`、`replay` の入力は 2 回流します (wgstack-rs.md の「書き換えた所だけの
 //! 確かめ」と「核の使い回し」)。どちらも各段で、書き換えた枠だけの確かめとすべての枠の確かめを並べ、答えが
@@ -219,6 +219,17 @@ fn main() {
                 )
             },
         ));
+    }
+    // 生の packet の敵の見つけた落ちる入力は、種とは別に regressions/raw_adversary/ に置きます
+    for p in files(&root.join("regressions").join("raw_adversary")) {
+        let name = format!(
+            "raw_adversary/regressions/{}",
+            p.file_name().expect("file name").to_string_lossy()
+        );
+        trials.push(Trial::test(name, move || {
+            let data = fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            fresh_and_reused(fuzz::raw_adversary, &data, fuzz::small_limits())
+        }));
     }
     let seeds = env_u64("WGFT_WGSTACK_RAW_SEEDS", RAW_SEEDS);
     for seed in 1..=seeds {
