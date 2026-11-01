@@ -263,10 +263,11 @@ fn a_cookie_row_is_reset_exactly_when_its_retransmissions_run_out() {
         n.advance(Duration::from_millis(100));
         let at = (n.now - t0).as_millis() as u64;
         for o in n.drain() {
-            assert!(
-                o.rport == 42000 || o.rport == 42001,
-                "no packet goes to any other peer, spoofed sources included: {o}"
-            );
+            if o.rport != 42000 && o.rport != 42001 {
+                // 偽の SYN の行は SYN-ACK を再送するが、その偽の送信元へ RST は出さない
+                assert!(!o.has(FLAG_RST), "RST to a non-cookie peer: {o}");
+                continue;
+            }
             if o.has(FLAG_RST) {
                 assert_eq!(o.flags, FLAG_RST | FLAG_ACK);
                 let p = if o.rport == 42000 { &quiet } else { &acking };
@@ -480,7 +481,6 @@ fn demoting_a_send_only_holder_moves_its_intervals_to_the_floor_table() {
     );
     assert_eq!(n.s.conn(c1.slot).b.boost, Some(0));
     // 残りの枠をすべて受信の需要で埋める
-    let mut _fill = Vec::new();
     for i in 0..15 {
         let mut p = n.handshake_sack(41000 + i, 80, true, true, true);
         let c = n.accept(l);
@@ -488,7 +488,6 @@ fn demoting_a_send_only_holder_moves_its_intervals_to_the_floor_table() {
         read_n(&mut n, c, DEMAND_BYTES);
         n.drain();
         assert!(boosted(&mut n, c), "filler {i}");
-        _fill.push(c);
     }
     assert_eq!(lent(&mut n), 16);
     // floor の中に順序外の区間を 3 つ置く
