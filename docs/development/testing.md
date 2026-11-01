@@ -42,10 +42,19 @@ v1.0 はリリース済みですが、その事実だけで新設項目の実装
 ## マージの前に流すテスト
 
 コードを変える PR は、マージの前にラボの一式 (A9) を両モードで流します。
-v2 への移行の間、次のものだけを変える PR は、ラボの一式を流しません。
+v2 への移行の間、次のものだけを変える PR は、ラボの一式の `go` の組を流しません。
 `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml`、文書、ラボが使わない CI 専用の検査スクリプト (`scripts/check-*`)、`.github/workflows/ci.yml` の Rust のジョブ (`rust-*`) と `changes` の `rust` の振り分けです。
-ラボはこれらをビルドも実行もしないためです。
+`go` の組はこれらをビルドも実行もしないためです。
 `lab/`、ラボが流すテスト、`deploy/`、ラボが使うスクリプトと、上記以外の Go のコードを変える PR は、これまでどおり流します。
+
+`go` の組は、ラボの台本が起動するユーザー空間モードのエージェントを Go の agent にした既定の一式です。
+Rust の agent のビルドに入るものを変える PR は、ラボの一式の `rust` の組 (`lab/lab suite --agent-impl rust`) を流します。
+対象は後述の契機の表の `rust-agent` です。
+積んだ PR では、積みの先頭で 1 回流し、下の PR はその結果で足ります。
+`rust` の組は、ユーザー空間モードのエージェントを Rust の agent に替えて一式を流し、カーネルモードのエージェントの確認の結果は `go` の組から取ります ([ラボの切り替え](../design/v2/agent-parity.md#ラボの切り替え))。
+「wgstack の上の agent」の段 ([段の計画](../design/v2/agent-parity.md#段の計画)) が入るまでは、Rust の agent は TUN の試作なので、`rust` の組の結果は PR の本文に報告するだけで、マージの関門にしません。
+その段が入った後は、`rust` の組で[完成の条件に入る確認](../design/v2/agent-parity.md#確認の分け方)がすべて PASS であることをマージの関門にします。
+
 ラボの一式は、ラボの一式の内訳 (L 番号) のうち実装済みの確認の集まりで、現在は L1 から L20 です。
 1 台の Lab Host VM の中で `labhost run -parallel 8 all` を実行して流します。
 この 1 コマンドが、両モードの確認と、分類に従った並列と単独の振り分けを含みます。
@@ -100,6 +109,7 @@ B 類の契機は、次のテストを選ぶために使います。
 | `deploy` | `deploy/*.service`、`deploy/*.conf`、`deploy/*.plist`、`deploy/server.env.example`、`cmd/wgft/config.go`、`cmd/wgft/server.go`、`cmd/wgft/agent.go` (設定の読み込みと終了コード) | B2、B9 | L7 |
 | `build` | `.goreleaser.yaml`、`scripts/build-release.sh`、`scripts/goreleaser-checksum.sh`、`scripts/third-party-licenses.sh`、`scripts/check-release-assets.sh`、`scripts/docker-smoke.sh`、`deploy/Dockerfile.*`、`deploy/*.compose.yaml`、`go.mod`、`go.sum`、`.github/workflows/**` | B5、B6、B10 | 無し |
 | `rust` | `crates/**`、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`deny.toml` | B13、B14、B15 | 無し |
+| `rust-agent` | `crates/**` のうち `crates/wgft-wireguard-tun/**` 以外、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` | 無し | ラボの一式の `rust` の組を積みの先頭で 1 回。「wgstack の上の agent」の段までは報告だけで、その後はマージの関門 ([マージの前に流すテスト](#マージの前に流すテスト)) |
 | `dataplane-net` | `internal/dataplane/**`、`internal/nettun/**`、`internal/netpipe/**`、`internal/agent/**` の転送の経路 | 無し (C1 と C5 は次の段階の完了時に流し直す) | L1 |
 | `phase` | 関係する実装の段階の完了 | C 類 | すべて |
 | `rc` | リリースの候補の版 | 「リリース候補ごと」の項目 | すべて |
@@ -282,7 +292,7 @@ VM の間で守るのは、`rates.sh` がレートを測る区間だけです。
 | L14 | `lab/lifecycle.sh` check 10 (kernel と userspace) | エージェントの停止後も、`agent ls` と Web UI の一覧が最後のハートビートを生きた状態のまま示すこと ([設計文書の 5.2 節](../design/overview.md#52-全体状態の配信とハートビート)) | ラボ | `rule-ops`、`protocol`、`agent-platform` | A9 として | 自動 |
 | L15 | `lab/lifecycle.sh` check 11 (kernel と userspace) | エージェントの無効化がそのエージェントのルールの転送を止めないこと、他のエージェントのルールまで止めること、有効化で各ルールが自分の `enabled` に戻らないこと、有効化が bind 中のポートを拒まないこと、公開に失敗した無効化がエージェントに届かないこと ([設計文書の 5.1 節](../design/overview.md#51-登録))、無効なエージェントのルールで `server doctor` と `status` が失敗を報告すること、削除したエージェントに残ったルールの `server doctor` と `status` の結果が変わること (設計文書の [10.2a 節](../design/server-doctor.md)と[10.2b 節](../design/status.md)) | ラボ | `reconcile`、`rule-ops`、`protocol` | A9 として | 自動 |
 | L16 | `lab/agentkernel.sh` check 16、17、18、19、22、24、25、loopback、resolve、failover、drift、notify、session、route、pin、reconnect、stale、teardown (kernel と userspace) | カーネルモードのエージェントの基本の転送とルール状態の到達、停止と再起動をまたぐ成立済みフローの継続、無関係な変更や再対象化や削除でのフローの扱い、許可一覧と、許可一覧が名指さないループバックの拒否、許可一覧が名指すループバックの宛先への TCP と UDP の転送とトンネルや LAN からのループバックの閉鎖、自ホストと他のテーブルからの隔離、MSS clamp、無効化による DNAT の撤去、名前解決の失敗時の直前アドレスへの転送継続、名前の最小のアドレスが応答しないときの別のアドレスへの切り替え、外部からの変更への収束と変更の通知による早期の収束、ポリシールーティングの変化の検出、サーバの乗っ取りに対する帯とアドレスの拒否、サーバの再起動をまたぐ再接続とトンネルの陳腐化への対応、`wgft agent teardown` の挙動 (設計文書の [7b 節](../design/agent-kernel.md)、[9 節](../design/state.md#9-状態の保存と再起動)、[10.3 節](../design/interface.md#103-運用の流れ)) | ラボ | `agent-platform` | A9 として | 自動 |
-| L17 | `lab/agentdoctor.sh` (kernel と userspace) | `wgft agent doctor` の判定が、稼働中と停止中の切り分け、テーブルの行の欠けや変更や差し替えの見分け、`ip_forward` と wgft0 の状態、経路、無効化、呼び出し元の権限の有無による結果の違いで、カーネルモードのエージェントの実際の状態と食い違うこと ([設計文書の 10.2c 節](../design/agent-doctor.md#102c-エージェント側の診断-wgft-agent-doctor)) | ラボ | `agent-platform` | A9 として | 自動 |
+| L17 | `lab/agentdoctor.sh` (kernel と userspace の server のそれぞれで、カーネルモードのエージェントの節とユーザー空間モードのエージェントの節) | `wgft agent doctor` の判定が、稼働中と停止中の切り分け、テーブルの行の欠けや変更や差し替えの見分け、`ip_forward` と wgft0 の状態、経路、無効化、呼び出し元の権限の有無による結果の違いで、カーネルモードのエージェントの実際の状態と食い違うこと、ユーザー空間モードのエージェントでカーネルモードの項目を検査しないこと ([設計文書の 10.2c 節](../design/agent-doctor.md#102c-エージェント側の診断-wgft-agent-doctor)) | ラボ | `agent-platform` | A9 として | 自動 |
 | L18 | `lab/lifecycle.sh` check 12 (kernel と userspace) | ユーザー空間モードの WireGuard のソケットのバッファの条件 ([設計文書の 7 節](../design/agent-dataplane.md#7-データプレーン自宅側)) を、`agent doctor` とログが実際のソケットの値で示さないこと、条件に届かないときに `agent doctor` の終了コードが 0 でなくなること、セットアップの文書の `/etc/sysctl.d` の手順で条件を満たせないこと、`rotate-key` で開き直したソケットを測らないこと | ラボ (VM 全体の sysctl を変えるので単独で) | `userspace`、`agent-platform` | A9 として | 自動 |
 | L19 | `lab/exhaustion.sh` の postclose (userspace)、mss (kernel と userspace)、acceptq と ackflood (kernel)、wgstall (userspace)。postclose の kernel モードは一式の外で、名前を指定して流します | 外からの入力で[閉じた後の接続の表](../design/userspace/tcp-retention.md#閉じた後の接続の表)の行が M を超えて生きているヒープを増やし続けること、追い出しが数えられずログに出ないこと、負荷が止まった後に作り直し無しで表が空かないこと、その負荷の間に別のフローが止まること、[MSS が 536 未満](../design/userspace/packet-validation.md#tcp-の-mss-の下限)のハンドシェイクで接続ができること、MTU 576 の経路で通常の TCP が通らないこと、カーネルモードの server の後ろの accept の待ち行列、中身の無い ACK の洪水、[WireGuard の受信の待ち](../design/userspace/flow-limits.md)の後に転送が戻らないこと。accept の待ち行列の長さと、洪水と受信の待ちの間のヒープと別のフローの遅れは測って示すだけで、判定に使いません | ラボ (CPU を占有できる VM) | `resource`、`userspace`、`phase`、`rc` | A9 として。kernel モードの postclose は、`internal/nettun` の閉じた後の接続の表 (`postclose.go` とその呼び出し) を変える PR ごとと、段階の完了時とリリース候補ごとに 1 回 | 自動 (kernel モードの postclose は開発者が起動) |
 | L20 | `lab/usage.sh` (kernel と userspace) | 通常の利用の形 (HTTP の並列の取得、SSH のような 1 文字ずつの往復、ゲームのような一定の間隔の UDP、大きな送受信) のどれかが欠けるか壊れること | ラボ | `userspace` | A9 として | 自動 |

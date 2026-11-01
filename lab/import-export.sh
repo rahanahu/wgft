@@ -84,7 +84,7 @@ sleep 3
 check "server up" "admin api" "$(grep -o 'admin api' $W/wgft-importexport-server.log | head -1)"
 
 join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-importexport-agent.log 2>&1 < /dev/null &
+WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > $W/wgft-importexport-agent.log 2>&1 < /dev/null &
 disown
 ip netns exec "$HOME_NS" setsid nohup echo -udp 19132 > $W/wgft-importexport-echo.log 2>&1 < /dev/null &
 disown

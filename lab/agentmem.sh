@@ -33,6 +33,8 @@
 #
 # The loads run alone (lab/suite.txt's exclusive-heavy): the value read is a memory peak.
 # Requires the labmemprobe build and the netns topology (`lab/lab net up`).
+# The probe is Go's, so with WGFT_LAB_AGENT_IMPL=rust the script prints one SKIP and runs nothing:
+# how the Rust wgstack's held memory is measured is the Rust wgstack design's to decide.
 set -u
 ulimit -n 100000 2>/dev/null || true
 NETSTACK=${1:-}
@@ -45,6 +47,10 @@ for c in $LOADS; do
 done
 
 . "$(dirname "$0")/sandbox.sh"
+if [ "$AGENT_WGFT" != wgft ]; then
+  echo "SKIP  agentmem.sh $NETSTACK: it reads the Go agent's memory probe, which the Rust agent does not have"
+  exit 0
+fi
 HERE=$(cd "$(dirname "$0")" && pwd)
 TRAFFIC="python3 $HERE/traffic.py"
 MEMLOAD="python3 $HERE/memload.py"
@@ -169,8 +175,7 @@ setup() {
   must_wait "server admin api comes up" 30 admin_up || return 1
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
   WGFT_MODE=userspace WGFT_JOIN="$join" WGFT_AGENT_NETSTACK=$NETSTACK GODEBUG=gctrace=1 WGFT_LAB_MEMPROBE="$PROBE" \
-    ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" --max-tcp-flows "$K" --max-udp-flows "$U" \
-    > "$ALOG" 2>&1 < /dev/null &
+    ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" --max-tcp-flows "$K" --max-udp-flows "$U" > "$ALOG" 2>&1 < /dev/null &  # lab: go agent
   disown
   must_wait "agent registers and handshakes" 30 agent_registered || return 1
   APID=$(find_agent_pid)

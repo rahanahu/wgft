@@ -32,6 +32,9 @@ type job struct {
 	Default  bool    `json:"default"`
 	Weight   float64 `json:"weight,omitempty"` // 見積もりの秒数。0 は未記載。-shard の釣り合いにだけ使う
 	Rate     string  `json:"rate,omitempty"`   // rateMeasure、rateGroup、rateOverlap、rateFlood か空。-shard の割り当てにだけ使う
+	// GoAgent は agent=go の印。どの組でも Go の agent を起動する仕事 (カーネルモードの agent など) で、
+	// WGFT_LAB_AGENT_IMPL=rust の run は計画から外し、結果を go の組から取る
+	GoAgent bool `json:"go_agent,omitempty"`
 }
 
 // rate= の値。VM を分けた run では VM どうしがホストを分け合うので、別の VM のフラッドが
@@ -79,6 +82,7 @@ func loadManifest(path string) ([]job, error) {
 		// シナリオの前の key=value は割り当ての印。シナリオの前に置くので、引数と取り違えない
 		var weight float64
 		var rate string
+		var goAgent bool
 		rest := f[2:]
 		for len(rest) > 1 && strings.Contains(rest[0], "=") {
 			k, v, _ := strings.Cut(rest[0], "=")
@@ -103,6 +107,11 @@ func loadManifest(path string) ([]job, error) {
 					return nil, fmt.Errorf("%s:%d: rate= wants %s, %s, %s or %s, not %q", path, line, rateMeasure, rateGroup, rateOverlap, rateFlood, v)
 				}
 				rate = v
+			case "agent":
+				if v != "go" {
+					return nil, fmt.Errorf("%s:%d: agent= wants go, not %q", path, line, v)
+				}
+				goAgent = true
 			default:
 				return nil, fmt.Errorf("%s:%d: unknown key %q before the scenario", path, line, k)
 			}
@@ -111,7 +120,7 @@ func loadManifest(path string) ([]job, error) {
 		if strings.Contains(rest[0], "=") {
 			return nil, fmt.Errorf("%s:%d: %q wants a scenario after it", path, line, rest[0])
 		}
-		jobs = append(jobs, job{Class: c, Scenario: strings.Join(rest, " "), Default: def, Weight: weight, Rate: rate})
+		jobs = append(jobs, job{Class: c, Scenario: strings.Join(rest, " "), Default: def, Weight: weight, Rate: rate, GoAgent: goAgent})
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err

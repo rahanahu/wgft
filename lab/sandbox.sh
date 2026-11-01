@@ -18,6 +18,23 @@ W=${WGFT_LAB_WORKDIR:-/tmp}
 SANDBOX=${WGFT_LAB_SANDBOX:-}
 mkdir -p "$W"
 
+# AGENT_WGFT is the wgft the scenarios run on the agent host as the userspace-mode agent: `agent run`
+# and the `agent doctor`, `agent rotate-key` and `agent pubkey` aimed at that agent. lab/lab passes
+# WGFT_LAB_AGENT_IMPL into the VM: rust is the Rust build that `lab/lab build` installs under its own
+# name, so that a process still has the comm wgft and a command line with " agent run", which the
+# scenarios search for; go, or unset, is the Go wgft on PATH. Kernel-mode starts, the commands aimed
+# at a kernel-mode agent, the server and the VPS-side commands stay plain wgft, and such an agent-host
+# line ends with "# lab: go agent". tools/labhost's TestScenariosCallTheAgentThroughAgentWgft finds a
+# plain wgft agent-host call without that mark (docs/design/v2/agent-parity.md, the lab switch).
+RUST_WGFT=/usr/local/lib/wgft-rust/wgft
+case ${WGFT_LAB_AGENT_IMPL:-go} in
+  rust)
+    AGENT_WGFT=$RUST_WGFT
+    [ -x "$RUST_WGFT" ] || echo "sandbox.sh: WGFT_LAB_AGENT_IMPL=rust, but $RUST_WGFT is missing; run WGFT_LAB_AGENT_IMPL=rust lab/lab build" >&2
+    ;;
+  *) AGENT_WGFT=wgft ;;
+esac
+
 # sandbox_pids: every process running in this sandbox's namespaces. `ip netns pids` compares
 # /proc/<pid>/ns/net against the namespace, so it also finds the grandchildren the scenarios detach
 # with `setsid nohup`, without cgroups and without bookkeeping of its own. `ip netns exec` does not

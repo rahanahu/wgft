@@ -4,7 +4,7 @@
 対象は、Rust の wgstack 自身を除くすべてです。
 契約は [agent と server の境目の仕様](../spec/README.md) です。
 この文書は、その契約を Rust の agent でどう満たすかと、どの順で作るかを書きます。
-「設定の層」は実装済みです。ほかの内容は未実装です。
+「設定の層」と[ラボの切り替え](#ラボの切り替え)は実装済みです。ほかの内容は未実装です。
 
 ## 範囲と完成の条件
 
@@ -608,17 +608,23 @@ macOS では hard の値が無制限でも `kern.maxfilesperproc` を超える�
 | 行 | 照らす確認 |
 | --- | --- |
 | `effective config:` と有効な設定の行 | 設定の照合の fixture |
-| `stream: connected to` と `server selected protocol v1` | `upgrade.sh`、`version-skew.sh` |
+| `wgft <版> agent starting: name <名前>, mode userspace, ...` | `agent-handover.sh`。もう一方の実装の `agent.json` から登録し直さずに動いたこと |
+| `stream: connected to` と `server selected protocol v1` | `upgrade.sh`、`version-skew.sh`、`agent-handover.sh` |
+| `not registered and no join string` | `upgrade.sh`。行が無いことを確かめ、同じログの `server selected protocol v1` と組にする |
+| `applied generation <N>: ...` | `agent-handover.sh` が待つ。行の後ろの要約は照らさない |
+| `tunnel: up addr=` | `lifecycle.sh` の check 12。下の警告の行が無いことの確認と組にする |
 | `warning: the WireGuard UDP sockets` | `lifecycle.sh` の check 12 |
 | `listener tcp/<port> closed` | `lifecycle.sh` の check 2 |
 | `listener tcp/<port>: bind ...` | `lifecycle.sh` の check 2 と 11。行が無いことを確かめる |
-| `listener tcp/<port> -> <宛先> opened; rule <ID>` | 上の行が無いことの確認と組にする |
-| `<待ち受け>: <理由>; refusing new connections` | フロー数の拒否。`lifecycle.sh` の check 5 の系列。`<理由>` は Go の `internal/resource/pool.go` の拒否の文 (`flow budget full: ...`、`rule <ID> holds ... for a rule added later`、`... below its minimum ...` など) をそのまま写します |
-| `dropped TCP handshakes that advertise an MSS below 536` | `exhaustion.sh` の `mss`。wgstack の捨てた数の口が要る |
+| `listener tcp/<port> -> <宛先> opened; rule <ID>` | `lifecycle.sh` の check 2 と 11。上の行が無いことの確認と組にし、開き直した後の行があることを確かめる |
+| `<待ち受け>: <理由>; refusing new connections` | フロー数の拒否。`lifecycle.sh` の check 5e が `rule <ID> holds ... for a rule added later` を照らす。`<理由>` は Go の `internal/resource/pool.go` の拒否の文 (`flow budget full: ...`、`rule <ID> holds ... for a rule added later`、`... below its minimum ...` など) をそのまま写します |
+| `memory bound: <N> MiB, ...` | `lifecycle.sh` の check 5 と 5b ([メモリの上界の行](#メモリの上界の行)) |
+| `dropped TCP handshakes that advertise an MSS below 536` | `exhaustion.sh` の kernel の `mss`。wgstack の捨てた数の口が要る |
 
 行が無いことを確かめる `absent` の確認は、Rust の agent が別の文面を書いても通ってしまいます。
-ラボの切り替えの PR は、Rust の agent で流す確認の `absent` を、同じ出来事で必ず出る行の存在の確認と組にします。
-同じ PR で、ラボの台本が agent のログを照らす箇所を数え直し、この表を直します。
+ラボの切り替えの PR で、Rust の agent で流す確認のうち agent のログに `absent` を当てるもの (`lifecycle.sh` の check 2、11、12) を、同じ出来事で必ず出る行の存在の確認と組にしました。
+`lifecycle.sh` の check 11 が `agent doctor` の出力に当てる `absent` は、同じ出力の終了コードと状態の確認とすでに組になっています。
+この表は、同じ PR でラボの台本が agent のログを照らす箇所を数え直したものです。
 
 Go と変える行は次のとおりです。
 
@@ -668,7 +674,9 @@ Rust の側は、agent のホストのコマンドのフラグが Go と同じ�
 - ビルド:`rust` のとき、`lab/lab build` は `cargo zigbuild --release --locked --target x86_64-unknown-linux-musl -p wgft` で静的なバイナリを作り、`bin/rust/wgft` に置きます
 - 置き場所:VM の中では `/usr/local/lib/wgft-rust/wgft` に置きます。
   ファイル名を `wgft` に保つのは、ラボの台本がプロセスを comm の `wgft` と cmdline の ` agent run` で探すためです
-- 試作の物:`wgft-rs` は、TUN が製品の経路から外れる段で置かなくなります。
+- ビルドの契機:`WGFT_LAB_AGENT_IMPL=rust` の `lab/lab build`、`--agent-impl` に `rust` を含む `lab/lab suite`、試作の道具を作る `WGFT_LAB_RUST=1` です
+- 試作の物:試作の `wgft-rs` の名前は、ラボの切り替えの PR で置かなくなりました。
+  `wgft-rs` を使っていたのは `lab/rust-agent.sh` だけで、その後を継ぐ `lab/agent-handover.sh` は同じバイナリを `/usr/local/lib/wgft-rust/wgft` から呼ぶためです。
   TUN の殻 (`wgft-wireguard-tun`) とラボのための wireguard-go は、device の層を Linux と wireguard-go と照らす `lab/wg-interop.sh` の道具として、ラボの一式が Rust の agent で通るまで残します。
   通った後は、ラボの一式が同じ相互運用を確かめるので、殻と `wg-interop.sh` を消します
 
@@ -684,8 +692,16 @@ Rust の側は、agent のホストのコマンドのフラグが Go と同じ�
 - 書き換えない呼び出し:`WGFT_MODE=kernel` の起動と、カーネルモードの agent に向けた `agent doctor`、`agent rotate-key`、`agent teardown` は Go の `wgft` のままです。
   VPS の側の `wgft agent ls`、`agent join-string`、`agent enable` などと `wgft server` も書き換えません
 - 書き換え漏れの検査:agent のホストのコマンドを `wgft` のまま呼ぶ行を見つける検査をラボの道具に足します。
-  意図して Go の `wgft` を呼ぶ行には、行末に印 `# lab: go agent` を付け、検査はこの印の行だけを許します
+  意図して Go の `wgft` を呼ぶ行には、行末に印 `# lab: go agent` を付け、検査はこの印の行だけを許します。
+  検査は `tools/labhost` の Go の試験 `TestScenariosCallTheAgentThroughAgentWgft` で、`go test ./...` と CI の A 類で流れます。
+  `lab/*.sh` のコメントでない行から、`wgft agent run`、`doctor`、`rotate-key`、`pubkey`、`teardown` を文字のまま呼ぶ形を探します。
+  変数を通した呼び出し (`"$bin" agent run`) は見えないので、そうした呼び出しは変数を決める行で `AGENT_WGFT` か Go の `wgft` を選びます。
+  文字の照合なので、見出しの `echo` の中の `wgft agent doctor` も拾います。
+  見出しからは `wgft` を外しました
 - `go` のとき:書き換えは機械的で、挙動は変わりません
+- 一式の外の台本:`version-skew.sh` と `upgrade.sh` の「今のビルドの agent」、`scale.sh` と `rcvwin.sh` のユーザー空間モードの agent も `AGENT_WGFT` にします。
+  `version-skew.sh` は今のビルドの agent の版を `"$AGENT_WGFT" version` で確かめます。
+  Go の netstack を比べる `tcpquality.sh` と、Go のメモリの probe を読む `agentmem.sh` は、Go の `wgft` のままにします
 
 ### 確認の分け方
 
@@ -694,27 +710,38 @@ Rust の側は、agent のホストのコマンドのフラグが Go と同じ�
 
 | 分類 | 確認 | `rust` のときの扱い |
 | --- | --- | --- |
-| 条件に入る | `e2e.sh`、`ipv6.sh`、`usage.sh`、`rates.sh`、`split-merge.sh`、`import-export.sh`、`connlimit.sh`、`lifecycle.sh` の各 check、`exhaustion.sh` の `postclose` (server がユーザー空間モード)、`acceptq`、`ackflood`、`wgstall` と kernel の `mss`、`agentdoctor.sh` の `== userspace` の節 | Rust の agent で流します |
+| 条件に入る | `e2e.sh`、`ipv6.sh`、`usage.sh`、`rates.sh`、`split-merge.sh`、`import-export.sh`、`connlimit.sh`、`lifecycle.sh` の各 check、`exhaustion.sh` の `postclose` (server がユーザー空間モード)、`acceptq`、`ackflood`、`wgstall` と kernel の `mss`、`agentdoctor.sh` の userspace の節 | Rust の agent で流します |
 | カーネルモードの agent | `agentkernel.sh`、`agentdoctor.sh` のカーネルモードの節、userspace の `exhaustion.sh mss` (server の netstack を確かめるため agent をカーネルモードで起動する) | `rust` の組では流さず、結果を `go` の組から取ります。agent のカーネルモードを移す段で条件に入れます |
-| opt-in | `agentmem.sh`、`exhaustion.sh kernel postclose`、`version-skew.sh` | 下に書きます |
+| opt-in | `agentmem.sh`、`exhaustion.sh kernel postclose`、`version-skew.sh`、`agent-handover.sh` | 下に書きます |
 
-`agentdoctor.sh` の `== userspace` の節は、ユーザー空間モードの agent を起動して `agent doctor` を確かめます。
-ラボの切り替えの PR で、この節をカーネルモードの節と分けて呼べる形にし、`AGENT_WGFT` で流します。
+`lab/suite.txt` は、`rust` の組で流さない確認に `agent=go` の印を付けます。
+印の付く確認は、カーネルモードの agent の行と `exhaustion.sh kernel postclose` です。
+`WGFT_LAB_AGENT_IMPL=rust` の `labhost run all` は、印の付いた確認を計画から外し、`summary.json` の `from_go` に名前を残します。
+`tools/labhost` の試験は、印がこれらの確認だけに付くことを確かめます。
+
+`agentdoctor.sh` の userspace の節は、ユーザー空間モードの agent を起動して `agent doctor` を確かめます。
+ラボの切り替えの PR で、`agentdoctor.sh` に 2 つ目の引数 (`kernel` か `userspace`、省略は両方) を足し、節を別に呼べる形にしました。
+`lab/suite.txt` は server のモードごとに 2 つの節を別の行にし、userspace の節を `AGENT_WGFT` で流します。
+節ごとに server を起動し直すので、一式の行は 2 つ増え、所要時間は server の起動の分だけ延びます。
 この節の `baseline_compare` は、`AGENTDOCTOR_BASELINE` の `wgft` の診断と今の診断の ID と状態と理由を比べます。
-`rust` の組で `AGENTDOCTOR_BASELINE` に Go の `wgft` を渡すと、Go の CLI が Rust の agent の制御ソケットを読む組み合わせを確かめられます。
+比べる前に、カーネルモードの項目 (`dataplane.*` と `host.forwarding`) を両方の側から外します。
+古い版は項目を持たず、今の版はこの節の確認が別に照らすためです。
+`rust` の組では `AGENTDOCTOR_BASELINE` の既定を Go の `wgft` にし、Go の CLI が Rust の agent の制御ソケットを読む組み合わせを毎回確かめます。
 
 Go の実行環境に依る読み取りは次のように扱います。
 
 - `lifecycle.sh` の check 5 と 5b:agent の `memory soft limit:` の行の代わりに `memory bound:` の行を読み、RSS がその値と[余裕](#メモリの上界の行)の和を超えないことを確かめます。
   server の側の行は今のまま Go の server を読みます
 - `exhaustion.sh` の gctrace:既定の確認のうち、判定に使うヒープは server のもの (ユーザー空間モードの `postclose`) です。
-  `acceptq`、`ackflood`、`wgstall` は agent のヒープを測って示すだけで、判定に使いません。
-  `rust` のときこれらの行は値を持たず、RSS だけを示します
+  `acceptq` と `ackflood` は agent のヒープを測って示すだけで、判定に使いません。
+  `rust` のときこれらの行は値を持たず、RSS だけを示します。
+  `wgstall` が示すヒープは server のものなので、`rust` でもそのまま示します
 - `exhaustion.sh kernel postclose`:カーネルモードの server の後ろで、agent の netstack の閉じた後の接続の表を agent のヒープで確かめます。
   Go の gVisor の表に固有の確認なので、Rust では wgstack の TIME_WAIT の表の設計が測り方 (表の行の数か wgstack の保持量) を決め、それまで `rust` では流しません
 - `agentmem.sh`:Go の wgstack の memprobe に依るので、`rust` のときは `SKIP` を出します。
   Rust の wgstack の保持量の測り方は #681 の「保持の量の測り方」が決めます
 - `version-skew.sh`:Rust の agent と古い Go の server の組み合わせを確かめるので、リリース候補の関門で `rust` の組でも流します
+- `agent-handover.sh`:下の[試作の台本](#試作の台本)のとおりです
 
 ### netstack の軸
 
@@ -724,9 +751,22 @@ Rust の agent は netstack を 1 つしか持たないので、`--netstack` の
 
 ### 結果の報告
 
-- `summary.json` に `agent_impl` を記録し、合わせるときに異なる値が混ざれば誤りにします
-- 組ごとの出力は `<out>/<agent_impl>/<netstack>/` に置き、見出しを `==== lab suite: agent=<impl>, netstack=<netstack>, N VMs` にします
-- `rust` の組の報告には、カーネルモードの agent の確認を `go` の組から取った結果として印を付けて載せます
+- `summary.json` に `agent_impl` を記録し、合わせるときに異なる値が混ざれば誤りにします。
+  この項目より前の `summary.json` は `go` と読みます
+- 組ごとの出力は `<out>/<agent_impl>/<netstack>/` に置き、見出しを `==== lab suite: agent=<impl>, netstack=<netstack>, N VMs` にします。
+  `rust` の組の netstack は `default` です
+- `rust` の組の報告には、カーネルモードの agent の確認を `go` の組から取った結果として印を付けて載せます。
+  `lab/lab suite` は `go` の組を先に合わせ、`rust` の組を合わせる `labhost merge` に最初の `go` の組の `summary.json` を `-go-summary` で渡します。
+  合わせた結果は `from go:` の行で確認ごとに出し、`summary.json` の `from_go_verdicts` に残します。
+  取った結果は `rust` の組の件数と終了コードに入れません。
+  `go` の組の終了コードにすでに入っているためです。
+  `--agent-impl rust` だけで流したときは、`go` の組が無い旨を出します。
+  `-go-summary` のファイルが読めないか、`summary.json` でないか、`go` の組のものでなければ、警告にして取った結果を出さず、`rust` の組の統合はそのまま書いて示します
+- `lab/lab suite` の終了コードは組ごとの結果を合わせます。
+  `rust` の組は「wgstack の上の agent」の段まで報告だけなので、`go` の組も流したときは `rust` の組の失敗を示すだけにし、終了コードに入れません。
+  その段で `lab/lab` の `SUITE_RUST_GATES` を 1 にし、`rust` の組の失敗も終了コードに入れます。
+  `rust` の組だけを流したときは、その結果が終了コードです
+- `labhost run all` は、`WGFT_LAB_AGENT_IMPL=rust` で Rust の `wgft` が入っていなければ、流す前に止まります
 - PR の本文には組ごとに、確認ごとの PASS と FAIL を書きます。
   完成の条件の判定には `rust` の組で「条件に入る」確認がすべて PASS であることを使います
 
@@ -734,13 +774,19 @@ Rust の agent は netstack を 1 つしか持たないので、`--netstack` の
 
 `lab/rust-agent.sh` の確認のうち、Go の agent と Rust の agent の間の `agent.json` の引き継ぎは、TUN に依らない価値があるので残します。
 TUN、入口の検査、root に依る確認は外し、台本の名前を `lab/agent-handover.sh` に替え、両方のバイナリを作ったときだけ流す opt-in の確認にします。
+外したのは、TUN の device のアドレスと停止の後の削除、keepalive の ping (カーネルモードの server での tcpdump と、ユーザー空間モードの server の応答)、規則の無いポートへの接続の拒否です。
+いずれも一式が Rust の agent で確かめます。
+残したのは、Rust の agent の登録と転送、Go の agent の登録と転送、互いの `agent.json` からの起動と転送です。
+Rust の agent は試作のあいだ root で動きます。
 
 ### 流す頻度と関門
 
 ラボの切り替えが入った後、agent の crate を変える PR は、ラボの一式の `rust` の組を積みの先頭で 1 回流します。
 「wgstack の上の agent」の段より前は、Rust の agent が TUN の試作の形なので、`rust` の組の結果は報告だけに使い、マージの関門にしません。
 「wgstack の上の agent」の段から後は、`rust` の組の結果をマージの関門にします。
-ラボの切り替えの PR は、この扱いを[テストの規範](../../development/testing.md)の契機の表に書きます。
+ラボの切り替えの PR は、この扱いを[テストの規範](../../development/testing.md)の契機の表に `rust-agent` として書きました。
+対象は、`crates/**` のうち TUN の殻の `crates/wgft-wireguard-tun/**` を除くものと、`Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml` です。
+TUN の殻は Rust の agent のビルドに入らないためです。
 ラボの切り替えの PR そのものは lab の変更なので、両方の netstack で `go` の一式を流します。
 
 ## Windows と macOS
@@ -875,7 +921,6 @@ wgstack の口が前提と違えば、wgstack の上の agent と UDP の中継�
 - Windows の接続した UDP のソケットが、宛先の Port Unreachable の後に `WSAECONNRESET` を返すこと
 - `GetAdaptersAddresses` が返す adapter の名前 (FriendlyName) が、TUN の名前と一致すること
 - musl と glibc の `getaddrinfo` の順と Go の resolver の順の違い。wgft が並べ直すので結果には効かない見込みです
-- ラボの台本が照らす agent のログの行の一覧は、調べた範囲のもので、ラボの切り替えの PR で数え直します
 - 設定の層の Windows と macOS の挙動:既定のパス、dotenv を権限で読めないときの文面、環境変数の名前の大文字と小文字の区別は、実機で確かめていません
 - 設定の層の Unicode の版の差:`%q` の引用は、Go が新しい版で割り当てた文字の扱いだけが Rust と違います
 - 大きさの目安は、Go の対応するコードと今の Rust の試作の大きさからの見積もりです

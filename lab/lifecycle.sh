@@ -158,13 +158,52 @@ SOFT_LIMIT_MIB=124
 # The margin absorbs Go's GC lagging behind the soft limit, not a real regression. The soft
 # limit is Go's GC target for all of its managed memory, not a bound on RSS (design 7).
 MARGIN_MIB=100
+# The Rust agent writes no soft limit; it writes "memory bound: <N> MiB, derived from the flow caps"
+# at start, the bytes it holds, and its RSS must stay under N plus this margin, which covers what RSS
+# counts beyond held bytes: the allocator's own records and fragmentation, touched stack pages and the
+# binary's pages (docs/design/v2/agent-parity.md, the memory bound line). Checks 5 and 5b read the
+# agent's limit through agent_limit below.
+RUST_BOUND_MARGIN_MIB=32
 fail=0
+
+# agent_limit <agent log> <Go soft limit MiB> <Go margin MiB>: prints "<limit MiB> <margin MiB>" for
+# the userspace agent's RSS. The Go agent's limit is the soft limit this script derives, with the GC
+# margin; the Rust agent's is the N of its "memory bound: N MiB" start line, "-" when the line is
+# missing, with RUST_BOUND_MARGIN_MIB.
+agent_limit() {
+  if [ "$AGENT_WGFT" = wgft ]; then echo "$2 $3"; return; fi
+  local n; n=$(grep -oE 'memory bound: [0-9]+ MiB' "$1" 2>/dev/null | head -1 | grep -oE '[0-9]+')
+  echo "${n:--} $RUST_BOUND_MARGIN_MIB"
+}
+# agent_limit_text <limit> <margin>: the limit as the RSS line names it
+agent_limit_text() {
+  if [ "$AGENT_WGFT" = wgft ]; then echo "soft limit $1 MiB, margin $2 MiB"; else echo "memory bound $1 MiB, margin $2 MiB"; fi
+}
+# agent_limit_checks <what> <rss> <limit> <margin> <agent log> <soft limit name>: the RSS stays under
+# the limit plus the margin while flooded past <what>, and the agent logged the limit at start
+agent_limit_checks() {
+  local what=$1 rss=$2 lim=$3 mar=$4 log=$5 name=$6
+  if [ "$AGENT_WGFT" = wgft ]; then
+    okcheck "agent RSS stays under the $name plus margin while flooded past $what" \
+      "$([ -n "$rss" ] && [ "$rss" -le "$((lim + mar))" ] && echo 1 || echo 0)"
+    check "agent logs its derived memory soft limit at start" "memory soft limit: $lim MiB" "$(grep 'memory soft limit' "$log")"
+  else
+    okcheck "agent RSS stays under its memory bound plus $mar MiB while flooded past $what" \
+      "$([ -n "$rss" ] && [ "$lim" != - ] && [ "$rss" -le "$((lim + mar))" ] && echo 1 || echo 0)"
+    check "agent logs its memory bound at start" "memory bound: " "$(grep 'memory bound:' "$log")"
+  fi
+}
 
 check() { # check <label> <expected-substring> <actual>
   # an empty expected substring matches anything, so it would always pass; refuse it
   if [ -z "$2" ]; then echo "FAIL  $1: empty expectation (test bug)"; fail=1; return; fi
   if [[ "$3" == *"$2"* ]]; then echo "PASS  $1"; else echo "FAIL  $1: got '$3'"; fail=1; fi
 }
+# opened_lines <log> <listener> <target>: how many times the agent logged the listener opened toward
+# the target. An absent check on an agent log passes for an agent that words its lines differently,
+# so each one is paired with this positive line of the same event (docs/design/v2/agent-parity.md,
+# the start log).
+opened_lines() { grep -c "listener $2 -> $3 opened" "$1" 2>/dev/null; }
 absent() { # absent <label> <substring-that-must-not-appear> <actual>
   if [ -z "$2" ]; then echo "FAIL  $1: empty substring (test bug)"; fail=1; return; fi
   if [[ "$3" == *"$2"* ]]; then echo "FAIL  $1: got '$3'"; fail=1; else echo "PASS  $1"; fi
@@ -736,7 +775,7 @@ check1() {
   start_server "$DATA" $W/wgft-lifecycle-c1-server.log
   if ! wait_admin; then echo "FAIL  check1 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c1-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c1-agent.log 2>&1 < /dev/null &
   disown
   ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25580 -udp 19150 > $W/wgft-lifecycle-c1-echo.log 2>&1 < /dev/null &
   disown
@@ -857,7 +896,7 @@ check2() {
   start_server "$DATA" $W/wgft-lifecycle-c2-server.log
   if ! wait_admin; then echo "FAIL  check2 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c2-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c2-agent.log 2>&1 < /dev/null &
   disown
   ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25581 -udp 19151 > $W/wgft-lifecycle-c2-echo.log 2>&1 < /dev/null &
   disown
@@ -985,6 +1024,8 @@ s = socket.create_connection(('198.51.100.1', $1), timeout=5); s.send(b'x'); tim
   echo "      A4 answered again: $back, $((SECONDS - t0))s after the reopen"
   okcheck "a retargeted A forwards again within 10s after its tcp session was cut" "$back"
   absent "the agent reopens A4's listener without a bind failure" "listener tcp/39985: bind" "$(grep 'listener tcp/39985' "$agentlog")"
+  okcheck "the agent logs A4's listener opened for the new target" \
+    "$([ "$(opened_lines "$agentlog" tcp/39985 192.168.50.3:25583)" -ge 1 ] && echo 1 || echo 0)"
 
   a_tcp5=$(vps wgft rule add --agent home --tcp 39986 --to 192.168.50.3:25581 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   must_wait "check2: rule A5's tcp probe answers before the disable" 10 tcp_probe_ok 39986
@@ -1000,6 +1041,8 @@ s = socket.create_connection(('198.51.100.1', $1), timeout=5); s.send(b'x'); tim
   echo "      A5 answered again: $back, $((SECONDS - t0))s after the enable"
   okcheck "a re-enabled A forwards again within 10s after its tcp session was cut" "$back"
   absent "the agent reopens A5's listener without a bind failure" "listener tcp/39986: bind" "$(grep 'listener tcp/39986' "$agentlog")"
+  okcheck "the agent logs A5's listener opened again after the enable" \
+    "$([ "$(opened_lines "$agentlog" tcp/39986 192.168.50.3:25581)" -ge 2 ] && echo 1 || echo 0)"
   # the held clients exit on their own once their 30s are up
   wait "$held4" "$held5" 2>/dev/null
 
@@ -1023,7 +1066,7 @@ check3() {
   start_server "$DATA" $W/wgft-lifecycle-c3-server.log
   if ! wait_admin; then echo "FAIL  check3 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c3-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c3-agent.log 2>&1 < /dev/null &
   disown
   ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25590 > $W/wgft-lifecycle-c3-echo.log 2>&1 < /dev/null &
   disown
@@ -1098,7 +1141,7 @@ check3b() {
   start_server "$DATA" $W/wgft-lifecycle-c3b-server.log
   if ! wait_admin; then echo "FAIL  check3b setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c3b-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c3b-agent.log 2>&1 < /dev/null &
   disown
   ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25597 > $W/wgft-lifecycle-c3b-echo.log 2>&1 < /dev/null &
   disown
@@ -1282,7 +1325,7 @@ check5_server_memory() {
   if ! wait_admin; then echo "FAIL  check5 (server) setup: admin api never came up"; fail=1
   else
     local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-    WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" "${C5_FLOW_FLAGS[@]}" > $W/wgft-lifecycle-c5s-agent.log 2>&1 < /dev/null &
+    WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" "${C5_FLOW_FLAGS[@]}" > $W/wgft-lifecycle-c5s-agent.log 2>&1 < /dev/null &
     disown
     ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25595 -udp 19160 > $W/wgft-lifecycle-c5s-echo.log 2>&1 < /dev/null &
     disown
@@ -1355,7 +1398,7 @@ check5_agent_memory() {
   if ! wait_admin; then echo "FAIL  check5 (agent) setup: admin api never came up"; fail=1
   else
     local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-    WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" "${C5_FLOW_FLAGS[@]}" > $W/wgft-lifecycle-c5a-agent.log 2>&1 < /dev/null &
+    WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" "${C5_FLOW_FLAGS[@]}" > $W/wgft-lifecycle-c5a-agent.log 2>&1 < /dev/null &
     disown
     ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25596 -udp 19161 > $W/wgft-lifecycle-c5a-echo.log 2>&1 < /dev/null &
     disown
@@ -1388,7 +1431,8 @@ check5_agent_memory() {
       wait "$flood_pid"
       echo "   $(cat $W/wgft-lifecycle-c5a-tcpflood.log)"
       echo "   tcp connections actually held (ss on the agent's own listener, not client-side connect success): $held"
-      echo "   agent RSS while flooded past its flow budget: ${rss:-unknown} MiB (soft limit $SOFT_LIMIT_MIB MiB, margin $MARGIN_MIB MiB)"
+      local lim mar; read -r lim mar <<< "$(agent_limit $W/wgft-lifecycle-c5a-agent.log "$SOFT_LIMIT_MIB" "$MARGIN_MIB")"
+      echo "   agent RSS while flooded past its flow budget: ${rss:-unknown} MiB ($(agent_limit_text "$lim" "$mar"))"
       # the RSS bound only means something if the budget was actually filled: one rule holding
       # all of it, from 21 sources x 60 TCP (budget 1024) and x 260 UDP (budget 4096). Both
       # floods stay under the per-source caps (128 TCP, 256 UDP), so the budget is what refuses
@@ -1397,9 +1441,7 @@ check5_agent_memory() {
       local udp_att udp_ans; udp_att=$(field attempted "$udp_out"); udp_ans=$(field answered "$udp_out")
       okcheck "agent: one rule's udp flood fills the flow budget but the spare and is refused beyond it (answered $udp_ans of $udp_att)" \
         "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((C5_UDP_BUDGET - 196)) ] && [ "$udp_ans" -le $((C5_UDP_BUDGET - 4)) ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
-      okcheck "agent RSS stays under the soft limit plus margin while flooded past its flow budget" \
-        "$([ -n "${rss:-}" ] && [ "$rss" -le "$((SOFT_LIMIT_MIB + MARGIN_MIB))" ] && echo 1 || echo 0)"
-      check "agent logs its derived memory soft limit at start" "memory soft limit: $SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' $W/wgft-lifecycle-c5a-agent.log)"
+      agent_limit_checks "its flow budget" "${rss:-}" "$lim" "$mar" $W/wgft-lifecycle-c5a-agent.log "soft limit"
     fi
   fi
 
@@ -1502,7 +1544,7 @@ check5b_server_default_memory() {
     local spid; spid=$(find_wgft_pid 'server run'); [ -n "$spid" ] && kill "$spid" 2>/dev/null
   else
     local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-    WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > "$W/wgft-lifecycle-c5bs-agent.log" 2>&1 < /dev/null &
+    WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > "$W/wgft-lifecycle-c5bs-agent.log" 2>&1 < /dev/null &
     agent_pid=$!
     ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25597 -udp 19162 > "$W/wgft-lifecycle-c5bs-echo.log" 2>&1 < /dev/null &
     echo_pid=$!
@@ -1562,7 +1604,7 @@ check5b_agent_default_memory() {
     echo "FAIL  check5b (agent) setup: admin api never came up"; fail=1
   else
     local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-    WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > "$W/wgft-lifecycle-c5ba-agent.log" 2>&1 < /dev/null &
+    WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > "$W/wgft-lifecycle-c5ba-agent.log" 2>&1 < /dev/null &
     agent_pid=$!
     ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25598 -udp 19163 > "$W/wgft-lifecycle-c5ba-echo.log" 2>&1 < /dev/null &
     echo_pid=$!
@@ -1585,15 +1627,14 @@ check5b_agent_default_memory() {
       wait "$flood_pid" 2>/dev/null; flood_pid=""
       echo "   $(cat "$W/wgft-lifecycle-c5ba-tcpflood.log")"
       echo "   tcp connections actually held: $held"
-      echo "   agent RSS while flooded past the default flow budget: ${rss:-unknown} MiB (soft limit $DEFAULT_SOFT_LIMIT_MIB MiB, margin $DEFAULT_MARGIN_MIB MiB)"
+      local lim mar; read -r lim mar <<< "$(agent_limit "$W/wgft-lifecycle-c5ba-agent.log" "$DEFAULT_SOFT_LIMIT_MIB" "$DEFAULT_MARGIN_MIB")"
+      echo "   agent RSS while flooded past the default flow budget: ${rss:-unknown} MiB ($(agent_limit_text "$lim" "$mar"))"
       okcheck "agent: one rule's tcp flood fills the default flow budget but the spare (held $held of $DEFAULT_TCP_BUDGET)" \
         "$([ "$held" -ge $((DEFAULT_TCP_BUDGET - 48)) ] && [ "$held" -le $((DEFAULT_TCP_BUDGET - 4)) ] && echo 1 || echo 0)"
       local udp_att udp_ans; udp_att=$(field attempted "$udp_out"); udp_ans=$(field answered "$udp_out")
       okcheck "agent: one rule's udp flood fills the default flow budget but the spare and is refused beyond it (answered $udp_ans of $udp_att)" \
         "$([ -n "$udp_ans" ] && [ "$udp_ans" -ge $((DEFAULT_UDP_BUDGET - 392)) ] && [ "$udp_ans" -le $((DEFAULT_UDP_BUDGET - 4)) ] && [ "$udp_ans" -lt "$udp_att" ] && echo 1 || echo 0)"
-      okcheck "agent RSS stays under the default soft limit plus margin while flooded past the default flow budget" \
-        "$([ -n "${rss:-}" ] && [ "$rss" -le "$((DEFAULT_SOFT_LIMIT_MIB + DEFAULT_MARGIN_MIB))" ] && echo 1 || echo 0)"
-      check "agent logs its derived memory soft limit at start" "memory soft limit: $DEFAULT_SOFT_LIMIT_MIB MiB" "$(grep 'memory soft limit' "$W/wgft-lifecycle-c5ba-agent.log")"
+      agent_limit_checks "the default flow budget" "${rss:-}" "$lim" "$mar" "$W/wgft-lifecycle-c5ba-agent.log" "default soft limit"
     fi
   fi
 
@@ -1685,7 +1726,7 @@ resource_isolation_case() {
     return
   fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" "${ADATA_EXTRA_FLAGS[@]}" > "$W/wgft-lifecycle-$tag-agent.log" 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" "${ADATA_EXTRA_FLAGS[@]}" > "$W/wgft-lifecycle-$tag-agent.log" 2>&1 < /dev/null &
   agent_pid=$!
   ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25599 > "$W/wgft-lifecycle-$tag-echo.log" 2>&1 < /dev/null &
   echo_pid=$!
@@ -1825,7 +1866,7 @@ agent_isolation_case() {
   fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
   local LOG="$W/wgft-lifecycle-$tag-agent.log"
-  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" --max-tcp-flows "$tcp_total" \
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" --max-tcp-flows "$tcp_total" \
     > "$LOG" 2>&1 < /dev/null &
   agent_pid=$!
   ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25599,25600 > "$W/wgft-lifecycle-$tag-echo.log" 2>&1 < /dev/null &
@@ -1907,7 +1948,7 @@ c5_setup() { # c5_setup <tag> <first addr> <last addr>: sets C5_LOG, C5_AGENT_PI
   start_server "$C5_DATA" "$C5_LOG" "${C5_FLOW_FLAGS[@]}"
   if ! wait_admin; then echo "FAIL  $tag setup: admin api never came up"; fail=1; c5_teardown; return 1; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$C5_ADATA" > "$W/wgft-lifecycle-$tag-agent.log" 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$C5_ADATA" > "$W/wgft-lifecycle-$tag-agent.log" 2>&1 < /dev/null &
   C5_AGENT_PID=$!
   ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25599,25600 > "$W/wgft-lifecycle-$tag-echo.log" 2>&1 < /dev/null &
   C5_ECHO_PID=$!
@@ -2072,7 +2113,7 @@ check6() {
   start_server "$DATA" $W/wgft-lifecycle-c6-server.log
   if ! wait_admin; then echo "FAIL  check6 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c6-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c6-agent.log 2>&1 < /dev/null &
   disown
   ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25620,25621,25622,25623,25624 \
     > $W/wgft-lifecycle-c6-echo.log 2>&1 < /dev/null &
@@ -2323,7 +2364,7 @@ check7() {
   start_server "$DATA" $W/wgft-lifecycle-c7-server.log
   if ! wait_admin; then echo "FAIL  check7 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c7-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c7-agent.log 2>&1 < /dev/null &
   disown
   ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25640 -udp 19190 \
     > $W/wgft-lifecycle-c7-echo.log 2>&1 < /dev/null &
@@ -2459,7 +2500,7 @@ check8() {
   start_server "$DATA" $W/wgft-lifecycle-c8-server.log
   if ! wait_admin; then echo "FAIL  check8 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c8-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c8-agent.log 2>&1 < /dev/null &
   disown
   ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25650 \
     > $W/wgft-lifecycle-c8-echo.log 2>&1 < /dev/null &
@@ -2549,7 +2590,7 @@ check9() {
   start_server "$DATA" "$LOG"
   if ! wait_admin; then echo "FAIL  check9 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c9-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c9-agent.log 2>&1 < /dev/null &
   disown
   ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25660 > $W/wgft-lifecycle-c9-echo.log 2>&1 < /dev/null &
   disown
@@ -2684,7 +2725,7 @@ check10() {
   if ! wait_admin; then echo "FAIL  check10 setup: admin api never came up"; fail=1; return; fi
   local join; join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
   local agent_pid
-  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c10-agent.log 2>&1 < /dev/null &
+  WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c10-agent.log 2>&1 < /dev/null &
   agent_pid=$!
   disown
   ip netns exec "$LAN_NS" setsid nohup echo -bind 192.168.50.3 -tcp 25575 -udp 19140 > $W/wgft-lifecycle-c10-echo.log 2>&1 < /dev/null &
@@ -2757,7 +2798,7 @@ print(a.get('$1', ''))
 
   # Restart the agent with the same credentials (agent.json, written by the join above, is
   # still on disk) and confirm both agent ls and the Web UI return to the live state.
-  ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c10-agent2.log 2>&1 < /dev/null &
+  ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > $W/wgft-lifecycle-c10-agent2.log 2>&1 < /dev/null &
   disown
   if ! wait_agent home; then echo "FAIL  check10: agent never re-registered after the restart"; fail=1; return; fi
 
@@ -2799,7 +2840,7 @@ check11() {
   for name in home other; do
     dir=$HDATA; [ "$name" = other ] && dir=$ODATA
     join=$(vps wgft agent join-string --name "$name" --admin "$ADMIN" 2>/dev/null | head -1)
-    WGFT_JOIN="$join" WGFT_NAME="$name" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$dir" \
+    WGFT_JOIN="$join" WGFT_NAME="$name" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$dir" \
       > "$W/wgft-lifecycle-c11-$name.log" 2>&1 < /dev/null &
     disown
   done
@@ -2960,11 +3001,11 @@ print('agents %d/%d/%d disabled=%d total=%d rules %d/%d/%d agent_disabled=%d tot
   eqcheck "status --json exits 0 while home is disabled" 0 "$rcode"
   strcheck "status --json counts" "agents 1/0/0 disabled=1 total=2 rules 1/0/0 agent_disabled=3 total=4 sums=True" "$(status_json_counts)"
 
-  echo "-- wgft agent doctor on home itself while it is disabled (design 10.2c)"
+  echo "-- agent doctor on home itself while it is disabled (design 10.2c)"
   # agent_doctor_json_of: the top status and relay.listeners's own status/reason from agent
   # doctor --json, run on the agent's own host (the home namespace) against its data dir.
   agent_doctor_json_of() {
-    ip netns exec "$HOME_NS" wgft agent doctor --data-dir "$HDATA" --json 2>/dev/null | python3 -c "
+    ip netns exec "$HOME_NS" "$AGENT_WGFT" agent doctor --data-dir "$HDATA" --json 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 by = {c['id']: c for c in d['checks']}
@@ -2977,14 +3018,14 @@ print('%s %s/%s last=%s' % (d['status'], c.get('status', ''), c.get('reason', ''
   # whole (not word-wrapped the way the plain-text report breaks a long detail across lines at
   # labelWidth, which would otherwise split "wgft agent enable home" mid-phrase).
   agent_doctor_check_detail() {
-    ip netns exec "$HOME_NS" wgft agent doctor --data-dir "$HDATA" --json 2>/dev/null | python3 -c "
+    ip netns exec "$HOME_NS" "$AGENT_WGFT" agent doctor --data-dir "$HDATA" --json 2>/dev/null | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 by = {c['id']: c for c in d['checks']}
 print(by.get('$1', {}).get('detail', ''))
 "
   }
-  out=$(ip netns exec "$HOME_NS" wgft agent doctor --data-dir "$HDATA" 2>&1); rcode=$?
+  out=$(ip netns exec "$HOME_NS" "$AGENT_WGFT" agent doctor --data-dir "$HDATA" 2>&1); rcode=$?
   eqcheck "agent doctor on the disabled home exits 0" 0 "$rcode"
   absent "agent doctor on the disabled home has no FAILED check" "FAILED" "$out"
   strcheck "agent doctor --json on the disabled home" "ok skipped/agent_disabled last=ok" "$(agent_doctor_json_of)"
@@ -3052,6 +3093,8 @@ print(by.get('$1', {}).get('detail', ''))
   # which gets no answer. Once A forwards, the tunnel is up, so the waits below keep 15s.
   must_wait "check11: A forwards again" 45 tcp_probe_ok 39970
   absent "the agent reopens A's listener without a bind failure" "listener tcp/39970: bind" "$(grep 'listener tcp/39970' $W/wgft-lifecycle-c11-home.log)"
+  okcheck "the agent logs A's listener opened again after the enable" \
+    "$([ "$(opened_lines $W/wgft-lifecycle-c11-home.log tcp/39970 192.168.50.3:25570)" -ge 2 ] && echo 1 || echo 0)"
   must_wait "check11: C forwards again" 15 udp_probe_ok 27002
   must_wait "check11: P forwards again" 15 tcp_probe_ok 39972
   must_wait "check11: D, added while disabled, forwards" 15 tcp_probe_ok 39973
@@ -3063,11 +3106,11 @@ print(by.get('$1', {}).get('detail', ''))
     must_wait "check11: the VPS relay listens on P's port again (tcp)" 15 vps_port_bound tcp 39972
   fi
 
-  echo "-- wgft agent doctor on home itself after the enable (design 10.2c)"
-  out=$(ip netns exec "$HOME_NS" wgft agent doctor --data-dir "$HDATA" 2>&1); rcode=$?
+  echo "-- agent doctor on home itself after the enable (design 10.2c)"
+  out=$(ip netns exec "$HOME_NS" "$AGENT_WGFT" agent doctor --data-dir "$HDATA" 2>&1); rcode=$?
   eqcheck "agent doctor on the re-enabled home exits 0" 0 "$rcode"
   strcheck "agent doctor --json on the re-enabled home clears the disabled status" "ok ok/ last=ok" "$(agent_doctor_json_of)"
-  local raw; raw=$(ip netns exec "$HOME_NS" wgft agent doctor --data-dir "$HDATA" --json 2>/dev/null)
+  local raw; raw=$(ip netns exec "$HOME_NS" "$AGENT_WGFT" agent doctor --data-dir "$HDATA" --json 2>/dev/null)
   absent "agent doctor --json on the re-enabled home carries no agent_disabled reason" "agent_disabled" "$raw"
   absent "agent doctor's agent.last_state no longer mentions the disable" "the server has disabled this agent" "$(agent_doctor_check_detail agent.last_state)"
 
@@ -3169,7 +3212,7 @@ init_ns() { nsenter -t 1 -n -- "$@"; }
 # socket_buffers item as "<status> <reason> <detail>".
 sb_doctor() {
   local out code
-  out=$(ip netns exec "$HOME_NS" runuser -u wgftlab -- wgft agent doctor --data-dir "$1" --json 2>/dev/null); code=$?
+  out=$(ip netns exec "$HOME_NS" runuser -u wgftlab -- "$AGENT_WGFT" agent doctor --data-dir "$1" --json 2>/dev/null); code=$?
   printf '%s' "$out" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
@@ -3182,7 +3225,7 @@ print(c["status"], c.get("reason", "-"), c["detail"])
 sb_port() { echo "$1" | grep -oE 'on port [0-9]+' | head -1 | awk '{print $3}'; }
 sb_answers() { [[ "$(sb_doctor "$1")" == *$'\n'"$2 "* ]]; }
 start_sb_agent() { # start_sb_agent <data dir> <log> [join]
-  WGFT_JOIN="${3:-}" ip netns exec "$HOME_NS" setsid nohup runuser -u wgftlab -- wgft agent run --data-dir "$1" > "$2" 2>&1 < /dev/null &
+  WGFT_JOIN="${3:-}" ip netns exec "$HOME_NS" setsid nohup runuser -u wgftlab -- "$AGENT_WGFT" agent run --data-dir "$1" > "$2" 2>&1 < /dev/null &
   disown
 }
 stop_sb_agent() {
@@ -3276,6 +3319,8 @@ check12_body() {
   check "after a restart the item reads OK" "exit=0 status=ok"$'\n'"ok - " "$out"
   check "the new sockets got 14680064 each" "receive buffer of 14680064 bytes and a send buffer of 14680064 bytes" "$out"
   absent "the restarted agent logs no warning" "warning: the WireGuard UDP sockets" "$(cat "$ALOG2")"
+  # paired with the line of the same event: the agent measures the sockets of each tunnel it brings up
+  check "the restarted agent logs its tunnel up" "tunnel: up addr=" "$(cat "$ALOG2")"
   if [ "$mode" = userspace ]; then
     out=$(vps wgft server check --mode userspace --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --config /nonexistent 2>&1)
     check "server check reads the raised sysctls as enough" "receive 14680064 and send 14680064 bytes, which meets the requirement" "$out"
@@ -3286,7 +3331,7 @@ check12_body() {
   init_ns sysctl -qw net.core.rmem_max=212992 net.core.wmem_max=212992
   out=$(sb_doctor "$ADATA"); port1=$(sb_port "$out")
   check "the sockets in place keep 14680064 after the sysctls drop" "ok - " "$out"
-  ip netns exec "$HOME_NS" runuser -u wgftlab -- wgft agent rotate-key --data-dir "$ADATA" >/dev/null 2>&1
+  ip netns exec "$HOME_NS" runuser -u wgftlab -- "$AGENT_WGFT" agent rotate-key --data-dir "$ADATA" >/dev/null 2>&1
   must_wait "check12: the rebuilt tunnel is measured" 30 sb_answers "$ADATA" failed
   out=$(sb_doctor "$ADATA"); port2=$(sb_port "$out")
   check "rotate-key's new sockets read FAILED" "failed socket_buffer_below_requirement" "$out"

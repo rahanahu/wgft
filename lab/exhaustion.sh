@@ -55,6 +55,11 @@
 # The live heap is read from the Go runtime's own GC trace (GODEBUG=gctrace=1, the third value of
 # "a->b->c MB", in MiB): neither process exports its heap or the post-close table's length. The
 # table's length is checked through its effects, its eviction count and the live heap.
+# The userspace agent is $AGENT_WGFT (lab/sandbox.sh). With the Rust agent, acceptq and ackflood
+# print its RSS only, since it has no GC trace; their heap was never asserted on. The heap that
+# postclose asserts on in userspace mode and the one wgstall prints are the Go server's. kernel
+# postclose reads the agent's gVisor table through its heap, so lab/suite.txt runs it with the Go
+# agent only (agent=go), as it does userspace mss, which starts a kernel-mode agent.
 #
 # The checks that measure a heap, an RSS, a rate or a round-trip time run alone (lab/suite.txt's
 # exclusive-heavy); mss does not measure and runs in the pool.
@@ -116,6 +121,13 @@ log_has() { grep -q "$2" "$1" 2>/dev/null; }
 lines_of() { wc -l < "$1" 2>/dev/null || echo 0; }
 rss_mib() { awk '/VmRSS/{print int($2/1024)}' "/proc/$1/status" 2>/dev/null; }
 
+# agent_heap <log> <from-line> <to-line> max|last: live_heap of the userspace agent's log. The Rust
+# agent has no GC trace, so with it the value is "not measured" (docs/design/v2/agent-parity.md, the
+# lab switch); acceptq and ackflood only print the agent's heap and keep its RSS.
+agent_heap() {
+  if [ "$AGENT_WGFT" != wgft ]; then echo "not measured, no GC trace in the Rust agent"; return; fi
+  live_heap "$@"
+}
 # live_heap <log> <from-line> <to-line> max|last: the largest or the last live heap, in MiB, of the
 # GC trace lines between the two line numbers of the log (from exclusive, to inclusive), or empty
 # when no GC ran there.
@@ -156,11 +168,13 @@ start_server() {
   must_wait "server admin api comes up" 30 admin_up
 }
 # start_agent <name> <netns> <data-dir> <log> [agent mode]: a userspace agent unless the mode says
-# kernel; the kernel-mode agent runs as root, the same as lab/agentkernel.sh.
+# kernel; the kernel-mode agent runs as root, the same as lab/agentkernel.sh. The userspace agent is
+# $AGENT_WGFT (lab/sandbox.sh); the kernel-mode agent is the Go wgft in either configuration.
 start_agent() {
-  local name=$1 ns=$2 data=$3 log=$4 amode=${5:-userspace} join
+  local name=$1 ns=$2 data=$3 log=$4 amode=${5:-userspace} join bin=$AGENT_WGFT
+  [ "$amode" = kernel ] && bin=wgft
   join=$(vps wgft agent join-string --name "$name" --admin "$ADMIN" 2>/dev/null | head -1)
-  WGFT_MODE=$amode WGFT_JOIN="$join" GODEBUG=gctrace=1 ip netns exec "$ns" setsid nohup wgft agent run --data-dir "$data" \
+  WGFT_MODE=$amode WGFT_JOIN="$join" GODEBUG=gctrace=1 ip netns exec "$ns" setsid nohup "$bin" agent run --data-dir "$data" \
     > "$log" 2>&1 < /dev/null &
   disown
   must_wait "agent $name registers and handshakes" 30 agent_registered "$name"
@@ -245,6 +259,10 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------------------------
 check_postclose() {
   echo "== $mode: postclose: the post-close table under short connections faster than M/60"
+  if [ "$mode" = kernel ] && [ "$AGENT_WGFT" != wgft ]; then
+    echo "SKIP  postclose: kernel mode reads the Go agent's post-close table through its GC trace, and the Rust agent has neither"
+    return
+  fi
   cleanup
   # The agent's host side dials the target once per connection; widen its ephemeral range, which
   # is per network namespace, so that a reused 4-tuple there is not what fails. The client binds
@@ -490,7 +508,7 @@ check_acceptq() {
   qmax=$(awk '{print $3}' $W/wgft-exh-queue.txt | sort -n | tail -1)
   estmax=$(awk '{print $1}' $W/wgft-exh-queue.txt | sort -n | tail -1)
   relmax=$(awk '{print $2}' $W/wgft-exh-queue.txt | sort -n | tail -1)
-  heap=$(live_heap "$ALOG" "$base_line" "$(lines_of "$ALOG")" max)
+  heap=$(agent_heap "$ALOG" "$base_line" "$(lines_of "$ALOG")" max)
   must_wait "the client closes them" 30 none_held
   kill "$SAMPLER" 2>/dev/null; SAMPLER=
   rss=$(max_of $W/wgft-exh-rss.txt)
@@ -539,8 +557,8 @@ check_ackflood() {
   tx1=$(vps cat /sys/class/net/wgft0/statistics/tx_packets)
   kill "$SAMPLER" 2>/dev/null; SAMPLER=
   flood=$(grep '^sent=' $W/wgft-exh-flood.log)
-  heap=$(live_heap "$ALOG" 0 "$l0" last)
-  local hmax; hmax=$(live_heap "$ALOG" "$l0" "$(lines_of "$ALOG")" max)
+  heap=$(agent_heap "$ALOG" 0 "$l0" last)
+  local hmax; hmax=$(agent_heap "$ALOG" "$l0" "$(lines_of "$ALOG")" max)
   rss=$(max_of $W/wgft-exh-rss.txt)
   echo "   flood: $flood"
   echo "   packets the server sent into WireGuard during the flood: $((tx1 - tx0))"

@@ -108,6 +108,10 @@ set -u
 # init). With -m on, $! for "vps CMD &" is that job's own process group leader, so a plain kill by
 # pid already reaches everything the job forked, and the group kill is an extra safety net.
 set -m
+# only for AGENT_WGFT, the current build's agent: the Go wgft, or with WGFT_LAB_AGENT_IMPL=rust the
+# Rust build, which then takes over the old release's credentials. This script keeps its own
+# namespace names and work directory.
+. "$(dirname "$0")/sandbox.sh"
 GH_REPO=rahanahu/wgft
 OLD_VERSION=${WGFT_UPGRADE_OLD_VERSION:-1.1.3}  # default v1.1.3, not necessarily the
   # immediately-previous release (see header comment). Override with WGFT_UPGRADE_OLD_VERSION=0.4.0
@@ -853,7 +857,7 @@ okcheck "step2: new server comes up with no extra step (admin api answers)" "$(w
 absent "step2: no schema/migration error in the new server's log" "applying schema version" "$(cat "$WORK/upgraded-server.log")"
 absent "step2: no newer-schema refusal in the new server's log" "is newer than this binary" "$(cat "$WORK/upgraded-server.log")"
 
-start_agent wgft "$ADATA" "$WORK/upgraded-agent.log"  # no join string: existing credentials only
+start_agent "$AGENT_WGFT" "$ADATA" "$WORK/upgraded-agent.log"  # no join string: existing credentials only
 if ! wait_until 40 agent_registered; then
   echo "FAIL  step2: agent never reconnected after the upgrade"; fail=1
   echo "   --- $WORK/upgraded-agent.log ---"; cat "$WORK/upgraded-agent.log"
@@ -903,7 +907,7 @@ print(','.join(added))
   fi
 fi
 
-new_agent_pubkey=$(home wgft agent pubkey --data-dir "$ADATA")
+new_agent_pubkey=$(home "$AGENT_WGFT" agent pubkey --data-dir "$ADATA")
 strcheck "step3: agent's WireGuard public key is unchanged" "$old_agent_pubkey" "$new_agent_pubkey"
 new_cred_stable_sha=$(stable_cred_hash "$ADATA/agent.json")
 strcheck "step3: agent's credentials (name/endpoint/cert/token/wg key) are byte-identical, no re-enrolment" \
@@ -1142,7 +1146,7 @@ if wait_admin; then
   wait_reconnected 40
   check "step4b: v$OLD_VERSION+v$OLD_VERSION resumes from the snapshot before the partial upgrade" "state=ok" "$(tunnel_state_text)"
   stop_agent  # agent side upgrades; the old-release server keeps running, untouched
-  start_agent wgft "$ADATA_B" "$WORK/step4b-new-agent.log"
+  start_agent "$AGENT_WGFT" "$ADATA_B" "$WORK/step4b-new-agent.log"
   wait_reconnected 40
   check "step4b: new agent reconnects to the still-v$OLD_VERSION server" "state=ok" "$(tunnel_state_text)"
   wait_until 15 tcp_probe_ok "$P_TCP"; wait_until 10 udp_probe_ok "$P_UDP"

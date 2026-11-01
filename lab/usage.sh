@@ -103,7 +103,7 @@ else
 fi
 must_wait "server admin api comes up" 30 admin_up || exit 1
 join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > $W/wgft-usage-agent.log 2>&1 < /dev/null &
+WGFT_JOIN="$join" ip netns exec "$HOME_NS" setsid nohup "$AGENT_WGFT" agent run --data-dir "$ADATA" > $W/wgft-usage-agent.log 2>&1 < /dev/null &
 disown
 must_wait "agent registers and handshakes" 30 agent_registered || exit 1
 

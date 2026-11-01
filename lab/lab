@@ -27,6 +27,10 @@ NAMESPACES=(client vps homerouter home lan)
 
 die() { echo "lab: $*" >&2; exit 1; }
 info() { echo "lab: $*" >&2; }
+case ${WGFT_LAB_AGENT_IMPL:-} in
+  "" | go | rust) ;;
+  *) die "WGFT_LAB_AGENT_IMPL=$WGFT_LAB_AGENT_IMPL: want go or rust" ;;
+esac
 
 # ---- WGFT_LAB_CPUS:VM の vCPU を CPU の集合に固定する ----
 # Incus の limits.cpu は数 (2) なら vCPU の数だけを決めて CPU は浮かせ、集合 (0-1 や 0,2) なら
@@ -115,10 +119,14 @@ wait_agent() { timeout 300 bash -c "$(declare -f inc); $(printf '%q ' inc wait "
 wait_net() { timeout 120 bash -c "$(declare -f inc); $(printf '%q ' inc wait "$VM" ip --interval 2)" || info "VM に IP アドレスが付かない(外部との通信は失敗する)"; }
 # WGFT_LAB_AGENT_NETSTACK はユーザー空間モードのエージェントの netstack(gvisor か wgstack)を選ぶ。
 # 値があれば VM の中のコマンドに WGFT_AGENT_NETSTACK として渡し、ラボの確認が起動するエージェントがそれを継ぐ。
-# 未設定なら何も渡さず、エージェントは既定の gvisor で動く
+# 未設定なら何も渡さず、エージェントは既定の gvisor で動く。
+# WGFT_LAB_AGENT_IMPL はユーザー空間モードのエージェントの実装(go か rust)を選ぶ。値があれば VM の中のコマンドに
+# そのまま渡し、lab/sandbox.sh がそれで AGENT_WGFT を決める。未設定なら go と同じ
+# (docs/design/v2/agent-parity.md の「ラボの切り替え」)
 in_vm() {
   local env=()
-  [[ -n ${WGFT_LAB_AGENT_NETSTACK:-} ]] && env=(--env "WGFT_AGENT_NETSTACK=$WGFT_LAB_AGENT_NETSTACK")
+  [[ -n ${WGFT_LAB_AGENT_NETSTACK:-} ]] && env+=(--env "WGFT_AGENT_NETSTACK=$WGFT_LAB_AGENT_NETSTACK")
+  [[ -n ${WGFT_LAB_AGENT_IMPL:-} ]] && env+=(--env "WGFT_LAB_AGENT_IMPL=$WGFT_LAB_AGENT_IMPL")
   inc exec "$VM" "${env[@]}" --cwd "$SHARE" -- "$@"
 }
 
@@ -310,27 +318,40 @@ host_build() {
   [[ -f $REPO/go.mod ]] || die "go.mod がまだない"
   # WGFT_LAB_BUILD_TAGS は go build の -tags に渡す。lab/agentmem.sh は labmemprobe を付けた build を要る
   (cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath ${WGFT_LAB_BUILD_TAGS:+-tags "$WGFT_LAB_BUILD_TAGS"} -o bin/ ./cmd/... ./tools/...)
-  # WGFT_LAB_RUST=1 は v2 の Rust の試作の道具も bin/rust/ に作る。wgft-wireguard-tun は lab/wg-interop.sh が、
-  # Rust の wgft (VM では wgft-rs) は lab/rust-agent.sh が使う。既定の bin/ と
-  # その install は変えない。Rust の TUN の殻は cargo-zigbuild で musl の静的バイナリにし、VM の Debian の
-  # glibc に依らない。wireguard-go は go.mod が既に要る版の upstream のコマンドをそのまま build する
-  if [[ ${WGFT_LAB_RUST:-} == 1 ]]; then
-    command -v cargo-zigbuild >/dev/null || die "WGFT_LAB_RUST=1 needs cargo-zigbuild and zig on the host"
+  # Rust の wgft は、WGFT_LAB_AGENT_IMPL=rust、WGFT_LAB_RUST=1、--agent-impl に rust を含む lab suite のとき
+  # bin/rust/wgft に作る。cargo-zigbuild で musl の静的バイナリにし、VM の Debian の glibc に依らない。
+  # WGFT_LAB_RUST=1 は v2 の試作の道具も bin/rust/ に作る。wgft-wireguard-tun と wireguard-go は
+  # lab/wg-interop.sh が使う。wireguard-go は go.mod が既に要る版の upstream のコマンドをそのまま build する。
+  # 既定の bin/ とその install は変えない
+  if rust_wanted; then
+    command -v cargo-zigbuild >/dev/null || die "the Rust build needs cargo-zigbuild and zig on the host"
+    local pkgs=(-p wgft)
+    [[ ${WGFT_LAB_RUST:-} == 1 ]] && pkgs+=(-p wgft-wireguard-tun)
     mkdir -p "$REPO/bin/rust"
-    (cd "$REPO" && cargo zigbuild --release --locked --target x86_64-unknown-linux-musl -p wgft-wireguard-tun -p wgft) || die "cargo zigbuild failed"
-    install -m 0755 "$REPO/target/x86_64-unknown-linux-musl/release/wgft-wireguard-tun" "$REPO/bin/rust/"
-    install -m 0755 "$REPO/target/x86_64-unknown-linux-musl/release/wgft" "$REPO/bin/rust/wgft-rs"
-    (cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/rust/wireguard-go golang.zx2c4.com/wireguard) || die "wireguard-go build failed"
-    info "built the Rust lab tools and wireguard-go into $REPO/bin/rust/"
+    (cd "$REPO" && cargo zigbuild --release --locked --target x86_64-unknown-linux-musl "${pkgs[@]}") || die "cargo zigbuild failed"
+    install -m 0755 "$REPO/target/x86_64-unknown-linux-musl/release/wgft" "$REPO/bin/rust/wgft"
+    if [[ ${WGFT_LAB_RUST:-} == 1 ]]; then
+      install -m 0755 "$REPO/target/x86_64-unknown-linux-musl/release/wgft-wireguard-tun" "$REPO/bin/rust/"
+      (cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/rust/wireguard-go golang.zx2c4.com/wireguard) || die "wireguard-go build failed"
+    fi
+    info "built the Rust wgft${WGFT_LAB_RUST:+, the Rust lab tools and wireguard-go} into $REPO/bin/rust/"
   fi
   info "built into $REPO/bin/"
 }
+# rust_wanted:この build が Rust の wgft を作って入れるか。LAB_BUILD_RUST は lab suite が --agent-impl で決める
+rust_wanted() { [[ ${WGFT_LAB_AGENT_IMPL:-} == rust || ${WGFT_LAB_RUST:-} == 1 || ${LAB_BUILD_RUST:-} == 1 ]]; }
+# vm_install:Go のバイナリを /usr/local/bin に入れる。Rust の wgft は名前を wgft のまま /usr/local/lib/wgft-rust/ に
+# 入れる。ラボの台本がプロセスを comm の wgft と cmdline の " agent run" で探すためで、lab/sandbox.sh の
+# AGENT_WGFT がこのパスを指す。WGFT_LAB_RUST=1 の試作の道具は /usr/local/bin に入れる
 vm_install() {
   in_vm sh -c 'for b in /wgft/bin/*; do [ -f "$b" ] && [ -x "$b" ] && case "$b" in *.test) ;; *) install -m 0755 "$b" /usr/local/bin/;; esac; done; ls /usr/local/bin/'
-  if [[ ${WGFT_LAB_RUST:-} == 1 ]]; then
-    in_vm sh -c 'for b in /wgft/bin/rust/*; do [ -f "$b" ] && [ -x "$b" ] && install -m 0755 "$b" /usr/local/bin/; done'
+  if rust_wanted; then
+    in_vm sh -c 'install -d -m 0755 /usr/local/lib/wgft-rust && install -m 0755 /wgft/bin/rust/wgft /usr/local/lib/wgft-rust/wgft'
   fi
-  info "installed into VM $VM /usr/local/bin (use plain command names in the VM)"
+  if [[ ${WGFT_LAB_RUST:-} == 1 ]]; then
+    in_vm sh -c 'for b in /wgft/bin/rust/*; do [ "$b" = /wgft/bin/rust/wgft ] && continue; [ -f "$b" ] && [ -x "$b" ] && install -m 0755 "$b" /usr/local/bin/; done'
+  fi
+  info "installed into VM $VM /usr/local/bin (use plain command names in the VM)$(rust_wanted && echo "; the Rust wgft as /usr/local/lib/wgft-rust/wgft")"
 }
 cmd_build() {
   host_build
@@ -392,7 +413,7 @@ suite_cleanup() {
 # 1 台の VM の agent や incus exec が固まっても、run 全体が止まったままにならない
 suite_timeout() {
   local sec=$1; shift
-  timeout -k 30 "$sec" bash -c "$(declare -f inc in_vm); VM=$(printf %q "$VM"); SHARE=$(printf %q "$SHARE"); WGFT_LAB_AGENT_NETSTACK=$(printf %q "${WGFT_LAB_AGENT_NETSTACK:-}"); \"\$@\"" suite_timeout "$@"
+  timeout -k 30 "$sec" bash -c "$(declare -f inc in_vm); VM=$(printf %q "$VM"); SHARE=$(printf %q "$SHARE"); WGFT_LAB_AGENT_NETSTACK=$(printf %q "${WGFT_LAB_AGENT_NETSTACK:-}"); WGFT_LAB_AGENT_IMPL=$(printf %q "${WGFT_LAB_AGENT_IMPL:-}"); \"\$@\"" suite_timeout "$@"
 }
 
 # suite_boot:VM を起動し、agent が応答するまで待つ。複数の VM を同時に起こすと agent が上がらない
@@ -483,42 +504,62 @@ suite_shard_body() {
   echo "$((t1 - t0)) $((SECONDS - t1)) $rc" > "$dir/times"
 }
 
-# suite_shard <name> <dir> <netstack> <k> <n> <durations> <all dirs...>:バックグラウンドで呼ぶ。
+# suite_shard <name> <dir> <netstack> <agent impl> <k> <n> <durations> <all dirs...>:バックグラウンドで呼ぶ。
 # 本体を子のシェルで流すのは、cmd_up などの die が exit しても failed の印を残すため
 suite_shard() {
   local name=$1 dir=$2
   VM=$name
   WGFT_LAB_AGENT_NETSTACK=$3
+  WGFT_LAB_AGENT_IMPL=$4
   mkdir -p "$dir"
-  shift 3
+  shift 4
   (suite_shard_body "$name" "$dir" "$@") > "$dir/shard.log" 2>&1 || echo failed > "$dir/failed"
   return 0
 }
 
 cmd_suite() {
   local vms=3 netstack=default keep= durations= out= parallel=8 timeout_s=${WGFT_LAB_SHARD_TIMEOUT:-3600}
+  local agent_impl=${WGFT_LAB_AGENT_IMPL:-go}
   while (($#)); do
     case $1 in
       --vms) vms=${2:?--vms N}; shift 2 ;;
       --netstack) netstack=${2:?--netstack default|wgstack|both}; shift 2 ;;
+      --agent-impl) agent_impl=${2:?--agent-impl go|rust|both}; shift 2 ;;
       --durations) durations=${2:?--durations FILE}; shift 2 ;;
       --parallel) parallel=${2:?--parallel N}; shift 2 ;;
       --shard-timeout) timeout_s=${2:?--shard-timeout SEC}; shift 2 ;;
       --out) out=${2:?--out DIR}; shift 2 ;;
       --keep) keep=1; shift ;;
-      *) die "usage: lab suite [--vms N] [--netstack default|wgstack|both] [--durations summary.json] [--parallel N] [--shard-timeout SEC] [--out DIR] [--keep]" ;;
+      *) die "usage: lab suite [--vms N] [--netstack default|wgstack|both] [--agent-impl go|rust|both] [--durations summary.json] [--parallel N] [--shard-timeout SEC] [--out DIR] [--keep]" ;;
     esac
   done
   [[ $vms =~ ^[1-9][0-9]*$ ]] || die "--vms wants a whole number of 1 or more"
   [[ $parallel =~ ^[1-9][0-9]*$ ]] || die "--parallel wants a whole number of 1 or more"
   [[ $timeout_s =~ ^[1-9][0-9]*$ ]] || die "--shard-timeout wants a whole number of seconds"
-  local cfgs=()
+  local nss=() impls=() cfgs=() i c
   case $netstack in
-    default) cfgs=(default) ;;
-    wgstack) cfgs=(wgstack) ;;
-    both) cfgs=(default wgstack) ;;
+    default) nss=(default) ;;
+    wgstack) nss=(wgstack) ;;
+    both) nss=(default wgstack) ;;
     *) die "--netstack wants default, wgstack or both" ;;
   esac
+  case $agent_impl in
+    go) impls=(go) ;;
+    rust) impls=(rust) ;;
+    both) impls=(go rust) ;;
+    *) die "--agent-impl wants go, rust or both" ;;
+  esac
+  # 組は <agent の実装>/<netstack>。Rust の agent は netstack を 1 つしか持たないので、rust の組は --netstack に
+  # よらず 1 回だけ流し、netstack は既定のまま (default) にする。go の組を先に並べ、rust の組の統合が go の組の
+  # 結果を使えるようにする
+  for i in "${impls[@]}"; do
+    if [[ $i == rust ]]; then
+      cfgs+=(rust/default)
+      LAB_BUILD_RUST=1
+    else
+      for c in "${nss[@]}"; do cfgs+=("go/$c"); done
+    fi
+  done
   [[ -z $durations || -f $durations ]] || die "no such --durations file: $durations"
   [[ -n $durations ]] && durations=$(cd "$(dirname "$durations")" && pwd)/$(basename "$durations")
   SUITE_KEEP=$keep
@@ -556,31 +597,37 @@ cmd_suite() {
   trap 'info "interrupted; deleting the suite VMs"; exit 130' INT TERM HUP
   cmd_suite_gc
   host_build
-  local c k
+  local k
   local names=() dirs=()
   for c in "${cfgs[@]}"; do
     for ((k = 1; k <= vms; k++)); do
-      names+=("wgft-suite-$$-$c-$k")
+      names+=("wgft-suite-$$-${c%/*}-${c#*/}-$k")
       dirs+=("$out/$c/shard-$k")
     done
   done
   SUITE_VMS=("${names[@]}")
   info "running on $total suite VMs: ${names[*]}; results in $out"
-  local i=0
+  i=0
   for c in "${cfgs[@]}"; do
     local ns=""
-    [[ $c == default ]] || ns=$c
+    [[ ${c#*/} == default ]] || ns=${c#*/}
     for ((k = 1; k <= vms; k++)); do
       SUITE_PIN=${pins[i]:-}
-      suite_shard "${names[i]}" "${dirs[i]}" "$ns" "$k" "$vms" "$durations" "${dirs[@]}" &
+      suite_shard "${names[i]}" "${dirs[i]}" "$ns" "${c%/*}" "$k" "$vms" "$durations" "${dirs[@]}" &
       i=$((i + 1))
     done
   done
   wait
-  local rc=0
+  # 終了コード:組ごとの失敗 (crc) を合わせる。rust の組は「wgstack の上の agent」の段まで報告だけなので
+  # (docs/development/testing.md の「マージの前に流すテスト」)、go の組も流したときは rust の組の失敗を出すだけにし、
+  # 終了コードに入れない。その段が入ったら SUITE_RUST_GATES を 1 にする。rust の組だけを流したときは、その結果が終了コードになる
+  local SUITE_RUST_GATES=0
+  local rc=0 gosum="" crc rust_failed=0 has_go=0
+  for c in "${cfgs[@]}"; do [[ ${c%/*} == go ]] && has_go=1; done
   for c in "${cfgs[@]}"; do
     echo
-    echo "==== lab suite: netstack=$c, $vms VMs"
+    echo "==== lab suite: agent=${c%/*}, netstack=${c#*/}, $vms VMs"
+    crc=0
     local sums=()
     for ((k = 1; k <= vms; k++)); do
       local d=$out/$c/shard-$k ready ran src
@@ -590,17 +637,29 @@ cmd_suite() {
       else
         echo "shard $k/$vms: did not finish; see $d/shard.log"
       fi
-      if [[ -f $d/summary.json ]]; then sums+=("$d/summary.json"); else rc=1; fi
+      if [[ -f $d/summary.json ]]; then sums+=("$d/summary.json"); else crc=1; fi
     done
-    # summary が欠けても、ある分を統合する。統合はどの shard でも流れなかった仕事を名前で出す
+    # summary が欠けても、ある分を統合する。統合はどの shard でも流れなかった仕事を名前で出す。
+    # rust の組は agent=go の仕事を流さないので、最初の go の組の統合からその結果を取って示す
+    local from=()
+    [[ ${c%/*} == rust && -n $gosum && -f $gosum ]] && from=(-go-summary "$gosum")
     if ((${#sums[@]})); then
-      "$REPO/bin/labhost" merge -out "$out/$c" "${sums[@]}" || rc=1
+      "$REPO/bin/labhost" merge -out "$out/$c" "${from[@]}" "${sums[@]}" || crc=1
     else
-      echo "lab: nothing to merge for netstack=$c: no shard summary" >&2
+      echo "lab: nothing to merge for agent=${c%/*}, netstack=${c#*/}: no shard summary" >&2
+      crc=1
+    fi
+    if ((crc)) && [[ ${c%/*} == rust ]] && ((has_go && !SUITE_RUST_GATES)); then
+      rust_failed=1
+    elif ((crc)); then
       rc=1
     fi
+    [[ ${c%/*} == go && -z $gosum ]] && gosum=$out/$c/summary.json
   done
   echo
+  if ((rust_failed)); then
+    echo "lab: the rust configuration failed; it is report-only until the agent runs on the Rust wgstack, so the exit code leaves it out"
+  fi
   echo "lab: suite wall time from the start to the merge: $((SECONDS - SUITE_T0)) s; VM deletion follows. Logs: $out"
   return $rc
 }
@@ -661,13 +720,15 @@ usage: lab <command>
   shell [ns|vm]       VM 内(ns 指定ならその netns 内)で bash を開く
   build               ホストで ./cmd/... ./tools/... を静的ビルドして bin/ に置き、VM の /usr/local/bin に install する
   test <pkg> [ns]     build tag lab 付きでテストバイナリを作り、VM の ns(既定 vps)で実行する
-  suite [--vms N] [--netstack default|wgstack|both] [--durations FILE] [--parallel N] [--shard-timeout SEC] [--out DIR] [--keep]
-                      一時 VM を N 台 (既定 3) 立てて一式を shard に分けて同時に流し、1 つの判定にまとめて VM を消す
+  suite [--vms N] [--netstack default|wgstack|both] [--agent-impl go|rust|both] [--durations FILE] [--parallel N] [--shard-timeout SEC] [--out DIR] [--keep]
+                      一時 VM を N 台 (既定 3) 立てて一式を shard に分けて同時に流し、1 つの判定にまとめて VM を消す。
+                      組 (agent の実装と netstack) ごとに N 台。結果は <out>/<実装>/<netstack>/
   suite-gc            持ち主のいない一時 VM(lab suite が残したもの)を消す
   host-fix            ホストの firewalld / Docker を設定して VM の IPv4 を通す(sudo)
 
 ns: ${NAMESPACES[*]}
 env: WGFT_LAB_VM=$VM WGFT_LAB_IMAGE=$IMAGE WGFT_LAB_CPU=$CPU WGFT_LAB_MEM=$MEM WGFT_LAB_CPUS=${CPUS:-<unset: not pinned>}
+     WGFT_LAB_AGENT_IMPL=${WGFT_LAB_AGENT_IMPL:-<unset: go>} (go or rust: the userspace-mode agent the checks run)
 EOF
 }
 

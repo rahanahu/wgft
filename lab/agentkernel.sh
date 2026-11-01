@@ -195,7 +195,7 @@ set_hosts() { printf '127.0.0.1 localhost\n' > "$HOSTS"; printf '%s\n' "$@" >> "
 ALLOW=192.168.50.3:25565,192.168.50.3:19132,192.168.50.2:19132,192.168.50.3:25570,192.168.50.2:25580,192.168.50.2:25565,192.168.50.4:25565,192.168.50.5:25565,127.0.0.1:25566,127.0.0.1:19133-19134
 start_agent() { # start_agent [mode]: kernel unless given
   WGFT_MODE=${1:-kernel} WGFT_JOIN="${JOIN:-}" WGFT_AGENT_ALLOW_TARGETS="$ALLOW" \
-    home setsid nohup wgft agent run --data-dir "$ADATA" >> "$ALOG" 2>&1 < /dev/null &
+    home setsid nohup wgft agent run --data-dir "$ADATA" >> "$ALOG" 2>&1 < /dev/null &  # lab: go agent
   disown
   wait_until 20 agent_running
 }
@@ -669,12 +669,12 @@ check_resolve() {
   eqcheck "agent doctor: the table with refused rules beside" "exit=1 failed listener_error" "$(agent_doctor_table)"
   check "agent doctor names the rule forwarding from the last resolution beside them" \
     "Rules still forwarding from the last successful resolution while their name does not resolve, 1: $R_NAME" \
-    "$(home wgft agent doctor --data-dir "$ADATA" --json 2>/dev/null | tr -d '\n')"
+    "$(home wgft agent doctor --data-dir "$ADATA" --json 2>/dev/null | tr -d '\n')"  # lab: go agent
   vps wgft rule rm "$R_OUT" --admin "$ADMIN" >/dev/null
   vps wgft rule rm "$R_LO" --admin "$ADMIN" >/dev/null
   wait_until 30 caught_up
   eqcheck "agent doctor: the table while the name fails" "exit=0 unknown resolve_failed" "$(agent_doctor_table)"
-  out=$(home wgft agent doctor --data-dir "$ADATA" 2>&1)
+  out=$(home wgft agent doctor --data-dir "$ADATA" 2>&1)  # lab: go agent
   check "agent doctor says the kernel keeps forwarding to the old address" "keeps forwarding it to the address from the last successful resolution" "$(echo "$out" | tr -s ' \n' ' ')"
   echo "INFO  agent doctor while the name fails:"; echo "$out" | grep -A6 "^  table" | sed 's/^/INFO    /'
   # the old address stops answering too: now traffic does stop at the target
@@ -821,7 +821,7 @@ eqcheck() { if [ "$2" = "$3" ]; then echo "PASS  $1"; else echo "FAIL  $1: want 
 # as root on the agent host.
 agent_doctor_table() {
   local out code
-  out=$(home wgft agent doctor --data-dir "$ADATA" --json 2>/dev/null); code=$?
+  out=$(home wgft agent doctor --data-dir "$ADATA" --json 2>/dev/null); code=$?  # lab: go agent
   printf 'exit=%s %s' "$code" "$(printf '%s' "$out" | python3 -c '
 import json, sys
 c = next((x for x in json.load(sys.stdin).get("checks") or [] if x.get("id") == "dataplane.table"), {})
@@ -884,10 +884,10 @@ check_drift() {
   echo "INFO  a TCP flow held across the deleted wgft0: $(flow_ok "$held" && echo survived || echo "ended: $(tail -1 "$held")")"
 }
 check_teardown() {
-  echo "== teardown: wgft agent teardown removes only what the agent owns"
+  echo "== teardown: agent teardown removes only what the agent owns"
   local out rc t_stop t_down t_up key other owner before probe=$W/wgft-ak-probe nocap=$W/wgft-ak-nocap
   wait_until 30 caught_up
-  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
+  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?  # lab: go agent
   check "teardown refuses while the agent runs" "the agent is running, so nothing was removed" "$out"
   okcheck "the refusal exits 1" "$([ "$rc" = 1 ] && echo 1 || echo 0)"
   check "wgft0 stays after the refusal" "wgft0" "$(home ip -br link show wgft0 2>&1)"
@@ -897,7 +897,7 @@ check_teardown() {
   # directory: the lock there says nothing about the running agent, so teardown must remove nothing.
   local empty=$W/wgft-ak-empty
   rm -rf "$empty"; mkdir -p "$empty"
-  out=$(home wgft agent teardown --data-dir "$empty" 2>&1); rc=$?
+  out=$(home wgft agent teardown --data-dir "$empty" 2>&1); rc=$?  # lab: go agent
   check "a directory without agent.json removes nothing" "does not exist, so nothing was removed" "$out"
   okcheck "and exits 1" "$([ "$rc" = 1 ] && echo 1 || echo 0)"
   check "it names the table it found" "found: table inet wgft_agent" "$out"
@@ -940,11 +940,11 @@ PY"
   home ip link add wgunrel type wireguard && home wg set wgunrel private-key "$other"
   home nft add table inet unrelated && home nft add chain inet unrelated keep
 
-  out=$(WGFT_MODE=userspace home timeout -k 5 30 wgft agent run --data-dir "$ADATA" 2>&1); rc=$?
+  out=$(WGFT_MODE=userspace home timeout -k 5 30 wgft agent run --data-dir "$ADATA" 2>&1); rc=$?  # lab: go agent
   check "a userspace start is refused while the kernel-mode leftovers remain" "refusing to start [mode-gate WGFT_MODE]" "$out"
   okcheck "the mode gate exits 3" "$([ "$rc" = 3 ] && echo 1 || echo 0)"
 
-  out=$(home wgft agent teardown --data-dir "$ADATA" --dry-run 2>&1)
+  out=$(home wgft agent teardown --data-dir "$ADATA" --dry-run 2>&1)  # lab: go agent
   check "dry run lists wgft0" "remove: the WireGuard interface wgft0, which holds this agent's key" "$out"
   check "dry run lists the old name" "remove: the WireGuard interface wgold, which holds this agent's key" "$out"
   not_forwarded "dry run does not list the interface with another key" "wgunrel" "$out"
@@ -954,7 +954,7 @@ PY"
   owner=$(stat -c %u:%g "$ADATA/agent.json")
   chown 65534:65534 "$ADATA/agent.json"
   t_down=$(date +%s.%N)
-  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
+  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?  # lab: go agent
   echo "$out" | sed 's/^/INFO  teardown: /'
   okcheck "teardown exits 0" "$([ "$rc" = 0 ] && echo 1 || echo 0)"
   check "teardown deleted wgft0" "deleted the WireGuard interface wgft0" "$out"
@@ -971,7 +971,7 @@ PY"
   if [ "$forward_before" = 0 ]; then
     check "the ip_forward change is shown with the command to restore it" "sysctl -w net.ipv4.ip_forward=0" "$out"
   fi
-  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
+  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?  # lab: go agent
   check "a second run finds nothing" "nothing to remove" "$out"
   okcheck "a second run exits 0" "$([ "$rc" = 0 ] && echo 1 || echo 0)"
 
@@ -1014,9 +1014,9 @@ PY
 
   echo "-- a wgft0 that holds the previous key after a stopped rotate-key"
   stop_agent
-  check "a stopped rotate-key keeps the old key as the previous one" "the old key is kept as the previous key" "$(home wgft agent rotate-key --data-dir "$ADATA" 2>&1)"
+  check "a stopped rotate-key keeps the old key as the previous one" "the old key is kept as the previous key" "$(home wgft agent rotate-key --data-dir "$ADATA" 2>&1)"  # lab: go agent
   not_forwarded "the stopped rotate-key cleared last_state" '"last_state": {' "$(cat "$ADATA/agent.json")"
-  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
+  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?  # lab: go agent
   check "teardown names wgft0 by the previous key" "remove: the WireGuard interface wgft0, which holds this agent's previous key" "$out"
   okcheck "without last_state it closes the agent's conntrack entries by wgft0's address" "$([[ "$out" =~ conntrack:\ closed\ [1-9] ]] && echo 1 || echo 0)"
   okcheck "and deletes it" "$([ "$rc" = 0 ] && ! home ip link show wgft0 >/dev/null 2>&1 && echo 1 || echo 0)"
@@ -1026,10 +1026,10 @@ PY
   start_agent kernel
   wait_until 60 tcp_ok 39971
   stop_agent
-  home wgft agent teardown --data-dir "$ADATA" > /dev/null 2>&1
+  home wgft agent teardown --data-dir "$ADATA" > /dev/null 2>&1  # lab: go agent
   home ip link add wgft0 type wireguard && home wg set wgft0 private-key "$other"
   home nft add table inet wgft_agent
-  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
+  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?  # lab: go agent
   check "a wgft0 with another key is named" "leave: wgft0 is a WireGuard interface that holds neither this agent's key nor its previous one" "$out"
   okcheck "and teardown succeeds" "$([ "$rc" = 0 ] && echo 1 || echo 0)"
   check "the wgft0 with another key stays" "wgft0" "$(home ip -br link show wgft0 2>&1)"
@@ -1042,9 +1042,9 @@ PY
   stop_agent
   home ip link del wgft0
   home nft delete table inet wgft_agent
-  out=$(WGFT_MODE=userspace home timeout -k 5 30 wgft agent run --data-dir "$ADATA" 2>&1); rc=$?
+  out=$(WGFT_MODE=userspace home timeout -k 5 30 wgft agent run --data-dir "$ADATA" 2>&1); rc=$?  # lab: go agent
   okcheck "the records alone make a userspace start refuse" "$([ "$rc" = 3 ] && [[ "$out" == *mode-gate* ]] && echo 1 || echo 0)"
-  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
+  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?  # lab: go agent
   check "teardown clears the records alone" "cleared the kernel-mode records" "$out"
   okcheck "and exits 0" "$([ "$rc" = 0 ] && echo 1 || echo 0)"
   not_forwarded "agent.json has no mode record after that" '"mode"' "$(cat "$ADATA/agent.json")"
@@ -1055,7 +1055,7 @@ PY
   stop_agent
   set_recorded_mode future
   before=$(sha256sum < "$ADATA/agent.json")
-  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?
+  out=$(home wgft agent teardown --data-dir "$ADATA" 2>&1); rc=$?  # lab: go agent
   check "an unknown mode stops teardown" "cannot continue [conflict WGFT_MODE]" "$out"
   okcheck "with exit code 3" "$([ "$rc" = 3 ] && echo 1 || echo 0)"
   okcheck "agent.json is unchanged" "$([ "$(sha256sum < "$ADATA/agent.json")" = "$before" ] && echo 1 || echo 0)"
@@ -1065,12 +1065,12 @@ PY
 
   echo "-- without CAP_NET_ADMIN"
   rm -rf "$nocap"; mkdir -p "$nocap"; cp "$ADATA/agent.json" "$nocap/"; chown -R 65534:65534 "$nocap"
-  out=$(home runuser -u nobody -- wgft agent teardown --data-dir "$nocap" --config "$nocap/none.env" 2>&1); rc=$?
+  out=$(home runuser -u nobody -- wgft agent teardown --data-dir "$nocap" --config "$nocap/none.env" 2>&1); rc=$?  # lab: go agent
   check "a run without CAP_NET_ADMIN is a prerequisite refusal" "cannot continue [prerequisite CAP_NET_ADMIN]" "$out"
   okcheck "with exit code 3" "$([ "$rc" = 3 ] && echo 1 || echo 0)"
   check "and wgft0 stays" "wgft0" "$(home ip -br link show wgft0 2>&1)"
   rm -rf "$nocap" "$key" "$other"
-  home wgft agent teardown --data-dir "$ADATA" > /dev/null 2>&1
+  home wgft agent teardown --data-dir "$ADATA" > /dev/null 2>&1  # lab: go agent
   home ip link del wgunrel
   home nft delete table inet unrelated
 }
@@ -1266,8 +1266,8 @@ check_pin() {
   check "the table stays after another band" "chain nat_pre" "$(home nft list table inet wgft_agent 2>&1)"
   wait_until 40 hb_refused
   check "the heartbeat names the refusal" "refused the wg configuration" "$(agents_json | grep -m1 '"reason"')"
-  home wgft agent doctor --data-dir "$ADATA" 2>&1 | grep -iE "tunnel|refused" | sed 's/^/INFO  doctor | /'
-  check "agent doctor names the refusal" "refused the wg configuration" "$(home wgft agent doctor --data-dir "$ADATA" 2>&1 | tr -s ' \n' ' ')"
+  home wgft agent doctor --data-dir "$ADATA" 2>&1 | grep -iE "tunnel|refused" | sed 's/^/INFO  doctor | /'  # lab: go agent
+  check "agent doctor names the refusal" "refused the wg configuration" "$(home wgft agent doctor --data-dir "$ADATA" 2>&1 | tr -s ' \n' ' ')"  # lab: go agent
   not_forwarded "no forwarding end to end while the server uses another band" "tcp-echo" "$(tcp_echo 39971)"
   # the 30-second check keeps repairing the table of the last applied state while refusing
   home nft delete table inet wgft_agent
