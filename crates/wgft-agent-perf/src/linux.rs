@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use clap::{Parser, ValueEnum};
 use socket2::{Domain, Protocol, Socket, Type};
 use wgft_wireguard::{
-    DEFAULT_KEEPALIVE, DEFAULT_MTU, Device, DeviceConfig, Ipv4Prefix, Limits, PeerConfig,
+    DEFAULT_KEEPALIVE, DEFAULT_MTU, Device, DeviceConfig, Ipv4Prefix, Limits, Outgoing, PeerConfig,
     PrivateKey, ProtocolTimers, PublicKey, Roaming, Transmit,
 };
 
@@ -304,6 +304,27 @@ impl Cpu {
     }
 }
 
+/// Sends one datagram, waiting while the socket is full.
+fn send_datagram(
+    socket: &UdpSocket,
+    to: SocketAddr,
+    payload: &[u8],
+    calls: &mut Syscalls,
+) -> std::io::Result<()> {
+    loop {
+        match socket.send_to(payload, to) {
+            Ok(_) => {
+                calls.data += 1;
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                wait(socket, libc::POLLOUT, 100)?;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// One end: a socket and the device layer on it.
 struct Link {
     socket: UdpSocket,
@@ -311,28 +332,40 @@ struct Link {
     /// Decrypted packets handed up so far.
     delivered: u64,
     buf: Vec<u8>,
+    /// The device layer decrypts into this buffer.
+    plain: Vec<u8>,
+    /// The device layer encrypts into this buffer; `direct` names the datagram it holds.
+    sealed: Vec<u8>,
+    direct: Option<Outgoing>,
 }
 
 impl Link {
     fn new(socket: UdpSocket, device: Device) -> Self {
         let buf = vec![0; device.max_transmit_len() + 64];
+        let sealed = vec![0; device.max_transmit_len()];
         Self {
             socket,
             device,
             delivered: 0,
             buf,
+            plain: vec![0; usize::from(u16::MAX)],
+            sealed,
+            direct: None,
         }
     }
 
     /// The adapter to the device layer's encrypt side: one inner packet in.
     fn encrypt(&mut self, now: Instant, packet: &[u8]) {
-        self.device.handle_packet(now, packet);
+        self.direct = self.device.handle_packet(now, packet, &mut self.sealed);
     }
 
     /// The adapter to the device layer's decrypt side: one datagram in, decrypted packets counted.
     fn decrypt(&mut self, now: Instant, from: SocketAddr, n: usize) {
-        self.device.handle_datagram(now, from, &self.buf[..n]);
-        while self.device.poll_packet().is_some() {
+        if self
+            .device
+            .handle_datagram(now, from, &self.buf[..n], &mut self.plain)
+            .is_some()
+        {
             self.delivered += 1;
         }
     }
@@ -340,18 +373,10 @@ impl Link {
     /// Sends every datagram the device layer has, one `sendto` each.
     fn send_pending(&mut self, calls: &mut Syscalls) -> std::io::Result<()> {
         while let Some(Transmit { to, payload }) = self.device.poll_transmit() {
-            loop {
-                match self.socket.send_to(&payload, to) {
-                    Ok(_) => {
-                        calls.data += 1;
-                        break;
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        wait(&self.socket, libc::POLLOUT, 100)?;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
+            send_datagram(&self.socket, to, &payload, calls)?;
+        }
+        if let Some(out) = self.direct.take() {
+            send_datagram(&self.socket, out.to, &self.sealed[..out.len], calls)?;
         }
         Ok(())
     }
