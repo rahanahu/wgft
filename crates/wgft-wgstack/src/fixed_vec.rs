@@ -111,6 +111,21 @@ impl<T: Copy> FixedVec<T> {
     }
 }
 
+/// 確保した長さ `N` の byte の配列です。`Box` の型はこの module だけが書きます。
+pub(crate) type BoxedBytes<const N: usize> = Box<[u8; N]>;
+
+/// 0 で埋めた長さ `N` の byte の配列を、失敗を返す確保で取ります。chunk の確保に使います。
+/// 容量が `N` でなければ、`into_boxed_slice` が縮めるために確保し直すので、確保の失敗として扱います。
+pub(crate) fn try_boxed_bytes<const N: usize>() -> Result<BoxedBytes<N>, AllocError> {
+    let mut v: Vec<u8> = Vec::new();
+    v.try_reserve_exact(N).map_err(|_| AllocError)?;
+    if v.capacity() != N {
+        return Err(AllocError);
+    }
+    v.resize(N, 0);
+    v.into_boxed_slice().try_into().map_err(|_| AllocError)
+}
+
 impl<T> Default for FixedVec<T> {
     fn default() -> Self {
         Self::new()
@@ -131,9 +146,13 @@ impl<T> DerefMut for FixedVec<T> {
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for FixedVec<T> {
+/// 中身は大きな表になりうるので、長さと容量だけを出します。
+impl<T> fmt::Debug for FixedVec<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.v.iter()).finish()
+        f.debug_struct("FixedVec")
+            .field("len", &self.v.len())
+            .field("capacity", &self.v.capacity())
+            .finish()
     }
 }
 
@@ -191,6 +210,12 @@ mod tests {
             FixedVec::<u8>::try_with_capacity(isize::MAX as usize + 1).err(),
             Some(AllocError)
         );
+    }
+
+    #[test]
+    fn boxed_bytes_are_zeroed() {
+        let b = try_boxed_bytes::<4096>().unwrap();
+        assert!(b.iter().all(|&x| x == 0));
     }
 
     #[test]
