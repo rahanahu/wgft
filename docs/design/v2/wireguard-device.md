@@ -422,7 +422,7 @@ sanstun を上げてその振る舞いが直ると試験が落ち、消す手当
 
 | 手当て | 補う sanstun 0.1.0 の振る舞い | 固定する試験 | 消し方 |
 | --- | --- | --- | --- |
-| `stamp_base`:sanstun に渡す Unix 時刻から 27 秒を引く ([時刻](#時刻)) | 開始の印の秒が 2^62 + 37 + Unix 時刻 | `sanstun_stamps_initiations_27_seconds_ahead` | sanstun が 2^62 + 10 に直した版に上げるのと同じ変更で、`stamp_base` を消して時刻をそのまま渡します。印は前後で同じ値になり、server の側で戻りません。直った sanstun で消し忘れると印が 27 秒戻り、server は前の印より古い開始を 27 秒の間捨てます。agent の `agent.json.clock` の語の無い行を読む扱い ([agent の制御](agent-control.md)) は、前の版のファイルのためのもので、手当てとは別に残せます |
+| `stamp_base`:sanstun に渡す Unix 時刻から 27 秒を引く ([時刻](#時刻)) | 開始の印の秒が 2^62 + 37 + Unix 時刻 | `sanstun_stamps_initiations_27_seconds_ahead` | sanstun が 2^62 + 10 に直した版に上げるのと同じ変更で、`stamp_base` を消して時刻をそのまま渡します。印は前後で同じ値になり、server の側で戻りません。直った sanstun で消し忘れると印が 27 秒戻り、server は前の印より古い開始を 27 秒の間捨てます。agent の `agent.json.clock` は値を前の版の単位 (27 秒小さい値) で持ちます ([agent の制御](agent-control.md))。手当てを消した後もこの単位は変えず、そのまま残せます |
 | `inner_mtu`:送る packet の上限を 16 の倍数に切り下げる ([MTU と詰め物](#mtu-と詰め物)) | 平文を MTU に依らず 16 の倍数まで詰める | `sanstun_pads_past_the_mtu` | sanstun が詰め物の上限を受ける口を持ったら、そこへ設定の MTU を渡し、`inner_mtu` を設定の MTU そのものにします。試験は口が増えても落ちないので、sanstun を上げるときに変更の記録を確かめます |
 | `PassiveKeepalive`:passive keepalive を最初の受信から 10 秒に送らせる ([passive keepalive](#passive-keepalive)) | データを受けるたびに passive keepalive の期限を延ばす | `sanstun_postpones_the_passive_keepalive_on_every_receipt` | 型と、`protocol.rs` の `passive` の呼び出し (`on_data`、`on_send`、`deadline`、`force`) と、`Device::handle_timeout` の `passive_keepalive` の呼び出しを消します |
 

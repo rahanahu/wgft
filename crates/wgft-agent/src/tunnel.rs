@@ -605,10 +605,10 @@ async fn resolve(endpoint: &str) -> Result<SocketAddrV4, String> {
 /// 最も高い水位と、データディレクトリのファイルに残した水位の大きい方を下限として渡す。ファイルは
 /// agent.json と分ける。Go の agent が agent.json を書き直すと、知らないキーを捨てるためである。
 ///
-/// ファイルは秒の値と、印が標準の TAI64N の基準 (2^62 + 10) によることを示す [`FORMAT`] の語を 1 行に
-/// 書く。語の無い行は、印が 27 秒進んでいた前の版 (sanstun の基準 2^62 + 37 をそのまま使った版) が
-/// 書いたものなので、27 秒を足して読む。相手は前の版の進んだ印を覚えているので、足さないと前の版の
-/// 終わりから 27 秒の間の開始が古いものの再送として捨てられる。
+/// ファイルは 1 行の秒の値を、前の版の単位で持つ。前の版は sanstun の基準 (2^62 + 37) のまま印を
+/// 付けたので、同じ値の下限でも印が今の版より 27 秒進む。今の版は [`FILE_BEHIND`] を引いて書き、足して
+/// 読む。こうすると、前の版と今の版のどちらが書いたファイルを、どちらが読んでも、次の印は相手が前に
+/// 受けた印を下回らない。前の版が読むと印は 27 秒進むだけで、戻らない。
 mod stamp {
     use std::path::Path;
     use std::sync::Mutex;
@@ -621,24 +621,17 @@ mod stamp {
     /// device が受ける下限の上限。これ以上の値は壊れた記録として捨てる。
     const FLOOR_LIMIT: u64 = 1 << 40;
 
-    /// 秒の値の後に書く語。印が標準の TAI64N の基準によることを示す。
-    const FORMAT: &str = "standard-tai64n";
-
-    /// 語の無い前の版の記録の印が、標準より進んでいた秒。
-    const LEGACY_AHEAD: Duration = Duration::from_secs(27);
+    /// ファイルの値と、今の版の下限 (本当の Unix 時刻) の差。前の版の印が標準の印より進んでいた秒で、
+    /// ファイルの値は今の版の下限よりこれだけ小さい。
+    const FILE_BEHIND: u64 = 27;
 
     /// プロセスの中で見た最も高い水位。
     static HIGH: Mutex<Duration> = Mutex::new(Duration::ZERO);
 
     fn read(file: Option<&Path>) -> Option<Duration> {
         let text = std::fs::read_to_string(file?).ok()?;
-        let mut words = text.split_whitespace();
-        let secs = Duration::from_secs(words.next()?.parse::<u64>().ok()?);
-        match (words.next(), words.next()) {
-            (Some(FORMAT), None) => Some(secs),
-            (None, _) => secs.checked_add(LEGACY_AHEAD),
-            _ => None,
-        }
+        let secs = text.trim().parse::<u64>().ok()?;
+        secs.checked_add(FILE_BEHIND).map(Duration::from_secs)
     }
 
     /// 新しい device に渡す下限。残した値が読めないか大きすぎれば、1 行を出して捨て、壁時計から始める。
@@ -694,9 +687,9 @@ mod stamp {
         }
     }
 
-    /// ファイルの中身。
+    /// ファイルの中身。`secs` は今の版の下限 (切り上げた秒)。
     fn encode(secs: u64) -> String {
-        format!("{secs} {FORMAT}\n")
+        format!("{}\n", secs.saturating_sub(FILE_BEHIND))
     }
 
     /// 一時ファイルに書いて fsync し、rename してからディレクトリも fsync する。
@@ -740,20 +733,27 @@ mod stamp {
             assert!(!f.exists());
             std::fs::write(&f, "100 other-format\n").unwrap();
             assert_eq!(read(Some(&f)), None);
+            // ファイルの値は前の版の単位
+            record(Some(&f), future + Duration::from_secs(5), false);
+            assert_eq!(
+                std::fs::read_to_string(&f).unwrap(),
+                format!("{}\n", future.as_secs() + 5 - 27)
+            );
             std::fs::remove_dir_all(dir).unwrap();
         }
 
         #[test]
-        fn a_record_of_the_earlier_stamps_is_read_27_seconds_later() {
+        fn the_file_keeps_the_earlier_builds_units() {
+            // 前の版は値 N の下限から 2^62 + 37 + N + 1 秒以上の印を付けた。今の版は 27 秒足して読み、
+            // 2^62 + 10 + (N + 27) + 1 秒以上の印を付けるので、同じ値から同じ印の下限になる
             let dir = std::env::temp_dir().join(format!("wgft-stamp-old-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let f = dir.join("agent.json.clock");
-            // 前の版は印を 27 秒進めて付け、秒の値だけを書いた
             std::fs::write(&f, "4100000000\n").unwrap();
             let floor = read(Some(&f)).unwrap();
             assert_eq!(floor, Duration::from_secs(4_100_000_027));
-            // 今の版の記録は語が付き、そのまま読む
-            assert_eq!(encode(4_100_000_027), "4100000027 standard-tai64n\n");
+            // 今の版が書いた値を前の版が読めば、印は 27 秒進むだけで戻らない
+            assert_eq!(encode(4_100_000_027), "4100000000\n");
             std::fs::write(&f, encode(4_100_000_027)).unwrap();
             assert_eq!(read(Some(&f)), Some(floor));
             std::fs::remove_dir_all(dir).unwrap();
