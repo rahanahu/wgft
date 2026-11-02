@@ -241,6 +241,7 @@ Go の実行環境に依る読み取りは、Rust の agent では次のよう�
 - `lifecycle.sh` の check 5 と 5b:エージェントの `memory soft limit:` の行の代わりに `memory bound:` の行を読み、RSS がその値と 32 MiB の和を超えないことを確かめます。
   あわせて、洪水の前 (トンネルと待ち受けを開いた後) に RSS を測り、洪水の間の育ちが `memory bound terms:` の行のうち洪水が満たせる項 (`core fixed`、`tables`、`driver`、`device`、`tcp relay`、`udp relay` と、洪水が使った接続の枠の配列) の和に 32 MiB を足した値を超えないことを確かめます。
   洪水が使った接続の枠の配列は、エージェントの最後の `connection slots used so far` の行の KiB です。
+  この行は `lab-observe` の feature を付けた build だけが書き、`lab suite` の build が付けます。`lab build` の build には付かず、行が無いときは `core arrays` の項の全体を数えます。
   洪水はデータを運ばないので、`tcp bulk` と `core flows` は入れません。
   項の分け方は [agent-parity.md](../docs/design/v2/agent-parity.md#メモリの上界の行) にあります。
   `WGFT_LAB_RSS_PHASES=1` を付けると、check 5 はエージェントの RSS を段ごとに測った 1 行 (`RSSPHASES`) も出します。

@@ -202,6 +202,7 @@ pub struct Tunnel {
     shared: Arc<Mutex<Reading>>,
     dataplane: Handle<Stack>,
     monitor: JoinHandle<()>,
+    #[cfg(feature = "lab-observe")]
     slot_watch: JoinHandle<()>,
     /// トンネルを立てた時刻。データプレーンの時計の値。
     started_at: Instant,
@@ -285,12 +286,14 @@ impl Tunnel {
             dataplane.clone(),
             dead,
         ));
+        #[cfg(feature = "lab-observe")]
         let slot_watch = tokio::spawn(slot_watch::slot_watch(dataplane.clone(), limits));
         Ok(Tunnel {
             cfg,
             shared,
             dataplane,
             monitor,
+            #[cfg(feature = "lab-observe")]
             slot_watch,
             started_at: dataplane::clock::now(),
             clock: clock.map(Path::to_path_buf),
@@ -383,8 +386,11 @@ impl Tunnel {
         stamp::record(self.clock.as_deref(), self.clock_now().await, !exiting).await;
         self.monitor.abort();
         let _ = self.monitor.await;
-        self.slot_watch.abort();
-        let _ = self.slot_watch.await;
+        #[cfg(feature = "lab-observe")]
+        {
+            self.slot_watch.abort();
+            let _ = self.slot_watch.await;
+        }
         generations.stop().await;
     }
 }

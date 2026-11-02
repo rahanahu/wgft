@@ -458,6 +458,10 @@ jobs:
               echo "cargo tree $args builds the wgstack core with its harness feature" >&2
               exit 1
             fi
+            if printf '%s\n' "$features" | grep -F 'wgft-agent feature "lab-observe"'; then
+              echo "cargo tree $args builds the agent with its lab-observe feature" >&2
+              exit 1
+            fi
           done
       # The fuzz targets build these crates with code that the normal build leaves out:
       # wgft-wgstack under --cfg fuzzing, wgft-wireguard with its fuzzing and deterministic
