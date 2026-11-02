@@ -245,9 +245,8 @@ if [ -n "$NETEM_SEED" ]; then
   fi
   vps tc qdisc del dev pub1 root 2>/dev/null
 fi
-tq_pids() { # the tcpquality.py processes of this sandbox
+tq_pids() { # the tcpquality.py processes in the lab's namespaces; a bare pgrep -f would match the whole VM and itself
   local p
-  if [ -z "$SANDBOX" ]; then pgrep -f -- '/tcpquality.py '; return 0; fi
   for p in $(sandbox_pids); do
     tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- '/tcpquality.py ' && echo "$p"
   done
@@ -272,6 +271,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# bad_config <message>: a setting the run cannot use. Nothing has been changed yet, so it only exits.
+bad_config() { echo "tcpquality.sh: $*" >&2; exit 2; }
+is_whole() { case $1 in ''|*[!0-9]*) return 1 ;; esac; }
+# need_positive <NAME> <value> <what NAME is>: the value is digits and not the single digit 0
+need_positive() { is_whole "$2" && [ "$2" != 0 ] || bad_config "$1 is $3"; }
 for mode in $MODES; do
   case "$mode" in kernel|userspace|gvisor|wgstack|rust) ;; *) echo "usage: tcpquality.sh [kernel|userspace|gvisor|wgstack|rust]..." >&2; exit 2;; esac
   if [ "$mode" = rust ] && [ ! -x "$RUST_AGENT" ]; then
@@ -280,36 +284,34 @@ for mode in $MODES; do
   fi
 done
 case "$TOOL" in
-  tcpquality) [ "$STREAMS" = 1 ] || { echo "tcpquality.sh: STREAMS above 1 needs TOOL=iperf3" >&2; exit 2; } ;;
-  iperf3) [ "$OUTAGE_S" = 0 ] || { echo "tcpquality.sh: TOOL=iperf3 needs OUTAGE_S=0" >&2; exit 2; } ;;
-  *) echo "tcpquality.sh: TOOL is tcpquality or iperf3" >&2; exit 2 ;;
+  tcpquality) [ "$STREAMS" = 1 ] || bad_config "STREAMS above 1 needs TOOL=iperf3" ;;
+  iperf3) [ "$OUTAGE_S" = 0 ] || bad_config "TOOL=iperf3 needs OUTAGE_S=0" ;;
+  *) bad_config "TOOL is tcpquality or iperf3" ;;
 esac
 case "$AGENT_GSO" in
   off) ;;
   on) [ "$DELAY_MS" = 0 ] && [ "$LOSS_PCT" = 0 ] && [ -z "$RATE_MBIT" ] ||
-    { echo "tcpquality.sh: AGENT_GSO=on is for the fast path only, where no netem queues the datagrams" >&2; exit 2; } ;;
-  *) echo "tcpquality.sh: AGENT_GSO is off or on" >&2; exit 2 ;;
+    bad_config "AGENT_GSO=on is for the fast path only, where no netem queues the datagrams" ;;
+  *) bad_config "AGENT_GSO is off or on" ;;
 esac
 case "$UDPPING" in
-  1) [ "$TOOL" = iperf3 ] || { echo "tcpquality.sh: UDPPING=1 needs TOOL=iperf3" >&2; exit 2; } ;;
+  1) [ "$TOOL" = iperf3 ] || bad_config "UDPPING=1 needs TOOL=iperf3" ;;
   ''|0) UDPPING= ;;
-  *) echo "tcpquality.sh: UDPPING is 1 or 0" >&2; exit 2 ;;
+  *) bad_config "UDPPING is 1 or 0" ;;
 esac
-case "$IPERF_MBIT" in
-  '') ;;
-  *[!0-9]*|0) echo "tcpquality.sh: IPERF_MBIT is a whole number of Mbit/s of 1 or more" >&2; exit 2 ;;
-  *) [ "$TOOL" = iperf3 ] || { echo "tcpquality.sh: IPERF_MBIT needs TOOL=iperf3" >&2; exit 2; } ;;
-esac
-case "$STREAMS" in ''|*[!0-9]*|0) echo "tcpquality.sh: STREAMS is a whole number of 1 or more" >&2; exit 2 ;; esac
-case "$KERNEL_RMEM_MAX" in
-  '') ;;
-  *[!0-9]*) echo "tcpquality.sh: KERNEL_RMEM_MAX is a whole number of bytes" >&2; exit 2 ;;
-  *) [ "$KERNEL_RMEM_MAX" -ge 4096 ] || { echo "tcpquality.sh: KERNEL_RMEM_MAX is at least 4096 bytes" >&2; exit 2; } ;;
-esac
+if [ -n "$IPERF_MBIT" ]; then
+  need_positive IPERF_MBIT "$IPERF_MBIT" "a whole number of Mbit/s of 1 or more"
+  [ "$TOOL" = iperf3 ] || bad_config "IPERF_MBIT needs TOOL=iperf3"
+fi
+need_positive STREAMS "$STREAMS" "a whole number of 1 or more"
+if [ -n "$KERNEL_RMEM_MAX" ]; then
+  is_whole "$KERNEL_RMEM_MAX" || bad_config "KERNEL_RMEM_MAX is a whole number of bytes"
+  [ "$KERNEL_RMEM_MAX" -ge 4096 ] || bad_config "KERNEL_RMEM_MAX is at least 4096 bytes"
+fi
 case "$DIRECTION" in
   down) transfer=download reader="the client" writer="the LAN host" dir_field= READER_NS=$CLIENT_NS ;;
   up) transfer=upload reader="the LAN host" writer="the client" dir_field="direction=up " READER_NS=$LAN_NS ;;
-  *) echo "tcpquality.sh: DIRECTION is down or up" >&2; exit 2 ;;
+  *) bad_config "DIRECTION is down or up" ;;
 esac
 # The agent's UDP segmentation offload is off on every path, for two reasons:
 # - netem: wireguard-go's Linux bind sends a run of same-sized datagrams as one UDP GSO packet, and
@@ -330,11 +332,18 @@ gso_was=$(ip netns exec "$HOME_NS" $Q udpgso eth0 show | grep -o 'requested=[a-z
 if [ "$gso_was" != on ]; then
   echo "WARN  UDP segmentation offload on the agent's eth0 is ${gso_was:-unreadable} at the start; it is not turned back on at exit"
 fi
+# restore_or_fail <what failed, after "cannot "> <command...>: run the command that puts a changed
+# value back; say so and fail if it does not work
+restore_or_fail() {
+  local what=$1
+  shift
+  "$@" >/dev/null && return 0
+  echo "FAIL  cannot $what"
+  return 1
+}
 restore_gso() {
   [ "$gso_was" = on ] || return 0
-  ip netns exec "$HOME_NS" $Q udpgso eth0 on >/dev/null && return 0
-  echo "FAIL  cannot turn UDP segmentation offload back on on the agent's eth0"
-  return 1
+  restore_or_fail "turn UDP segmentation offload back on on the agent's eth0" ip netns exec "$HOME_NS" $Q udpgso eth0 on
 }
 # the reader's tcp_rmem for KERNEL_RMEM_MAX: read once, lowered for the kernel mode, put back after it
 rmem_was=$(ip netns exec "$READER_NS" sysctl -n net.ipv4.tcp_rmem | tr -s ' \t' '  ')
@@ -345,9 +354,9 @@ set_rmem() { # set_rmem <min default max>
 }
 restore_rmem() {
   [ -n "$rmem_set" ] || return 0
-  set_rmem $rmem_was && { rmem_set=; return 0; }
-  echo "FAIL  cannot put tcp_rmem back to $rmem_was in the $READER_NS namespace"
-  return 1
+  # shellcheck disable=SC2086 # the three values of tcp_rmem are words on purpose
+  restore_or_fail "put tcp_rmem back to $rmem_was in the $READER_NS namespace" set_rmem $rmem_was || return 1
+  rmem_set=
 }
 on_exit() {
   local rc=$?
@@ -368,11 +377,14 @@ for mode in $MODES; do
   esac
   rmem_field=
   if [ "$mode" = kernel ] && [ -n "$KERNEL_RMEM_MAX" ]; then
-    # shellcheck disable=SC2086 # the three values of tcp_rmem are words on purpose
-    set -- $rmem_was
+    read -r rmem_min rmem_def _ <<<"$rmem_was"
     rmem_set=1
-    set_rmem "$1" "$(( $2 < KERNEL_RMEM_MAX ? $2 : KERNEL_RMEM_MAX ))" "$KERNEL_RMEM_MAX" ||
-      { echo "FAIL  cannot set the tcp_rmem maximum to $KERNEL_RMEM_MAX in the $READER_NS namespace"; fail=1; restore_rmem; continue; }
+    if ! set_rmem "$rmem_min" "$(( rmem_def < KERNEL_RMEM_MAX ? rmem_def : KERNEL_RMEM_MAX ))" "$KERNEL_RMEM_MAX"; then
+      echo "FAIL  cannot set the tcp_rmem maximum to $KERNEL_RMEM_MAX in the $READER_NS namespace"
+      fail=1
+      restore_rmem
+      continue
+    fi
     echo "   $READER_NS tcp_rmem: $(ip netns exec "$READER_NS" sysctl -n net.ipv4.tcp_rmem)"
     rmem_field="rcv_rmem_max=$KERNEL_RMEM_MAX "
   else
