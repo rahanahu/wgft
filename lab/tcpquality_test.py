@@ -66,6 +66,18 @@ class CpuPaired(unittest.TestCase):
         lines = [l.replace("pass=1", "pass=0") if l.startswith("PAIRED round=2 run=1 arm=y") else l for l in lines]
         self.assertEqual(analyse(lines), (1, EXPECTED_LEFT_OUT))
 
+    def test_non_numeric_and_nan_values_are_failed_pairs(self):
+        # a value that is not a number, or is nan, fails its pair instead of raising or passing
+        lines = synthetic_log()
+        lines = [l.replace("agent_cpu_s_per_gb=1.020", "agent_cpu_s_per_gb=abc") if l.startswith("PAIRED round=2 run=1 arm=x") else l
+                 for l in lines]
+        lines = [l.replace("agent_cpu_s_per_gb=1.040", "agent_cpu_s_per_gb=nan") if l.startswith("PAIRED round=4 run=1 arm=x") else l
+                 for l in lines]
+        rc, out = analyse(lines)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("failed=2", out)
+        self.assertNotIn("Traceback", out)
+
 
 if __name__ == "__main__":
     unittest.main()
