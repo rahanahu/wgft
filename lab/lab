@@ -123,12 +123,10 @@ wait_net() { timeout 120 bash -c "$(declare -f inc); $(printf '%q ' inc wait "$V
 # WGFT_LAB_AGENT_IMPL はユーザー空間モードのエージェントの実装(go か rust)を選ぶ。値があれば VM の中のコマンドに
 # そのまま渡し、lab/sandbox.sh がそれで AGENT_WGFT を決める。未設定なら go と同じ
 # (docs/design/v2/agent-parity.md の「ラボの切り替え」)
-# WGFT_LAB_RSS_PHASES は値があればそのまま渡す。lifecycle.sh の check 5 が agent の RSS を段ごとに測って書く
 in_vm() {
   local env=()
   [[ -n ${WGFT_LAB_AGENT_NETSTACK:-} ]] && env+=(--env "WGFT_AGENT_NETSTACK=$WGFT_LAB_AGENT_NETSTACK")
   [[ -n ${WGFT_LAB_AGENT_IMPL:-} ]] && env+=(--env "WGFT_LAB_AGENT_IMPL=$WGFT_LAB_AGENT_IMPL")
-  [[ -n ${WGFT_LAB_RSS_PHASES:-} ]] && env+=(--env "WGFT_LAB_RSS_PHASES=$WGFT_LAB_RSS_PHASES")
   inc exec "$VM" "${env[@]}" --cwd "$SHARE" -- "$@"
 }
 

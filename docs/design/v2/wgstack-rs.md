@@ -799,7 +799,7 @@ glibc の build では、それに加えて `memcpy` が速いと考えます。
 
 #### メモリ
 
-`lifecycle.sh kernel 5 5b` を `WGFT_LAB_RSS_PHASES=1` で流し、check 5 (UDP 4096、TCP 1024 の上限) の中でエージェントの RSS を段ごとに測りました。
+`lifecycle.sh kernel 5 5b` に一時的に足した測り (環境変数 `WGFT_LAB_RSS_PHASES=1`。決定の後に取り除いたので、Git の履歴の `lab/lifecycle.sh` にあります) を付けて流し、check 5 (UDP 4096、TCP 1024 の上限) の中でエージェントの RSS を段ごとに測りました。
 段は、起動の後、エージェントが 512 MiB を受けた後、洪水の最中、TCP の洪水の接続が閉じた後、エージェントが 512 MiB を送った後、UDP のセッションが無通信の期限 (120 秒) で閉じた後です。
 check 5 と 5b はどの build でも通りました。
 
