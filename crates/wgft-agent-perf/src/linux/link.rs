@@ -5,7 +5,8 @@ use std::net::{SocketAddr, UdpSocket};
 use std::os::fd::AsRawFd;
 use std::time::Instant;
 
-use wgft_udp_batch::{MAX_SLOTS, RxBatch, TxBatch, sys};
+use wgft_udp_batch::crypto::Crypto;
+use wgft_udp_batch::{MAX_SLOTS, RX_SLOT, RxBatch, TxBatch, sys};
 use wgft_wireguard::{Device, Outgoing, PublicKey, Transmit};
 
 use super::cpu::wait;
@@ -62,20 +63,43 @@ struct Batch {
     rx: RxBatch,
     tx: TxBatch,
     gso: bool,
+    /// The crypto workers and their lanes, with `--crypto-workers`: the split device calls of the data
+    /// plane's parallel path. Packets wait in the packet slots until the batch is sealed.
+    crypto: Option<Crypto>,
+    /// Packets written into the packet slots and not sealed yet, with `crypto`.
+    pending: usize,
+}
+
+/// How the measured end runs its crypto: on the data plane's crypto workers (`lanes - 1` of them),
+/// a round of fewer than `min_bytes` bytes on the measured thread alone.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Lanes {
+    pub(super) lanes: usize,
+    pub(super) min_bytes: usize,
 }
 
 impl Link {
-    pub(super) fn new(socket: UdpSocket, device: Device, batching: bool) -> Self {
+    /// One end. With `lanes`, make it on the thread that measures it: the crypto workers' owner.
+    pub(super) fn new(
+        socket: UdpSocket,
+        device: Device,
+        batching: bool,
+        lanes: Option<Lanes>,
+    ) -> Self {
         let buf = vec![0; device.max_transmit_len() + 64];
         let sealed = vec![0; device.max_transmit_len()];
         let batch = batching.then(|| {
             let fd = socket.as_raw_fd();
             // データプレーンと同じく、GRO を有効にし、GSO の有無を調べる
             let _ = sys::enable_gro(fd);
+            let n = lanes.map_or(1, |l| l.lanes);
+            let rx = RxBatch::new(MAX_SLOTS, true, device.max_transmit_len(), n);
             Batch {
-                rx: RxBatch::new(MAX_SLOTS, true, device.max_transmit_len()),
-                tx: TxBatch::new(MAX_SLOTS, true, device.mtu(), device.max_transmit_len()),
+                crypto: lanes.map(|l| Crypto::new(rx.plain.len(), l.min_bytes)),
+                rx,
+                tx: TxBatch::new(MAX_SLOTS, true, device.mtu(), device.max_transmit_len(), n),
                 gso: sys::has_gso(fd),
+                pending: 0,
             }
         });
         Self {
@@ -95,9 +119,17 @@ impl Link {
     /// slot.
     pub(super) fn encrypt(&mut self, now: Instant, packet: &[u8]) {
         if let Some(b) = &mut self.batch {
+            if b.crypto.is_some() {
+                let mut slots = b.tx.packet_slots();
+                slots.slot(b.pending)[..packet.len()].copy_from_slice(packet);
+                slots.set_len(b.pending, packet.len());
+                b.pending += 1;
+                return;
+            }
             let i = b.tx.n_sealed;
-            b.tx.packet_slot(i)[..packet.len()].copy_from_slice(packet);
-            b.tx.set_len(i, packet.len());
+            let mut slots = b.tx.packet_slots();
+            slots.slot(i)[..packet.len()].copy_from_slice(packet);
+            slots.set_len(i, packet.len());
             let (p, out) = b.tx.seal_slot(i);
             if let Some(o) = self.device.handle_packet(now, p, out) {
                 b.tx.push_sealed(o.to, o.len);
@@ -125,6 +157,13 @@ impl Link {
             send_datagram(&self.socket, to, &payload, calls)?;
         }
         if let Some(b) = &mut self.batch {
+            if let Some(c) = &mut b.crypto
+                && b.pending > 0
+            {
+                c.seal(&mut b.tx, &mut self.device, Instant::now(), b.pending)
+                    .map_err(std::io::Error::other)?;
+                b.pending = 0;
+            }
             if b.tx.n_sealed == 0 {
                 return Ok(());
             }
@@ -151,9 +190,13 @@ impl Link {
     /// Whether to send after this packet: always without batching, and when the send slots are
     /// full with it.
     pub(super) fn send_each(&self) -> bool {
-        self.batch
-            .as_ref()
-            .is_none_or(|b| b.tx.n_sealed == b.tx.slots())
+        self.batch.as_ref().is_none_or(|b| {
+            if b.crypto.is_some() {
+                b.pending == b.tx.slots()
+            } else {
+                b.tx.n_sealed == b.tx.slots()
+            }
+        })
     }
 
     /// Reads until the socket is empty, one `recvfrom` or `recvmmsg` each and one for the
@@ -195,6 +238,18 @@ impl Link {
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(read),
                 Err(e) => return Err(e),
             };
+            if let Some(c) = &mut b.crypto {
+                read += datagrams(&b.rx, n);
+                c.start_open(&b.rx, n);
+                while c
+                    .open_round(&mut b.rx, &mut self.device, now)
+                    .map_err(std::io::Error::other)?
+                {
+                    let (u, o) = c.each_packet(&b.rx, true, |_| {});
+                    self.delivered += (u + o) as u64;
+                }
+                continue;
+            }
             let device = &mut self.device;
             let mut delivered = 0;
             b.rx.decrypt_each(n, |from, datagram, out| {
@@ -219,7 +274,32 @@ impl Link {
     }
 }
 
+/// The datagrams in the first `n` filled slots, a GRO buffer's segments each.
+fn datagrams(rx: &RxBatch, n: usize) -> u64 {
+    rx.meta[..n]
+        .iter()
+        .filter(|m| m.from.is_some())
+        .map(|m| {
+            let len = (m.len as usize).min(RX_SLOT);
+            let seg = if m.seg == 0 {
+                len.max(1)
+            } else {
+                m.seg as usize
+            };
+            len.div_ceil(seg) as u64
+        })
+        .sum()
+}
+
 impl Link {
+    /// The crypto workers that started, with `--crypto-workers`.
+    pub(super) fn workers(&self) -> Option<usize> {
+        self.batch
+            .as_ref()
+            .and_then(|b| b.crypto.as_ref())
+            .map(Crypto::workers)
+    }
+
     /// The server's public key as the agent knows it.
     pub(super) fn server_key(&self) -> PublicKey {
         self.device

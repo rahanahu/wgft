@@ -16,7 +16,11 @@
 #[cfg(target_os = "linux")]
 pub mod sys;
 
+pub mod crypto;
+pub mod pool;
+
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 /// The most slots per direction: datagrams one `recvmmsg` or `sendmmsg` call may carry. It is also
 /// the most segments one UDP GSO send carries on every kernel that has GSO.
@@ -56,6 +60,8 @@ const EMPTY_META: RxMeta = RxMeta {
 pub struct Sealed {
     pub to: SocketAddr,
     pub len: u32,
+    /// Its sealed slot: slot `pos % per` of lane `pos / per` ([`TxBatch::sealed`]).
+    pub pos: u32,
 }
 
 const EMPTY_SEALED: Sealed = Sealed {
@@ -64,6 +70,7 @@ const EMPTY_SEALED: Sealed = Sealed {
         0,
     )),
     len: 0,
+    pos: 0,
 };
 
 /// One message of a send batch: the sealed datagrams `first..first + count`, sent as one UDP
@@ -82,16 +89,38 @@ const EMPTY_MSG: Msg = Msg {
 };
 
 /// The bytes of a batch store of `slots` slots per direction, with the system call headers when
-/// `on`, for packets of up to `mtu` bytes sealed into datagrams of up to `max_datagram` bytes:
-/// what [`RxBatch::new`] and [`TxBatch::new`] allocate.
+/// `on`, for packets of up to `mtu` bytes sealed into datagrams of up to `max_datagram` bytes, its
+/// plaintext and sealed areas cut into `lanes` lanes ([`lanes_for`]): what [`RxBatch::new`] and
+/// [`TxBatch::new`] allocate.
 #[must_use]
-pub const fn store_bytes(slots: usize, on: bool, mtu: usize, max_datagram: usize) -> usize {
+pub const fn store_bytes(
+    slots: usize,
+    on: bool,
+    mtu: usize,
+    max_datagram: usize,
+    lanes: usize,
+) -> usize {
     let headers = if on { header_bytes() } else { 0 };
-    let rx = 2 * RX_SLOT + size_of::<RxMeta>() + headers;
-    let tx =
-        mtu + max_datagram + size_of::<u16>() + size_of::<Sealed>() + size_of::<Msg>() + headers;
+    let lanes = lanes_for(slots, lanes);
+    let rx = RX_SLOT + size_of::<RxMeta>() + headers;
+    let tx = mtu + size_of::<u16>() + size_of::<Sealed>() + size_of::<Msg>() + headers;
     let scratch = if slots > 1 { RX_SLOT } else { 0 };
-    slots * (rx + tx) + scratch
+    let plain = lanes * plain_lane(slots, lanes);
+    let sealed = lanes * slots.div_ceil(lanes) * max_datagram;
+    slots * (rx + tx) + scratch + plain + sealed
+}
+
+/// The lanes a store of `slots` slots uses when asked for `lanes`: at least 1 and at most `slots`,
+/// so that a lane of the plaintext area holds the largest datagram.
+#[must_use]
+pub const fn lanes_for(slots: usize, lanes: usize) -> usize {
+    let lanes = if lanes < slots { lanes } else { slots };
+    if lanes == 0 { 1 } else { lanes }
+}
+
+/// The bytes of one lane of the plaintext area: the area of `slots` receive slots cut into `lanes`.
+const fn plain_lane(slots: usize, lanes: usize) -> usize {
+    (slots * RX_SLOT).div_ceil(lanes)
 }
 
 #[cfg(target_os = "linux")]
@@ -114,10 +143,12 @@ const fn header_bytes() -> usize {
 /// host that made a batch of 64 slots read no faster than one `recvfrom` per datagram. With one
 /// slot the two parts follow each other and form one buffer.
 pub struct RxBatch {
-    /// The datagrams read.
-    pub data: Box<[u8]>,
-    /// The packets decrypted from them, one after the other.
-    pub plain: Box<[u8]>,
+    /// The datagrams read. The crypto workers read it while they decrypt
+    /// ([`crypto::Crypto::open_round`]); [`RxBatch::data_mut`] writes it in between.
+    pub data: Arc<[u8]>,
+    /// The packets decrypted from them, one after the other, in lanes. One slot or no crypto workers
+    /// use one lane, which is the whole area; with the workers each lane is one part of a batch.
+    pub plain: Box<[Box<[u8]>]>,
     pub meta: Box<[RxMeta]>,
     /// Receive buffers dropped because the kernel cut them or their control message short, so far; a UDP GRO buffer counts once.
     pub truncated: u64,
@@ -140,14 +171,18 @@ impl std::fmt::Debug for RxBatch {
 
 impl RxBatch {
     /// The store of `slots` slots whose dense parts hold `dense` bytes each (the longest datagram
-    /// the peer sends), with the system call headers when `on` (Linux only).
+    /// the peer sends), with the system call headers when `on` (Linux only), and its plaintext area
+    /// cut into `lanes` lanes ([`lanes_for`]).
     #[must_use]
-    pub fn new(slots: usize, on: bool, dense: usize) -> Self {
+    pub fn new(slots: usize, on: bool, dense: usize, lanes: usize) -> Self {
         #[cfg(not(target_os = "linux"))]
         let _ = on;
+        let lanes = lanes_for(slots, lanes);
         Self {
-            data: vec![0; slots * RX_SLOT].into_boxed_slice(),
-            plain: vec![0; slots * RX_SLOT].into_boxed_slice(),
+            data: Arc::from(vec![0; slots * RX_SLOT]),
+            plain: (0..lanes)
+                .map(|_| vec![0; plain_lane(slots, lanes)].into_boxed_slice())
+                .collect(),
             meta: vec![EMPTY_META; slots].into_boxed_slice(),
             truncated: 0,
             dense: dense.clamp(1, RX_SLOT),
@@ -182,7 +217,50 @@ impl RxBatch {
         let headers = self.headers.as_ref().map_or(0, sys::Headers::allocated);
         #[cfg(not(target_os = "linux"))]
         let headers = 0;
-        self.data.len() + self.plain.len() + size_of_val(&*self.meta) + self.scratch.len() + headers
+        self.data.len()
+            + self.plain.iter().map(|l| l.len()).sum::<usize>()
+            + size_of_val(&*self.meta)
+            + self.scratch.len()
+            + headers
+    }
+
+    /// The datagram area to write into.
+    ///
+    /// # Panics
+    ///
+    /// While a crypto worker still reads it, which [`crypto::Crypto`] never lets happen between two
+    /// of its calls.
+    pub fn data_mut(&mut self) -> &mut [u8] {
+        Arc::get_mut(&mut self.data)
+            .expect("no crypto worker holds the receive store between batches")
+    }
+
+    /// Where the datagram `start..stop` of filled slot `i` lies in [`RxBatch::data`]: its offset when
+    /// it is in one piece, or `None` when it crosses from the slot's dense part to its spill part.
+    fn piece(&self, i: usize, start: usize, stop: usize) -> Option<usize> {
+        if self.slots() == 1 {
+            return Some(start);
+        }
+        let cut = self.dense;
+        if stop <= cut {
+            Some(i * cut + start)
+        } else if start >= cut {
+            Some(self.spill_at(i) + start - cut)
+        } else {
+            None
+        }
+    }
+
+    /// Copies the datagram `start..stop` of filled slot `i`, which crosses its slot's two parts, to
+    /// the work area and returns it.
+    fn gather(&mut self, i: usize, start: usize, stop: usize) -> &[u8] {
+        let cut = self.dense;
+        let head = i * cut;
+        let at = self.spill_at(i);
+        let Self { data, scratch, .. } = self;
+        scratch[..cut - start].copy_from_slice(&data[head + start..head + cut]);
+        scratch[cut - start..stop - start].copy_from_slice(&data[at..at + stop - cut]);
+        &scratch[..stop - start]
     }
 
     /// The bytes of a slot in the dense part.
@@ -197,8 +275,9 @@ impl RxBatch {
     }
 
     /// Calls `f` with each datagram of the first `n` filled slots in order, GRO buffers split into
-    /// their segments, its sender, and the plaintext area after what earlier calls wrote; `f`
-    /// returns how many bytes it wrote there. Returns the plaintext area's used length.
+    /// their segments, its sender, and the plaintext area's first lane after what earlier calls
+    /// wrote; `f` returns how many bytes it wrote there. Returns the lane's used length. It is the
+    /// path without crypto workers, where that lane is the whole area.
     pub fn decrypt_each(
         &mut self,
         n: usize,
@@ -213,6 +292,7 @@ impl RxBatch {
             scratch,
             ..
         } = self;
+        let plain = &mut plain[0];
         let mut end = 0;
         for (i, m) in meta.iter().enumerate().take(n) {
             let Some(from) = m.from else {
@@ -282,12 +362,16 @@ pub fn is_udp(packet: &[u8]) -> bool {
 
 /// The send side of the batch store.
 pub struct TxBatch {
-    /// The packets the layer above wrote, `mtu` bytes per slot.
-    packets: Box<[u8]>,
+    /// The packets the layer above wrote, `mtu` bytes per slot. The crypto workers read it while they
+    /// encrypt ([`crypto::Crypto::seal`]).
+    packets: Arc<[u8]>,
     /// Their lengths.
     lens: Box<[u16]>,
-    /// The datagrams the device sealed, in send order, `stride` bytes per slot.
-    pub sealed: Box<[u8]>,
+    /// The datagrams the device sealed, in lanes of `per` slots of `stride` bytes. One slot or no
+    /// crypto workers use one lane of every slot; with the workers each lane is one part of a batch.
+    pub sealed: Box<[Box<[u8]>]>,
+    /// Sealed slots per lane.
+    pub per: usize,
     pub out: Box<[Sealed]>,
     pub msgs: Box<[Msg]>,
     #[cfg(target_os = "linux")]
@@ -314,15 +398,21 @@ impl std::fmt::Debug for TxBatch {
 
 impl TxBatch {
     /// The store of `slots` slots, with the system call headers when `on` (Linux only), with packets
-    /// of up to `mtu` bytes sealed into datagrams of up to `max_datagram` bytes.
+    /// of up to `mtu` bytes sealed into datagrams of up to `max_datagram` bytes, its sealed area cut
+    /// into `lanes` lanes ([`lanes_for`]).
     #[must_use]
-    pub fn new(slots: usize, on: bool, mtu: usize, max_datagram: usize) -> Self {
+    pub fn new(slots: usize, on: bool, mtu: usize, max_datagram: usize, lanes: usize) -> Self {
         #[cfg(not(target_os = "linux"))]
         let _ = on;
+        let lanes = lanes_for(slots, lanes);
+        let per = slots.div_ceil(lanes);
         Self {
-            packets: vec![0; slots * mtu].into_boxed_slice(),
+            packets: Arc::from(vec![0; slots * mtu]),
             lens: vec![0; slots].into_boxed_slice(),
-            sealed: vec![0; slots * max_datagram].into_boxed_slice(),
+            sealed: (0..lanes)
+                .map(|_| vec![0; per * max_datagram].into_boxed_slice())
+                .collect(),
+            per,
             out: vec![EMPTY_SEALED; slots].into_boxed_slice(),
             msgs: vec![EMPTY_MSG; slots].into_boxed_slice(),
             #[cfg(target_os = "linux")]
@@ -358,13 +448,25 @@ impl TxBatch {
         self.next < self.n_msgs
     }
 
-    /// The packet slot `i`, for the layer above to write into.
-    pub fn packet_slot(&mut self, i: usize) -> &mut [u8] {
-        &mut self.packets[i * self.mtu..(i + 1) * self.mtu]
+    /// The packet slots, for the layer above to write into: once per batch, not per packet.
+    ///
+    /// # Panics
+    ///
+    /// While a crypto worker still reads them, which [`crypto::Crypto`] never lets happen between
+    /// two of its calls.
+    pub fn packet_slots(&mut self) -> PacketSlots<'_> {
+        PacketSlots {
+            packets: Arc::get_mut(&mut self.packets)
+                .expect("no crypto worker holds the send store between batches"),
+            lens: &mut self.lens,
+            mtu: self.mtu,
+        }
     }
 
-    pub fn set_len(&mut self, i: usize, len: usize) {
-        self.lens[i] = u16::try_from(len).unwrap_or(0);
+    /// The packet in slot `i`.
+    pub fn packet(&self, i: usize) -> &[u8] {
+        let len = usize::from(self.lens[i]).min(self.mtu);
+        &self.packets[i * self.mtu..i * self.mtu + len]
     }
 
     /// Whether the packet in slot `i` carries UDP.
@@ -372,30 +474,37 @@ impl TxBatch {
         is_udp(&self.packets[i * self.mtu..(i + 1) * self.mtu])
     }
 
-    /// The packet in slot `i` and the next free sealed slot, borrowed together.
+    /// The packet in slot `i` and the next free sealed slot, borrowed together: the path without
+    /// crypto workers, whose one lane holds every sealed slot.
     pub fn seal_slot(&mut self, i: usize) -> (&[u8], &mut [u8]) {
         let len = usize::from(self.lens[i]).min(self.mtu);
         let j = self.n_sealed;
         (
             &self.packets[i * self.mtu..i * self.mtu + len],
-            &mut self.sealed[j * self.stride..(j + 1) * self.stride],
+            &mut self.sealed[0][j * self.stride..(j + 1) * self.stride],
         )
     }
 
-    /// Records the datagram just sealed into the next free sealed slot.
+    /// Records the datagram just sealed into the next free sealed slot of the first lane.
     pub fn push_sealed(&mut self, to: SocketAddr, len: usize) {
+        let pos = self.n_sealed;
+        self.push_sealed_at(to, len, pos);
+    }
+
+    /// Records the datagram sealed into sealed slot `pos` ([`Sealed::pos`]) as the next to send.
+    pub fn push_sealed_at(&mut self, to: SocketAddr, len: usize, pos: usize) {
         self.out[self.n_sealed] = Sealed {
             to,
             len: u32::try_from(len).unwrap_or(0),
+            pos: u32::try_from(pos).unwrap_or(0),
         };
         self.n_sealed += 1;
     }
 
-    /// The datagram of sealed slot `j`.
+    /// The datagram sent `j`-th.
     pub fn datagram(&self, j: usize) -> (SocketAddr, &[u8]) {
         let s = self.out[j];
-        let at = j * self.stride;
-        (s.to, &self.sealed[at..at + s.len as usize])
+        (s.to, sealed_bytes(&self.sealed, self.per, self.stride, s))
     }
 
     /// Groups the sealed datagrams from slot `from` into messages from message `self.next` on.
@@ -457,11 +566,38 @@ impl TxBatch {
         let headers = 0;
         self.packets.len()
             + size_of_val(&*self.lens)
-            + self.sealed.len()
+            + self.sealed.iter().map(|l| l.len()).sum::<usize>()
             + size_of_val(&*self.out)
             + size_of_val(&*self.msgs)
             + headers
     }
+}
+
+/// The packet slots of a send batch, borrowed for the layer above to write a batch of packets.
+#[derive(Debug)]
+pub struct PacketSlots<'a> {
+    packets: &'a mut [u8],
+    lens: &'a mut [u16],
+    mtu: usize,
+}
+
+impl PacketSlots<'_> {
+    /// The packet slot `i`.
+    pub fn slot(&mut self, i: usize) -> &mut [u8] {
+        &mut self.packets[i * self.mtu..(i + 1) * self.mtu]
+    }
+
+    /// Records the length of the packet written into slot `i`.
+    pub fn set_len(&mut self, i: usize, len: usize) {
+        self.lens[i] = u16::try_from(len).unwrap_or(0);
+    }
+}
+
+/// The bytes of the sealed datagram `s` in the sealed lanes.
+fn sealed_bytes(sealed: &[Box<[u8]>], per: usize, stride: usize, s: Sealed) -> &[u8] {
+    let pos = s.pos as usize;
+    let at = (pos % per) * stride;
+    &sealed[pos / per][at..at + s.len as usize]
 }
 
 #[cfg(test)]
@@ -480,13 +616,18 @@ mod tests {
     fn the_store_is_what_store_bytes_counts() {
         let mtu = 9216;
         for (slots, on) in [(1, false), (1, true), (7, true), (MAX_SLOTS, true)] {
-            let rx = RxBatch::new(slots, on, mtu + 32);
-            let tx = TxBatch::new(slots, on, mtu, mtu + 32);
-            assert_eq!(
-                rx.allocated() + tx.allocated(),
-                store_bytes(slots, on, mtu, mtu + 32),
-                "{slots} {on}"
-            );
+            for lanes in [1, 2, 3] {
+                let rx = RxBatch::new(slots, on, mtu + 32, lanes);
+                let tx = TxBatch::new(slots, on, mtu, mtu + 32, lanes);
+                assert_eq!(rx.plain.len(), lanes_for(slots, lanes));
+                assert_eq!(tx.sealed.len(), lanes_for(slots, lanes));
+                assert!(rx.plain.iter().all(|l| l.len() >= RX_SLOT));
+                assert_eq!(
+                    rx.allocated() + tx.allocated(),
+                    store_bytes(slots, on, mtu, mtu + 32, lanes),
+                    "{slots} {on} {lanes}"
+                );
+            }
         }
     }
 
@@ -509,7 +650,7 @@ mod tests {
 
     #[test]
     fn runs_of_one_length_become_one_message() {
-        let mut t = TxBatch::new(MAX_SLOTS, false, 1408, 1440);
+        let mut t = TxBatch::new(MAX_SLOTS, false, 1408, 1440, 1);
         let a: SocketAddr = "192.0.2.1:51820".parse().unwrap();
         let c: SocketAddr = "192.0.2.2:51820".parse().unwrap();
         for (to, len) in [
@@ -549,17 +690,18 @@ mod tests {
 
     #[test]
     fn datagrams_split_across_the_dense_and_spill_parts_read_back_whole() {
-        let mut rx = RxBatch::new(4, false, 100);
+        let mut rx = RxBatch::new(4, false, 100, 1);
         let from: SocketAddr = "192.0.2.1:51820".parse().unwrap();
         // 枠 1 に 250 byte を、密な部分の 100 byte と溢れの部分の 150 byte に分けて置く
         let bytes: Vec<u8> = (0..250u32)
             .map(|b| u8::try_from(b % 251).unwrap())
             .collect();
-        rx.data[100..200].copy_from_slice(&bytes[..100]);
         let at = rx.spill_at(1);
-        rx.data[at..at + 150].copy_from_slice(&bytes[100..]);
+        let data = rx.data_mut();
+        data[100..200].copy_from_slice(&bytes[..100]);
+        data[at..at + 150].copy_from_slice(&bytes[100..]);
         // 枠 0 は密な部分に収まる 40 byte
-        rx.data[..40].copy_from_slice(&bytes[..40]);
+        data[..40].copy_from_slice(&bytes[..40]);
         for (seg, want) in [
             (0u32, vec![bytes[..40].to_vec(), bytes.clone()]),
             (

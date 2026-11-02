@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use libc::{POLLIN, POLLOUT};
 
-use super::cpu::{Cpu, pin, wait};
+use super::cpu::{Cpu, named_cpu, pin, wait};
 use super::error::Error;
 use super::link::{Link, Syscalls};
 
@@ -27,6 +27,47 @@ pub(super) struct Plan {
 pub(super) struct Measured {
     pub(super) cpu: Cpu,
     pub(super) calls: Syscalls,
+    /// The crypto workers' CPU time over the bursts.
+    pub(super) worker: Duration,
+    /// The median and 99th percentile of one burst's wall time on the measured thread.
+    pub(super) burst_p50: Duration,
+    pub(super) burst_p99: Duration,
+}
+
+/// The crypto workers' threads' name.
+const WORKERS: &str = "wgft-crypto";
+
+/// The measured thread's per-burst wall times and the workers' CPU at the start.
+struct Clock {
+    walls: Vec<Duration>,
+    worker_start: Duration,
+}
+
+impl Clock {
+    fn start(bursts: u64) -> Result<Self, Error> {
+        Ok(Self {
+            walls: Vec::with_capacity(usize::try_from(bursts).unwrap_or(0)),
+            worker_start: named_cpu(WORKERS)?,
+        })
+    }
+
+    fn finish(mut self, cpu: Cpu, calls: Syscalls) -> Result<Measured, Error> {
+        let worker = named_cpu(WORKERS)?.saturating_sub(self.worker_start);
+        self.walls.sort_unstable();
+        let at = |q: usize| {
+            self.walls
+                .get((self.walls.len().saturating_sub(1)) * q / 100)
+                .copied()
+                .unwrap_or_default()
+        };
+        Ok(Measured {
+            cpu,
+            calls,
+            worker,
+            burst_p50: at(50),
+            burst_p99: at(99),
+        })
+    }
 }
 
 /// Waits for the second thread, then returns the measured thread's result before the second
@@ -100,6 +141,7 @@ pub(super) fn measure_send(mut agent: Link, server: Link, plan: &Plan) -> Result
         let mut calls = Syscalls::default();
         let mut target = seen;
         let mut cpu = Cpu::ZERO;
+        let mut clock = Clock::start(plan.bursts)?;
         for _ in 0..plan.bursts {
             let start = Cpu::now();
             let now = Instant::now();
@@ -113,6 +155,7 @@ pub(super) fn measure_send(mut agent: Link, server: Link, plan: &Plan) -> Result
             }
             agent.send_pending(&mut calls)?;
             cpu = cpu.plus(Cpu::now().since(start));
+            clock.walls.push(now.elapsed());
             target += plan.burst as u64;
             while seen < target {
                 seen = delivered_rx.recv_timeout(HAND_OFF_LIMIT).map_err(|_| {
@@ -121,7 +164,7 @@ pub(super) fn measure_send(mut agent: Link, server: Link, plan: &Plan) -> Result
             }
         }
         no_drops(&agent)?;
-        Ok(Measured { cpu, calls })
+        clock.finish(cpu, calls)
     })();
     stop.store(true, Ordering::Relaxed);
     drop(delivered_rx);
@@ -166,6 +209,7 @@ pub(super) fn measure_recv(mut server: Link, agent: Link, plan: &Plan) -> Result
         }
         let mut calls = Syscalls::default();
         let mut cpu = Cpu::ZERO;
+        let mut clock = Clock::start(plan.bursts)?;
         for _ in 0..plan.bursts {
             command_tx
                 .send(Command::Burst(plan.burst))
@@ -180,6 +224,7 @@ pub(super) fn measure_recv(mut server: Link, agent: Link, plan: &Plan) -> Result
             calls.wake += 1;
             let read = server.receive_all(now, &mut calls)?;
             cpu = cpu.plus(Cpu::now().since(start));
+            clock.walls.push(now.elapsed());
             if read != plan.burst as u64 {
                 return Err(Error::failed(format!(
                     "a burst delivered {read} of {} datagrams",
@@ -188,7 +233,7 @@ pub(super) fn measure_recv(mut server: Link, agent: Link, plan: &Plan) -> Result
             }
         }
         no_drops(&server)?;
-        Ok(Measured { cpu, calls })
+        clock.finish(cpu, calls)
     })();
     drop(command_tx);
     finish(peer, result)
