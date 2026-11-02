@@ -21,13 +21,16 @@ const SHARE_DEN: u64 = 20;
 
 /// How the tunnel batches its WireGuard socket's receive and send, fixed at start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Batching {
-    /// Slots per direction, at least 1.
-    slots: usize,
-    /// Whether batching is on: `recvmmsg`, `sendmmsg`, UDP GRO and GSO on Linux.
-    on: bool,
-    /// Where the budget came from.
-    source: Source,
+pub enum Batching {
+    /// One datagram per system call, in one slot.
+    Off,
+    /// `recvmmsg`, `sendmmsg`, UDP GRO and GSO on Linux.
+    On {
+        /// Slots per direction, at least 1.
+        slots: usize,
+        /// Where the budget came from.
+        source: Source,
+    },
 }
 
 impl Default for Batching {
@@ -50,11 +53,7 @@ pub enum Source {
 
 impl Batching {
     /// Batching off: one datagram per system call, in one slot.
-    pub const OFF: Self = Self {
-        slots: 1,
-        on: false,
-        source: Source::Set,
-    };
+    pub const OFF: Self = Self::Off;
 
     /// The batching for the setting `mib` (`WGFT_AGENT_BATCH_MIB`, `None` when unset or empty) and
     /// the flow caps `limits`.
@@ -67,10 +66,7 @@ impl Batching {
                 let bytes = u64::try_from(n).unwrap_or(0).saturating_mul(1 << 20);
                 let b = Self::from_bytes(bytes, Source::Set);
                 if bytes > store_of(MAX_SLOTS) {
-                    Self {
-                        source: Source::Lowered,
-                        ..b
-                    }
+                    Self::from_bytes(bytes, Source::Lowered)
                 } else {
                     b
                 }
@@ -92,11 +88,7 @@ impl Batching {
         while slots > 1 && store_of(slots) > bytes {
             slots -= 1;
         }
-        Self {
-            slots,
-            on: true,
-            source,
-        }
+        Self::On { slots, source }
     }
 
     /// What this build runs: the batching itself on Linux, [`Batching::OFF`] elsewhere.
@@ -105,29 +97,32 @@ impl Batching {
         if cfg!(target_os = "linux") {
             self
         } else {
-            Self {
-                source: self.source,
-                ..Self::OFF
-            }
+            Self::Off
         }
     }
 
     /// Slots per direction.
     #[must_use]
     pub fn slots(self) -> usize {
-        self.slots
+        match self {
+            Self::Off => 1,
+            Self::On { slots, .. } => slots,
+        }
     }
 
     /// Whether batching is on.
     #[must_use]
     pub fn is_on(self) -> bool {
-        self.on
+        matches!(self, Self::On { .. })
     }
 
-    /// Where the budget came from.
+    /// Where the budget came from; `None` when batching is off.
     #[must_use]
-    pub fn source(self) -> Source {
-        self.source
+    pub fn source(self) -> Option<Source> {
+        match self {
+            Self::Off => None,
+            Self::On { source, .. } => Some(source),
+        }
     }
 
     /// The bytes of the batch buffers this build allocates for it, at the largest MTU: the memory
@@ -140,22 +135,21 @@ impl Batching {
     /// The start line that says what the setting does, after the memory bound lines.
     #[must_use]
     pub fn line(self) -> String {
-        let run = self.running();
         if !cfg!(target_os = "linux") {
             return "tunnel batching: unused on this OS, where the tunnel reads and sends one datagram per system call; WGFT_AGENT_BATCH_MIB is kept so the same agent.env works on Linux".to_owned();
         }
-        if !run.on {
+        let Self::On { slots, source } = self else {
             return "tunnel batching: off, WGFT_AGENT_BATCH_MIB=0; the tunnel reads and sends one datagram per system call".to_owned();
-        }
-        let source = match self.source {
+        };
+        let source = match source {
             Source::Derived => "derived from the flow caps; set WGFT_AGENT_BATCH_MIB to override",
             Source::Set => "from WGFT_AGENT_BATCH_MIB",
             Source::Lowered => "from WGFT_AGENT_BATCH_MIB, lowered to the most this build uses",
         };
         format!(
             "tunnel batching: up to {} messages per receive and per send system call, {:.1} MiB of buffers; {source}",
-            run.slots,
-            mib_tenths(run.bytes())
+            slots,
+            mib_tenths(self.bytes())
         )
     }
 }
@@ -188,9 +182,8 @@ pub fn derived_budget(limits: flowpool::Limits) -> u64 {
 
 /// The batch store of `slots` slots per direction with batching on, at the largest MTU.
 fn store_of(slots: usize) -> u64 {
-    let b = Batching {
+    let b = Batching::On {
         slots,
-        on: true,
         source: Source::Set,
     };
     let bytes = crate::dataplane::batch::store_bytes(b, wgft_wgstack::MAX_MTU);
@@ -209,24 +202,24 @@ mod tests {
         let one = Batching::new(Some(1), caps);
         assert!(one.is_on());
         assert!(one.slots() >= 1 && one.slots() < MAX_SLOTS, "{one:?}");
-        assert_eq!(one.source(), Source::Set);
+        assert_eq!(one.source(), Some(Source::Set));
         // 1 MiB の予算は、最大の MTU の枠の組をその数だけ持つ
         assert!(store_fits(one, 1 << 20));
         let big = Batching::new(Some(i64::MAX), caps);
         assert_eq!(big.slots(), MAX_SLOTS);
-        assert_eq!(big.source(), Source::Lowered);
+        assert_eq!(big.source(), Some(Source::Lowered));
         // 既定の上限から導く予算は、最大の枠の数に届く
         let derived = Batching::new(None, caps);
-        assert_eq!(derived.source(), Source::Derived);
+        assert_eq!(derived.source(), Some(Source::Derived));
         assert_eq!(derived.slots(), MAX_SLOTS);
         // (32 MiB + 8192 × 12 KiB + 2048 × 44 KiB) × 3 / 20
         assert_eq!(derived_budget(caps), 33_973_862);
     }
 
     fn store_fits(b: Batching, budget: usize) -> bool {
-        let next = Batching {
+        let next = Batching::On {
             slots: b.slots() + 1,
-            ..b
+            source: Source::Set,
         };
         crate::dataplane::batch::store_bytes(b, wgft_wgstack::MAX_MTU) <= budget
             && crate::dataplane::batch::store_bytes(next, wgft_wgstack::MAX_MTU) > budget
