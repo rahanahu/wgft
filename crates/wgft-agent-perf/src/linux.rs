@@ -59,6 +59,10 @@ struct Args {
     /// CPU for the second thread.
     #[arg(long)]
     cpu_peer: Option<usize>,
+    /// Use one `sendto` or `recvfrom` per datagram, as before the batching, instead of the data
+    /// plane's batch store with `sendmmsg`, `recvmmsg`, UDP GSO and GRO.
+    #[arg(long)]
+    one_by_one: bool,
 }
 
 pub(crate) fn main() -> ExitCode {
@@ -111,8 +115,8 @@ fn run(args: &Args) -> Result<String, Error> {
             agent.mtu()
         )));
     }
-    let agent = Link::new(agent_socket, agent);
-    let server = Link::new(server_socket, server);
+    let agent = Link::new(agent_socket, agent, !args.one_by_one);
+    let server = Link::new(server_socket, server, !args.one_by_one);
     let packet = inner_packet(args.size);
     let bursts = args.packets.div_ceil(args.burst as u64);
     let plan = Plan {
@@ -127,12 +131,13 @@ fn run(args: &Args) -> Result<String, Error> {
     };
     let packets = bursts * args.burst as u64;
     Ok(format!(
-        "RESULT mode={} size={} packets={packets} bytes={} cpu_ns={} user_ns={} sys_ns={} data_syscalls={} wake_syscalls={}",
+        "RESULT mode={} size={} batch={} packets={packets} bytes={} cpu_ns={} user_ns={} sys_ns={} data_syscalls={} wake_syscalls={}",
         match args.mode {
             Mode::Send => "send",
             Mode::Recv => "recv",
         },
         args.size,
+        if args.one_by_one { "off" } else { "on" },
         packets * args.size as u64,
         measured.cpu.total.as_nanos(),
         measured.cpu.user.as_nanos(),
