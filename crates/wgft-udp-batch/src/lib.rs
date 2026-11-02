@@ -123,6 +123,21 @@ pub const fn rx_store_bytes(slots: usize, on: bool, rx_lanes: usize) -> usize {
         + rx_lanes * plain_lane(slots, rx_lanes)
 }
 
+/// The bytes of the send side alone of [`store_bytes`]: what one more [`TxBatch::new`] adds.
+#[must_use]
+pub const fn tx_store_bytes(
+    slots: usize,
+    on: bool,
+    mtu: usize,
+    max_datagram: usize,
+    tx_lanes: usize,
+) -> usize {
+    let headers = if on { header_bytes() } else { 0 };
+    let tx_lanes = lanes_for(slots, tx_lanes);
+    slots * (mtu + size_of::<u16>() + size_of::<Sealed>() + size_of::<Msg>() + headers)
+        + tx_lanes * slots.div_ceil(tx_lanes) * max_datagram
+}
+
 /// The lanes a store of `slots` slots uses when asked for `lanes`: at least 1 and at most `slots`,
 /// so that a lane of the plaintext area holds the largest datagram.
 #[must_use]
@@ -639,6 +654,11 @@ mod tests {
                     rx.allocated() + tx.allocated(),
                     store_bytes(slots, on, mtu, mtu + 32, lanes, lanes),
                     "{slots} {on} {lanes}"
+                );
+                assert_eq!(rx.allocated(), rx_store_bytes(slots, on, lanes));
+                assert_eq!(
+                    tx.allocated(),
+                    tx_store_bytes(slots, on, mtu, mtu + 32, lanes)
                 );
             }
         }

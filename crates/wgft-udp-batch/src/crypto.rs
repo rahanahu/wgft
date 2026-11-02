@@ -179,6 +179,20 @@ fn seal_lane_mut(l: &mut Option<Lane>) -> &mut SealLane {
     }
 }
 
+fn seal_lanes(workers: usize) -> Box<[Option<Lane>]> {
+    (0..workers)
+        .map(|_| {
+            Some(Lane::Seal(SealLane {
+                packets: None,
+                sealed: Box::default(),
+                mtu: 0,
+                stride: 0,
+                jobs: Vec::with_capacity(MAX_SLOTS),
+            }))
+        })
+        .collect()
+}
+
 /// The most worker lanes a pipelined batch has.
 const MAX_LANES: usize = crate::pool::MAX_WORKERS;
 
@@ -250,6 +264,12 @@ pub struct Crypto {
     /// The store whose batch is with the workers. Only one is at a time: the workers have one place
     /// each.
     in_flight: Option<usize>,
+    /// The pipelined sealing: per send store, the workers' lanes of its batch; lane `i` seals into
+    /// the store's sealed lane `i + 1`.
+    seal_pipe: [Box<[Option<Lane>]>; 2],
+    seal_offered: Option<Offered>,
+    /// The send store whose batch is with the workers.
+    seal_in_flight: Option<usize>,
     /// The batch being opened: its filled slots, the next datagram (slot, offset) and the bytes left.
     n: usize,
     slot: usize,
@@ -291,6 +311,9 @@ impl Crypto {
             min_bytes,
             pipe: [PipeSet::new(lanes - 1), PipeSet::new(lanes - 1)],
             in_flight: None,
+            seal_pipe: [seal_lanes(lanes - 1), seal_lanes(lanes - 1)],
+            seal_offered: None,
+            seal_in_flight: None,
             n: 0,
             slot: 0,
             start: 0,
@@ -306,6 +329,13 @@ impl Crypto {
         }
     }
 
+    /// How many parts the workers were offered so far, for tests that check what wakes them.
+    #[cfg(feature = "test-hooks")]
+    #[must_use]
+    pub fn offers(&self) -> u64 {
+        self.pool.as_ref().map_or(0, Pool::offers)
+    }
+
     /// The workers that started.
     #[must_use]
     pub fn workers(&self) -> usize {
@@ -318,11 +348,12 @@ impl Crypto {
     #[must_use]
     pub const fn bytes(lanes: usize) -> usize {
         let lanes = if lanes == 0 { 1 } else { lanes };
-        // 回のレーンと、受信の 2 つの置き場ごとの作業者のレーン
+        // 回のレーンと、2 つの置き場ごとの作業者のレーン (受信と送信)
         let workers = lanes - 1;
         lanes * (LANE_JOBS * size_of::<OpenEntry>() + MAX_SLOTS * size_of::<SealEntry>())
-            + 2 * workers * LANE_JOBS * size_of::<OpenEntry>()
-            + (2 * lanes + 2 * workers) * size_of::<Option<Lane>>()
+            + 2 * workers
+                * (LANE_JOBS * size_of::<OpenEntry>() + MAX_SLOTS * size_of::<SealEntry>())
+            + (2 * lanes + 4 * workers) * size_of::<Option<Lane>>()
             + crate::pool::bytes::<Lane>(lanes - 1)
     }
 
@@ -352,7 +383,7 @@ impl Crypto {
         now: Instant,
     ) -> Result<bool, Poisoned> {
         assert!(
-            self.in_flight.is_none(),
+            self.in_flight.is_none() && self.seal_in_flight.is_none(),
             "a round runs while no pipelined batch is with the workers"
         );
         let lanes = self.open.len().min(rx.plain.len());
@@ -619,7 +650,7 @@ impl Crypto {
     /// and a second offer would take it.
     pub fn offer_pipelined(&mut self, set: usize, rx: &mut RxBatch) -> Result<(), Poisoned> {
         assert!(
-            self.in_flight.is_none(),
+            self.in_flight.is_none() && self.seal_in_flight.is_none(),
             "one batch is with the workers at a time"
         );
         let ps = &mut self.pipe[set];
@@ -748,6 +779,153 @@ impl Crypto {
         (taken, others)
     }
 
+    /// The most packets one pipelined send batch takes: the slots of the workers' sealed lanes of
+    /// `tx`, or 0 without workers.
+    #[must_use]
+    pub fn seal_pipeline_slots(&self, tx: &TxBatch) -> usize {
+        if self.pool.is_none() {
+            return 0;
+        }
+        let workers = self.open.len().saturating_sub(1).min(MAX_LANES);
+        if tx.sealed.len() < workers + 1 {
+            return 0;
+        }
+        workers * tx.per
+    }
+
+    /// Takes the counters of the first `pulled` packets of `tx` with [`Device::begin_packet`], UDP
+    /// first and the rest in slot order, which is the send order, into the workers' lanes of send
+    /// store `set` (0 or 1): consecutive runs of that order, about the same number per lane.
+    /// `pulled` is at most [`Crypto::seal_pipeline_slots`]. Returns the packets that got a counter;
+    /// the others wait for a handshake or were dropped, as for `begin_packet`.
+    ///
+    /// # Panics
+    ///
+    /// When store `set`'s batch is with the workers.
+    pub fn begin_seal_pipelined(
+        &mut self,
+        set: usize,
+        tx: &TxBatch,
+        device: &mut Device,
+        now: Instant,
+        pulled: usize,
+    ) -> usize {
+        assert_ne!(
+            self.seal_in_flight,
+            Some(set),
+            "the store's batch is with the workers"
+        );
+        let lanes = &mut self.seal_pipe[set];
+        let workers = lanes.len();
+        for l in lanes.iter_mut() {
+            let l = seal_lane_mut(l);
+            l.jobs.clear();
+            l.mtu = tx.mtu;
+            l.stride = tx.stride;
+        }
+        let per_lane = pulled.div_ceil(workers).clamp(1, tx.per);
+        let (mut lane, mut begun) = (0, 0);
+        for udp in [true, false] {
+            for i in 0..pulled {
+                if tx.is_udp_slot(i) != udp {
+                    continue;
+                }
+                let Some(job) = device.begin_packet(now, tx.packet(i), tx.stride) else {
+                    continue;
+                };
+                while lane + 1 < workers && seal_lane_mut(&mut lanes[lane]).jobs.len() >= per_lane {
+                    lane += 1;
+                }
+                seal_lane_mut(&mut lanes[lane]).jobs.push(SealEntry {
+                    slot: u16::try_from(i).unwrap_or(u16::MAX),
+                    state: SealState::Pending(job),
+                });
+                begun += 1;
+            }
+        }
+        begun
+    }
+
+    /// Offers the batch [`Crypto::begin_seal_pipelined`] began in send store `set` to the workers and
+    /// returns without waiting. The store's sealed lanes stay with the workers until
+    /// [`Crypto::finish_seal_pipelined`].
+    ///
+    /// # Errors
+    ///
+    /// [`Poisoned`] after a worker panicked.
+    ///
+    /// # Panics
+    ///
+    /// While another batch, of either direction, is with the workers.
+    pub fn offer_seal_pipelined(&mut self, set: usize, tx: &mut TxBatch) -> Result<(), Poisoned> {
+        assert!(
+            self.in_flight.is_none() && self.seal_in_flight.is_none(),
+            "one batch is with the workers at a time"
+        );
+        let lanes = &mut self.seal_pipe[set];
+        // 仕事の無いレーンは置き場の buffer を持たず、作業者にも渡らない (Run::is_idle)
+        for (j, l) in lanes.iter_mut().enumerate() {
+            let l = seal_lane_mut(l);
+            if !l.jobs.is_empty() {
+                l.packets = Some(Arc::clone(&tx.packets));
+                l.sealed = mem::take(&mut tx.sealed[j + 1]);
+            }
+        }
+        match &self.pool {
+            Some(pool) => self.seal_offered = Some(pool.offer(lanes)?),
+            None => {
+                for l in lanes.iter_mut() {
+                    seal_lane_mut(l).run();
+                }
+            }
+        }
+        self.seal_in_flight = Some(set);
+        Ok(())
+    }
+
+    /// The send store whose batch is with the workers.
+    #[must_use]
+    pub fn seal_in_flight(&self) -> Option<usize> {
+        self.seal_in_flight
+    }
+
+    /// Takes the batch of send store `set` back from the workers, sealing a lane no worker started
+    /// here, and records its datagrams to send in counter order. The caller lays them out and sends
+    /// them before the batch it begins next.
+    ///
+    /// # Errors
+    ///
+    /// [`Poisoned`] after a worker panicked; the store is then unusable and the generation ends.
+    ///
+    /// # Panics
+    ///
+    /// When store `set`'s batch is not with the workers.
+    pub fn finish_seal_pipelined(&mut self, set: usize, tx: &mut TxBatch) -> Result<(), Poisoned> {
+        assert_eq!(
+            self.seal_in_flight,
+            Some(set),
+            "the store's batch is with the workers"
+        );
+        self.seal_in_flight = None;
+        let lanes = &mut self.seal_pipe[set];
+        if let (Some(pool), Some(offered)) = (&self.pool, self.seal_offered.take()) {
+            pool.collect(lanes, offered)?;
+        }
+        for (j, l) in lanes.iter_mut().enumerate() {
+            let l = seal_lane_mut(l);
+            if !l.sealed.is_empty() {
+                tx.sealed[j + 1] = mem::take(&mut l.sealed);
+            }
+            l.packets = None;
+            for (k, e) in l.jobs.iter_mut().enumerate() {
+                if let SealState::Sealed(o) = mem::replace(&mut e.state, SealState::Empty) {
+                    tx.push_sealed_at(o.to, o.len, (j + 1) * tx.per + k);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Encrypts the first `pulled` packets of `tx`, UDP first and the rest in slot order, into its
     /// sealed lanes and records them to send in that order, which is their counters' order: the
     /// counters are taken here in that order and the lanes hold consecutive runs of it.
@@ -763,7 +941,7 @@ impl Crypto {
         pulled: usize,
     ) -> Result<(), Poisoned> {
         assert!(
-            self.in_flight.is_none(),
+            self.in_flight.is_none() && self.seal_in_flight.is_none(),
             "a send batch runs while no pipelined batch is with the workers"
         );
         let lanes = self.seal.len().min(tx.sealed.len());
@@ -1138,10 +1316,17 @@ mod tests {
                     .iter()
                     .flat_map(|p| p.lanes.iter())
                     .map(open)
+                    .sum::<usize>()
+                + c.seal_pipe
+                    .iter()
+                    .flat_map(|p| p.iter())
+                    .map(seal)
                     .sum::<usize>();
-            let places =
-                (c.open.len() + c.seal.len() + c.pipe.iter().map(|p| p.lanes.len()).sum::<usize>())
-                    * size_of::<Option<Lane>>();
+            let places = (c.open.len()
+                + c.seal.len()
+                + c.pipe.iter().map(|p| p.lanes.len()).sum::<usize>()
+                + c.seal_pipe.iter().map(|p| p.len()).sum::<usize>())
+                * size_of::<Option<Lane>>();
             assert_eq!(
                 Crypto::bytes(lanes),
                 lists + places + crate::pool::bytes::<Lane>(lanes - 1)

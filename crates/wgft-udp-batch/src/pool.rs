@@ -113,6 +113,9 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct Pool<T: Run> {
     shared: Arc<Shared<T>>,
     workers: Box<[JoinHandle<()>]>,
+    /// Parts offered to a worker so far, for tests. The owner thread alone offers.
+    #[cfg(feature = "test-hooks")]
+    offers: std::cell::Cell<u64>,
 }
 
 impl<T: Run> fmt::Debug for Pool<T> {
@@ -190,6 +193,8 @@ impl<T: Run> Pool<T> {
                     let _ = Self {
                         shared,
                         workers: handles.into_boxed_slice(),
+                        #[cfg(feature = "test-hooks")]
+                        offers: std::cell::Cell::new(0),
                     };
                     return Err(e);
                 }
@@ -202,6 +207,8 @@ impl<T: Run> Pool<T> {
         Ok(Self {
             shared,
             workers: handles.into_boxed_slice(),
+            #[cfg(feature = "test-hooks")]
+            offers: std::cell::Cell::new(0),
         })
     }
 
@@ -259,6 +266,8 @@ impl<T: Run> Pool<T> {
                     "one batch is with the workers at a time"
                 );
                 *lock(&slot.todo) = Some(part);
+                #[cfg(feature = "test-hooks")]
+                self.offers.set(self.offers.get() + 1);
                 offered.0[i] = true;
                 self.workers[i].thread().unpark();
             }
@@ -332,6 +341,11 @@ impl<T: Run> Pool<T> {
     /// Marks the pool poisoned, as a worker's panic does, for tests of the callers' handling.
     pub fn poison(&self) {
         self.shared.poisoned.store(true, Ordering::Release);
+    }
+
+    /// How many parts were offered to a worker so far.
+    pub fn offers(&self) -> u64 {
+        self.offers.get()
     }
 }
 
