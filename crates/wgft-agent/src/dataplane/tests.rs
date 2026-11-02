@@ -1052,8 +1052,9 @@ impl Source for Feed {
     }
 }
 
-#[tokio::test]
-async fn a_receive_batch_hands_udp_first_and_keeps_the_tcp_order() {
+/// 交互に並ぶ TCP と UDP の datagram を 1 つの受信のバッチで読み、上の層に渡った順を返す。`lanes` が
+/// 2 つ以上なら、暗号の作業者に小さな回も渡す。
+async fn receive_mixed(lanes: usize) -> Vec<u32> {
     let mut t = Bench::new(0);
     t.connected();
     // server の側が agent に送る packet。TCP と UDP が交互に並ぶ
@@ -1078,18 +1079,34 @@ async fn a_receive_batch_hands_udp_first_and_keeps_the_tcp_order() {
         wake: super::Wake::default(),
     }));
     // 密な部分を枠の全体にして、枠 i が data の i × RX_SLOT から始まるようにする
-    let mut rx = RxBatch::new(8, false, RX_SLOT, 1);
+    let mut rx = RxBatch::new(8, false, RX_SLOT, lanes);
+    let mut crypto = (lanes > 1).then(|| wgft_udp_batch::crypto::Crypto::new(lanes, 0));
     let (mut errors, mut wakers) = (0, Vec::new());
-    let (n, _) = receive_batch(&local, &mut feed, &mut rx, now, 8, &mut errors, &mut wakers)
-        .await
-        .unwrap();
+    let (n, _) = receive_batch(
+        &local,
+        &mut feed,
+        &mut rx,
+        crypto.as_mut(),
+        now,
+        8,
+        &mut errors,
+        &mut wakers,
+    )
+    .await
+    .unwrap();
     assert_eq!((n, errors), (5, 0));
-    let got: Vec<u32> = local.with(|s| s.got.iter().map(|p| seq(p)).collect());
-    assert_eq!(
-        got,
-        vec![100, 101, 0, 1, 2],
-        "UDP first, TCP in the order read"
-    );
+    local.with(|s| s.got.iter().map(|p| seq(p)).collect())
+}
+
+#[tokio::test]
+async fn a_receive_batch_hands_udp_first_and_keeps_the_tcp_order() {
+    for lanes in [1, 3] {
+        assert_eq!(
+            receive_mixed(lanes).await,
+            vec![100, 101, 0, 1, 2],
+            "UDP first, TCP in the order read, {lanes} lanes"
+        );
+    }
 }
 
 #[test]

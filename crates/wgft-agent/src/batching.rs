@@ -7,7 +7,17 @@
 //! - `0` は両方の向きのバッチを切り、1 つずつ送受信する。空は v1 と同じくフロー数の上限から導く
 //! - Linux だけがバッチを使う。ほかの OS は 1 つずつ送受信し、枠は 1 つである
 
+use std::sync::OnceLock;
+
 use crate::flowpool;
+
+/// The crypto workers of this process's data plane, read once at start
+/// (`wgft_udp_batch::pool::worker_count`): the memory bound counts the most a build may start, and
+/// the data plane starts these.
+pub fn crypto_workers() -> usize {
+    static WORKERS: OnceLock<usize> = OnceLock::new();
+    *WORKERS.get_or_init(wgft_udp_batch::pool::worker_count)
+}
 
 /// The most slots per direction: datagrams one `recvmmsg` or `sendmmsg` call may carry. The
 /// wake-up's latency budget ends a batch long before this at the lab's per-packet cost, and it is
@@ -125,11 +135,34 @@ impl Batching {
         }
     }
 
-    /// The bytes of the batch buffers this build allocates for it, at the largest MTU: the memory
-    /// bound's `batch` term.
+    /// The bytes of the batch buffers this build allocates for it, at the largest MTU and with the
+    /// most crypto lanes a host can give it: the memory bound's `batch` term. A host with fewer
+    /// CPUs allocates no more.
     #[must_use]
     pub fn bytes(self) -> usize {
-        crate::dataplane::batch::store_bytes(self.running(), wgft_wgstack::MAX_MTU)
+        let b = self.running();
+        crate::dataplane::batch::store_bytes(b, wgft_wgstack::MAX_MTU, self.bound_lanes())
+    }
+
+    /// The crypto lanes the bound counts: those of the most crypto workers this build starts.
+    fn bound_lanes(self) -> usize {
+        crate::dataplane::batch::crypto_lanes(self.running(), wgft_udp_batch::pool::MAX_WORKERS)
+    }
+
+    /// The bytes the crypto workers hold beyond the batch store, with the most workers this build
+    /// starts: their stacks, their places and the lanes' job lists. The memory bound's `crypto` term.
+    #[must_use]
+    pub fn crypto_bytes(self) -> usize {
+        match self.bound_lanes() {
+            1 => 0,
+            lanes => wgft_udp_batch::crypto::Crypto::bytes(lanes),
+        }
+    }
+
+    /// The crypto lanes the data plane runs with this host's [`crypto_workers`].
+    #[must_use]
+    pub fn crypto_lanes(self) -> usize {
+        crate::dataplane::batch::crypto_lanes(self.running(), crypto_workers())
     }
 
     /// The start line that says what the setting does, after the memory bound lines.
@@ -186,7 +219,8 @@ fn store_of(slots: usize) -> u64 {
         slots,
         source: Source::Set,
     };
-    let bytes = crate::dataplane::batch::store_bytes(b, wgft_wgstack::MAX_MTU);
+    let lanes = crate::dataplane::batch::crypto_lanes(b, wgft_udp_batch::pool::MAX_WORKERS);
+    let bytes = crate::dataplane::batch::store_bytes(b, wgft_wgstack::MAX_MTU, lanes);
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
@@ -221,8 +255,8 @@ mod tests {
             slots: b.slots() + 1,
             source: Source::Set,
         };
-        crate::dataplane::batch::store_bytes(b, wgft_wgstack::MAX_MTU) <= budget
-            && crate::dataplane::batch::store_bytes(next, wgft_wgstack::MAX_MTU) > budget
+        u64::try_from(budget)
+            .is_ok_and(|budget| store_of(b.slots()) <= budget && store_of(next.slots()) > budget)
     }
 
     #[test]
