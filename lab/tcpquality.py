@@ -304,19 +304,24 @@ def iperf(jsonfile):
 
 
 def cpupaired(logfile):
-    rc = cpupaired_key(logfile, "agent_cpu_s_per_gb", "")
+    data = load_paired(logfile)
+    rc = 0
+    for arm in ("x", "y"):
+        if kernel_arm(data[1].get(arm, arm)):
+            print("RATIO unavailable: arm %s (%s) is the kernel-mode agent, whose work runs outside its process; "
+                  "compare the arms by VMRATIO" % (arm, data[1].get(arm, arm)))
+            break
+    else:
+        rc = cpupaired_key(data, "agent_cpu_s_per_gb", vm=False)
     with open(logfile) as f:
         if any(l.startswith("PAIRED ") and " vm_cpu_s_per_gb=" in l for l in f):
-            rc = cpupaired_key(logfile, "vm_cpu_s_per_gb", "VM") or rc
-    rc = paired_ratio(logfile, "overall_mbit", "MBITRATIO", sender_check=True) or rc
+            rc = cpupaired_key(data, "vm_cpu_s_per_gb", vm=True) or rc
+    rc = paired_ratio(data, "overall_mbit", "MBITRATIO", sender_check=True) or rc
     return rc
 
 
-def paired_ratio(logfile, key, label, sender_check=False):
-    # the ratio of x over y of one value per run, paired and estimated like cpupaired's RATIO, with
-    # the same PLAN-based counting: a planned pair is left out when a run is missing, failed (pass=0,
-    # undetermined, or no positive value for the key) or started without the barrier, and with
-    # fewer than half the planned pairs on either side there is no ratio and the result is 1
+def load_paired(logfile):
+    # the PLAN line and the PAIRED lines of `lab/lab paired`: (plan, arm names, runs by (round, run, arm))
     runs, names, plan = {}, {}, {}
     for l in open(logfile):
         if l.startswith("PLAN "):
@@ -329,11 +334,55 @@ def paired_ratio(logfile, key, label, sender_check=False):
             continue
         names[r["arm"]] = r.get("name", r["arm"])
         runs[(int(r.get("round", 0)), int(r.get("run", 0)), r["arm"])] = r
+    return plan, names, runs
+
+
+def planned_keys(plan, runs):
+    # the (round, run) of every planned pair; a log without the plan has the pairs that appear in it
     if "rounds" in plan and "runs" in plan:
-        keys = [(rnd, run) for rnd in range(1, int(plan["rounds"]) + 1) for run in range(1, int(plan["runs"]) + 1)]
-    else:
-        keys = sorted({(k[0], k[1]) for k in runs})
-    side_of = lambda rnd: "a" if rnd % 2 == 1 else "b"
+        return [(rnd, run) for rnd in range(1, int(plan["rounds"]) + 1) for run in range(1, int(plan["runs"]) + 1)]
+    return sorted({(k[0], k[1]) for k in runs})
+
+
+def side_of(rnd):
+    # x is in VM a in odd rounds and in VM b in even rounds
+    return "a" if rnd % 2 == 1 else "b"
+
+
+def classify_pair(x, y, key, sender_check):
+    # why a pair is left out ("failed", "sync_timeout" or "sender_bound"), or None when it is used
+    why = None
+    for r in (x, y):
+        try:
+            ok = float(r.get(key, "0")) > 0
+        except ValueError:
+            ok = False
+        if r.get("pass") == "0" or r.get("undetermined") == "1" or not ok:
+            why = why or "failed"
+        elif r.get("sync") == "timeout":
+            why = why or "sync_timeout"
+        elif sender_check and sender_share(r) >= SENDER_BOUND:
+            why = why or "sender_bound"
+    return why
+
+
+def ratio_ci(pairs):
+    # the median ratio of each side, and the sorted geometric means of 10,000 resamplings of the sides
+    ma, mb = statistics.median(pairs["a"]), statistics.median(pairs["b"])
+    rng = random.Random(1)
+    boot = sorted(math.sqrt(statistics.median(rng.choices(pairs["a"], k=len(pairs["a"])))
+                            * statistics.median(rng.choices(pairs["b"], k=len(pairs["b"]))))
+                  for _ in range(10000))
+    return ma, mb, boot
+
+
+def paired_ratio(data, key, label, sender_check=False):
+    # the ratio of x over y of one value per run, paired and estimated like cpupaired's RATIO, with
+    # the same PLAN-based counting: a planned pair is left out when a run is missing, failed (pass=0,
+    # undetermined, or no positive value for the key) or started without the barrier, and with
+    # fewer than half the planned pairs on either side there is no ratio and the result is 1
+    plan, names, runs = data
+    keys = planned_keys(plan, runs)
     expected = {"a": 0, "b": 0}
     pairs = {"a": [], "b": []}
     counts = {"missing": 0, "failed": 0, "sync_timeout": 0}
@@ -346,18 +395,7 @@ def paired_ratio(logfile, key, label, sender_check=False):
         if x is None or y is None:
             counts["missing"] += 1
             continue
-        why = None
-        for r in (x, y):
-            try:
-                ok = float(r.get(key, "0")) > 0
-            except ValueError:
-                ok = False
-            if r.get("pass") == "0" or r.get("undetermined") == "1" or not ok:
-                why = why or "failed"
-            elif r.get("sync") == "timeout":
-                why = why or "sync_timeout"
-            elif sender_check and sender_share(r) >= SENDER_BOUND:
-                why = why or "sender_bound"
+        why = classify_pair(x, y, key, sender_check)
         if why:
             counts[why] += 1
             continue
@@ -368,38 +406,17 @@ def paired_ratio(logfile, key, label, sender_check=False):
             print("%s key=%s TOO FEW x_in_vm=%s pairs=%d of %d planned; no ratio %s"
                   % (label, key, side, len(pairs[side]), expected[side], left))
             return 1
-    ma, mb = statistics.median(pairs["a"]), statistics.median(pairs["b"])
-    rng = random.Random(1)
-    boot = sorted(math.sqrt(statistics.median(rng.choices(pairs["a"], k=len(pairs["a"])))
-                            * statistics.median(rng.choices(pairs["b"], k=len(pairs["b"]))))
-                  for _ in range(10000))
+    ma, mb, boot = ratio_ci(pairs)
     print("%s key=%s x_over_y=%.3f ci95_low=%.3f ci95_high=%.3f pairs=%d planned=%d %s x=%s y=%s"
           % (label, key, math.sqrt(ma * mb), boot[249], boot[9749], len(pairs["a"]) + len(pairs["b"]), len(keys),
              left, names.get("x", "x"), names.get("y", "y")))
     return 0
 
 
-def cpupaired_key(logfile, key, pre):
-    runs = {}
-    names = {}
-    plan = {}
-    for l in open(logfile):
-        if l.startswith("PLAN "):
-            plan = dict(kv.split("=", 1) for kv in l.split()[1:] if "=" in kv)
-            continue
-        if not l.startswith("PAIRED "):
-            continue
-        r = dict(kv.split("=", 1) for kv in l.split()[1:] if "=" in kv)
-        if r.get("arm") not in ("x", "y") or r.get("vm") not in ("a", "b"):
-            continue
-        names[r["arm"]] = r.get("name", r["arm"])
-        runs[(int(r.get("round", 0)), int(r.get("run", 0)), r["arm"])] = r
-    if "rounds" in plan and "runs" in plan:
-        keys = [(rnd, run) for rnd in range(1, int(plan["rounds"]) + 1) for run in range(1, int(plan["runs"]) + 1)]
-    else:
-        keys = sorted({(k[0], k[1]) for k in runs})
-    # x is in VM a in odd rounds and in VM b in even rounds
-    side_of = lambda rnd: "a" if rnd % 2 == 1 else "b"
+def cpupaired_key(data, key, vm):
+    plan, names, runs = data
+    pre = "VM" if vm else ""
+    keys = planned_keys(plan, runs)
     expected = {"a": 0, "b": 0}
     pairs = {"a": [], "b": []}
     by_round = {}
@@ -407,12 +424,6 @@ def cpupaired_key(logfile, key, pre):
     counts = {"missing": 0, "failed": 0, "sync_timeout": 0, "sender_bound": 0}
     late = 0
     overlaps = []
-    if not pre:
-        for arm in ("x", "y"):
-            if kernel_arm(names.get(arm, arm)):
-                print("RATIO unavailable: arm %s (%s) is the kernel-mode agent, whose work runs outside its process; "
-                      "compare the arms by VMRATIO" % (arm, names.get(arm, arm)))
-                return 0
     for rnd, run in keys:
         side = side_of(rnd)
         expected[side] += 1
@@ -421,23 +432,12 @@ def cpupaired_key(logfile, key, pre):
             counts["missing"] += 1
             continue
         late += sum(r.get("sync") == "late" for r in (x, y))
-        why = None
-        vals = []
-        for r in (x, y):
-            if (r.get("pass") == "0" or r.get("undetermined") == "1" or key not in r
-                    or float(r[key]) <= 0):
-                why = why or "failed"
-            elif r.get("sync") == "timeout":
-                why = why or "sync_timeout"
-            else:
-                sender = sender_share(r)
-                if sender >= SENDER_BOUND:
-                    why = why or "sender_bound"
-                vals.append((float(r[key]), float(r["overall_mbit"]),
-                             float(r["agent_cpu_share"]), sender, float(r.get("vm_cpu_share", "nan"))))
+        why = classify_pair(x, y, key, True)
         if why:
             counts[why] += 1
             continue
+        vals = [(float(r[key]), float(r["overall_mbit"]), float(r["agent_cpu_share"]), sender_share(r),
+                 float(r.get("vm_cpu_share", "nan"))) for r in (x, y)]
         arm_vals["x"].append(vals[0])
         arm_vals["y"].append(vals[1])
         ratio = vals[0][0] / vals[1][0]
@@ -480,20 +480,16 @@ def cpupaired_key(logfile, key, pre):
             ok = False
     if not ok:
         return 1
-    ma, mb = statistics.median(pairs["a"]), statistics.median(pairs["b"])
+    ma, mb, boot = ratio_ci(pairs)
     for side, m in (("a", ma), ("b", mb)):
         print(pre + "PAIRS x_in_vm=%s pairs=%d ratio_median=%.3f min=%.3f max=%.3f"
               % (side, len(pairs[side]), m, min(pairs[side]), max(pairs[side])))
-    rng = random.Random(1)
-    boot = sorted(math.sqrt(statistics.median(rng.choices(pairs["a"], k=len(pairs["a"])))
-                            * statistics.median(rng.choices(pairs["b"], k=len(pairs["b"]))))
-                  for _ in range(10000))
     overlap = statistics.median(overlaps) if overlaps else None
     print(pre + "RATIO x_over_y=%.3f ci95_low=%.3f ci95_high=%.3f pairs=%d left_out=%d vm_a_over_b=%.3f overlap=%s x=%s y=%s"
           % (math.sqrt(ma * mb), boot[249], boot[9749], len(pairs["a"]) + len(pairs["b"]), sum(counts.values()),
              math.sqrt(ma / mb), "%.2f" % overlap if overlap is not None else "unknown",
              names.get("x", "x"), names.get("y", "y")))
-    if pre:
+    if vm:
         # the VMs' vCPU count comes from the PLAN line; runs from before it was written there had 4
         vcpus = int(plan.get("vcpus", "4"))
         limit = VM_BUSY_SHARE * vcpus
@@ -605,8 +601,9 @@ def latpaired(logfile):
                  "%.1f" % statistics.median(mbit) if mbit else "-",
                  "%.2f" % statistics.median(busy) if busy else "-", "%.2f" % max(busy) if busy else "-"))
     rc = 0
-    for key in ("udp_load_p99_ms", "udp_load_jitter_ms", "udp_idle_p99_ms", "udp_idle_jitter_ms"):
-        rc = paired_ratio(logfile, key, "LATRATIO") or rc
+    data = load_paired(logfile)
+    for key in ("udp_load_p50_ms", "udp_load_p99_ms", "udp_load_jitter_ms", "udp_idle_p99_ms", "udp_idle_jitter_ms"):
+        rc = paired_ratio(data, key, "LATRATIO") or rc
     return rc
 
 

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket as LanSocket;
 use wgft_proto::{AgentRule, Proto};
 
-use super::replies::Replies;
+use super::replies::{Replies, UDP_BUF};
 use super::testpeer::{Peer, UdpClient};
 use super::tests::{free_port, rule, targets, wait_for};
 use super::{Key, Kind, ListenerStat, Manager};
@@ -52,7 +52,7 @@ async fn echo() -> (SocketAddr, tokio::sync::watch::Receiver<Vec<SocketAddr>>) {
     let a = s.local_addr().unwrap();
     let (tx, rx) = tokio::sync::watch::channel(Vec::new());
     tokio::spawn(async move {
-        let mut buf = vec![0u8; 65535];
+        let mut buf = vec![0u8; UDP_BUF];
         loop {
             let Ok((n, from)) = s.recv_from(&mut buf).await else {
                 continue;
@@ -163,7 +163,7 @@ async fn sink() -> (
     let a = s.local_addr().unwrap();
     let (tx, rx) = tokio::sync::watch::channel((Vec::new(), 0));
     tokio::spawn(async move {
-        let mut buf = vec![0u8; 65535];
+        let mut buf = vec![0u8; UDP_BUF];
         while let Ok((_, from)) = s.recv_from(&mut buf).await {
             tx.send_modify(|(v, n)| {
                 if !v.contains(&from) {

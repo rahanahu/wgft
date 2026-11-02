@@ -1,12 +1,10 @@
 use super::*;
+use crate::batching::Batching;
 
 #[test]
 fn the_line_has_the_lab_s_form_and_grows_with_the_caps() {
-    let small = MemoryBound::for_limits(flowpool::Limits {
-        udp: 4096,
-        tcp: 1024,
-    });
-    let big = MemoryBound::for_limits(flowpool::Limits::default());
+    let small = MemoryBound::for_limits(caps(4096, 1024), Batching::derived(caps(4096, 1024)));
+    let big = MemoryBound::for_limits(flowpool::Limits::default(), Batching::default());
     assert!(small.line().starts_with("memory bound: "));
     assert!(
         small
@@ -33,6 +31,7 @@ fn the_line_has_the_lab_s_form_and_grows_with_the_caps() {
         "tables",
         "driver",
         "device",
+        "batch",
         "tcp relay",
         "udp relay",
     ] {
@@ -41,6 +40,41 @@ fn the_line_has_the_lab_s_form_and_grows_with_the_caps() {
             "{name} is missing: {line}"
         );
     }
+}
+
+fn caps(udp: usize, tcp: usize) -> flowpool::Limits {
+    flowpool::Limits { udp, tcp }
+}
+
+/// データプレーンが device に渡すバッチの枠は、最大の MTU の device が求める長さで数える。
+#[test]
+fn the_batch_term_counts_slots_the_device_fills() {
+    use wgft_wireguard::{DATA_OVERHEAD, DEFAULT_KEEPALIVE, Device, DeviceConfig, PrivateKey};
+    let key = PrivateKey::generate(&[1; 32]);
+    let peer = PrivateKey::generate(&[2; 32]).public_key();
+    let mut config = DeviceConfig::agent(
+        key,
+        peer,
+        None,
+        std::net::Ipv4Addr::new(10, 200, 0, 1),
+        DEFAULT_KEEPALIVE,
+    );
+    config.mtu = u16::try_from(MAX_MTU).unwrap();
+    let device = Device::new(config, std::time::Instant::now(), std::time::Duration::ZERO).unwrap();
+    assert_eq!(device.mtu(), MAX_MTU);
+    assert_eq!(device.max_transmit_len(), MAX_MTU + DATA_OVERHEAD);
+    // 枠を持たない device の項は、バッチが無くても変わらない
+    let on = MemoryBound::for_limits(caps(4096, 1024), Batching::default());
+    let off = MemoryBound::for_limits(caps(4096, 1024), Batching::OFF);
+    assert_eq!(on.device, off.device);
+    assert_eq!(on.device, device_bytes());
+    let one_slot = 2 * UDP_BUF + device.mtu() + device.max_transmit_len();
+    assert!(
+        off.batch >= one_slot && off.batch < one_slot + 256,
+        "{}",
+        off.batch
+    );
+    assert_eq!(on.batch, Batching::default().bytes());
 }
 
 #[test]
@@ -77,7 +111,10 @@ mod table {
         let bounds = TABLE_LIMITS.map(|(udp, tcp)| {
             let limits = flowpool::Limits { udp, tcp };
             let core = Bound::for_limits(&CoreLimits::with_max_flows(tcp), MAX_MTU);
-            (MemoryBound::for_limits(limits), core)
+            (
+                MemoryBound::for_limits(limits, Batching::derived(limits)),
+                core,
+            )
         });
         let mut w = String::new();
         w.push_str("| term |");

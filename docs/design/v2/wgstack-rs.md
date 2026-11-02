@@ -44,7 +44,7 @@ Go の文書と食い違う点は、この文書が理由と共に挙げたも�
 - 決定:適合の台本は混成で持ちます。直線の台本はデータにし、Go の runner と Rust の runner が同じファイルを流します。反応する台本と測る台本は Go のまま残し、Rust の試験用のプログラムを標準入出力で時計ごと動かします。C ABI は作りません (2026-11-01)
 - 決定:内部に触れる試験 (fuzz、不変条件、手で進める時計の試験、単体の試験) は実装と一緒に Rust に移します。実ネットワークの面から製品を確かめる試験は Go のまま残せます ([テスト](README.md#テスト))
 - 決定:割り当て器は、予算を持つ保持を自前の置き場から取ることを前提に、OS の標準と mimalloc を測ってから選びます (2026-11-01)
-- 決定:device の層は datagram ごとに確保せず、buffer を使い回します。割り当て器は OS の標準のまま、Linux の build は musl の静的な build のままにします。glibc に動的に結ぶ build は、バッチの段で写しを減らした後に残る差を測り直してから決めます ([割り当て器と libc の比べ](#割り当て器と-libc-の比べ)、2026-11-02)
+- 決定:device の層は datagram ごとに確保せず、データプレーンが起動の時に確保した buffer を呼び手の buffer として使い回します。割り当て器は OS の標準のまま、Linux の build は musl の静的な build のままにします。glibc に動的に結ぶ build は、バッチの段で写しを減らした後に残る差を測り直してから決めます ([割り当て器と libc の比べ](#割り当て器と-libc-の比べ)、2026-11-02)
 - 決定:上界の表は `Bound` の計算から生成し、生成し直しの差分で検査します (2026-11-01)
 - 決定:wgstack の実装の担当は Linux の source を読みません。Linux の振る舞いは文書で渡します。実装の担当は wgft 自身のコードである Go の wgstack を読んで写せます。GotaTun (MPL-2.0) のコードは写しません。gVisor と smoltcp のコードも写しません (2026-10-30、2026-11-01)
 - 決定:需要で育つバッファは採用済みで、性能の段階の後に実装します ([決めたこと](../userspace/wgstack-buffers.md#決めたこと)、2026-10-31)
@@ -118,6 +118,8 @@ Go の `internal/ipv4frag` は gVisor の経路と共有する葉の package で
 | `crates/wgft-wgstack` | sans-IO の核 | 標準ライブラリだけ | 実装の担当 |
 | `crates/wgft-netstack` | 核を tokio の上で使う handle の層。TCP、UDP、ping の非同期の handle、waker の表、操作の知らせ | `wgft-wgstack`、tokio | 実装の担当 |
 | `crates/wgft-wgstack-bench` | 核の segment ごとの受信と送信の経路の criterion のベンチ。配布せず、`wgft` のバイナリにも入りません | `wgft-wgstack`、dev 依存の `criterion` | 実装の担当 |
+| `crates/wgft-udp-batch` | agent のトンネルのバッチの置き場と、Linux のバッチの system call の包み。agent のデータプレーンとホストの測定の道具が使います | Linux では `libc` | 実装の担当 |
+| `crates/wgft-agent-perf` | agent の tunnel のソケットの経路を、ホストの network namespace の中で `perf stat` の下で測る道具。配布せず、ワークスペースの既定の member に入りません。[agent-throughput.md](agent-throughput.md#目的byte-あたりの-cpu-と速さ)に使い方があります | `wgft-wireguard` | 実装の担当 |
 | `crates/wgft-wgstack/fuzz` | cargo-fuzz の target。ワークスペースの member に入りません | `wgft-wgstack`、`libfuzzer-sys` | target ごとに[fuzz](#fuzz)の表が決めます |
 | `crates/wgft-tcpharness`、`crates/wgft-wgstack-dut` | 試験の道具と DUT のバイナリ。配布せず、`wgft` のバイナリにも入りません | `wgft-wgstack` | 試験の担当 |
 
@@ -223,7 +225,9 @@ IPv4 でない packet は device の層が捨てます。
   採るかは CPU を測ってから決めます
 - UDP:`bind_udp(now, SocketAddrV4) -> Result<UdpId>`、`recv_from(now, UdpId, &mut [u8]) -> Result<(usize, SocketAddrV4)>`、`send_to(now, UdpId, &[u8], SocketAddrV4)`、`close_udp`。
   `send_to` は送信の予算を予約できなければ `WouldBlock` を返し、予約できるようになったら知らせます。
-  Go の `WriteTo` が予約できるまで待つ挙動は、handle の層の待ちになります
+  Go の `WriteTo` が予約できるまで待つ挙動は、handle の層の待ちになります。
+  agent の中継がトンネルへ応答を入れる口として `send_to_latest(now, UdpId, &[u8], SocketAddrV4, max_age_ms)` を足します。
+  待たず、`WouldBlock` を返さず、待ちの list にも入れません ([トンネルへ送る応答の詰まり](agent-parity.md#トンネルへ送る応答の詰まり))
 - keepalive の ping:`open_ping(now, Ipv4Addr) -> Result<PingId>`、`send_ping`、`recv_ping`、`close_ping`。
   表は Go と同じ固定の大きさで、満杯なら誤りを返します
 - 会計の故障:`udp_receive_fault() -> Option<UdpFault>` が、`agent doctor` の `tunnel.udp_accounting` に使う最初の違反を返します ([会計の不整合](../userspace/udp-accounting.md#会計の不整合))
@@ -391,9 +395,12 @@ UDP のソケットは駆動の task が持ちます。
 ### 1 回の起床
 
 駆動の task は、UDP のソケットの準備、タイマー、操作の知らせ (後述) の 3 つを待ち、起きたら次の順に処理します。
+受信と送信はバッチで行います。
+1 の受信の相 (ソケットが空になるか遅れの予算が尽きるまで受信のバッチを繰り返します) の後に、3 の送信の相を行います ([バッチの作り](agent-throughput.md#バッチの作り))。
 
-1. UDP のソケットから datagram を読み、`Device::handle_datagram` に渡し、`Device::poll_packet` が出す packet をすべて核の `handle_packet` に渡します
-2. 時刻が来ていれば、device の層と核の `handle_timeout` を呼びます
+1. UDP のソケットから datagram の列を読み、それぞれを `Device::handle_datagram` でバッチの平文の領域に復号し、戻りの長さの packet を核の `handle_packet` に借用で渡します。
+   UDP の packet を先に渡します
+2. 受信の相の後に、時刻が来ていれば、device の層と核の `handle_timeout` を呼びます
 3. 送り出しを次の規則で行います
 4. `poll_event` の知らせで waker を起こし、`poll_log` の行をログに出します
 5. device の層と核の `poll_timeout` の早い方でタイマーを張り直します
@@ -401,8 +408,9 @@ UDP のソケットは駆動の task が持ちます。
 送り出しの規則は次のとおりです。
 
 - 先に device の層:`Device::poll_transmit` が出す datagram を、ソケットが受け付ける間すべて送ります
-- 核から取り出す条件:device の層がピアとの使えるセッションを持ち、device の層の送る datagram の待ち行列が空の間だけ、核の `poll_transmit` で packet を 1 つ作り、`Device::handle_packet` で暗号にし、出た datagram を送ります。
-  これを 1 回の起床の上限の数まで繰り返します
+- 核から取り出す条件:device の層がピアとの使えるセッションを持ち、device の層の送る datagram の待ち行列が空で、前のバッチを送り切っている間だけ、核の `poll_transmit` でバッチの枠の数までの packet を作ります。
+  それを UDP の packet を先に `Device::handle_packet` で暗号にし、出た datagram の列を送ります。
+  これを 1 回の起床の遅れの予算の内で繰り返します
 - セッションが無いとき:核から取り出さず、device の層にハンドシェイクを始めさせます。
   セッションの無いピアへの packet はハンドシェイクを待つ待ち行列に入り、溢れると古いものから捨てられるためです。
   device の層の口は `Device::has_session` と `Device::start_handshake` です。
@@ -411,6 +419,7 @@ UDP のソケットは駆動の task が持ちます。
 
 この規則で、核の出力は device の層の上限の内側にだけ滞留し、wgstack と UDP のソケットの間に上限の外の待ち行列はできません。
 核の出力は呼ばれない間も保持を増やさないので、送り出しの詰まりは核の中に積もらず、TCP の再送で回復します。
+UDP の応答だけは例外で、核の送信の予算の中に積もります。積もる量の上界は予算と、古いものから捨てる決まりと時間の上限で決まります ([トンネルへ送る応答の詰まり](agent-parity.md#トンネルへ送る応答の詰まり))。
 これは Go の設計の「出力の詰まり」と同じ性質です。
 
 ### 操作の知らせ
@@ -709,13 +718,12 @@ sanstun のデータの経路は呼び手の buffer を使います。
 `Interface::receive` はデータの message のヘッダを読むだけで、確保しません。
 sanstun が確保するのは、ハンドシェイク、cookie の返事、keepalive の datagram (`Datagram` の `Box`) だけです。
 
-device の層の確保は、データの packet 1 つにつき次のとおりです。
+device の層の確保は、バッチの段の最初の段階の前は、データの packet 1 つにつき次のとおりでした。
 
 - 受ける向き:`Protocol::receive` の復号の buffer (`vec!` の零埋め) と、`Device::deliver` の平文の写し (`to_vec`)
 - 送る向き:`Device::handle_packet` の packet の写し (`to_vec`) と、`Protocol::encapsulate` の datagram の buffer (`vec!` の零埋め)
 
-受けた packet の `Vec` は、駆動が核に渡した後に解放します。
-送る datagram の `Vec` は、駆動が送った後に解放します。
+受けた packet の `Vec` は、駆動が核に渡した後に解放し、送る datagram の `Vec` は、駆動が送った後に解放していました。
 核と `wgft-netstack` の handle の層は、packet ごとに確保しません。
 
 #### 測った build
@@ -733,7 +741,7 @@ device の層の確保は、データの packet 1 つにつき次のとおりで
 C の libc は musl の名前の target ですが、`cargo zigbuild` は zig の同梱の libc を結び、`malloc` と `free` は zig の実装です。
 B から E は測るための試作で、製品には入れていません。
 
-E の使い回しは向きごとに 8 個までで、容量が MTU と 32 byte を超える buffer は持たずに解放します。
+E の試作の使い回しは向きごとに 8 個までで、容量が MTU と 32 byte を超える buffer は持たずに解放します。
 持つ量は 2 × 8 × (MTU + 32) byte で、最大の MTU (9216) で約 145 KiB の決まった項になります。
 復号の buffer は最大の datagram の 64 KiB で、今の上界の device の項が数える「復号に使う datagram 1 つ分」と同じ大きさです。
 渡す packet の buffer はどれも容量が MTU と 32 byte になり、送る datagram も buffer の容量で待ち行列の byte に数えます。
@@ -791,7 +799,7 @@ glibc の build では、それに加えて `memcpy` が速いと考えます。
 
 #### メモリ
 
-`lifecycle.sh kernel 5 5b` を `WGFT_LAB_RSS_PHASES=1` で流し、check 5 (UDP 4096、TCP 1024 の上限) の中でエージェントの RSS を段ごとに測りました。
+`lifecycle.sh kernel 5 5b` に一時的に足した測り (環境変数 `WGFT_LAB_RSS_PHASES=1`。決定の後に取り除いたので、Git の履歴の `lab/lifecycle.sh` にあります) を付けて流し、check 5 (UDP 4096、TCP 1024 の上限) の中でエージェントの RSS を段ごとに測りました。
 段は、起動の後、エージェントが 512 MiB を受けた後、洪水の最中、TCP の洪水の接続が閉じた後、エージェントが 512 MiB を送った後、UDP のセッションが無通信の期限 (120 秒) で閉じた後です。
 check 5 と 5b はどの build でも通りました。
 
@@ -858,11 +866,18 @@ D は動き、Miri の試験も通りましたが、採用を勧めません。
 所有者が 2026-11-02 に次のとおり決めました。
 
 1. device の層を E の形にします。
+   E は、device の層の自前の buffer の使い回しで、unsafe も依存も使いません。
    復号は device が持つ 1 つの buffer に行い、渡す packet と送る datagram の buffer は呼び手が返したものを向きごとに 8 個まで使い回します。
-   バッチの段の最初の段階 (確保をやめ、まだ 1 packet ずつ送受信する間)は、使い回しの量 2 × 8 × (MTU + 32) byte を上界の device の項に足します。
-   unsafe も依存も増やさずに、C に対して受ける向きの CPU を 14% 減らしました。
+   バッチの段の最初の段階の実装は、E の考えを、呼び手の buffer を取る API に進めた形です (実装の判断)。
+   device は buffer の `Vec` を持ちません。
+   受ける向きは呼び手の復号の buffer に復号して先頭の長さを返し、送る向きは呼び手の buffer に暗号化して宛先と長さを返します。
+   E の使い回しの組は、受ける向きの packet の写し 1 回を残します。
+   借用で渡す形には、この写しも使い回しの組の管理も要りません。
+   最初の段階 (1 packet ずつ送受信する間) は、データプレーンが起動の時に 1 回だけ確保する 4 つの buffer を上界の device の項に数えます。
+   4 つは、受ける datagram と復号の行き先 (どちらも 65535 byte)、核が書く packet (MTU)、暗号文 (MTU と 32 byte) です。
+   device の受信の待ち行列 (`deliver` の上限) は無いので、device の項に入りません。
+   E の試作は unsafe も依存も増やさずに、C に対して受ける向きの CPU を 14% 減らしました。
    送る向きは 0.9 から 1.0 の間で、決まっていません。
-   buffer はバッチの段が持つので、実装はバッチの段と一緒に入れます。
    バッチの段が入った後の数え方は [バッチの作りの規則](agent-throughput.md#バッチの作りの規則) に従います。
    E の効果はバッチの無い形で測った値で、[バッチで減らせる分の見積もり](agent-throughput.md#バッチで減らせる分の見積もり)の `malloc` と `free` の行 (送る向き 6.1%、受ける向き 14.6%) に当たります
 2. 割り当て器は OS の標準のままにし、mimalloc と自前の割り当て器 (D) は採りません。
@@ -921,8 +936,8 @@ Rust の wgstack は Go と同じ floor と boost の枠の模型で書き、Go 
 
 agent では packet は次のように流れます。
 
-- 受信:UDP のソケット、`Device::handle_datagram`、`Device::poll_packet`、核の `handle_packet`
-- 送信:核の `poll_transmit`、`Device::handle_packet`、`Device::poll_transmit`、UDP のソケット
+- 受信:UDP のソケット、`Device::handle_datagram` (復号の buffer を渡す)、核の `handle_packet`
+- 送信:核の `poll_transmit`、`Device::handle_packet` (暗号文の buffer を渡す)、UDP のソケット。ハンドシェイクと keepalive の datagram は `Device::poll_transmit` から取る
 - アプリケーション:中継の task が `wgft-netstack` の handle を読み書きし、LAN の宛先へは OS のソケットで接続します
 
 TUN も、トンネルのアドレスの経路も、専用の経路表と rule も要りません。
@@ -930,9 +945,8 @@ agent はどの OS でも利用者の権限で動き、Go の v1 のユーザー
 核は OS に依らないので、Windows と macOS でも同じ形で動きます。
 CI はこの 2 つの OS で build と単体の試験を流しますが、実機での動作は未確認です。
 
-device の層の `poll_packet` は packet ごとに `Vec` を確保して返し、agent はこの形のまま使います。
-device の層に呼び手の buffer へ書く口を足すかは、CPU を測ってから決めます。
-送信の向きも同じです。
+device の層は packet ごとに確保せず、呼び手の buffer に復号と暗号化を行います。
+バッチの段では、この buffer がバッチの配列の枠になります ([速さを制限しない経路の agent の性能](agent-throughput.md#バッチの作りの規則))。
 
 ### 入口の検査
 
@@ -965,8 +979,7 @@ wgstack はそれらを自分で扱うので、[トンネルの中の約束](../
   `gvisor` のときは使わない旨を英語の 1 行で出します
 - `WGFT_MAX_TCP_FLOWS`:Go と同じく K として受け取り、接続の枠の数 N_c = K + Q を導きます
 - `WGFT_AGENT_BATCH_MIB`:仕様は、受け付ける値の集合と誤りの文面を Go と同じにし、値から何を導くかは実装の送信の経路で決めるとしています ([WGFT_AGENT_BATCH_MIB](../spec/cli-config.md#wgft_agent_batch_mib))。
-  提案:値は 1 回の起床で作る packet の数の上限に使い、`0` は 1 件ずつ送ることにします。
-  導く式は送信の経路を測ってから決めます
+  値はトンネルの受信と送信のバッチの置き場の予算にし、`0` は 1 つずつ送受信することにしました ([WGFT_AGENT_BATCH_MIB の意味](agent-throughput.md#wgft_agent_batch_mib-の意味))
 
 ## 待ち受けの守り
 
@@ -1489,6 +1502,17 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   ログの文面は記録の照合の対象ではありません。
   会計の不整合は門を通さずに 1 回だけ `LogKind::UdpFault` を出し、中身は `udp_receive_fault` が返します。
   ICMP の誤りの速さの制限で送らなかった数は `icmp_limited` に数えます
+- 古いものから捨てる送信:`send_to_latest` は、予約を断られたら捨ててから予約し直します。
+  endpoint の上限で断られたらその endpoint の最も古い送信の datagram を、核の全体の予算で断られたら送信の FIFO の先頭を捨て、足りるまで繰り返します。
+  捨てるのは入れる datagram の分だけなので、1 つの datagram が 1 回しか捨てられない分の仕事です。
+  外す操作を O(1) にするため、送信の FIFO は前の指しを持つ二重の list にし、endpoint の行は自分の送信の datagram の先頭と末尾を持ちます。
+  どの外し方でも、外すのは持ち主の endpoint で最も古い datagram なので、endpoint の列は一方向で足ります。
+  `max_age_ms` が 0 でなければ、datagram は入れた時刻 (ns) と時間の上限を持ち、`poll_udp` が先頭を取り出す時に、送り始めていない datagram が上限を超えていれば捨てます。
+  捨てた数は `udp_send_evicted` と `udp_send_expired` に数え、`LogKind::UdpSendDropped` の門 (1 分に 1 回まで) を通します。
+  `send_to` は変わらないので、凍結した Go の recording の照合には影響せず、divergences.json に足す行はありません。
+  待つ `send_to`、待ちの list の出入り、起こす経路は `cfg(test)` か `harness` の feature のときだけ作り、欄は残します。
+  endpoint の列では、送り始めた先頭を飛ばした捨てが 2 番目を外すことがあり、`unlink_tx` はそれ以外の位置を会計の不整合 (`UdpFault::SendListBroken`) にします。
+  不変条件の `check_invariants` は、送信の FIFO の前の指しと入れた時刻の順、endpoint の列の datagram の世代と順、列の長さが endpoint の送信の予算の件数に等しいことを確かめます
 - 断片の数:`fragments_dropped` は、Go の `FragmentsDropped` と同じく、datagram を完成させなかった断片 (保持した断片、重なった断片、捨てた断片) を数えます
 - 再組み立ての表の掃除の期限:`poll_timeout` は、表が項目を持つ間だけ次の掃除の時刻を返します (Go の `nextDeadline`)。
   呼び手の待ちのたびに表の全体をたどらないよう、表は使っている項目の数を持ちます
@@ -2001,11 +2025,7 @@ agent の置き換えが終わった後に、次の作業を順に決めます�
 ## 実装の時に決めること
 
 - 写さずに読み書きする口:`read_slices` と `write_slices` を足すか。CPU を測ってから決めます
-- device の層との受け渡し:`Device::poll_packet` と `Device::poll_transmit` が packet ごとに確保する形を、呼び手の buffer に書く形に替えるか。
-  2026-11-02 に使い回す形に決めました ([決めたこと](#決めたこと))。
-  実装はバッチの段と一緒に入れます
 - 受け付けるアドレスが増えたときの待ち受けと UDP の endpoint の表の持ち方 (dial の側を足すときに決めます)
-- 1 回の起床の上限:1 回に作る packet の数と、`WGFT_AGENT_BATCH_MIB` から導く式
 - glibc に動的に結ぶ build:バッチの段で写しを減らした後に、musl の静的な build との差を測り直して決めます ([決めたこと](#決めたこと))
 - 割り当て器の丸めの係数:OS の標準の割り当て器の係数を測ります
 

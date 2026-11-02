@@ -27,9 +27,24 @@ mod replay;
 pub use adversary::{AdversaryCfg, adversarial_sender, adversarial_sender_seed};
 pub use core::core;
 pub use net::{
-    Check, DUT, MTU, Net, Options, PEER, fuzz_limits, last_digest, put_spare, set_options,
+    Check, DUT, HarnessOptions, MTU, Net, PEER, fuzz_limits, last_digest, put_spare, set_options,
     small_limits, take_spare,
 };
 pub use peer::{PeerConn, SackPeer};
 pub use raw::{raw_adversary, raw_adversary_input, raw_adversary_seed};
 pub use replay::{replay, replay_seed};
+
+/// 表を使い回す cargo-fuzz の target を宣言します。入力の間で核の表を使い回す選び方
+/// (`HarnessOptions::FUZZ`) をここだけに置き、target を足す時に付け忘れないようにします
+/// (docs/design/v2/wgstack-rs.md の「核の使い回し」)。呼び手の crate が `libfuzzer-sys` を持ちます。
+#[macro_export]
+macro_rules! fuzz_entry {
+    ($body:path) => {
+        ::libfuzzer_sys::fuzz_target!(
+            init: {
+                $crate::fuzz::set_options($crate::fuzz::HarnessOptions::FUZZ);
+            },
+            |data: &[u8]| $body(data)
+        );
+    };
+}

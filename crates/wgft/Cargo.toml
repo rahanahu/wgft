@@ -15,6 +15,10 @@ time = { workspace = true, features = ["formatting", "macros"] }
 wgft-agent.workspace = true
 wgft-proto.workspace = true
 
+[features]
+# ラボの build だけが付ける。wgft-agent の同名の feature を開ける
+lab-observe = ["wgft-agent/lab-observe"]
+
 [lints]
 workspace = true
 

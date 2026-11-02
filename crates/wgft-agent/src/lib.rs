@@ -5,6 +5,7 @@
 //! `dataplane` のスレッドが動かす。TUN は使わない。作りは `docs/design/v2/agent-control.md` と
 //! `docs/design/v2/agent-parity.md` に書く。
 
+pub mod batching;
 pub mod config;
 mod control;
 pub mod controlapi;

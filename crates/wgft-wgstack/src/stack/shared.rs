@@ -133,6 +133,10 @@ pub struct Stats {
     pub udp_endpoint_full: u64,
     /// 核の全体の予算で断った受信の datagram です。
     pub udp_tunnel_full: u64,
+    /// 送信の予算が尽きた時に、新しい datagram の場所を空けるために捨てた古い送信の datagram です。
+    pub udp_send_evicted: u64,
+    /// 待てる最長の時間を超えて、送り始める前に捨てた送信の datagram です。
+    pub udp_send_expired: u64,
     pub icmp_dropped: u64,
     /// 速さの制限で送らなかった ICMP の誤りです。
     pub icmp_limited: u64,
@@ -207,13 +211,16 @@ pub enum LogKind {
     AccountingFault,
     /// 受信の socket が読まれず、UDP の予算で datagram を捨てました。`count` は予算で断った数です。
     UdpDropped,
+    /// トンネルへ送る UDP の datagram を、送信の予算が尽きたか待てる時間を超えたために捨てました。`count` は
+    /// 捨てた数の和です。
+    UdpSendDropped,
     /// UDP の会計が不変条件の違反を見つけ、核の UDP をすべて止めました。1 回だけ出します。違反の中身は
     /// [`crate::Stack::udp_receive_fault`] が返します。
     UdpFault,
 }
 
 /// 門を通るログの種類です。`UdpFault` は 1 回だけ出すので門を持ちません。
-const LOG_KINDS: [LogKind; 10] = [
+const LOG_KINDS: [LogKind; 11] = [
     LogKind::MssFloor,
     LogKind::SynFull,
     LogKind::SynCookies,
@@ -224,6 +231,7 @@ const LOG_KINDS: [LogKind; 10] = [
     LogKind::OooDropped,
     LogKind::AccountingFault,
     LogKind::UdpDropped,
+    LogKind::UdpSendDropped,
 ];
 
 /// 門を通った 1 行の材料です。`count` は核を作ってからの数です。英語の文面は駆動の層 (`wgft-netstack`) が書きます。
@@ -333,7 +341,10 @@ impl Shared {
             LogKind::OooDropped => &mut st.ooo_dropped,
             LogKind::AccountingFault => &mut st.accounting_faults,
             // UDP の数は入口が数え、cookie の数は送った所が数えます。
-            LogKind::UdpDropped | LogKind::UdpFault | LogKind::SynCookies => return,
+            LogKind::UdpDropped
+            | LogKind::UdpSendDropped
+            | LogKind::UdpFault
+            | LogKind::SynCookies => return,
         };
         *c += 1;
         let n = *c;

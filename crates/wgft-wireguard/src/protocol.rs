@@ -59,8 +59,8 @@ pub(crate) enum Inbound {
     ResponseAccepted { peer: PeerId, keepalive: Vec<u8> },
     /// cookie を受け取った。次の開始に使う。
     CookieStored,
-    /// 認証し、再送の検査を通ったデータ。平文は詰め物を含む。
-    Data { peer: PeerId, plaintext: Vec<u8> },
+    /// 認証し、再送の検査を通ったデータ。平文は呼び手の buffer の先頭の `len` byte で、詰め物を含む。
+    Data { peer: PeerId, len: usize },
     /// 認証した keepalive。
     Keepalive { peer: PeerId },
 }
@@ -185,6 +185,7 @@ impl Protocol {
         now: Instant,
         src: SocketAddr,
         datagram: &[u8],
+        out: &mut [u8],
     ) -> Result<Inbound, DropReason> {
         let message = match self
             .interface
@@ -238,20 +239,19 @@ impl Protocol {
                 let pending = tunnel
                     .begin_decapsulate(data, now)
                     .map_err(|e| map_error(&e))?;
-                // 復号はこの呼び出しの中で済ませる。復号を待つキューは持たない
-                let buffer = vec![0u8; datagram.len() - DATA_HEADER_LEN];
+                // 復号はこの呼び出しの中で、呼び手の buffer に済ませる。復号を待つキューは持たない。
+                // buffer が短ければ、復号を始めずに捨てる
+                let Some(buffer) = out.get_mut(..datagram.len() - DATA_HEADER_LEN) else {
+                    return Err(DropReason::Malformed);
+                };
                 let decrypted = pending.decrypt(datagram, buffer);
                 match tunnel
                     .commit_decapsulate(decrypted, now)
                     .map_err(|e| map_error(&e))?
                 {
-                    Committed::Data { mut buffer, len } => {
-                        buffer.truncate(len);
+                    Committed::Data { len, .. } => {
                         self.peers[peer].passive.on_data(now);
-                        Ok(Inbound::Data {
-                            peer,
-                            plaintext: buffer,
-                        })
+                        Ok(Inbound::Data { peer, len })
                     }
                     Committed::Keepalive => Ok(Inbound::Keepalive { peer }),
                 }
@@ -259,13 +259,23 @@ impl Protocol {
         }
     }
 
-    /// `packet` を暗号化する。セッションが無ければ `Ok(None)` を返す。
-    pub(crate) fn encapsulate(
+    /// 暗号に要る `out` の長さ。詰め物と header と tag を含む。
+    pub(crate) const fn sealed_len(packet_len: usize) -> usize {
+        packet_len.next_multiple_of(PADDING) + DATA_OVERHEAD
+    }
+
+    /// `packet` を呼び手の buffer `out` に暗号化し、書いた長さを返す。セッションが無ければ `Ok(None)`。
+    /// `out` は [`Protocol::sealed_len`] より短くてはならない。短ければ `Err` で、暗号の番号は使わない。
+    pub(crate) fn encapsulate_into(
         &mut self,
         peer: PeerId,
         now: Instant,
         packet: &[u8],
-    ) -> Result<Option<Vec<u8>>, DropReason> {
+        out: &mut [u8],
+    ) -> Result<Option<usize>, DropReason> {
+        let Some(out) = out.get_mut(..Self::sealed_len(packet.len())) else {
+            return Err(DropReason::Internal);
+        };
         let p = &mut self.peers[peer];
         let pending = match p.tunnel.begin_encapsulate(now) {
             Ok(pending) => {
@@ -277,13 +287,28 @@ impl Protocol {
             }
             Err(e) => return Err(map_error(&e)),
         };
-        let mut out = vec![0u8; packet.len().next_multiple_of(PADDING) + DATA_OVERHEAD];
         let len = pending
-            .encrypt(packet, &mut out)
+            .encrypt(packet, out)
             .map_err(|e| map_error(&e))?
             .len();
-        out.truncate(len);
-        Ok(Some(out))
+        Ok(Some(len))
+    }
+
+    /// `packet` を新しい buffer に暗号化する。ハンドシェイクを待っていた packet を送るときの、
+    /// 定常の経路ではない道で使う。セッションが無ければ `Ok(None)`。
+    pub(crate) fn encapsulate(
+        &mut self,
+        peer: PeerId,
+        now: Instant,
+        packet: &[u8],
+    ) -> Result<Option<Vec<u8>>, DropReason> {
+        let mut out = vec![0u8; Self::sealed_len(packet.len())];
+        Ok(self
+            .encapsulate_into(peer, now, packet, &mut out)?
+            .map(|len| {
+                out.truncate(len);
+                out
+            }))
     }
 
     /// ハンドシェイクを始める。進行中なら `None`。

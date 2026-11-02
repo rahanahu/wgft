@@ -19,8 +19,9 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 /// The reply buffers lent at once across the process (Go's `replySlots`).
 pub(crate) const REPLY_SLOTS: usize = 64;
 
-/// The size of one UDP buffer: a reply buffer and a listener's receive buffer (Go's `udpBufMax`).
-pub(crate) const UDP_BUF: usize = 65535;
+/// The size of one UDP buffer: a reply buffer, a listener's receive buffer and a tunnel receive slot (Go's `udpBufMax`).
+/// One constant for all three, the largest UDP datagram.
+pub(crate) const UDP_BUF: usize = wgft_udp_batch::RX_SLOT;
 
 /// プロセス全体の枠。どの世代の中継もこれを使う。
 pub(crate) static REPLIES: LazyLock<Replies> = LazyLock::new(|| Replies::new(REPLY_SLOTS));

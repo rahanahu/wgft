@@ -27,7 +27,13 @@ wgft-proto.workspace = true
 wgft-wireguard.workspace = true
 wgft-netstack.workspace = true
 wgft-wgstack.workspace = true
+wgft-udp-batch.workspace = true
 zeroize = { workspace = true, features = ["serde", "zeroize_derive"] }
+
+[features]
+# ラボの build だけが付ける。接続の枠の使用量の行 (`memory: connection slots used so far`) を 1 秒ごとに読んで書く。
+# 製品の build (`-p wgft` を feature なしで) にはなく、データプレーンのスレッドへの定期の呼び出しも持たない
+lab-observe = []
 
 [lints]
 workspace = true

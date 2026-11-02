@@ -58,7 +58,7 @@ pub enum Check {
 
 /// 核の作り方と確かめの形です。スレッドごとに持ち、[`set_options`] で変えます。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Options {
+pub struct HarnessOptions {
     pub check: Check,
     /// 前の入力の核のポートの数の行を持つ表を、作成の時の値に戻して使い回します ([`Stack::close_keeping`])。
     pub reuse: bool,
@@ -67,7 +67,7 @@ pub struct Options {
     pub digest: bool,
 }
 
-impl Options {
+impl HarnessOptions {
     /// `Net` の既定です。書き換えた枠だけを確かめ、核を毎回新しく作り、hash を取りません。保持の試験のように
     /// 核を作った後の確保を数える試験が、前の核の表を数えに入れないためです。
     pub const DEFAULT: Self = Self {
@@ -90,22 +90,22 @@ thread_local! {
     static BUDGET: RefCell<Option<Budget>> = const { RefCell::new(None) };
     /// 入力から入力へ渡す、作成の時の値に戻したポートの数の行を持つ表です。
     static SPARE: RefCell<Option<Spare>> = const { RefCell::new(None) };
-    static OPTIONS: Cell<Options> = const { Cell::new(Options::DEFAULT) };
+    static OPTIONS: Cell<HarnessOptions> = const { Cell::new(HarnessOptions::DEFAULT) };
     static DIGEST: Cell<u64> = const { Cell::new(0) };
 }
 
 /// このスレッドの核の作り方と確かめの形を変え、前の値を返します。
-pub fn set_options(o: Options) -> Options {
+pub fn set_options(o: HarnessOptions) -> HarnessOptions {
     OPTIONS.replace(o)
 }
 
-/// このスレッドで最後に閉じた核の出力の hash です。[`Options::digest`] が偽なら 0 です。
+/// このスレッドで最後に閉じた核の出力の hash です。[`HarnessOptions::digest`] が偽なら 0 です。
 pub fn last_digest() -> u64 {
     DIGEST.get()
 }
 
 /// このスレッドの核の作り方と確かめの形です。
-pub(crate) fn options() -> Options {
+pub(crate) fn options() -> HarnessOptions {
     OPTIONS.get()
 }
 
@@ -141,7 +141,7 @@ pub(crate) fn put_budget(b: Budget) {
 
 /// 手で進める時計の核です。時刻は核を作ってからの ns で、Go の `ManualClock` と同じ値です。
 ///
-/// 各段の確かめは [`Options::check`] の形で行います。
+/// 各段の確かめは [`HarnessOptions::check`] の形で行います。
 #[derive(Debug)]
 pub struct Net<H: Hook> {
     stack: Option<Stack<H>>,
@@ -150,13 +150,13 @@ pub struct Net<H: Hook> {
     limits: Limits,
     bound: Bound,
     slots: usize,
-    options: Options,
+    options: HarnessOptions,
     touched: TouchedCheck,
     digest: DefaultHasher,
 }
 
 impl<H: Hook> Net<H> {
-    /// 表の大きさ `limits` の核を、Go の試験と同じ固定の種 (64 byte の 7) で作ります。[`Options::reuse`] が真なら、
+    /// 表の大きさ `limits` の核を、Go の試験と同じ固定の種 (64 byte の 7) で作ります。[`HarnessOptions::reuse`] が真なら、
     /// 前の入力の核の表を使い回します。
     pub fn new(config: Config, hook: H) -> Self {
         let options = OPTIONS.get();
@@ -307,7 +307,7 @@ impl<H: Hook> Net<H> {
     }
 
     /// 核の不変条件と、保持が表の大きさと上界の内にあることを確かめます。Go の `checkHeld` のうち、公開の
-    /// API で見える部分です。不変条件は [`Options::check`] の形で確かめます。
+    /// API で見える部分です。不変条件は [`HarnessOptions::check`] の形で確かめます。
     pub fn check(&mut self) {
         let stack = self.stack.as_mut().expect("the stack is open");
         let result = match self.options.check {
@@ -371,7 +371,7 @@ impl<H: Hook> Net<H> {
     }
 
     /// 核を閉じ、最後の会計がすべて 0 であることを確かめ、`Budget` を次の入力のために取り戻します。
-    /// [`Options::reuse`] が真なら、ポートの数の行を持つ表も作成の時の値に戻して取り戻します。
+    /// [`HarnessOptions::reuse`] が真なら、ポートの数の行を持つ表も作成の時の値に戻して取り戻します。
     pub fn finish(mut self) -> Held {
         let now = self.now();
         let stack = self.stack.take().expect("the stack is open");

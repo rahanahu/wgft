@@ -14,6 +14,7 @@
 //!   上の層の `Budget` を [`Carry`] で返す。[`Generations`] はそれを次の世代に渡し、スレッドがどの理由で
 //!   終わっても [`Generations::exited`] で知らせる
 
+pub(crate) mod batch;
 pub(crate) mod clock;
 mod driver;
 mod socket;
@@ -36,6 +37,8 @@ use tokio::sync::{mpsc, oneshot};
 use wgft_wireguard::{Device, DeviceConfig, Drops, Event, Held, PeerStatus};
 
 pub(crate) use socket::{REQUIRED, SocketBuffers};
+
+use crate::batching::Batching;
 
 /// The layer above the WireGuard device: the TCP/IP core that ends the tunnel's traffic.
 ///
@@ -119,18 +122,17 @@ impl<B> Carry<B> {
 pub struct Settings {
     /// The local address of the WireGuard UDP socket.
     pub listen: SocketAddr,
-    /// The most packets taken from the layer above in one wake-up.
-    pub max_packets_per_wake: usize,
-    /// The most datagrams read from the socket in one wake-up.
-    pub max_datagrams_per_wake: usize,
+    /// How the tunnel batches its socket's receive and send. One wake-up's work ends at the
+    /// latency budget, an internal constant (`docs/design/v2/agent-throughput.md`).
+    pub batching: Batching,
 }
 
 impl Default for Settings {
+    /// Any port on every IPv4 address, and the batching derived from the default flow caps.
     fn default() -> Self {
         Self {
             listen: SocketAddr::from(([0, 0, 0, 0], 0)),
-            max_packets_per_wake: 64,
-            max_datagrams_per_wake: 64,
+            batching: Batching::derived(crate::flowpool::Limits::default()),
         }
     }
 }
@@ -150,6 +152,10 @@ pub struct Status {
     pub send_errors: u64,
     /// Receive errors the data plane counted and skipped.
     pub receive_errors: u64,
+    /// Receive buffers the kernel cut short or whose control message did not fit (`MSG_TRUNC`,
+    /// `MSG_CTRUNC`), dropped and counted. A buffer is one datagram, or one UDP GRO buffer that
+    /// carries several segments, so a GRO buffer counts once.
+    pub receive_truncated: u64,
     /// The socket's buffers, measured when it was opened.
     pub socket_buffers: SocketBuffers,
     /// The device's [`Device::unix_high_water`].

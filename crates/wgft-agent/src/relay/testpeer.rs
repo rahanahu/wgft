@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -64,6 +64,9 @@ struct Inner {
     /// echo の応答でない ICMP の packet (Port Unreachable など)。
     icmp: Mutex<Vec<Vec<u8>>>,
     next_port: AtomicU16,
+    /// agent との間で通った WireGuard の datagram の数 (受けたものと送ったものの和)。確保の数を datagram の
+    /// 数で割る試験が読む。
+    datagrams: AtomicUsize,
 }
 
 /// The server side of a tunnel to an agent data plane, with a scripted TCP client.
@@ -87,13 +90,28 @@ impl Peer {
     /// points at it.
     pub(crate) async fn start() -> Peer {
         let (mut peer, agent_key) = Peer::server().await;
-        let agent = DeviceConfig::agent(
+        let endpoint = peer.endpoint;
+        peer.start_agent(agent_key, endpoint, ProtocolTimers::default())
+            .await;
+        peer
+    }
+
+    /// Starts the agent's data plane with `agent_key`, its peer's endpoint being `endpoint`, which
+    /// a test may point at something in front of the server, and with `timers`.
+    pub(crate) async fn start_agent(
+        &mut self,
+        agent_key: PrivateKey,
+        endpoint: SocketAddr,
+        timers: ProtocolTimers,
+    ) {
+        let mut agent = DeviceConfig::agent(
             agent_key,
-            peer.server_key.public_key(),
-            Some(peer.endpoint),
+            self.server_key.public_key(),
+            Some(endpoint),
             SERVER_IP,
             Duration::from_secs(25),
         );
+        agent.timers = timers;
         let settings = Settings {
             listen: "127.0.0.1:0".parse().unwrap(),
             ..Settings::default()
@@ -107,8 +125,7 @@ impl Peer {
         })
         .await
         .unwrap();
-        peer.agent = Some(agent);
-        peer
+        self.agent = Some(agent);
     }
 
     /// Starts only the server device on loopback, for an agent the test starts itself with the
@@ -139,6 +156,7 @@ impl Peer {
             udp: Mutex::new(HashMap::new()),
             icmp: Mutex::new(Vec::new()),
             next_port: AtomicU16::new(40000),
+            datagrams: AtomicUsize::new(0),
         });
         let task = tokio::spawn(serve(device, sock, out_rx, Arc::clone(&inner)));
         let peer = Peer {
@@ -159,6 +177,11 @@ impl Peer {
     /// The server's UDP endpoint.
     pub(crate) fn endpoint(&self) -> SocketAddr {
         self.endpoint
+    }
+
+    /// The datagrams that crossed between the agent and this server so far, both ways.
+    pub(crate) fn datagrams(&self) -> usize {
+        self.inner.datagrams.load(Ordering::Relaxed)
     }
 
     /// The agent's data plane.
@@ -377,6 +400,11 @@ impl Drop for UdpClient {
 }
 
 impl UdpClient {
+    /// The port this endpoint sends from and receives on, on the server's tunnel address.
+    pub(crate) fn port(&self) -> u16 {
+        self.lport
+    }
+
     /// Sends `data` as one datagram to the agent's `port`. It must fit the tunnel's MTU.
     pub(crate) fn send(&self, port: u16, data: &[u8]) {
         let _ = self
@@ -401,27 +429,39 @@ async fn serve(
     mut out: mpsc::UnboundedReceiver<Vec<u8>>,
     inner: Arc<Inner>,
 ) {
-    let mut buf = vec![0u8; 65535];
+    let mut buf = vec![0u8; crate::relay::UDP_BUF];
+    let mut plain = vec![0u8; crate::relay::UDP_BUF];
+    let mut sealed = vec![0u8; device.max_transmit_len()];
     loop {
         let deadline = device.poll_timeout();
         tokio::select! {
             r = sock.recv_from(&mut buf) => {
                 let Ok((n, from)) = r else { continue };
-                device.handle_datagram(clock::now(), from, &buf[..n]);
-                while let Some(p) = device.poll_packet() {
-                    if let Some(reply) = route(&p, &inner) {
-                        device.handle_packet(clock::now(), &reply);
-                    }
+                inner.datagrams.fetch_add(1, Ordering::Relaxed);
+                if let Some(len) = device.handle_datagram(clock::now(), from, &buf[..n], &mut plain)
+                    && let Some(reply) = route(&plain[..len], &inner)
+                    && let Some(o) = device.handle_packet(clock::now(), &reply, &mut sealed)
+                    && sock.send_to(&sealed[..o.len], o.to).await.is_ok()
+                {
+                    inner.datagrams.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            Some(p) = out.recv() => device.handle_packet(clock::now(), &p),
+            Some(p) = out.recv() => {
+                if let Some(o) = device.handle_packet(clock::now(), &p, &mut sealed)
+                    && sock.send_to(&sealed[..o.len], o.to).await.is_ok()
+                {
+                    inner.datagrams.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             () = crate::dataplane::clock::sleep_until(deadline.unwrap_or_else(|| clock::now() + Duration::from_secs(1))) => {
                 device.handle_timeout(clock::now());
             }
         }
         while let Some(t) = device.poll_transmit() {
             let to: SocketAddr = t.to;
-            let _ = sock.send_to(&t.payload, to).await;
+            if sock.send_to(&t.payload, to).await.is_ok() {
+                inner.datagrams.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -530,7 +570,13 @@ fn tcp_packet(
     ipv4(src, dst, 6, &t)
 }
 
-fn udp_packet(src: Ipv4Addr, dst: Ipv4Addr, sport: u16, dport: u16, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn udp_packet(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    sport: u16,
+    dport: u16,
+    payload: &[u8],
+) -> Vec<u8> {
     let len = 8 + payload.len();
     let mut u = vec![0u8; len];
     u[0..2].copy_from_slice(&sport.to_be_bytes());

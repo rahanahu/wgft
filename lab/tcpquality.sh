@@ -103,6 +103,15 @@
 # modes measured so by `lab/lab paired`. UDPPING=0 or unset turns it off. The UDP target is always
 # in the agent's allowlist, so that the agent's configuration does not depend on UDPPING.
 #
+# KERNEL_RMEM_MAX, a whole number of bytes, lowers the receiving end's TCP receive buffer maximum, the
+# third value of net.ipv4.tcp_rmem in the namespace of the process that reads (the LAN host on an
+# upload, the client on a download), for the kernel mode only; the other modes run with the
+# namespace's own value. The receive buffer autotuning of the kernel's TCP then advertises no more
+# than that buffer allows, which is how the receive-window stage of
+# docs/design/v2/agent-throughput.md sets the kernel mode it compares with. The default value of
+# tcp_rmem is lowered to the maximum when it is above it, and both are put back after the mode and at
+# exit. The result line then has rcv_rmem_max.
+#
 # With CPU=1 the result line also has the whole VM's CPU time per byte, vm_cpu_s_per_gb, and the
 # number of CPUs busy over the transfer, vm_cpu_share, from the busy times in /proc/stat: user,
 # nice, system, irq and softirq. Kernel work that runs in no process of the agent, such as kernel
@@ -136,6 +145,7 @@ UDPPING=${UDPPING:-}
 UDPPING_MS=${UDPPING_MS:-10}
 UDPPING_IDLE_S=${UDPPING_IDLE_S:-5}
 STREAMS=${STREAMS:-1}
+KERNEL_RMEM_MAX=${KERNEL_RMEM_MAX:-}
 if [ -n "${WGFT_BIN_DIR:-}" ]; then
   PATH=$WGFT_BIN_DIR:$PATH
   export PATH
@@ -235,9 +245,8 @@ if [ -n "$NETEM_SEED" ]; then
   fi
   vps tc qdisc del dev pub1 root 2>/dev/null
 fi
-tq_pids() { # the tcpquality.py processes of this sandbox
+tq_pids() { # the tcpquality.py processes in the lab's namespaces; a bare pgrep -f would match the whole VM and itself
   local p
-  if [ -z "$SANDBOX" ]; then pgrep -f -- '/tcpquality.py '; return 0; fi
   for p in $(sandbox_pids); do
     tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- '/tcpquality.py ' && echo "$p"
   done
@@ -262,6 +271,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# bad_config <message>: a setting the run cannot use. Nothing has been changed yet, so it only exits.
+bad_config() { echo "tcpquality.sh: $*" >&2; exit 2; }
+is_whole() { case $1 in ''|*[!0-9]*) return 1 ;; esac; }
+# need_positive <NAME> <value> <what NAME is>: the value is digits and not the single digit 0
+need_positive() { is_whole "$2" && [ "$2" != 0 ] || bad_config "$1 is $3"; }
 for mode in $MODES; do
   case "$mode" in kernel|userspace|gvisor|wgstack|rust) ;; *) echo "usage: tcpquality.sh [kernel|userspace|gvisor|wgstack|rust]..." >&2; exit 2;; esac
   if [ "$mode" = rust ] && [ ! -x "$RUST_AGENT" ]; then
@@ -270,31 +284,34 @@ for mode in $MODES; do
   fi
 done
 case "$TOOL" in
-  tcpquality) [ "$STREAMS" = 1 ] || { echo "tcpquality.sh: STREAMS above 1 needs TOOL=iperf3" >&2; exit 2; } ;;
-  iperf3) [ "$OUTAGE_S" = 0 ] || { echo "tcpquality.sh: TOOL=iperf3 needs OUTAGE_S=0" >&2; exit 2; } ;;
-  *) echo "tcpquality.sh: TOOL is tcpquality or iperf3" >&2; exit 2 ;;
+  tcpquality) [ "$STREAMS" = 1 ] || bad_config "STREAMS above 1 needs TOOL=iperf3" ;;
+  iperf3) [ "$OUTAGE_S" = 0 ] || bad_config "TOOL=iperf3 needs OUTAGE_S=0" ;;
+  *) bad_config "TOOL is tcpquality or iperf3" ;;
 esac
 case "$AGENT_GSO" in
   off) ;;
   on) [ "$DELAY_MS" = 0 ] && [ "$LOSS_PCT" = 0 ] && [ -z "$RATE_MBIT" ] ||
-    { echo "tcpquality.sh: AGENT_GSO=on is for the fast path only, where no netem queues the datagrams" >&2; exit 2; } ;;
-  *) echo "tcpquality.sh: AGENT_GSO is off or on" >&2; exit 2 ;;
+    bad_config "AGENT_GSO=on is for the fast path only, where no netem queues the datagrams" ;;
+  *) bad_config "AGENT_GSO is off or on" ;;
 esac
 case "$UDPPING" in
-  1) [ "$TOOL" = iperf3 ] || { echo "tcpquality.sh: UDPPING=1 needs TOOL=iperf3" >&2; exit 2; } ;;
+  1) [ "$TOOL" = iperf3 ] || bad_config "UDPPING=1 needs TOOL=iperf3" ;;
   ''|0) UDPPING= ;;
-  *) echo "tcpquality.sh: UDPPING is 1 or 0" >&2; exit 2 ;;
+  *) bad_config "UDPPING is 1 or 0" ;;
 esac
-case "$IPERF_MBIT" in
-  '') ;;
-  *[!0-9]*|0) echo "tcpquality.sh: IPERF_MBIT is a whole number of Mbit/s of 1 or more" >&2; exit 2 ;;
-  *) [ "$TOOL" = iperf3 ] || { echo "tcpquality.sh: IPERF_MBIT needs TOOL=iperf3" >&2; exit 2; } ;;
-esac
-case "$STREAMS" in ''|*[!0-9]*|0) echo "tcpquality.sh: STREAMS is a whole number of 1 or more" >&2; exit 2 ;; esac
+if [ -n "$IPERF_MBIT" ]; then
+  need_positive IPERF_MBIT "$IPERF_MBIT" "a whole number of Mbit/s of 1 or more"
+  [ "$TOOL" = iperf3 ] || bad_config "IPERF_MBIT needs TOOL=iperf3"
+fi
+need_positive STREAMS "$STREAMS" "a whole number of 1 or more"
+if [ -n "$KERNEL_RMEM_MAX" ]; then
+  is_whole "$KERNEL_RMEM_MAX" || bad_config "KERNEL_RMEM_MAX is a whole number of bytes"
+  [ "$KERNEL_RMEM_MAX" -ge 4096 ] || bad_config "KERNEL_RMEM_MAX is at least 4096 bytes"
+fi
 case "$DIRECTION" in
-  down) transfer=download reader="the client" writer="the LAN host" dir_field= ;;
-  up) transfer=upload reader="the LAN host" writer="the client" dir_field="direction=up " ;;
-  *) echo "tcpquality.sh: DIRECTION is down or up" >&2; exit 2 ;;
+  down) transfer=download reader="the client" writer="the LAN host" dir_field= READER_NS=$CLIENT_NS ;;
+  up) transfer=upload reader="the LAN host" writer="the client" dir_field="direction=up " READER_NS=$LAN_NS ;;
+  *) bad_config "DIRECTION is down or up" ;;
 esac
 # The agent's UDP segmentation offload is off on every path, for two reasons:
 # - netem: wireguard-go's Linux bind sends a run of same-sized datagrams as one UDP GSO packet, and
@@ -315,16 +332,37 @@ gso_was=$(ip netns exec "$HOME_NS" $Q udpgso eth0 show | grep -o 'requested=[a-z
 if [ "$gso_was" != on ]; then
   echo "WARN  UDP segmentation offload on the agent's eth0 is ${gso_was:-unreadable} at the start; it is not turned back on at exit"
 fi
+# restore_or_fail <what failed, after "cannot "> <command...>: run the command that puts a changed
+# value back; say so and fail if it does not work
+restore_or_fail() {
+  local what=$1
+  shift
+  "$@" >/dev/null && return 0
+  echo "FAIL  cannot $what"
+  return 1
+}
 restore_gso() {
   [ "$gso_was" = on ] || return 0
-  ip netns exec "$HOME_NS" $Q udpgso eth0 on >/dev/null && return 0
-  echo "FAIL  cannot turn UDP segmentation offload back on on the agent's eth0"
-  return 1
+  restore_or_fail "turn UDP segmentation offload back on on the agent's eth0" ip netns exec "$HOME_NS" $Q udpgso eth0 on
+}
+# the reader's tcp_rmem for KERNEL_RMEM_MAX: read once, lowered for the kernel mode, put back after it
+rmem_was=$(ip netns exec "$READER_NS" sysctl -n net.ipv4.tcp_rmem | tr -s ' \t' '  ')
+rmem_set=
+set_rmem() { # set_rmem <min default max>
+  ip netns exec "$READER_NS" sysctl -qw net.ipv4.tcp_rmem="$*" &&
+    [ "$(ip netns exec "$READER_NS" sysctl -n net.ipv4.tcp_rmem | tr -s ' \t' '  ')" = "$*" ]
+}
+restore_rmem() {
+  [ -n "$rmem_set" ] || return 0
+  # shellcheck disable=SC2086 # the three values of tcp_rmem are words on purpose
+  restore_or_fail "put tcp_rmem back to $rmem_was in the $READER_NS namespace" set_rmem $rmem_was || return 1
+  rmem_set=
 }
 on_exit() {
   local rc=$?
   cleanup
   restore_gso || rc=1
+  restore_rmem || rc=1
   exit "$rc"
 }
 trap on_exit EXIT
@@ -337,6 +375,21 @@ for mode in $MODES; do
     gvisor|wgstack) agent_env=(WGFT_MODE=userspace WGFT_AGENT_NETSTACK="$mode") ;;
     rust) agent_env=(-u WGFT_AGENT_NETSTACK WGFT_MODE=userspace) ;;
   esac
+  rmem_field=
+  if [ "$mode" = kernel ] && [ -n "$KERNEL_RMEM_MAX" ]; then
+    read -r rmem_min rmem_def _ <<<"$rmem_was"
+    rmem_set=1
+    if ! set_rmem "$rmem_min" "$(( rmem_def < KERNEL_RMEM_MAX ? rmem_def : KERNEL_RMEM_MAX ))" "$KERNEL_RMEM_MAX"; then
+      echo "FAIL  cannot set the tcp_rmem maximum to $KERNEL_RMEM_MAX in the $READER_NS namespace"
+      fail=1
+      restore_rmem
+      continue
+    fi
+    echo "   $READER_NS tcp_rmem: $(ip netns exec "$READER_NS" sysctl -n net.ipv4.tcp_rmem)"
+    rmem_field="rcv_rmem_max=$KERNEL_RMEM_MAX "
+  else
+    restore_rmem || fail=1
+  fi
   if [ "$OUTAGE_S" = 0 ]; then outage="no outage"; else outage="${OUTAGE_S}s outage after ${OUTAGE_AFTER} bytes"; fi
   path="delay ${DELAY_MS}ms and loss ${LOSS_PCT}%${RATE_MBIT:+ at ${RATE_MBIT} Mbit/s with a ${QUEUE_PKTS}-packet queue}"
   if [ "$TOOL" = iperf3 ]; then size="${IPERF_S}-second"; else size="${BYTES}-byte"; fi
@@ -516,7 +569,7 @@ for mode in $MODES; do
     if [ "$(field undetermined "$stats")" = 1 ]; then
       echo "UNDETERMINED  agent $mode run $run: no reads on both sides of the outage; $stats"
     fi
-    echo "RESULT mode=$mode run=$run ${dir_field}delay_ms=$DELAY_MS loss_pct=$LOSS_PCT ${RATE_MBIT:+rate_mbit=$RATE_MBIT }$stats bytes=$(field received "$got") pass=$run_pass sync=$sync_state${udp_idle:+ $udp_idle}${udp_load:+ $udp_load}"
+    echo "RESULT mode=$mode run=$run ${dir_field}${rmem_field}delay_ms=$DELAY_MS loss_pct=$LOSS_PCT ${RATE_MBIT:+rate_mbit=$RATE_MBIT }$stats bytes=$(field received "$got") pass=$run_pass sync=$sync_state${udp_idle:+ $udp_idle}${udp_load:+ $udp_load}"
     echo "$stats" >> "$results"
   done
   echo "MEDIAN mode=$mode $($Q median "$results")"

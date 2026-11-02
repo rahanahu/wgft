@@ -241,12 +241,9 @@ Go の実行環境に依る読み取りは、Rust の agent では次のよう�
 - `lifecycle.sh` の check 5 と 5b:エージェントの `memory soft limit:` の行の代わりに `memory bound:` の行を読み、RSS がその値と 32 MiB の和を超えないことを確かめます。
   あわせて、洪水の前 (トンネルと待ち受けを開いた後) に RSS を測り、洪水の間の育ちが `memory bound terms:` の行のうち洪水が満たせる項 (`core fixed`、`tables`、`driver`、`device`、`tcp relay`、`udp relay` と、洪水が使った接続の枠の配列) の和に 32 MiB を足した値を超えないことを確かめます。
   洪水が使った接続の枠の配列は、エージェントの最後の `connection slots used so far` の行の KiB です。
+  この行は `lab-observe` の feature を付けた build だけが書き、`lab build` と `lab suite` の build が付けます。`lab paired` の build には付かず、行が無いときは `core arrays` の項の全体を数えます。
   洪水はデータを運ばないので、`tcp bulk` と `core flows` は入れません。
   項の分け方は [agent-parity.md](../docs/design/v2/agent-parity.md#メモリの上界の行) にあります。
-  `WGFT_LAB_RSS_PHASES=1` を付けると、check 5 はエージェントの RSS を段ごとに測った 1 行 (`RSSPHASES`) も出します。
-  段は、起動の後、エージェントが 512 MiB を受けた後、洪水の最中、TCP の洪水の接続が閉じた後、エージェントが 512 MiB を送った後、UDP のセッションが無通信の期限で閉じた後です。
-  libc と割り当て器の違う build を比べるためのもので、どの確認もこの値を読みません。
-  check 5 は約 2 分半長くなります
 - `exhaustion.sh` の acceptq と ackflood:エージェントの GC の記録が無いので、ヒープの値を示さず RSS だけを示します
 - `agentmem.sh`:Go の agent のメモリの probe に依るので、`SKIP` を 1 行出して何もしません
 - `agentdoctor.sh` の userspace の節:`AGENTDOCTOR_BASELINE` の既定を Go の `wgft` にし、Go の CLI が Rust の agent の制御ソケットから読む ID と状態と理由が、Rust の CLI と同じことを確かめます
@@ -276,6 +273,7 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --direction up rate rust wgstack
 WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --base origin/main fast wgstack base:wgstack
 WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --tool iperf3 --streams 4 fast rust kernel
 WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --tool iperf3 --udp-ping --direction up fast rust gvisor
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --tool iperf3 --udp-ping --kernel-rmem-max 1048576 --direction up fast rust kernel
 ```
 
 経路は `lab/tcpquality-cpu.sh` の `fast` か `rate` で、`--direction up` でエージェントが受ける向きにします。
@@ -288,9 +286,11 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --tool iperf3 --udp-ping --direct
 `--streams N` は iperf3 の並行の TCP 接続の数です。
 iperf3 は送り手と受け手の byte あたりの CPU が `tcpquality.py` より小さいので、カーネルの速さの腕でも測る道具の CPU が値を占めません。
 `--udp-ping` は、`--tool iperf3` の実行ごとに、同じエージェントの UDP の規則を通る 100 byte の datagram の往復の時間を、何もしていない時と TCP の転送の間に測ります。
-解析の `LAT` の行が腕ごとの p50、p99、最大、jitter と失った数を、`LATRATIO` の行が p99 と jitter の比を出します。
+解析の `LAT` の行が腕ごとの p50、p99、最大、jitter と失った数を、`LATRATIO` の行が転送の間の p50、p99、jitter と、何もしていない時の p99 と jitter の比を出します。
 `--bulk-mbit N` は iperf3 の stream ごとの速さを N Mbit/s で頭打ちにし、2 つの腕に同じ負荷を掛けます。
 `--agent-gso on` は、`fast` の経路で、エージェントの `eth0` の UDP の segmentation offload を切らずに測ります。
+`--kernel-rmem-max BYTES` は、`kernel` の腕だけで、データを読む側 (受ける向きは LAN のホスト、送る向きは client) の namespace の `net.ipv4.tcp_rmem` の最大を BYTES に下げます。
+カーネルの TCP の受信の窓の自動調整が広げる窓をその大きさで抑えた比べの相手で、[受信の窓の段](../docs/design/v2/agent-throughput.md#受信の窓の段)の判定に使います。
 解析の `MBITRATIO` の行は、組にした速さの比です。
 `base:<モード>` は、`--base` の commit の build で同じモードを動かします。
 `--base` は commit をホストの `~/.cache/wgft-lab/` の一時的な worktree に取り出し、`wgft` を `bin/base/` に作ります。
@@ -328,7 +328,7 @@ iperf3 は送り手と受け手の byte あたりの CPU が `tcpquality.py` よ
   VM 全体の byte あたりの CPU (`/proc/stat` の user、nice、system、irq、softirq の和) も同じ形で比べ、行の名前の頭に `VM` を付けて (`VMRATIO` など) 出します。
   `kernel` の腕を含む比べには `RATIO` の行が無く、そのことを示す 1 行が出ます
 
-結果は `--out` (既定は `/tmp/wgft-lab-paired-<日時>`) の `result.txt`、組の行の `paired.log`、round と VM ごとのログです。
+結果は `--out` (既定は `~/.cache/wgft-lab/paired-<日時>`) の `result.txt`、組の行の `paired.log`、round と VM ごとのログです。
 `FAIL` の行があるか組が足りない場合は、終了コードが 0 以外になります。
 VM は終わると消し、`--keep` を付けると残します。
 残った VM は `lab/lab suite-gc` が消します。

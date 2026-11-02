@@ -441,7 +441,7 @@ jobs:
       - name: product tree
         run: |
           tree=$(cargo tree -p wgft -e normal,build --target all --all-features --prefix none --locked)
-          if printf '%s\n' "$tree" | grep -E '^(wgft-(tcpharness|wgstack-dut)|flate2|miniz_oxide) '; then
+          if printf '%s\n' "$tree" | grep -E '^(wgft-(tcpharness|wgstack-dut|agent-perf)|flate2|miniz_oxide) '; then
             echo "the wgft binary depends on a test tooling crate" >&2
             exit 1
           fi
@@ -456,6 +456,12 @@ jobs:
             features=$(cargo tree $args -e features --target all --prefix none --locked)
             if printf '%s\n' "$features" | grep -F 'wgft-wgstack feature "harness"'; then
               echo "cargo tree $args builds the wgstack core with its harness feature" >&2
+              exit 1
+            fi
+            # the inverted tree lists the root package's own features too, which the plain tree leaves out
+            inverted=$(cargo tree $args -e features --target all --prefix none --locked -i wgft-agent)
+            if printf '%s\n%s\n' "$features" "$inverted" | grep -F 'feature "lab-observe"'; then
+              echo "cargo tree $args builds the agent with its lab-observe feature" >&2
               exit 1
             fi
           done

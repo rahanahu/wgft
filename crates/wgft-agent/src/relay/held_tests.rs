@@ -138,7 +138,11 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
         return;
     }
     let limits = Limits { udp: 128, tcp: 24 };
-    let bound = MemoryBound::with_core(limits, testpeer::limits());
+    let bound = MemoryBound::with_core(
+        limits,
+        testpeer::limits(),
+        crate::dataplane::Settings::default().batching,
+    );
     let chunk = vec![7u8; 2 * BULK_BUF.min(8 << 10)];
 
     // 試験の側:server の側の device を agent 無しで立てて測る
@@ -204,7 +208,7 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
     .await;
     let setup = settled().await;
     let agent_setup = setup.saturating_sub(t2).saturating_sub(server_side);
-    let made_at_setup = bound.core_fixed + bound.tables + bound.driver + bound.device;
+    let made_at_setup = bound.core_fixed + bound.tables + bound.driver + bound.device + bound.batch;
     eprintln!(
         "setup: the agent holds {agent_setup} bytes against the terms made at creation, {made_at_setup}; the test side: the server device {server_side}, one echo connection {echo_conn}"
     );

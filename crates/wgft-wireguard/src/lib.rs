@@ -2,7 +2,8 @@
 //!
 //! [`Device`] is sans-IO: the caller passes in the current time, UDP datagrams that arrived and IP
 //! packets to send through the tunnel, and takes out datagrams to send, packets to deliver,
-//! [`Event`]s and the next wake-up time. The protocol core is sanstun, confined to one private
+//! [`Event`]s and the next wake-up time. Data packets pass through buffers of the caller, so that
+//! nothing is allocated or copied for them. The protocol core is sanstun, confined to one private
 //! module; this crate's API uses only its own types.
 //!
 //! ```
@@ -44,7 +45,9 @@ pub use config::{
     MAX_LIMIT_BYTES, MAX_LIMIT_PACKETS, MAX_UNIX_TIME, MIN_MTU, PeerConfig, ProtocolTimers,
     Roaming,
 };
-pub use device::{Device, Event, Held, PeerStatus, Transmit};
+pub use device::{Device, Event, Held, Outgoing, PeerStatus, Transmit};
+/// The bytes a data message adds to the inner packet: the header and the tag.
+pub const DATA_OVERHEAD: usize = protocol::DATA_OVERHEAD;
 pub use drops::{DropReason, Drops};
 pub use keys::{KEY_LEN, KeyError, PrivateKey, PublicKey};
 pub use zeroize::Zeroizing;

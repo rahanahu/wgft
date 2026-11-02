@@ -1665,10 +1665,22 @@ dependencies = [
  "wgft-alloc-count",
  "wgft-netstack",
  "wgft-proto",
+ "wgft-udp-batch",
  "wgft-wgstack",
  "wgft-wireguard",
  "windows-sys 0.61.2",
  "zeroize",
+]
+
+[[package]]
+name = "wgft-agent-perf"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "libc",
+ "socket2",
+ "wgft-udp-batch",
+ "wgft-wireguard",
 ]
 
 [[package]]
@@ -1709,6 +1721,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wgft-udp-batch"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "wgft-wgstack"
 version = "0.1.0"
 
@@ -1744,6 +1763,7 @@ dependencies = [
  "getrandom 0.4.3",
  "proptest",
  "sanstun",
+ "wgft-alloc-count",
  "zeroize",
 ]
 
