@@ -290,7 +290,7 @@ iperf3 は送り手と受け手の byte あたりの CPU が `tcpquality.py` よ
 `--bulk-mbit N` は iperf3 の stream ごとの速さを N Mbit/s で頭打ちにし、2 つの腕に同じ負荷を掛けます。
 `--agent-gso on` は、`fast` の経路で、エージェントの `eth0` の UDP の segmentation offload を切らずに測ります。
 `--kernel-rmem-max BYTES` は、`kernel` の腕だけで、データを読む側 (受ける向きは LAN のホスト、送る向きは client) の namespace の `net.ipv4.tcp_rmem` の最大を BYTES に下げます。
-カーネルの TCP の受信の窓の自動調整が広げる窓をその大きさで抑えた比べの相手で、[受信の窓の段](../docs/design/v2/agent-throughput.md#受信の窓の段)の判定に使います。
+カーネルの TCP の受信の窓の自動調整が広げる窓をその大きさで抑えた比べの相手で、[受信の窓の頭打ちの候補](../docs/design/v2/agent-throughput.md#受信の窓の頭打ちの候補)の判定の案に使います。
 解析の `MBITRATIO` の行は、組にした速さの比です。
 `base:<モード>` は、`--base` の commit の build で同じモードを動かします。
 `--base` は commit をホストの `~/.cache/wgft-lab/` の一時的な worktree に取り出し、`wgft` を `bin/base/` に作ります。
