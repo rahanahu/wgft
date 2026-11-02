@@ -927,6 +927,15 @@ impl Udp {
     }
 }
 
+/// 送信の datagram を捨てる理由。
+#[derive(Clone, Copy)]
+enum TxDrop {
+    /// 予算が足りず、新しい datagram の場所を作るために捨てた。
+    Evicted,
+    /// 待てる最長の時間を超えた。
+    Expired,
+}
+
 impl Shared {
     /// 送信の FIFO で最も古い datagram を捨てて予約を返します。`port` を渡すと、その endpoint の最も古い
     /// datagram を捨てます。捨てるものが無ければ `false` です。捨てた数は数え、ログの門に通します。
@@ -948,13 +957,22 @@ impl Shared {
                 id = next;
             }
         }
+        self.drop_tx(id, TxDrop::Evicted);
+        true
+    }
+
+    /// 送信の datagram `id` を、`why` の理由で捨てます。FIFO から外して予約を返し、理由ごとの数を数え、ログの
+    /// 門に通します。理由が増えても、会計はここだけを直します。
+    fn drop_tx(&mut self, id: u16, why: TxDrop) {
         self.udp.unlink_tx(id);
         self.release_udp(TX, id);
         self.out.udp_queued -= 1;
-        self.stats.udp_send_evicted += 1;
+        match why {
+            TxDrop::Evicted => self.stats.udp_send_evicted += 1,
+            TxDrop::Expired => self.stats.udp_send_expired += 1,
+        }
         let n = self.stats.udp_send_evicted + self.stats.udp_send_expired;
         self.gates.allow(LogKind::UdpSendDropped, self.now, n);
-        true
     }
 
     /// UDP の endpoint `port` の知らせの対象です。待ち受けのポートの対象を分け合い、印で分けます。
@@ -1036,12 +1054,7 @@ impl Shared {
             if !stale {
                 break id;
             }
-            self.udp.unlink_tx(id);
-            self.release_udp(TX, id);
-            self.out.udp_queued -= 1;
-            self.stats.udp_send_expired += 1;
-            let n = self.stats.udp_send_evicted + self.stats.udp_send_expired;
-            self.gates.allow(LogKind::UdpSendDropped, self.now, n);
+            self.drop_tx(id, TxDrop::Expired);
         };
         let g = self.udp.dg[TX][usize::from(id)];
         let len = usize::try_from(g.n).unwrap_or(0);
