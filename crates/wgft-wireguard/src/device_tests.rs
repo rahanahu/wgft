@@ -1324,3 +1324,177 @@ fn a_held_back_data_request_keeps_its_earlier_time() {
         "last {last:?}, first {first:?}"
     );
 }
+
+/// 接続した 2 組の同じ Net。同じ種と同じ時刻で作るので、同じ datagram に同じ振る舞いをする。
+fn twin_nets() -> (Net, Net) {
+    let mut a = Net::new();
+    let mut b = Net::new();
+    a.connect();
+    b.connect();
+    (a, b)
+}
+
+/// server (B) が agent (A) へ送る datagram を `payloads` の数だけ作る。運ばずに返す。
+fn b_datagrams(n: &mut Net, payloads: &[&[u8]]) -> Vec<Vec<u8>> {
+    let now = n.now();
+    for p in payloads {
+        n.b.send(now, &ipv4_packet(SERVER_IP, AGENT_IP, p));
+    }
+    std::iter::from_fn(|| n.b.poll_transmit())
+        .map(|t| t.payload)
+        .collect()
+}
+
+/// 分けた受信の口でバッチを扱う。始めは届いた順、復号は `order` の順、受け付けは届いた順。
+fn split_receive(
+    d: &mut Device,
+    now: Instant,
+    from: SocketAddr,
+    batch: &[Vec<u8>],
+    order: &[usize],
+) -> Vec<Vec<u8>> {
+    let mut jobs: Vec<_> = batch
+        .iter()
+        .map(|dg| {
+            assert!(Device::is_data_message(dg));
+            d.begin_datagram(now, from, dg)
+        })
+        .collect();
+    let mut outs: Vec<Vec<u8>> = batch
+        .iter()
+        .map(|_| vec![0; usize::from(u16::MAX)])
+        .collect();
+    let mut opened: Vec<Option<crate::device::Opened>> = (0..batch.len()).map(|_| None).collect();
+    for &i in order {
+        if let Some(job) = jobs[i].take() {
+            opened[i] = Some(job.open(&batch[i], &mut outs[i]));
+        }
+    }
+    let mut got = Vec::new();
+    for (i, o) in opened.into_iter().enumerate() {
+        if let Some(o) = o
+            && let Some(len) = d.finish_datagram(now, from, batch[i].len(), o, &outs[i])
+        {
+            got.push(outs[i][..len].to_vec());
+        }
+    }
+    got
+}
+
+#[test]
+fn decrypting_a_batch_in_any_order_gives_what_one_by_one_gives() {
+    let (mut inline, mut split) = twin_nets();
+    let payloads: Vec<Vec<u8>> = (0..8u8)
+        .map(|i| vec![i; 100 + usize::from(i) * 37])
+        .collect();
+    let refs: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+    let mut batch = b_datagrams(&mut inline, &refs);
+    assert_eq!(
+        batch,
+        b_datagrams(&mut split, &refs),
+        "the twins send the same bytes"
+    );
+    // 同じバッチの中の重複と、壊した datagram を混ぜる
+    batch.insert(3, batch[1].clone());
+    let mut broken = batch[5].clone();
+    broken[40] ^= 1;
+    batch.insert(6, broken);
+    let from = inline.b_addr;
+    let now = inline.now();
+    let want: Vec<Vec<u8>> = batch
+        .iter()
+        .filter_map(|dg| inline.a.recv(now, from, dg))
+        .collect();
+    let order: Vec<usize> = (0..batch.len()).rev().collect();
+    let split_now = split.now();
+    let got = split_receive(&mut split.a, split_now, from, &batch, &order);
+    assert_eq!(got, want);
+    assert_eq!(got.len(), payloads.len(), "the duplicate is accepted once");
+    let status = |n: &Net| {
+        let s = n.a.peer_status(&n.b_pub(), n.now()).unwrap();
+        (s.endpoint, s.rx_bytes, s.tx_bytes)
+    };
+    assert_eq!(status(&split), status(&inline));
+    assert_eq!(split.a.drops().get(DropReason::Replayed), 1);
+    assert_eq!(split.a.drops().get(DropReason::Unauthenticated), 1);
+    assert_eq!(split.a.drops().total(), inline.a.drops().total());
+}
+
+#[test]
+fn a_job_of_a_tunnel_replaced_before_it_finished_is_dropped() {
+    let mut n = Net::new();
+    n.connect();
+    let batch = b_datagrams(&mut n, &[b"late"]);
+    let now = n.now();
+    let job = n.a.begin_datagram(now, n.b_addr, &batch[0]).unwrap();
+    let mut out = vec![0; 2048];
+    let opened = job.open(&batch[0], &mut out);
+    // server が答えなくなり、agent のトンネルは期限切れで取り替わる
+    n.b_up = false;
+    n.drop_b_initiations = true;
+    n.run(Duration::from_secs(600), Duration::from_secs(1));
+    assert!(
+        n.a_events
+            .iter()
+            .any(|e| matches!(e, Event::PeerExpired { .. }))
+    );
+    let later = n.now();
+    assert_eq!(
+        n.a.finish_datagram(later, n.b_addr, batch[0].len(), opened, &out),
+        None
+    );
+    assert_eq!(n.a.drops().get(DropReason::UnknownPeer), 1);
+}
+
+#[test]
+fn sealing_out_of_order_keeps_the_counters_in_the_order_begun() {
+    let mut n = Net::new();
+    n.connect();
+    let now = n.now();
+    let packets: Vec<Vec<u8>> = (0..6u8)
+        .map(|i| ipv4_packet(AGENT_IP, SERVER_IP, &vec![i; 50 + usize::from(i) * 100]))
+        .collect();
+    let jobs: Vec<_> = packets
+        .iter()
+        .map(|p| n.a.begin_packet(now, p, n.a.max_transmit_len()).unwrap())
+        .collect();
+    let mut outs: Vec<Vec<u8>> = jobs.iter().map(|j| vec![0; j.len()]).collect();
+    let mut sent: Vec<Option<crate::device::Outgoing>> = vec![None; jobs.len()];
+    for (i, job) in jobs.into_iter().enumerate().rev() {
+        sent[i] = job.seal(&packets[i], &mut outs[i]);
+    }
+    let counters: Vec<u64> = outs
+        .iter()
+        .map(|o| u64::from_le_bytes(o[8..16].try_into().unwrap()))
+        .collect();
+    assert!(
+        counters.windows(2).all(|w| w[0] + 1 == w[1]),
+        "{counters:?}"
+    );
+    for (i, o) in sent.iter().enumerate() {
+        let o = o.unwrap();
+        assert_eq!(o.to, n.b_addr);
+        assert_eq!(o.len, outs[i].len());
+        let got = n.b.recv(now, n.a_addr, &outs[i]).unwrap();
+        assert_eq!(got, packets[i]);
+    }
+    assert_eq!(n.a.drops().total(), 0);
+}
+
+#[test]
+fn a_seal_buffer_that_is_too_short_drops_the_packet_before_taking_a_counter() {
+    let mut n = Net::new();
+    n.connect();
+    let now = n.now();
+    let packet = ipv4_packet(AGENT_IP, SERVER_IP, &[7; 200]);
+    let counter = |d: &mut Device| {
+        let job = d.begin_packet(now, &packet, d.max_transmit_len()).unwrap();
+        let mut out = vec![0; job.len()];
+        job.seal(&packet, &mut out).unwrap();
+        u64::from_le_bytes(out[8..16].try_into().unwrap())
+    };
+    let first = counter(&mut n.a);
+    assert!(n.a.begin_packet(now, &packet, 100).is_none());
+    assert_eq!(n.a.drops().get(DropReason::Internal), 1);
+    assert_eq!(counter(&mut n.a), first + 1, "no counter was skipped");
+}
