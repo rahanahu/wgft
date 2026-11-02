@@ -119,7 +119,7 @@ pub struct RxBatch {
     /// The packets decrypted from them, one after the other.
     pub plain: Box<[u8]>,
     pub meta: Box<[RxMeta]>,
-    /// Datagrams dropped because the kernel cut them or their control message short, so far.
+    /// Receive buffers dropped because the kernel cut them or their control message short, so far; a UDP GRO buffer counts once.
     pub truncated: u64,
     /// The bytes of a slot in the dense part.
     dense: usize,
