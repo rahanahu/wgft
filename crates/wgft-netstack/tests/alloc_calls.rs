@@ -16,9 +16,10 @@ mod common;
 use std::net::SocketAddrV4;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use common::{A, B, End, TcpPeer, netstack};
-use wgft_alloc_count::{CountingAlloc, thread_alloc_calls};
+use wgft_alloc_count::{CountingAlloc, ThreadWindow, thread_alloc_calls};
 use wgft_netstack::{Access, Ping, TcpListener, TcpStream, UdpSocket};
 
 #[global_allocator]
@@ -254,3 +255,30 @@ const TCP_TO_TUNNEL_ALLOWED: usize = 0;
 const UDP_FROM_TUNNEL_ALLOWED: usize = 0;
 const UDP_TO_TUNNEL_ALLOWED: usize = 0;
 const PING_ALLOWED: usize = 0;
+
+/// トンネルへ待たずに送る `send_to_latest` は、送信の予算が尽きて最も古い datagram を捨てる形でも、datagram ごとに
+/// ヒープを確保しない。出力を運ばないので、送るたびに捨てる。慣らしの後の確保を、スレッドごとの窓の最大値で確かめる。
+#[test]
+fn send_to_latest_does_not_allocate_once_the_budget_is_full() {
+    let far = netstack(B);
+    let ub = UdpSocket::bind(&far, SocketAddrV4::new(B, 5353)).unwrap();
+    let tx = ub.sender();
+    let to = SocketAddrV4::new(A, 53);
+    let msg = common::pattern(1000, 5);
+    // 慣らし:予算が尽きて捨てる形になるまで送る
+    for _ in 0..2000 {
+        tx.send_to_latest(&msg, to, Duration::from_millis(100))
+            .unwrap();
+    }
+    let st = far.with(|n| n.core().stats());
+    assert!(st.udp_send_evicted > 0, "the budget never filled");
+    let window = ThreadWindow::open();
+    for i in 0..5000 {
+        let size = 1 + (i * 37) % msg.len();
+        tx.send_to_latest(&msg[..size], to, Duration::from_millis(100))
+            .unwrap();
+        assert_eq!(window.peak(), 0, "send {i} allocated");
+    }
+    assert_eq!(window.grown(), 0);
+    far.with(|n| n.core().check_invariants()).unwrap();
+}
