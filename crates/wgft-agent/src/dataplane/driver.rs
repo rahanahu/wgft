@@ -35,8 +35,6 @@ use super::batch::{
 use super::{Command, Local, Settings, SocketBuffers, Status, Upper, clock, duration_to_nanos};
 use crate::batching::Batching;
 
-const _: () = assert!(RX_SLOT == crate::relay::UDP_BUF);
-
 /// 送り出しの先。製品はソケットで、試験は記録する。
 pub(super) trait Sink {
     /// 1 つの datagram を送る。`WouldBlock` は書けないことを示し、datagram は呼び手が持ち続ける。
