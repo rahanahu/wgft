@@ -2,8 +2,9 @@
 //!
 //! 予約の内側で確保した chunk を返すと、上限の数まで次の確保に使い回します。上限を超えて返った chunk は
 //! 解放します。置き場の chunk はどの予約にも数えず、上限の分を上界の M_fix に数えます。
-//! 置き場に返す chunk は 0 で埋めます。`--cfg wgstack_sentinel` の build は目印の byte で埋め、試験は目印が
-//! 出力と読み取りに現れないことを確かめます (wgstack-rs.md の「故障の注入と目印の build」)。
+//! 製品の build は、置き場に返す chunk を埋めません。輪は書いた範囲だけを読むので、前の持ち主の byte は
+//! 読み取りにも送る segment にも届きません。試験と道具の build は、取る chunk を目印の byte で埋め、書いて
+//! いない byte を読むと目印が出るようにします (wgstack-rs.md の「置き場の chunk と古い byte」)。
 
 use crate::fixed_vec::{AllocError, BoxedBytes, FixedVec, try_boxed_bytes};
 
@@ -12,11 +13,9 @@ pub(crate) const CHUNK_SHIFT: u32 = 14;
 pub(crate) const CHUNK_SIZE: usize = 1 << CHUNK_SHIFT;
 /// 置き場に残す chunk の上限です。
 pub(crate) const POOL_KEEP: usize = 64;
-/// 置き場に返す chunk を埋める byte です。目印の build だけが 0 でない値を使います。
-#[cfg(not(wgstack_sentinel))]
-pub(crate) const FILL: u8 = 0;
-#[cfg(wgstack_sentinel)]
-pub(crate) const FILL: u8 = 0xa5;
+/// 試験と道具の build で、取る chunk を埋める目印の byte です。試験の道具の packet の中身の値と違う値にします。
+#[cfg(any(test, fuzzing, feature = "harness"))]
+pub(crate) const SENTINEL: u8 = 0xc9;
 
 /// バッファの中身の 16 KiB です。
 pub(crate) type Chunk = BoxedBytes<CHUNK_SIZE>;
@@ -74,7 +73,7 @@ impl ChunkPool {
         self.free.heap_bytes()
     }
 
-    /// chunk を 1 つ取ります。置き場が空なら確保します。
+    /// chunk を 1 つ取ります。置き場が空なら確保します。置き場の chunk は前の持ち主の byte を持ったままです。
     pub(crate) fn get(&mut self) -> Result<Chunk, AllocError> {
         #[cfg(test)]
         if let Some(n) = FAIL_AFTER.get() {
@@ -87,15 +86,22 @@ impl ChunkPool {
             Some(c) => c,
             None => try_boxed_bytes::<CHUNK_SIZE>()?,
         };
+        // 書いていない byte を読む経路があれば、試験と道具の build では目印が出ます。新しく確保した chunk も
+        // 埋めるので、0 の byte に頼る読み取りも見つかります。
+        #[cfg(any(test, fuzzing, feature = "harness"))]
+        let c = {
+            let mut c = c;
+            c.fill(SENTINEL);
+            c
+        };
         self.held += 1;
         #[cfg(test)]
         PEAK_HELD.set(PEAK_HELD.get().max(self.held));
         Ok(c)
     }
 
-    /// chunk を返します。次に使う接続に前の中身を残さないよう、埋めてから置き場に置きます。
-    pub(crate) fn put(&mut self, mut c: Chunk) {
-        c.fill(FILL);
+    /// chunk を返します。中身は埋めずに置き場に置きます。
+    pub(crate) fn put(&mut self, c: Chunk) {
         self.held -= 1;
         // 置き場が満杯なら c はここで解放されます。
         let _ = self.free.try_push(c);
@@ -125,13 +131,17 @@ mod tests {
     fn reuses_up_to_the_limit_and_fills() {
         let mut p = ChunkPool::new().unwrap();
         let mut c = p.get().unwrap();
+        assert!(
+            c.iter().all(|&b| b == SENTINEL),
+            "a new chunk holds the sentinel in a test build"
+        );
         c[100] = 7;
         p.put(c);
         assert_eq!((p.held(), p.kept()), (0, 1));
         let c = p.get().unwrap();
         assert!(
-            c.iter().all(|&b| b == FILL),
-            "a reused chunk keeps no old bytes"
+            c.iter().all(|&b| b == SENTINEL),
+            "a reused chunk holds the sentinel in a test build"
         );
         p.put(c);
         let mut held = FixedVec::try_with_capacity(POOL_KEEP + 3).unwrap();

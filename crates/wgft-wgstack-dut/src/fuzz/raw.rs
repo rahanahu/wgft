@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use wgft_tcpharness::ip::{self, Icmp, Ipv4};
 use wgft_tcpharness::packet::{ACK, FIN, Options, RST, SYN, SackBlock, Segment, Timestamps};
-use wgft_wgstack::{ConnId, Hook, ListenerId, PingId, UdpId};
+use wgft_wgstack::{CHUNK_SENTINEL, ConnId, Hook, ListenerId, PingId, UdpId};
 
 use super::net::{DUT, MTU, Net, PEER, small_limits};
 
@@ -510,7 +510,9 @@ impl App {
             }
             4 | 5 if !conns.is_empty() => {
                 let c = pick_conn(r, conns);
-                let _ = n.stack().read(now, c, rbuf);
+                if let Ok(k) = n.stack().read(now, c, rbuf) {
+                    no_sentinel(&rbuf[..k], "a read");
+                }
             }
             6 if !conns.is_empty() => {
                 let i = r.below(u32::try_from(conns.len()).unwrap_or(1)) as usize;
@@ -543,7 +545,11 @@ impl App {
             11 => {
                 // すべての接続から読み切ります。読まなかった接続も受信の需要を持ちます
                 for &c in conns.iter() {
-                    while n.stack().read(now, c, rbuf).is_ok_and(|k| k > 0) {}
+                    while let Ok(k) = n.stack().read(now, c, rbuf)
+                        && k > 0
+                    {
+                        no_sentinel(&rbuf[..k], "a read");
+                    }
                 }
             }
             12 => self.may_return.set(!self.may_return.get()),
@@ -628,6 +634,7 @@ fn absorb(n: &mut RawNet, peers: &mut BTreeMap<u16, Peer>) {
         }
     }
     for s in segs {
+        no_sentinel(&s.payload, "a segment the core sent");
         let p = peers.entry(s.dst.port()).or_default();
         let end = s.seq.wrapping_add(s.seq_len());
         if s.flags & SYN != 0 {
@@ -643,6 +650,15 @@ fn absorb(n: &mut RawNet, peers: &mut BTreeMap<u16, Peer>) {
         p.last_seg = Some(s.marshal());
     }
     while n.stack().poll_event().is_some() {}
+}
+
+/// TCP の中身に目印の byte が無いことを確かめます。相手とアプリケーションが書く TCP の中身は目印と違う値だけ
+/// なので、目印が出たら核が書いていない byte を読んだことになります (wgstack-rs.md の「置き場の chunk と古い
+/// byte」)。
+fn no_sentinel(b: &[u8], what: &str) {
+    if let Some(i) = b.iter().position(|&x| x == CHUNK_SENTINEL) {
+        panic!("{what} holds the chunk sentinel {CHUNK_SENTINEL:#04x} at {i}");
+    }
 }
 
 fn fold(b: &[u8]) -> u16 {
