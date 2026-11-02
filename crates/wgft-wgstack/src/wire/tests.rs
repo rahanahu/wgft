@@ -230,6 +230,20 @@ fn checksum_matches_definition() {
             }
         }
     }
+    // 最も大きな IP の packet の長さで、和が最も大きくなる中身と初めの値です。
+    let big = vec![0xffu8; 65535];
+    for s in [0, 0xffff, 0xffff_ffff] {
+        assert_eq!(
+            checksum(s, &big),
+            ref_checksum(s, &big),
+            "65535 bytes of 0xff, sum {s:#x}"
+        );
+        assert_eq!(
+            checksum(s, &big[1..]),
+            ref_checksum(s, &big[1..]),
+            "65534 bytes of 0xff, sum {s:#x}"
+        );
+    }
     for _ in 0..20000 {
         let n = r.below(buf.len() as u64 + 1) as usize;
         for x in &mut buf[..n] {

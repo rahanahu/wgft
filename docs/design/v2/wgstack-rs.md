@@ -143,7 +143,7 @@ Go の `internal/dataplane/deps_test.go` の `TestWgstackImports` に当たる�
   clippy が見ない cfg (`fuzzing` と故障の注入) の中のコードを確かめ、clippy の一覧から項目が消えていないことも確かめます。
   文字列の照合なので、注釈と試験の module は見ません
 - unsafe:`wgft-wgstack` は `#![forbid(unsafe_code)]` にします。
-  checksum も `as_chunks` と `u64::from_be_bytes` の安全なコードで書きます
+  checksum も `as_chunks` と `u32::from_be_bytes` の安全なコードで書きます
 - 製品の木:CI の `cargo tree` の検査が、`wgft` のバイナリの依存の木に `wgft-tcpharness` と `wgft-wgstack-dut` が無いこと、測定用の feature が有効でないことを確かめます。
   今の `rust-check` は crate の検査を、すべての target と feature を有効にした依存の木で行います。
   feature の検査は、測定用の feature を足すときに足します
@@ -1881,8 +1881,13 @@ Rust が同じ loop を速く回す理由 (vector の命令にするか) は確�
 
 - chunk の 0 埋め:製品の build では埋めないことにしました ([置き場の chunk と古い byte](#置き場の-chunk-と古い-byte))。
   上の内訳では segment ごとの時間の 4 割近くで、道具を引いた受信の費用 (約 600 ns) の 4 割余りに当たります
-- checksum:Go の核の実装より約 1.4 倍遅い 1 の補数の和を、64 bit の加算か vector の命令にします。
-  受信と送信の両方の 1 segment ごとに約 140 ns です
+- checksum:実施しました (2026-11-02)。
+  前の形は 8 byte の語を足すたびに繰り上がりを次の足し算に回すので、足し算が 1 本の依存の列になっていました。
+  今の形は 4 byte の語を 64 bit の和に足します。
+  語は 2^32 未満なので、2^32 個まで足しても和は溢れず、語ごとの繰り上がりが要りません。
+  足し算が互いを待たないので、compiler が vector の命令にできます。
+  ホストの E コアの 1 つで、musl の release の build の 1380 byte の和は約 126 ns から約 41 ns に、40 byte の和は約 3.7 ns から約 2.6 ns になりました。
+  結果は定義どおりの和と同じで、`wire::tests::checksum_matches_definition` と `parse` の fuzz が照らします
 - qbench の起床の費用:20 Mbit/s の経路の byte あたりの CPU (約 7.5 ns) は、速さを外した経路 (約 1 ns) の 7 倍で、packet ごとの起床と system call の固定の費用です。
   製品のデータプレーンでも packet ごとに起きますが、`sendmmsg` と `recvmmsg` のまとめは実装済みです ([目標](agent-throughput.md#目標))。
   実装後の製品のデータプレーンの起床の費用は測っていません

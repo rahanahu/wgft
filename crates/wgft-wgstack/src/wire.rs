@@ -65,34 +65,20 @@ pub(crate) struct Tuple {
 }
 
 /// `b` を 16 bit の 1 の補数で足した値を `sum` に足して畳みます。結果の補数が checksum です。
-/// 1 の補数の和は語の幅によらないので、8 byte ずつ繰り上がりを回して足し、最後に 16 bit に畳みます
-/// (RFC 1071 2 節)。
+/// 1 の補数の和は語の幅によらないので、4 byte の語を 64 bit の和に足し、最後に 16 bit に畳みます
+/// (RFC 1071 2 節)。4 byte の語は 2^32 未満なので、2^32 個まで足しても 64 bit の和は溢れず、繰り上がりを
+/// 語ごとに回す必要がありません。語ごとの足し算が前の繰り上がりを待たないので、compiler が vector の命令に
+/// できます。
 #[expect(
     clippy::cast_possible_truncation,
     reason = "the folded sum fits in 16 bits"
 )]
 pub(crate) fn checksum(sum: u32, b: &[u8]) -> u16 {
-    #[inline]
-    fn add(acc: u64, x: u64, carry: u64) -> (u64, u64) {
-        let (s, c1) = acc.overflowing_add(x);
-        let (s, c2) = s.overflowing_add(carry);
-        (s, u64::from(c1) + u64::from(c2))
-    }
     let mut acc = u64::from(sum);
-    let mut carry = 0;
-    let (blocks, rest) = b.as_chunks::<32>();
-    for blk in blocks {
-        for w in blk.as_chunks::<8>().0 {
-            (acc, carry) = add(acc, u64::from_be_bytes(*w), carry);
-        }
-    }
-    let (words, rest) = rest.as_chunks::<8>();
+    let (words, rest) = b.as_chunks::<4>();
     for w in words {
-        (acc, carry) = add(acc, u64::from_be_bytes(*w), carry);
+        acc += u64::from(u32::from_be_bytes(*w));
     }
-    // 繰り上がりが残るとき acc は 2^64 - 2 以下なので、足しても溢れません。
-    acc += carry;
-    acc = (acc >> 32) + (acc & 0xffff_ffff); // 33 bit 以下
     let (pairs, last) = rest.as_chunks::<2>();
     for p in pairs {
         acc += u64::from(u16::from_be_bytes(*p));
