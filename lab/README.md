@@ -331,7 +331,7 @@ iperf3 は送り手と受け手の byte あたりの CPU が `tcpquality.py` よ
   VM 全体の byte あたりの CPU (`/proc/stat` の user、nice、system、irq、softirq の和) も同じ形で比べ、行の名前の頭に `VM` を付けて (`VMRATIO` など) 出します。
   `kernel` の腕を含む比べには `RATIO` の行が無く、そのことを示す 1 行が出ます
 
-結果は `--out` (既定は `/tmp/wgft-lab-paired-<日時>`) の `result.txt`、組の行の `paired.log`、round と VM ごとのログです。
+結果は `--out` (既定は `~/.cache/wgft-lab/paired-<日時>`) の `result.txt`、組の行の `paired.log`、round と VM ごとのログです。
 `FAIL` の行があるか組が足りない場合は、終了コードが 0 以外になります。
 VM は終わると消し、`--keep` を付けると残します。
 残った VM は `lab/lab suite-gc` が消します。
