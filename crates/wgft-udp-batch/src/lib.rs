@@ -90,23 +90,25 @@ const EMPTY_MSG: Msg = Msg {
 
 /// The bytes of a batch store of `slots` slots per direction, with the system call headers when
 /// `on`, for packets of up to `mtu` bytes sealed into datagrams of up to `max_datagram` bytes, its
-/// plaintext and sealed areas cut into `lanes` lanes ([`lanes_for`]): what [`RxBatch::new`] and
-/// [`TxBatch::new`] allocate.
+/// plaintext area cut into `rx_lanes` lanes and its sealed area into `tx_lanes` ([`lanes_for`]):
+/// what [`RxBatch::new`] and [`TxBatch::new`] allocate.
 #[must_use]
 pub const fn store_bytes(
     slots: usize,
     on: bool,
     mtu: usize,
     max_datagram: usize,
-    lanes: usize,
+    rx_lanes: usize,
+    tx_lanes: usize,
 ) -> usize {
     let headers = if on { header_bytes() } else { 0 };
-    let lanes = lanes_for(slots, lanes);
+    let rx_lanes = lanes_for(slots, rx_lanes);
+    let tx_lanes = lanes_for(slots, tx_lanes);
     let rx = RX_SLOT + size_of::<RxMeta>() + headers;
     let tx = mtu + size_of::<u16>() + size_of::<Sealed>() + size_of::<Msg>() + headers;
     let scratch = if slots > 1 { RX_SLOT } else { 0 };
-    let plain = lanes * plain_lane(slots, lanes);
-    let sealed = lanes * slots.div_ceil(lanes) * max_datagram;
+    let plain = rx_lanes * plain_lane(slots, rx_lanes);
+    let sealed = tx_lanes * slots.div_ceil(tx_lanes) * max_datagram;
     slots * (rx + tx) + scratch + plain + sealed
 }
 
@@ -624,7 +626,7 @@ mod tests {
                 assert!(rx.plain.iter().all(|l| l.len() >= RX_SLOT));
                 assert_eq!(
                     rx.allocated() + tx.allocated(),
-                    store_bytes(slots, on, mtu, mtu + 32, lanes),
+                    store_bytes(slots, on, mtu, mtu + 32, lanes, lanes),
                     "{slots} {on} {lanes}"
                 );
             }

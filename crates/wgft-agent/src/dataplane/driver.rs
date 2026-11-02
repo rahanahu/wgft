@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
+use wgft_udp_batch::crypto::{Crypto, PARALLEL_MIN_BYTES};
 use wgft_wireguard::{Device, Event, PublicKey, Transmit};
 
 use super::batch::{
@@ -368,11 +369,18 @@ pub(super) fn pump<U: Upper>(
 ///
 /// 読んだ datagram をすべて復号してから、UDP の packet を先に上の層に渡す。残りの packet もあれば、
 /// 起こす waker を起こして順を譲り、中継の task が UDP の datagram を先に運べるようにしてから、残りを
-/// 読んだ順に渡す。核に渡す TCP の segment の順は変えない。
+/// 読んだ順に渡す。核に渡す TCP の segment の順は変えない。暗号の作業者 (`crypto`) があれば、復号は
+/// 回 (round) ごとに作業者と分けて行い、この規則を回ごとに当てる
+/// (`docs/design/v2/agent-crypto-workers.md`)。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the receive batch's state lives in the driver's loop"
+)]
 pub(super) async fn receive_batch<U: Upper>(
     local: &Local<U>,
     source: &mut impl Source,
     rx: &mut RxBatch,
+    crypto: Option<&mut Crypto>,
     now: Instant,
     vlen: usize,
     receive_errors: &mut u64,
@@ -393,36 +401,76 @@ pub(super) async fn receive_batch<U: Upper>(
             return Ok((0, Duration::ZERO));
         }
     };
-    let (end, udp, others) = {
-        let mut guard = local.0.borrow();
-        let inner = &mut *guard;
-        let end = decrypt(&mut inner.device, rx, n, now);
-        let upper = &mut inner.upper;
-        let (udp, others) = each_packet(&rx.plain[0][..end], true, |p| upper.handle_packet(now, p));
-        (end, udp, others)
+    let Some(crypto) = crypto else {
+        let (end, udp, others) = {
+            let mut guard = local.0.borrow();
+            let inner = &mut *guard;
+            let end = decrypt(&mut inner.device, rx, n, now);
+            let upper = &mut inner.upper;
+            let (udp, others) =
+                each_packet(&rx.plain[0][..end], true, |p| upper.handle_packet(now, p));
+            (end, udp, others)
+        };
+        let yielded = if others > 0 {
+            let yielded = udp_first(local, udp, wakers).await?;
+            let mut guard = local.0.borrow();
+            let upper = &mut guard.upper;
+            each_packet(&rx.plain[0][..end], false, |p| upper.handle_packet(now, p));
+            yielded
+        } else {
+            Duration::ZERO
+        };
+        return Ok((n, yielded));
     };
-    if others == 0 {
-        return Ok((n, Duration::ZERO));
-    }
+    crypto.start_open(rx, n);
     let mut yielded = Duration::ZERO;
-    if udp > 0 {
-        local.0.borrow().upper.poll_wakers(wakers);
-        for waker in wakers.drain(..) {
-            waker.wake();
+    loop {
+        let (udp, others) = {
+            let mut guard = local.0.borrow();
+            let inner = &mut *guard;
+            let opened = crypto.open_round(rx, &mut inner.device, now).map_err(|e| {
+                io::Error::other(format!("{e}, which ended this tunnel generation"))
+            })?;
+            if !opened {
+                break;
+            }
+            let upper = &mut inner.upper;
+            crypto.each_packet(rx, true, |p| upper.handle_packet(now, p))
+        };
+        if others == 0 {
+            continue;
         }
-        let before = clock::now();
-        tokio::task::yield_now().await;
-        yielded = clock::now().saturating_duration_since(before);
-        if local.is_poisoned() {
-            return Err(io::Error::other(
-                "a panic inside the TCP/IP core ended this tunnel generation",
-            ));
-        }
+        yielded += udp_first(local, udp, wakers).await?;
+        let mut guard = local.0.borrow();
+        let upper = &mut guard.upper;
+        crypto.each_packet(rx, false, |p| upper.handle_packet(now, p));
     }
-    let mut guard = local.0.borrow();
-    let upper = &mut guard.upper;
-    each_packet(&rx.plain[0][..end], false, |p| upper.handle_packet(now, p));
     Ok((n, yielded))
+}
+
+/// UDP の packet を上の層に渡した後で、残りを渡す前に、起こす waker を起こして順を譲る。中継の task が
+/// UDP の datagram を先に運ぶ。譲っていた時間を返す。
+async fn udp_first<U: Upper>(
+    local: &Local<U>,
+    udp: usize,
+    wakers: &mut Vec<Waker>,
+) -> io::Result<Duration> {
+    if udp == 0 {
+        return Ok(Duration::ZERO);
+    }
+    local.0.borrow().upper.poll_wakers(wakers);
+    for waker in wakers.drain(..) {
+        waker.wake();
+    }
+    let before = clock::now();
+    tokio::task::yield_now().await;
+    let yielded = clock::now().saturating_duration_since(before);
+    if local.is_poisoned() {
+        return Err(io::Error::other(
+            "a panic inside the TCP/IP core ended this tunnel generation",
+        ));
+    }
+    Ok(yielded)
 }
 
 /// 埋めた `n` 個の枠の datagram を、GRO がまとめた列は segment ごとに、device の層で平文の領域に
@@ -598,7 +646,17 @@ pub(super) async fn drive<U: Upper>(
         .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
     let batching = settings.batching.running();
     // バッチの置き場は起動の時に 1 回だけ確保する。メモリの上界の `batch` の項が数える
-    let mut rx = rx_store(batching, max_datagram);
+    // 暗号の作業者は Linux のバッチの道だけで、起動の時に 1 回だけ決めた数を使う
+    let lanes = batching.crypto_lanes();
+    let mut rx = rx_store(batching, max_datagram, lanes);
+    let mut crypto = (lanes > 1 && rx.batched()).then(|| Crypto::new(lanes, PARALLEL_MIN_BYTES));
+    if let Some(c) = &crypto {
+        crate::logf!(
+            "tunnel crypto: {} worker threads beside the data plane for receive rounds of {} KiB or more",
+            c.workers(),
+            PARALLEL_MIN_BYTES >> 10
+        );
+    }
     // Linux でバッチを使うときだけ時間で区切る。1 つずつ送受信する道 (Windows、macOS、
     // WGFT_AGENT_BATCH_MIB=0) は、バッチの前と同じく 1 回の起床を数で区切り、時計をバッチごとに読まない
     let timed = rx.batched();
@@ -631,6 +689,7 @@ pub(super) async fn drive<U: Upper>(
                 &local,
                 &mut io,
                 &mut rx,
+                crypto.as_mut(),
                 now,
                 vlen,
                 &mut receive_errors,
