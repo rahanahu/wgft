@@ -429,7 +429,7 @@ Go の recording を使う `send_to` の振る舞いは変えないので、dive
 ### 送り出しと受信の値
 
 - 1 回の起床の上限:Linux でバッチを使うときは、受信と送信のバッチを起床の始めから遅れの予算 (50 µs) が経つまでにします ([バッチの作り](agent-throughput.md#バッチの作り))。
-  1 つずつ送受信する道 (Windows、macOS、`WGFT_AGENT_BATCH_MIB=0`) は、バッチの前と同じく、核から引く packet とソケットから読む datagram を、どちらも 1 回の起床で 64 までにします。
+  1 つずつ送受信する道 (Windows、macOS、`WGFT_AGENT_BATCH_MIB=0`) は、核から引く packet とソケットから読む datagram を、どちらも 1 回の起床で 64 までにします。
   上限で止まったときは他の task に順を譲ってからすぐに起きます。
   譲るのは待つ前で、待つ所の選択の中では譲りません。
   ソケットが読める間は選択が読める準備をすぐに選び、駆動の task は tokio の coop の予算を使い切るまで起床を繰り返すためです。
@@ -710,7 +710,6 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
   枠が 2 つ以上なら、受信の枠の 2 つの部分にまたがる datagram を写す作業の領域 (65535 byte) を 1 つ足します。
   MTU は最大の 9216 で数えます。
   データの packet は、この枠を通るだけで、packet ごとに確保も写しもしません。
-  バッチの段の最初の段階 (確保をやめ、まだ 1 packet ずつ送受信する間) は、データプレーンの 4 つの buffer を `device` の項に数えていました。
   試験 (`wgft-udp-batch` の `the_store_is_what_store_bytes_counts` と、`dataplane::batch` の `the_running_store_is_what_the_bound_counts`) が、置き場の確保した長さとこの項が一致することを確かめます。
   置き場は起動の時に確保するので、ラボの check 5 と 5b の洪水が満たせる項に `batch` を加えます
 - TCP の中継:接続 1 本につき、中継の task の future、tokio の task と I/O の登録の余裕 (各 512 byte)、両方の向きの大きいバッファ (32 KiB ずつ) です。
@@ -1521,7 +1520,7 @@ Windows の DACL とソケットの操作には `windows-sys` を使います。
 - エンドポイントの名前を `AF_INET` で引く Windows の経路は、Windows の CI の build と試験だけで、実機では確かめていません
 - 核の接続ごとの送受信の floor を満たす量を流す場面 (読まない相手) で、核の保持が核の項に収まること
 - check 5 と 5b の RSS は洪水の最中の 1 回の読みで、その後の最大値を見ません。
-  2026-11-02 の測定では、今のラボの build の check 5 の洪水の RSS が 69 MiB で、その後の VmHWM は 98 MiB でした ([割り当て器と libc の比べ](wgstack-rs.md#割り当て器と-libc-の比べ))。
+  2026-11-02 の測定では、バッチの前のラボの build の check 5 の洪水の RSS が 69 MiB で、その後の VmHWM は 98 MiB でした。
   check 5 で VmHWM も読むことを、後の変更の候補にします
 - 固定の基礎の 32 MiB は Linux の musl の静的なビルドの RSS から決めました。
   Windows と macOS のビルドの起動の後の RSS は測っていません
@@ -1539,7 +1538,7 @@ Windows の DACL とソケットの操作には `windows-sys` を使います。
   単体の試験はありますが、CI の Windows で流すだけです
 - Windows の実機で、`QueryInterruptTimePrecise` がスリープの間も進み、データプレーンの待ちがスリープの後に期限どおりに解けること
 - 1 つずつ送受信する道の 1 回の起床の上限の 64 が、送信の速さと他の task の遅れに対して十分かどうか。
-  Linux のバッチの遅れの予算は [判定の手順](agent-throughput.md#判定の手順) で測りました
+  Linux のバッチの遅れの予算は [判定の手順](agent-throughput.md#判定の手順) で測ります
 - 中継が LAN の側のソケットを核の hook で固定する受信のバッファの値は、単体の試験では確かめていません。
   boost の変化を起こす量の転送はラボの一式だけが流します
 - 1 つのスレッドのデータプレーンが中継の写しと暗号を同じ CPU で行うときの byte あたりの CPU と速さは、ラボの値だけを測りました ([速さを制限しない経路の agent の性能](agent-throughput.md))。
