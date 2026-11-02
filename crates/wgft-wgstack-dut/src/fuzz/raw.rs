@@ -528,7 +528,8 @@ impl App {
                 let _ = n.stack().close_write(now, c);
             }
             8 => {
-                while let Ok((_, from)) = n.stack().recv_from(now, u, rbuf) {
+                while let Ok((k, from)) = n.stack().recv_from(now, u, rbuf) {
+                    no_sentinel(&rbuf[..k], "a UDP datagram read");
                     if r.below(2) == 0 {
                         let k = r.pick(&[1usize, 1400, 9000, 65_000]);
                         let _ = n.stack().send_to(now, u, &wbuf[..k], from);
@@ -613,6 +614,18 @@ fn absorb(n: &mut RawNet, peers: &mut BTreeMap<u16, Peer>) {
     let mut others = Vec::new();
     n.drain_into(&mut segs, &mut others);
     for pkt in others {
+        // UDP の datagram の中身も chunk に置くので、目印が出ないことを確かめます。最初の断片は UDP の header
+        // (長さと checksum は目印と同じ byte を持ちうる) を除きます
+        if let Ok(ip) = ip::parse_ipv4(&pkt)
+            && ip.proto == ip::PROTO_UDP
+        {
+            let skip = if ip.offset == 0 { 8 } else { 0 };
+            no_sentinel(
+                ip.payload.get(skip..).unwrap_or_default(),
+                "a UDP datagram the core sent",
+            );
+            continue;
+        }
         // 相手は核の echo に答えます
         if let Ok(ip) = ip::parse_ipv4(&pkt)
             && ip.proto == ip::PROTO_ICMP
@@ -652,9 +665,9 @@ fn absorb(n: &mut RawNet, peers: &mut BTreeMap<u16, Peer>) {
     while n.stack().poll_event().is_some() {}
 }
 
-/// TCP の中身に目印の byte が無いことを確かめます。相手とアプリケーションが書く TCP の中身は目印と違う値だけ
-/// なので、目印が出たら核が書いていない byte を読んだことになります (wgstack-rs.md の「置き場の chunk と古い
-/// byte」)。
+/// TCP と UDP の中身に目印の byte が無いことを確かめます。相手とアプリケーションが書く TCP と UDP の中身は
+/// 目印と違う値だけなので、目印が出たら核が書いていない byte を読んだことになります (wgstack-rs.md の「置き場の
+/// chunk と古い byte」)。
 fn no_sentinel(b: &[u8], what: &str) {
     if let Some(i) = b.iter().position(|&x| x == CHUNK_SENTINEL) {
         panic!("{what} holds the chunk sentinel {CHUNK_SENTINEL:#04x} at {i}");
