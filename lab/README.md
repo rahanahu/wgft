@@ -244,10 +244,6 @@ Go の実行環境に依る読み取りは、Rust の agent では次のよう�
   この行は `lab-observe` の feature を付けた build だけが書き、`lab build` と `lab suite` の build が付けます。`lab paired` の build には付かず、行が無いときは `core arrays` の項の全体を数えます。
   洪水はデータを運ばないので、`tcp bulk` と `core flows` は入れません。
   項の分け方は [agent-parity.md](../docs/design/v2/agent-parity.md#メモリの上界の行) にあります。
-  `WGFT_LAB_RSS_PHASES=1` を付けると、check 5 はエージェントの RSS を段ごとに測った 1 行 (`RSSPHASES`) も出します。
-  段は、起動の後、エージェントが 512 MiB を受けた後、洪水の最中、TCP の洪水の接続が閉じた後、エージェントが 512 MiB を送った後、UDP のセッションが無通信の期限で閉じた後です。
-  libc と割り当て器の違う build を比べるためのもので、どの確認もこの値を読みません。
-  check 5 は約 2 分半長くなります
 - `exhaustion.sh` の acceptq と ackflood:エージェントの GC の記録が無いので、ヒープの値を示さず RSS だけを示します
 - `agentmem.sh`:Go の agent のメモリの probe に依るので、`SKIP` を 1 行出して何もしません
 - `agentdoctor.sh` の userspace の節:`AGENTDOCTOR_BASELINE` の既定を Go の `wgft` にし、Go の CLI が Rust の agent の制御ソケットから読む ID と状態と理由が、Rust の CLI と同じことを確かめます
