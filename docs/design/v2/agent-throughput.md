@@ -311,6 +311,7 @@ packet あたりの値は次のとおりです。
 | エージェントが返す ACK の datagram | - | データの約 64 に 1 つ |
 
 内訳から次のことが分かります。
+この節の `calloc`、`memset`、`to_vec` の項は最初の段階の前の値で、現在のコードの記述ではありません。
 
 - 送る向き:datagram ごとに 1 回の `sendto` を呼びます。
   `sendto` の中の時間の 7 割は、veth の反対側の受信の処理です。
@@ -320,7 +321,7 @@ packet あたりの値は次のとおりです。
 - 受ける向き:datagram ごとに 1 回の `recvfrom` を呼び、復号の前に datagram ごとに 1 回 `calloc` を呼びます。
   `calloc` は WireGuard の device の層の受信 (`Protocol::receive`) の packet の確保で、零で埋める分を含みます
 - 送る向きの `calloc` は、device の層の暗号化 (`Device::handle_packet` の encapsulate) の packet の確保です
-- これらの確保と写しは (最初の段階の前の値)、sanstun ではなく wgft 自身の `wgft-wireguard` のコードにありました。
+- これらの確保と写しは、sanstun ではなく wgft 自身の `wgft-wireguard` のコードにありました。
   受信は `Protocol::receive` が datagram ごとに零で埋めた buffer を確保して復号し (`protocol.rs`)、`Device` が詰め物を除いた平文を `to_vec` で別の buffer に写して待ち行列に積みます (`device.rs`)。
   送信は `Device::handle_packet` が packet を `to_vec` で写し (`device.rs`)、`Protocol` が暗号文の buffer を確保します (`protocol.rs`)
 - `memset` の大半は wgstack の受信と送信の輪の `trim` で、16 KiB の chunk を返す時の零埋めです。

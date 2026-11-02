@@ -85,7 +85,8 @@ pub(crate) struct Wakers {
     ports: Vec<Option<Vec<Pair>>>,
     pings: Vec<Option<Waker>>,
     /// 待つ `send_to` の送り手の待ち手。製品の build は読まないが、欄は残して型の大きさと上界を試験の
-    /// build と同じにする。
+    /// build と同じにする。上界の表は型の大きさから導くので、欄を cfg で外すと試験と製品で型の大きさが
+    /// 分かれ、表の値も分かれる。そのため欄を外さず、読み手だけを `harness` に限る。
     #[cfg_attr(
         not(feature = "harness"),
         expect(dead_code, reason = "only the waiting send_to reads it")
