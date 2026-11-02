@@ -326,14 +326,14 @@ cmd_shell() {
 # 9p 上の bin/ を VM で直接 exec すると、そのバイナリを実行中のプロセスがいる間にホストで上書きしたとき、
 # ページキャッシュに残った古いページと新しいページが混ざって SIGSEGV になる(実験で確認)。
 # install(1) は unlink してから書くので、実行中のプロセスは古い inode のまま動き続け、新しい exec は新しい方を読む
-# rust_build <ソースの木> <target> <入れる先> [<cargo の target ディレクトリ>]:木の wgft を cargo-zigbuild で作り、
-# 入れる先に install する。target ディレクトリを渡さなければ <木>/target に作る。
+# rust_build <ソースの木> <target> <入れる先> [<cargo の target ディレクトリ> [<cargo の feature>]]:木の wgft を
+# cargo-zigbuild で作り、入れる先に install する。target ディレクトリを渡さなければ <木>/target に作る。
 # zigbuild の target の glibc の版 (x86_64-unknown-linux-gnu.2.41 の .2.41) は出力の置き場の名前に入らない
 rust_build() {
-  local src=$1 target=$2 dest=$3 tdir=${4:-} envs=()
+  local src=$1 target=$2 dest=$3 tdir=${4:-} feat=${5:-} envs=()
   command -v cargo-zigbuild >/dev/null || die "the Rust build needs cargo-zigbuild and zig on the host"
   [[ -z $tdir ]] || envs=(env CARGO_TARGET_DIR="$tdir")
-  (cd "$src" && "${envs[@]}" cargo zigbuild --release --locked --target "$target" -p wgft) \
+  (cd "$src" && "${envs[@]}" cargo zigbuild --release --locked --target "$target" -p wgft ${feat:+--features "$feat"}) \
     && install -D -m 0755 "${tdir:-$src/target}/${target%%.*}/release/wgft" "$dest"
 }
 host_build() {
@@ -348,7 +348,7 @@ host_build() {
   # 既定の bin/ とその install は変えない
   if rust_wanted; then
     local rtarget=${WGFT_LAB_RUST_TARGET:-x86_64-unknown-linux-musl}
-    rust_build "$REPO" "$rtarget" "$REPO/bin/rust/wgft" || die "cargo zigbuild failed"
+    rust_build "$REPO" "$rtarget" "$REPO/bin/rust/wgft" "" "${LAB_RUST_FEATURES:-}" || die "cargo zigbuild failed"
     info "built the Rust wgft for $rtarget into $REPO/bin/rust/"
   fi
   info "built into $REPO/bin/"
@@ -366,7 +366,9 @@ vm_install() {
   info "installed into VM $VM /usr/local/bin (use plain command names in the VM)$(rust_wanted && echo "; the Rust wgft as /usr/local/lib/wgft-rust/wgft")"
 }
 cmd_build() {
-  host_build
+  # 機能の確認 (labhost run all) が使う build なので、lifecycle.sh の check 5 と 5b の行を出す lab-observe を付ける。
+  # 性能を測る lab paired は付けない
+  LAB_RUST_FEATURES=lab-observe host_build
   if vm_exists && [[ $(vm_state) == RUNNING ]]; then vm_install; fi
 }
 
@@ -608,7 +610,9 @@ cmd_suite() {
   trap suite_cleanup EXIT
   trap 'info "interrupted; deleting the suite VMs"; exit 130' INT TERM HUP
   cmd_suite_gc
-  host_build
+  # lifecycle.sh の check 5 と 5b が読む接続の枠の行は lab-observe の feature の build だけが書く。製品の build と
+  # lab paired の build には付けない
+  LAB_RUST_FEATURES=lab-observe host_build
   local k
   local names=() dirs=()
   for c in "${cfgs[@]}"; do

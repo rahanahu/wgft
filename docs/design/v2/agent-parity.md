@@ -774,14 +774,15 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
   核の項は、作成の時に作って流れによらず持つ固定の部分 (`Bound::fix`、`core fixed`)、接続の枠が初めて使われた時から持つ floor の記録の輪と区間の表 (`Bound::floor_arrays`、`core arrays`)、残り (`core flows`) に分けます。
   TCP の中継の項は、接続ごとの task と登録の部分 (`tcp relay`) と大きいバッファの部分 (`tcp bulk`) に分けます。
   形は保証の外で、ラボの check 5 と 5b が読みます
-- 使った枠の行:agent は核を作ってから使ったことのある接続の枠 (floor の配列を持つ枠) の数を 1 秒ごとに読み、刻みの倍数に切り上げた値が増えたときだけ、`memory: connection slots used so far: at most <N> of <N_c>; their floor arrays hold <K> KiB` を書きます。
+- 使った枠の行:`lab-observe` の feature を付けた build だけが書きます (ラボの `lab build` と `lab suite` の build が付け、性能を測る `lab paired` の build は付けません)。製品の build は 1 秒ごとの起床も、データプレーンのスレッドへの呼び出しも持ちません。
+  feature を付けた agent は核を作ってから使ったことのある接続の枠 (floor の配列を持つ枠) の数を 1 秒ごとに読み、刻みの倍数に切り上げた値が増えたときだけ、`memory: connection slots used so far: at most <N> of <N_c>; their floor arrays hold <K> KiB` を書きます。
   核は枠が初めて配列を確保する時に数えて持つので (`Stack::slots_used`)、読むのは定数の手間で、データプレーンのスレッドで枠をたどりません。
   枠は配列を持ち続けるので数は減らず、行の値は読んだ時の数の上界です。
   刻みは次の手順で決めます:N_c を 32 で割って切り上げ、その値と 64 の大きい方を取り、64 の倍数に切り上げます。
   このため、N_c が大きくても、行の数はトンネルを立てるたびに 32 までです。
   `slot_watch` は `Tunnel::start` ごとに動き始め、最後に書いた値 `shown` を 0 から始めます。
   洪水で数が一気に増えても行は増えすぎません。
-  ラボの check 5 と 5b は、RSS を測った後に、最後に出たこの行を読みます。
+  ラボの check 5 と 5b は、RSS を測った後に、最後に出たこの行を読みます。行が無い build (feature なし) では、`core arrays` の項の全体を数えます。
   形は保証の外です
 - 単体の試験 (`relay/held_tests.rs`):小さい上限 (UDP 128、TCP 24) の agent を試験の相手と組み、`wgft-alloc-count` で数えた生きている確保を段ごとに測ります。
   作成の後の保持を作成の時に作る項 (核の固定の部分、表、駆動、device) と比べ、応答のバッファの枠をすべて貸させた後の育ちを枠の数の UDP のバッファと比べます。
@@ -1251,7 +1252,7 @@ macOS では hard の値が無制限でも `kern.maxfilesperproc` を超える�
 | `<待ち受け>: <理由>; refusing new connections` | フロー数の拒否。`lifecycle.sh` の check 5e が `rule <ID> holds ... for a rule added later` を照らす。`<理由>` は Go の `internal/resource/pool.go` の拒否の文 (`flow budget full: ...`、`rule <ID> holds ... for a rule added later`、`... below its minimum ...` など) をそのまま写します |
 | `memory bound: <N> MiB, ...` | `lifecycle.sh` の check 5 と 5b ([メモリの上界の行](#メモリの上界の行)) |
 | `memory bound terms: ...` | `lifecycle.sh` の check 5 と 5b。洪水が満たせる項を読みます |
-| `memory: connection slots used so far: ...` | `lifecycle.sh` の check 5 と 5b。洪水が使った接続の枠の配列の KiB を読みます |
+| `memory: connection slots used so far: ...` | `lab-observe` の build だけが書く。`lifecycle.sh` の check 5 と 5b。洪水が使った接続の枠の配列の KiB を読みます |
 | `dropped TCP handshakes that advertise an MSS below 536` | `exhaustion.sh` の kernel の `mss`。wgstack の捨てた数の口が要る |
 
 行が無いことを確かめる `absent` の確認は、Rust の agent が別の文面を書いても通ってしまいます。
