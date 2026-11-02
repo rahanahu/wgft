@@ -71,6 +71,8 @@ pub mod fuzz {
 }
 
 #[cfg(test)]
+mod audit_tests;
+#[cfg(test)]
 mod boost_tests;
 #[cfg(test)]
 mod cc_tests;
@@ -82,6 +84,8 @@ mod icmp_tests;
 mod lifecycle_tests;
 #[cfg(test)]
 mod listen_tests;
+#[cfg(test)]
+mod netsim_tests;
 #[cfg(test)]
 mod rack_tests;
 #[cfg(test)]
