@@ -30,7 +30,7 @@ use std::{env, fs};
 
 use libtest_mimic::{Arguments, Trial};
 use wgft_wgstack::Limits;
-use wgft_wgstack_dut::fuzz::{self, Check, DUT, Net, Options, PEER};
+use wgft_wgstack_dut::fuzz::{self, Check, DUT, HarnessOptions, Net, PEER};
 
 /// fuzz の target の本体です。
 type Body = fn(&[u8]);
@@ -88,14 +88,14 @@ fn dirty(limits: Limits) {
 
 /// `body` に `data` を新しい核と使い回した核で流し、2 つが同じ出力を返すことを確かめます。
 fn fresh_and_reused(body: Body, data: &[u8], limits: Limits) -> Result<(), libtest_mimic::Failed> {
-    fuzz::set_options(Options {
+    fuzz::set_options(HarnessOptions {
         check: Check::Both,
         reuse: false,
         digest: true,
     });
     body(data);
     let fresh = fuzz::last_digest();
-    fuzz::set_options(Options {
+    fuzz::set_options(HarnessOptions {
         check: Check::Both,
         reuse: true,
         digest: true,
@@ -110,7 +110,7 @@ fn fresh_and_reused(body: Body, data: &[u8], limits: Limits) -> Result<(), libte
     body(data);
     let reused = fuzz::last_digest();
     let spare = fuzz::take_spare().ok_or("no tables kept")?;
-    fuzz::set_options(Options::FUZZ);
+    fuzz::set_options(HarnessOptions::FUZZ);
     if fresh != reused {
         return Err("a reused stack gave other output than a new one".into());
     }
