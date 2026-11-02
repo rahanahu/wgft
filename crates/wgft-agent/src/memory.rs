@@ -157,7 +157,7 @@ pub struct MemoryBound {
     pub driver: usize,
     /// The WireGuard device's queues and the data plane's buffers.
     pub device: usize,
-    /// The tunnel batching's buffers ([`batch_bytes`]).
+    /// The tunnel batching's buffers (`batch_bytes`).
     pub batch: usize,
     /// The TCP relay without its bulk buffers: per connection its task and socket.
     pub tcp: usize,

@@ -1,7 +1,7 @@
 //! 適合の台本の言語 (`docs/design/v2/test-tooling.md` の 1 節) の構文解析器と静的な検査です。
 //!
 //! Go の構文解析器 (`internal/tcpharness/script_parse.go` と `script_check.go`) の写しで、同じ入力に同じ
-//! 構文木と同じ誤り (行と種類) を返します。正規化した構文木 ([`Script::ast_json`]) は Go の `ScriptAST` を
+//! 構文木と同じ誤り (行と種類) を返します。正規化した構文木 ([`Script::ast`]) は Go の `ScriptAST` を
 //! `json.Marshal` で書いたものと byte の単位で同じです。誤りの英語の文は Go と違ってよく、比べません。
 //!
 //! 台本は UTF-8 の text で、UTF-8 として読めない行は `layout` の誤りです。文字列の literal は `\xHH` の
