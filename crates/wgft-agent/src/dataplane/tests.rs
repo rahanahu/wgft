@@ -896,6 +896,43 @@ fn a_full_socket_stops_the_pulling_and_keeps_the_batch() {
     assert_eq!(got, vec![9, 10, 11]);
 }
 
+/// ソケットが書けない間にバッチが残り、device の層が datagram (server が始めたハンドシェイクへの答え) を
+/// 持ったとき、答えがバッチの data の message より先に出る。
+#[test]
+fn datagrams_the_device_queued_go_out_before_a_pending_batch() {
+    let mut t = Bench::new(0);
+    t.connected();
+    t.sink.sent.clear();
+    t.stub
+        .out
+        .extend((0..3).map(|i| packet(AGENT_IP, SERVER_IP, i)));
+    t.sink.block = true;
+    assert!(!t.pump(64));
+    assert!(t.outbox.is_blocked());
+    assert_eq!(t.outbox.tx.n_sealed, 3);
+    // B が新しいハンドシェイクを始め、その開始を A が受けて答えを device の待ち行列に積む
+    let later = clock::now() + Duration::from_secs(10);
+    assert!(t.b.start_handshake(later, &keys().0.public_key()));
+    let initiation = t.b.poll_transmit().expect("an initiation");
+    let mut plain = vec![0u8; usize::from(u16::MAX)];
+    t.a.handle_datagram(
+        later,
+        B_ADDR.parse().unwrap(),
+        &initiation.payload,
+        &mut plain,
+    );
+    assert_eq!(
+        t.a.held().transmit_packets,
+        1,
+        "the response waits in the device"
+    );
+    t.sink.block = false;
+    assert!(!t.pump(64));
+    // WireGuard の message の種類: 2 が答え、4 が data
+    let kinds: Vec<u8> = t.sink.sent.iter().map(|d| d.payload[0]).collect();
+    assert_eq!(kinds, vec![2, 4, 4, 4]);
+}
+
 #[test]
 fn a_batch_cut_by_a_full_socket_resumes_where_it_stopped() {
     let mut t = Bench::new(0);
