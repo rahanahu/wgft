@@ -601,6 +601,34 @@ fn accounting_fault_stops_udp() {
     );
 }
 
+/// 送信の datagram の中身を写せない時は、送る断片の残りを 0 で埋め、呼び手のバッファに前から残る byte を
+/// 出しません。小さい区分の枠と chunk の列の両方を確かめます。
+#[test]
+fn poll_udp_fills_what_it_could_not_copy() {
+    for len in [100usize, 20_000] {
+        let mut n = TestNet::new(small_limits());
+        let pc = bind(&mut n, 53);
+        send(&mut n, pc, &vec![0x5a; len], PEER_UDP).unwrap();
+        // 会計を壊し、先頭の datagram の chunk を外します。
+        let u = &mut n.s.s.udp;
+        let chunk = u.dg[TX][usize::from(u.tx_head)].ck[0];
+        let taken = u.ck[usize::from(chunk)].buf.take();
+        let mut pkt = vec![0xeeu8; TEST_MTU];
+        let sent = n.s.s.poll_udp(&mut pkt);
+        assert!(
+            sent > IP_HEADER_LEN + UDP_HEADER_LEN,
+            "len {len}: sent {sent}"
+        );
+        let data = &pkt[IP_HEADER_LEN + UDP_HEADER_LEN..sent];
+        assert!(
+            data.iter().all(|&x| x == 0),
+            "len {len}: the fragment holds bytes the caller's buffer had"
+        );
+        // 外した chunk を戻し、後始末の会計を保ちます。
+        n.s.s.udp.ck[usize::from(chunk)].buf = taken;
+    }
+}
+
 /// 核を閉じると UDP の予約と chunk がすべて返ります。
 #[test]
 fn close_returns_udp_holdings() {

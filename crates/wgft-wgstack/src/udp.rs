@@ -602,7 +602,8 @@ impl Udp {
         }
     }
 
-    /// datagram の中身の `off` から `dst` に写し、写した長さを返します。
+    /// datagram の中身の `off` から `dst` に写し、写した長さを返します。chunk を持たない枠からは写さず、写した
+    /// 長さに数えません。
     fn get(&self, dir: usize, id: u16, off: usize, dst: &mut [u8]) -> usize {
         let dg = &self.dg[dir][usize::from(id)];
         let len = usize::try_from(dg.n).unwrap_or(0);
@@ -612,9 +613,10 @@ impl Udp {
         let want = dst.len().min(len - off);
         if dg.class != LARGE {
             let start = usize::from(dg.off) + off;
-            if let Some(buf) = self.ck[usize::from(dg.ck[0])].buf.as_deref() {
-                dst[..want].copy_from_slice(&buf[start..start + want]);
-            }
+            let Some(buf) = self.ck[usize::from(dg.ck[0])].buf.as_deref() else {
+                return 0;
+            };
+            dst[..want].copy_from_slice(&buf[start..start + want]);
             return want;
         }
         let mut done = 0;
@@ -1079,12 +1081,18 @@ impl Shared {
         }
         wire::set_frag_field(p, flags);
         let body = &mut p[IP_HEADER_LEN..];
-        if sent == 0 {
+        let data = if sent == 0 {
             wire::write_udp_header(body, g.ep_port, g.peer_port, total, g.csum);
-            self.udp.get(TX, id, 0, &mut body[UDP_HEADER_LEN..]);
+            let data = &mut body[UDP_HEADER_LEN..];
+            let k = self.udp.get(TX, id, 0, data);
+            &mut data[k..]
         } else {
-            self.udp.get(TX, id, sent - UDP_HEADER_LEN, body);
-        }
+            let k = self.udp.get(TX, id, sent - UDP_HEADER_LEN, body);
+            &mut body[k..]
+        };
+        // 写せなかった残りは 0 で埋めます。会計が壊れて datagram の中身を写せなくても、`b` に前から残る byte
+        // (前に作った packet、別の接続の中身) を回線に出しません。
+        data.fill(0);
         let sent = sent + frag;
         self.udp.dg[TX][usize::from(id)].sent = u32::try_from(sent).unwrap_or(u32::MAX);
         if sent >= total {
