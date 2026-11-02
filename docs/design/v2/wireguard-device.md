@@ -233,6 +233,15 @@ device が呼び出しの間に持つものと、既定の上限は次のとお�
 ハンドシェイクを待つ packet の 128 は、Linux の WireGuard と wireguard-go の `MAX_STAGED_PACKETS` と同じ数です。
 古いものから捨てる扱いも Linux と同じです。
 
+cookie の返事は、送る datagram のキューの件数とバイト数のそれぞれ半分までしか積みません。
+半分を超える分は捨てて `TransmitOverflow` に数えます。
+cookie の返事は外から届いた開始と返事に答える datagram で、データプレーンは受信の相の間はこのキューを吐き出さず、送信の相で device の timer を回してから吐き出します。
+上限を分けないと、1 回の受信の相で 256 通を超える cookie を求める message (agent の公開鍵を知る者が作れます) が届いたとき、timer が出す device 自身のハンドシェイクの開始と keepalive が毎回キューから溢れます。
+上限を分ける前の device の層の模擬 (100 ms ごとの起床、起床ごとに 300 通、試験には残していません) では、再ハンドシェイクが出ずにセッションが期限を迎え、171 秒目からデータが止まりました。
+半分の上限で、device 自身が積む message には残りの半分が必ず空きます。
+`a_cookie_flood_leaves_room_for_the_agents_own_handshakes` は、1 回の受信の相で 500 通を受けた直後に device 自身の開始がキューに入ることを確かめます。
+cookie の返事を捨てても、相手は開始を送り直すので、正しい相手のハンドシェイクは遅れるだけです。
+
 ピアが 1 つの agent では、device のキューが持つバイト数の上界は次の和です。
 
 - ハンドシェイクを待つ packet:128 × 1420 バイト (約 178 KiB)
@@ -428,8 +437,10 @@ sanstun を改変 (fork やパッチ) しない所有者の方針に従い、受
 - sanstun は、ピアごとに 1 秒あたり 50 回の開始の上限 (Linux の WireGuard) を持ちません。
   代わりに、全体で 1 秒あたり 100 回を超えると cookie を求め、cookie を持つ開始を送信元の IP ごとの bucket で絞ります。
   この違いで負荷の高いときの挙動がどう変わるかは確かめていません。
-- cookie の返事の経路 (負荷が高いときのハンドシェイク) は device の層の試験で通していません。
-  sanstun の試験が sanstun の中で確かめています。
+- cookie の返事の経路 (負荷が高いときのハンドシェイク) は、device の層の試験で sanstun どうしの組だけを通しています。
+  開始を流し続ける間、最初のセッションは cookie の往復と送り直しの分だけ遅れて張れます (毎秒 200 通で約 5 秒、`a_handshake_flood_delays_the_first_session_but_does_not_stop_it`)。
+  Linux の WireGuard と wireguard-go が相手のときの cookie の扱いは確かめていません。
+- 起床ごとに cookie を求める message が何通届くかは、UDP の GRO と受信の予算で決まり、ラボで確かめていません。
 - 性能 (1 秒あたりの packet の数、CPU) の device 単体の値は測っていません。
   定常の状態で packet ごとの確保が 0 であることは、`tests/alloc_calls.rs` が確かめます。
 - device のキューと sanstun の状態を合わせたメモリの保持量は測っていません。

@@ -1324,3 +1324,88 @@ fn a_held_back_data_request_keeps_its_earlier_time() {
         "last {last:?}, first {first:?}"
     );
 }
+
+/// agent の公開鍵を知る者が作れる、知らない鍵のハンドシェイクの開始。mac1 が正しいので負荷の判定に数え、
+/// 負荷が高い間は cookie の返事を招く。
+fn stranger_initiation(n: &Net) -> Vec<u8> {
+    let stranger_key = PrivateKey::generate(&[0xcc; 32]);
+    let mut c = Device::with_seed(
+        agent_config(&stranger_key, n.a_pub(), n.a_addr),
+        Zeroizing::new([9; 32]),
+        n.base,
+        UNIX,
+    )
+    .unwrap();
+    c.handle_timeout(n.now());
+    c.poll_transmit().unwrap().payload
+}
+
+/// 1 回の受信の相に cookie を求める開始がキューの上限より多く届いても、続く送信の相で device 自身の
+/// ハンドシェイクの開始がキューに入る。cookie の返事が送る datagram のキューを埋めると、timer の出す
+/// 再ハンドシェイクが毎回溢れ、流し続ける間にセッションが期限を迎えて止まった (wireguard-device.md)。
+#[test]
+fn a_cookie_flood_leaves_room_for_the_agents_own_handshakes() {
+    let mut n = Net::new();
+    let init = stranger_initiation(&n);
+    let attacker = addr("192.0.2.66:9999");
+    let now = n.now();
+    // データプレーンは受信の相の間はキューを吐き出さない。最初の 100 通は負荷の判定の内なので答えず、
+    // 残りがキューの上限の 256 を超える
+    for _ in 0..500 {
+        n.a.recv(now, attacker, &init);
+    }
+    let limits = Limits::default();
+    assert_eq!(n.a.held().transmit_packets, limits.transmit_packets / 2);
+    assert_eq!(n.a.drops().get(DropReason::TransmitOverflow), 400 - 128);
+    let b = n.b_pub();
+    assert!(n.a.start_handshake(now, &b));
+    let mut to_server = Vec::new();
+    while let Some(t) = n.a.poll_transmit() {
+        if t.to == n.b_addr {
+            to_server.push(t.payload);
+        }
+    }
+    assert_eq!(to_server.len(), 1, "the agent's own initiation was queued");
+    assert_eq!((to_server[0].len(), to_server[0][0]), (148, 1));
+}
+
+/// 知らない鍵の開始を流し続ける間も、最初のセッションは cookie の往復と送り直しの分だけ遅れて張れ、
+/// 張る前に送った packet も届く。
+#[test]
+fn a_handshake_flood_delays_the_first_session_but_does_not_stop_it() {
+    let mut n = Net::new();
+    let init = stranger_initiation(&n);
+    let attacker = addr("192.0.2.66:9999");
+    let b = n.b_pub();
+    // 最初の接触の前に、1 秒の窓の上限 (100) を超える数を積む
+    for _ in 0..160 {
+        n.a.recv(n.now(), attacker, &init);
+    }
+    let mut at = None;
+    while at.is_none() && n.t < Duration::from_secs(20) {
+        let now = n.now();
+        // 毎秒 200 通
+        for _ in 0..20 {
+            n.a.recv(now, attacker, &init);
+        }
+        n.tick();
+        if n.t.as_millis().is_multiple_of(1000) {
+            n.a_sends(b"data");
+        }
+        if n.a.has_session(&b, n.now()) {
+            at = Some(n.t);
+        }
+        n.t += Duration::from_millis(100);
+    }
+    let at = at.expect("a session within 20 s");
+    let rekey = ProtocolTimers::default().effective_rekey_timeout();
+    assert!(
+        at >= rekey && at < 2 * rekey,
+        "the session waited one retry for the cookie: {at:?}"
+    );
+    n.pump();
+    assert!(
+        !n.b_got.is_empty(),
+        "packets sent before the session arrived"
+    );
+}
