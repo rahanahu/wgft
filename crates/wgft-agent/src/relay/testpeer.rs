@@ -429,8 +429,8 @@ async fn serve(
     mut out: mpsc::UnboundedReceiver<Vec<u8>>,
     inner: Arc<Inner>,
 ) {
-    let mut buf = vec![0u8; 65535];
-    let mut plain = vec![0u8; 65535];
+    let mut buf = vec![0u8; crate::relay::UDP_BUF];
+    let mut plain = vec![0u8; crate::relay::UDP_BUF];
     let mut sealed = vec![0u8; device.max_transmit_len()];
     loop {
         let deadline = device.poll_timeout();
