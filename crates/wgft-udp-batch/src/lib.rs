@@ -112,6 +112,17 @@ pub const fn store_bytes(
     slots * (rx + tx) + scratch + plain + sealed
 }
 
+/// The bytes of the receive side alone of [`store_bytes`]: what one more [`RxBatch::new`] adds.
+#[must_use]
+pub const fn rx_store_bytes(slots: usize, on: bool, rx_lanes: usize) -> usize {
+    let headers = if on { header_bytes() } else { 0 };
+    let rx_lanes = lanes_for(slots, rx_lanes);
+    let scratch = if slots > 1 { RX_SLOT } else { 0 };
+    slots * (RX_SLOT + size_of::<RxMeta>() + headers)
+        + scratch
+        + rx_lanes * plain_lane(slots, rx_lanes)
+}
+
 /// The lanes a store of `slots` slots uses when asked for `lanes`: at least 1 and at most `slots`,
 /// so that a lane of the plaintext area holds the largest datagram.
 #[must_use]

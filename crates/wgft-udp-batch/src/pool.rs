@@ -220,23 +220,36 @@ impl<T: Run> Pool<T> {
     ///
     /// [`Poisoned`] once a worker panicked: a part it held is lost and the pool runs nothing more.
     pub fn run(&self, parts: &mut [Option<T>]) -> Result<(), Poisoned> {
+        let Some((first, rest)) = parts.split_first_mut() else {
+            return Ok(());
+        };
+        let offered = self.offer(rest)?;
+        if let Some(part) = first.as_mut().filter(|p| !p.is_idle()) {
+            part.run();
+        }
+        self.collect(rest, offered)
+    }
+
+    /// Offers `parts[i]` to worker `i` and returns at once; places beyond the workers run here
+    /// first. Pass the result to [`Pool::collect`] with the same places.
+    ///
+    /// # Errors
+    ///
+    /// [`Poisoned`] once a worker panicked.
+    pub fn offer(&self, parts: &mut [Option<T>]) -> Result<Offered, Poisoned> {
         let shared = &*self.shared;
         if shared.poisoned.load(Ordering::Acquire) {
             return Err(Poisoned);
         }
-        let Some((first, rest)) = parts.split_first_mut() else {
-            return Ok(());
-        };
         debug_assert_eq!(
             thread::current().id(),
             shared.owner.id(),
             "the pool runs on the thread that made it"
         );
-        let offered = rest.len().min(self.workers.len());
-        // 作業者に渡した部分。持ち主が取り戻せなかったものは、作業者の終わりを待つ。することの無い
-        // 部分は渡さず、作業者を起こさない
-        let mut waiting = [false; MAX_WORKERS];
-        for (i, place) in rest[..offered].iter_mut().enumerate() {
+        let n = parts.len().min(self.workers.len());
+        // することの無い部分は渡さず、作業者を起こさない
+        let mut offered = Offered([false; MAX_WORKERS]);
+        for (i, place) in parts[..n].iter_mut().enumerate() {
             if place.as_ref().is_some_and(|p| !p.is_idle())
                 && let Some(part) = place.take()
             {
@@ -246,21 +259,34 @@ impl<T: Run> Pool<T> {
                     "one batch is with the workers at a time"
                 );
                 *lock(&slot.todo) = Some(part);
-                waiting[i] = true;
+                offered.0[i] = true;
                 self.workers[i].thread().unpark();
             }
         }
-        if let Some(part) = first.as_mut().filter(|p| !p.is_idle()) {
-            part.run();
-        }
-        for part in rest[offered..].iter_mut().flatten() {
+        for part in parts[n..].iter_mut().flatten() {
             if !part.is_idle() {
                 part.run();
             }
         }
-        // 作業者がまだ取っていない部分を取り戻して、ここで行う
+        Ok(offered)
+    }
+
+    /// Puts the parts [`Pool::offer`] offered back in place: a part no worker has started runs
+    /// here, a started one is waited for.
+    ///
+    /// # Errors
+    ///
+    /// [`Poisoned`] once a worker panicked: a part it held is lost.
+    pub fn collect(&self, parts: &mut [Option<T>], offered: Offered) -> Result<(), Poisoned> {
+        let shared = &*self.shared;
+        debug_assert_eq!(
+            thread::current().id(),
+            shared.owner.id(),
+            "the pool runs on the thread that made it"
+        );
+        let mut waiting = offered.0;
         let mut any = false;
-        for (i, place) in rest[..offered].iter_mut().enumerate() {
+        for (i, place) in parts.iter_mut().enumerate().take(MAX_WORKERS) {
             if !waiting[i] {
                 continue;
             }
@@ -275,7 +301,7 @@ impl<T: Run> Pool<T> {
         }
         while any {
             any = false;
-            for (i, place) in rest[..offered].iter_mut().enumerate() {
+            for (i, place) in parts.iter_mut().enumerate().take(MAX_WORKERS) {
                 if !waiting[i] {
                     continue;
                 }
@@ -294,6 +320,18 @@ impl<T: Run> Pool<T> {
             }
         }
         Ok(())
+    }
+}
+
+/// Which places [`Pool::offer`] handed to workers.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Offered([bool; MAX_WORKERS]);
+
+#[cfg(feature = "test-hooks")]
+impl<T: Run> Pool<T> {
+    /// Marks the pool poisoned, as a worker's panic does, for tests of the callers' handling.
+    pub fn poison(&self) {
+        self.shared.poisoned.store(true, Ordering::Release);
     }
 }
 
@@ -415,6 +453,29 @@ mod tests {
         assert!(parts[1].is_none(), "the part the worker held is lost");
         let mut again = [Some(Count::default())];
         assert_eq!(pool.run(&mut again), Err(Poisoned));
+    }
+
+    #[test]
+    fn a_worker_panic_on_an_offered_part_poisons_the_collect() {
+        let pool = Pool::<Count>::new(1).unwrap();
+        let mut parts = [Some(Count {
+            panic: true,
+            ..Count::default()
+        })];
+        let offered = pool.offer(&mut parts).unwrap();
+        // 作業者が取るまで待ってから取り戻す。取り戻せた部分はここで panic するので、取られたことを確かめる
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while lock(&pool.shared.slots[0].todo).is_some() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker took the part"
+            );
+            thread::yield_now();
+        }
+        assert_eq!(pool.collect(&mut parts, offered), Err(Poisoned));
+        assert!(parts[0].is_none());
+        let mut again = [Some(Count::default())];
+        assert!(matches!(pool.offer(&mut again), Err(Poisoned)));
     }
 
     #[test]

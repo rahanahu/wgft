@@ -94,6 +94,7 @@ fn connected() -> (Device, Device, SocketAddr, Instant) {
 #[test]
 fn the_crypto_workers_allocate_nothing_per_packet() {
     rounds();
+    pipelined_opening();
 }
 
 /// 回ごとに待つ形の暗号化と復号。
@@ -153,4 +154,84 @@ fn rounds() {
         "heap allocations in {} batches of {n} packets",
         BATCHES - WARM
     );
+}
+
+/// 受信の重ね。
+#[expect(
+    clippy::many_single_char_names,
+    reason = "the test reads like the data plane it imitates"
+)]
+fn pipelined_opening() {
+    // 作業者の 2 つのレーンに収まるバッチ
+    const PIPE_PER_SLOT: usize = 10;
+    let (mut agent, mut server, from, now) = connected();
+    let n = SLOTS * PIPE_PER_SLOT;
+    let mut tx = TxBatch::new(n, false, agent.mtu(), agent.max_transmit_len(), 1);
+    let mut stores = [
+        RxBatch::new(SLOTS, false, RX_SLOT, LANES),
+        RxBatch::new(SLOTS, false, RX_SLOT, LANES),
+    ];
+    let mut crypto = Crypto::new(LANES, 0);
+    let p = packet(1400, 7);
+    let mut delivered = 0;
+    let mut calls = 0;
+    let mut inflight: Option<usize> = None;
+    for batch in 0..BATCHES {
+        let cur = batch % 2;
+        let before = process_alloc_calls();
+        tx.clear();
+        {
+            let mut slots = tx.packet_slots();
+            for i in 0..n {
+                slots.slot(i)[..p.len()].copy_from_slice(&p);
+                slots.set_len(i, p.len());
+            }
+        }
+        for i in 0..n {
+            let (packet, sealed) = tx.seal_slot(i);
+            let o = agent.handle_packet(now, packet, sealed).unwrap();
+            tx.push_sealed(o.to, o.len);
+        }
+        let rx = &mut stores[cur];
+        for s in 0..SLOTS {
+            let mut len = 0;
+            let seg = tx.datagram(s * PIPE_PER_SLOT).1.len();
+            for k in 0..PIPE_PER_SLOT {
+                let (_, d) = tx.datagram(s * PIPE_PER_SLOT + k);
+                let at = s * RX_SLOT + len;
+                rx.data_mut()[at..at + d.len()].copy_from_slice(d);
+                len += d.len();
+            }
+            rx.meta[s] = RxMeta {
+                from: Some(from),
+                len: u32::try_from(len).unwrap(),
+                seg: u32::try_from(seg).unwrap(),
+            };
+        }
+        assert!(crypto.can_pipeline(rx, SLOTS));
+        crypto.begin_pipelined(cur, rx, SLOTS, &mut server, now);
+        if let Some(prev) = inflight {
+            let [a, b] = &mut stores;
+            let old = if prev == 0 { a } else { b };
+            crypto
+                .finish_pipelined(prev, old, &mut server, now)
+                .unwrap();
+            let (u, o) = crypto.each_pipelined(prev, old, false, |_| {});
+            delivered += u + o;
+        }
+        crypto.offer_pipelined(cur, &mut stores[cur]).unwrap();
+        inflight = Some(cur);
+        if batch >= WARM {
+            calls += process_alloc_calls() - before;
+        }
+    }
+    let prev = inflight.unwrap();
+    crypto
+        .finish_pipelined(prev, &mut stores[prev], &mut server, now)
+        .unwrap();
+    let (u, o) = crypto.each_pipelined(prev, &stores[prev], false, |_| {});
+    delivered += u + o;
+    assert_eq!(delivered, BATCHES * n);
+    assert_eq!(server.drops().total(), 0);
+    assert_eq!(calls, 0, "heap allocations in pipelined batches");
 }
