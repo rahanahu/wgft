@@ -50,7 +50,7 @@ pub struct Bound {
     /// N_ping × c_ping:ping の endpoint の行と応答の置き場です。
     pub ping: u64,
     /// 項の和です。段を変える間の一時の保持は、段を変える接続が持つ boost の枠の予約の内にあるので、別の項を
-    /// 持ちません ([`STAGE_CHANGE_FITS`])。
+    /// 持ちません (`STAGE_CHANGE_FITS`)。
     pub total: u64,
 }
 

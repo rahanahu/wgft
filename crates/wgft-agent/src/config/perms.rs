@@ -20,7 +20,7 @@ pub(super) fn read_facts(path: &Path) -> String {
     config_file_perm_facts(path).0
 }
 
-/// [`read_facts`] の句と、ファイル自身の持ち主とパーミッションを読めたかどうか (Go の
+/// `read_facts` の句と、ファイル自身の持ち主とパーミッションを読めたかどうか (Go の
 /// `configFilePermFacts`)。読めなかった場合は上の階層のディレクトリが通り抜けを拒んでいる。
 #[cfg(unix)]
 #[must_use]
