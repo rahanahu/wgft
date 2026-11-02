@@ -4,7 +4,8 @@
 対象は、適合の台本をデータにする言語、台本を流す 2 つの runner、Rust の DUT を別のプロセスとして叩く標準入出力の口、凍結した Go の wgstack の記録との照合、qbench、fuzz、関門です。
 1 節の台本の言語、2 節の Go の runner と Rust の runner と 2 つの runner の一致の確かめ、Rust の構文解析器と台本の乱数の写し、3 節の口の Go と Rust の符号と `dutserve` と `rustdut` と `ProcessDut` と `wgstack-dut`、4 節の記録とその Rust での照合は実装済みです。
 6 節の fuzz と 7 節の関門も実装済みです。
-5 節の qbench は未実装で、残りの作業は 8 節にまとめます。
+5 節の qbench の `wgstack-rs` の engine も実装済みです。
+残りの作業は 8 節にまとめます。
 試験の道具を変えるときは、この文書の該当する節を同じ変更で直します。
 
 Rust の wgstack そのもの (sans-IO の API、crate の分け方、bit の一致の条件) は、wgstack の Rust 版の設計 (`docs/design/v2/wgstack-rs.md`) が決めます。
@@ -48,6 +49,8 @@ Rust の wgstack の核は sans-IO で、台本と記録と fuzz は偽の時計
 | 別のプロセスの DUT | `internal/tcpharness/rustdut` | Go | 3 節の口の client。`tcpharness.ClockedDUT` を実装する。相手は Rust の `wgstack-dut` か、確かめのための `dutserve` |
 | Rust の道具の crate | `crates/wgft-tcpharness` | Rust | 口の符号、packet の組み立て、台本の構文解析器と runner |
 | Rust の DUT | `crates/wgft-wgstack-dut` | Rust | Rust の wgstack を `ClockedDut` に合わせる adapter、3 節の口の server のバイナリ `wgstack-dut`、記録の読み込みと照合、核に入った段の表 (`stages.json`)、fuzz の target の本体 (`fuzz`)、敵対的な保持の試験 (`tests/holding.rs`) |
+| agent の tunnel のソケットの経路の測定 | `crates/wgft-agent-perf` と `scripts/agent-perf-stat.sh` | Rust | PMU のあるホストで `perf stat` の下で packet あたりのキャッシュの miss と命令の数を測る ([目的:byte あたりの CPU と速さ](agent-throughput.md#目的byte-あたりの-cpu-と速さ)) |
+| 確保の数え | `crates/wgft-alloc-count` | Rust | データの経路の packet あたりの確保が 0 であることを試験で数える割り当て器。試験だけが使う ([バッチの作りの規則](agent-throughput.md#バッチの作りの規則)) |
 | 記録 | `testdata/wgstack-rec/` | 言語に依らない | 凍結した Go の wgstack の入出力 |
 | wgstack の fuzz | `crates/wgft-wgstack/fuzz/` | Rust | cargo-fuzz の target。試験の担当の target は `wgft-wgstack-dut` の本体を呼ぶだけ |
 
