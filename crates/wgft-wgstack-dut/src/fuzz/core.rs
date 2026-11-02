@@ -8,13 +8,18 @@
 //! 核の公開の API は書ける量と読めるかを返さないので、書き込みと読み取りをそのまま呼び、`WouldBlock` と
 //! 一部だけの書き込みを受け入れます。Go の wgstack と出力が同じ間は同じ経路をたどり、違えば別の経路を
 //! たどります。どちらでも種としては働きます。
+//!
+//! 古い byte の確かめ:相手が送る中身とアプリケーションが書く中身はどれも 0 です。道具の build の核は輪が取る
+//! chunk を目印の byte ([`wgft_wgstack::CHUNK_SENTINEL`]) で埋めるので、読み取りか送る segment の中身に 0 で
+//! ない byte が出たら、核が書いていない byte を読んだことになります (wgstack-rs.md の「置き場の chunk と古い
+//! byte」)。
 
 use std::collections::BTreeMap;
 use std::net::SocketAddrV4;
 use std::time::Duration;
 
 use wgft_tcpharness::packet::{ACK, FIN, Options, RST, SYN, Segment, Timestamps};
-use wgft_wgstack::{ConnId, Error, NoHook};
+use wgft_wgstack::{CHUNK_SENTINEL, ConnId, Error, NoHook};
 
 use super::net::{DUT, Net, PEER, fuzz_limits};
 use super::peer::PeerConn;
@@ -33,6 +38,25 @@ impl Prog<'_> {
         self.0 = rest;
         b
     }
+}
+
+/// 中身がすべて 0 であることを確かめます。`what` は落ちた時の説明です。
+fn all_zero(b: &[u8], what: &str) {
+    if let Some(i) = b.iter().position(|&x| x != 0) {
+        panic!(
+            "{what} holds byte {:#04x} at {i}, but every byte written is 0 (sentinel {CHUNK_SENTINEL:#04x})",
+            b[i]
+        );
+    }
+}
+
+/// 出力の segment を返し、中身がすべて 0 であることを確かめます。
+fn drain(n: &mut Net<NoHook>) -> Vec<Segment> {
+    let segs = n.drain();
+    for s in &segs {
+        all_zero(&s.payload, "a segment the core sent");
+    }
+    segs
 }
 
 /// `core` の target の 1 回分です。
@@ -73,7 +97,7 @@ pub fn core(prog: &[u8]) {
                     ..Segment::default()
                 };
                 n.inject(&syn);
-                for o in n.drain() {
+                for o in drain(&mut n) {
                     if o.flags == SYN | ACK && o.dst.port() == port {
                         peers.insert(
                             port,
@@ -149,7 +173,9 @@ pub fn core(prog: &[u8]) {
                             let _ = st.write(now, c, &wbuf);
                         }
                         4 => {
-                            let _ = st.read(now, c, &mut rbuf);
+                            if let Ok(k) = st.read(now, c, &mut rbuf) {
+                                all_zero(&rbuf[..k], "a read");
+                            }
                         }
                         _ => {
                             let _ = st.delivered(c);
@@ -159,7 +185,7 @@ pub fn core(prog: &[u8]) {
             }
             6 => {
                 // 出力を読み、相手が確認する
-                for o in n.drain() {
+                for o in drain(&mut n) {
                     if let Some(q) = peers.get_mut(&o.dst.port()) {
                         q.absorb(&o);
                     }
@@ -182,6 +208,6 @@ pub fn core(prog: &[u8]) {
         }
         n.check();
     }
-    n.drain();
+    drain(&mut n);
     n.finish();
 }

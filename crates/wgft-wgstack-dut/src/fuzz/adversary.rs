@@ -12,7 +12,8 @@
 //!   核の `check_invariants` は使っている接続ごとに送り手の確かめ (`check_sender`) を行い、この送り手の欄の
 //!   確かめと Go の `checkScoreboard` を写します。この target は各段の後に `check_invariants` を呼ぶので、Go と同じ確かめを
 //!   各段で受けます。加えて外から見える出力を確かめます。DUT の data は書いた byte の範囲の中にあり、中身は
-//!   stream と同じで、FIN は stream の終わりにあることです
+//!   stream と同じで、FIN は stream の終わりにあることです。相手の data の中身は 0 だけなので、読み取りが 0 だけを
+//!   返すことも確かめます (道具の build の核は書いていない byte を目印で埋めます)
 //! - 嘘の SACK の block の範囲と ICMP の引く番号は、Go は DUT の SND.UNA と SND.MAX から取ります。ここでは
 //!   相手が知る値 (累積の確認と、見た DUT の segment の最も先の番号) から取ります
 //! - Go の boost の切り替え (`tryBoost` と `demote` を試験が直接呼ぶ) は frame に無い内部の操作です。ここでは
@@ -341,7 +342,11 @@ fn run(cfg: &AdversaryCfg) {
             }
         } else if r < 80 && cfg.peer_data {
             match n.stack().read(now, c, &mut rbuf) {
-                Ok(_) | Err(Error::WouldBlock) => {}
+                Ok(k) => assert!(
+                    rbuf[..k].iter().all(|&b| b == 0),
+                    "seed {seed} step {step}: a read returned a byte the peer did not send"
+                ),
+                Err(Error::WouldBlock) => {}
                 Err(e) => panic!("seed {seed} step {step}: read: {e}"),
             }
         } else if r < 82 && cfg.boost_flip {

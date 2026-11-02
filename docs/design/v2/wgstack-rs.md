@@ -616,7 +616,7 @@ I1 から I7 の不変条件もそのまま守ります ([不変条件](../users
   単体の試験 (`stack::tests::demote_holds_within_the_connection_s_reservation`) は、受信の輪を順序外のデータで満たした boost の接続を floor に戻し、移す間に輪が持つ chunk の最大がちょうど 305 個に届き、予約の内にあることを確かめます。
   敵対的な保持の試験は確保の最大値を Rust の `total` と比べます
 - chunk:16 KiB の固定の配列で、予約の内側でだけ確保します。
-  返した chunk は 0 で埋めて置き場に置き、置き場の上限 (Go と同じ 64 個) を超えた分は解放します
+  返した chunk は埋めずに置き場に置き、置き場の上限 (Go と同じ 64 個) を超えた分は解放します ([置き場の chunk と古い byte](#置き場の-chunk-と古い-byte))
 - 再組み立ての表:管理領域 (表、項目、断片の枠、Go の `Sweep` が返す知らせの写し) は、Go の linux/amd64 の型の大きさで数えます。
   保持 byte の上限に近いときの追い出しの時機が管理領域の大きさで変わり、移行の間は Go と同じ出力を求めるためです。
   Rust の型がその大きさ以下であることは compile の時に確かめるので、数えた値は実際の保持の上界です。
@@ -643,14 +643,74 @@ Go の測った値 (c_conn、記録 1 件、区間 1 つ) は Rust の型の大�
   製品のコードの例外は `FixedVec` 自身の実装だけで、その module にだけ `#[expect(clippy::disallowed_types, clippy::disallowed_methods, reason = "...")]` を付けます。
   試験の module も同じ `#[expect]` で例外にします
 - 伸びる API の禁止:`Vec::push`、`Vec::extend`、`Vec::insert`、`Vec::resize`、`vec!`、`VecDeque`、`HashMap`、`BTreeMap`、`String` への追加のように容量を自動で伸ばす API を、[依存と隔離の検査](#依存と隔離の検査)の禁止の一覧に入れます
-- 0 で埋める:置き場に返す chunk は 0 で埋めます ([使い回しと古い byte](../userspace/wgstack-buffers.md#使い回しと古い-byte))。
-  目印の build (`--cfg wgstack_sentinel`) は 0xa5 で埋めます
+- 古い byte:製品の build は置き場に返す chunk を埋めません。
+  試験と道具の build は、取る chunk を目印の byte で埋めます ([置き場の chunk と古い byte](#置き場の-chunk-と古い-byte))
 - chunk の確保:chunk は 16 KiB の配列の `Box` で、輪は Go と同じく枠ごとに chunk への pointer の配列を持ちます。
   `Box::new` は失敗するとプロセスを止めるので、`FixedVec` の module の関数が `try_reserve_exact` で取り、容量がちょうど 16 KiB のときだけ `into_boxed_slice` で `Box` にします。
   容量が違えば確保の失敗として扱います
 - 輪への書き込みの失敗:Go の輪の書き込みは失敗しませんが、Rust の輪は chunk の確保が失敗しえます。
   書く操作は先に要る chunk を揃え、揃わなければ何も変えずに誤りを返します。
   受信のバッファの挿入は、このとき segment を状態を変えずに捨てた結果 (`no_memory`) を返します
+
+### 置き場の chunk と古い byte
+
+決定 (2026-11-02、実装の判断):製品の build は、置き場に返す chunk を埋めません。
+新しく確保した chunk は 0 から始まり、置き場から取った chunk は前の持ち主の byte を持ったままです。
+Go の wgstack は返す chunk を 0 で埋めます ([使い回しと古い byte](../userspace/wgstack-buffers.md#使い回しと古い-byte))。
+
+守る性質は、接続が読み取りで返す byte と送る segment の中身が、どれもその接続が書いた byte であることです。
+UDP の datagram も同じ置き場の chunk に置くので、endpoint が読む datagram と送る datagram の中身も、その datagram に書いた byte だけです。
+別の接続と別の datagram の byte は、読み取りにも回線にも出ません。
+この性質は 0 埋めではなく、次の 3 つで成り立ちます。
+
+1. 持ち主は 1 つ:chunk は置き場にあるか、1 つの輪の位置にあるかのどちらかです。
+   chunk は `Box` の値で、取る操作と返す操作は所有の移動なので、置き場にある chunk を参照する輪はありません
+2. 輪は書いた範囲だけを読む:受信の輪が読むのは、最も古い未読の byte (`read_off`) から順序どおりの末尾 (`nxt_off`) までです。
+   順序どおりの segment は書いてから `nxt_off` を進めます。
+   順序外の segment は書いてから区間を木に入れ、穴が埋まると `nxt_off` を区間の末尾に進めます。
+   したがって、`nxt_off` の手前の byte はどれもこの接続が書いた byte です。
+   送信の輪が読むのは、確認を待つ先頭 (`una_off`) から書いた末尾 (`tail_off`) までです。
+   送る segment を作る処理は、範囲の外を読む前に会計の不整合として接続を閉じます (守りの重ね)。
+   段を移す写し (`Ring::copy_into`) は書いた区間だけを写し、chunk を持たない位置の読みは 0 を返します。
+   UDP の datagram は、予約した枠 (16 KiB の chunk の中の区分の枠か、chunk の列) に中身の全体を書いてから受信か送信の FIFO に入れ、読み取りと送る断片は枠の先頭から datagram の長さまでだけを写します
+3. 位置の対応は変わらない:生きている範囲は輪の容量以下なので、生きている byte の位置を別の offset の byte が上書きすることはありません。
+   段を移しても、chunk の中の位置と offset の対応は保たれます
+
+2 と 3 から、chunk の中の書いていない byte と、生きている範囲の外に残る byte は、どの読み取りにも届きません。
+前の持ち主の byte が chunk に残っていても、読み取りと送る segment には現れません。
+新しく輪を読む経路を足す変更は、その経路が 2 を守る理由をこの節に足します。
+
+確かめ:試験と道具の build (`cfg(test)`、cargo-fuzz の `fuzzing`、試験の道具の crate が付ける feature `harness`) は、置き場から取る chunk と新しく確保した chunk を目印の byte (`CHUNK_SENTINEL`、0xc9) で埋めます。
+書いていない byte を読む経路があれば、その経路の出力に目印が出ます。
+次の確かめが、この build で目印の出る経路を捉えます。
+どれも PR の CI と wgstack の関門で流れます。
+
+- Go の記録との bit の一致:Go の記録は 0 で埋めた chunk で作ったので、書いていない byte を読む経路があれば応答が記録と食い違います。
+  git の集まりを CI で、手元の全体の集まりを関門で照らします
+- fuzz の `core`:相手が送る中身とアプリケーションが書く中身はどれも 0 なので、読み取りか核が送る segment の中身に 0 でない byte が出たら落ちます
+- fuzz の `adversarial_sender`:核が送る中身を書いた stream と比べ、読み取りが相手の送った 0 だけを返すことを確かめます
+- fuzz の `raw_adversary`:相手とアプリケーションが書く TCP と UDP の中身は目印と違う値だけなので、TCP の読み取り、核が送る segment の中身、UDP の datagram の読み取り、核が送る UDP の datagram の中身 (最初の断片の UDP の header を除く) に目印が出たら落ちます
+- 受信の区間の模型の試験 (`interval_tree_against_model`):順序外の挿入と読み取りを乱数で混ぜ、読んだ byte を書いた模様と比べます
+
+製品で埋めない理由:バッチを入れた後の受ける向きの 1 stream の転送では、`memset` が agent の CPU の 11.2% で、ほぼすべてが輪の `trim` から chunk を返す時の 0 埋めでした ([CPU の行き先](agent-throughput.md#cpu-の行き先))。
+読み取りが輪を空にするたびに書きかけの chunk も返すので、埋める byte の数は運ぶ byte の数より多くなります。
+採らなかった案は次のとおりです。
+
+- 書いた範囲だけを埋める:chunk ごとに範囲を持つと、輪の表と `Budget` が貸す表の要素が大きくなり、上界の表が変わります。
+  連続した転送では書いた範囲が chunk の全体に近いので、データの byte と同じ程度の量を埋め続けます
+- 空になった輪が最後の chunk を持ち続ける:遊んでいる接続ごとに、送受信の輪で 2 つまでの chunk を実際に持ちます。
+  予約の内なので上界は変わりませんが、多くの接続が遊ぶ時の保持の量が増えます
+
+残る危険は次の 2 つです。
+
+- 論証の崩れ:2 が将来の変更で崩れると、0 埋めがあれば 0 を返した読み取りが、前の持ち主の byte を返します。
+  上の確かめは試験と fuzz が通る経路だけを見るので、通らない経路の崩れは見逃します
+- 平文の残り:接続を閉じた後も、その接続が運んだ平文 (トンネルの中の TCP と UDP の中身) が、置き場の chunk と、置き場の上限を超えて allocator に解放した chunk に残ります。
+  置き場の chunk は次の持ち主が上書きするまで、解放した chunk は allocator が別の確保に使って上書きするまで残ります。
+  0 埋めがあった時も、輪が持つ chunk と解放の前に写した先 (アプリケーションのバッファ、カーネルの socket のバッファ) には同じ平文があったので、残る場所と時間が増える変更です。
+  agent のプロセスのメモリを読める者 (同じ利用者の別のプロセス、core dump、swap) には、閉じた接続の平文が読める時間が延びます。
+  agent はトンネルの鍵を同じメモリに持つので、そのメモリを読める者に対して平文を守る境界は元からありません。
+  core dump と swap に平文が出る危険を下げる手当て (mlock、`MADV_DONTDUMP`) は、0 埋めの有無に関わらず採っていません
 
 ### 予算の持ち主
 
@@ -1225,11 +1285,13 @@ Go の `-race` の競合の試験は、核が錠を持たないので移しま�
 
 ### 故障の注入と目印の build
 
-故障の注入と、置き場に返す chunk を目印の byte で埋める build は、cargo の feature ではなく `--cfg` で選びます。
+故障の注入は、cargo の feature ではなく `--cfg` で選びます。
+置き場の chunk を目印の byte で埋めるのは、試験と道具の build のすべてです ([置き場の chunk と古い byte](#置き場の-chunk-と古い-byte))。
+目印の確かめを、CI と関門が常に流す試験の build で受けるためです。
 
-- 選び方:`RUSTFLAGS` で `--cfg wgstack_fault="<名前>"` と `--cfg wgstack_sentinel` を渡します。
+- 選び方:`RUSTFLAGS` で `--cfg wgstack_fault="<名前>"` を渡します。
   feature はワークスペースの中で合わさり、製品の build に漏れうるためです
-- 宣言:ワークスペースの `[workspace.lints.rust]` の `unexpected_cfgs` の `check-cfg` に 2 つの cfg を宣言し、source の中の `#[cfg(...)]` の名前と値の綴りの誤りを lint で捉えます。
+- 宣言:ワークスペースの `[workspace.lints.rust]` の `unexpected_cfgs` の `check-cfg` に cfg を宣言し、source の中の `#[cfg(...)]` の名前と値の綴りの誤りを lint で捉えます。
   `RUSTFLAGS` で渡した `--cfg` の綴りの誤りは lint では捉えられないので、故障を入れた build の試験が、その故障を捉えるはずの確かめが落ちることで確かめます。
   `wgstack_fault` の値の一覧は、故障の点を足すときに足します。
   それまでは値を持たない宣言で、source の中で値を書くと lint が捉えます
@@ -1237,8 +1299,8 @@ Go の `-race` の競合の試験は、核が錠を持たないので移しま�
   名前が `wgstack_` で始まるので、ほかの crate に宣言が効いても害はありません。
   cargo-fuzz が付ける `fuzzing` も同じ所で宣言します
 - 製品:リリースの build と B13 の通常の build はこの cfg を渡しません。
-  `wgft` のバイナリの依存の木の検査 ([依存と隔離の検査](#依存と隔離の検査)) と合わせ、製品にどちらも入らないことを CI で確かめます
-- 目印の確かめ:目印の build で、目印が読み取り、送る segment、記録と区間の欄の値に現れないことを、stream の一致の試験、敵対的な送り手の試験、`core` の fuzz で確かめます
+  `wgft` のバイナリの依存の木の検査 ([依存と隔離の検査](#依存と隔離の検査)) が feature `harness` の無いことを確かめるので、目印で埋める処理も製品に入りません
+- 目印の確かめ:試験と道具の build で、目印が読み取りと送る segment に現れないことを、Go の記録の照合、受信の区間の模型の試験、fuzz の `core`、敵対的な送り手、`raw_adversary` で確かめます
 - 故障の置き場と一覧:核の故障は核の crate に置き、adapter の側には作りません。
   理由と故障の一覧 (どの確かめが落ちるはずか) は[試験の道具の設計の関門](test-tooling.md#pr-の関門)にあります
 
@@ -1817,9 +1879,8 @@ Rust が同じ loop を速く回す理由 (vector の命令にするか) は確�
 
 最適化の候補 (提案、未実施):
 
-- chunk の 0 埋め:輪が空になっても最後の chunk を持ち続けるか、書いた範囲だけを埋めます。
-  上の内訳では segment ごとの時間の 4 割近くで、道具を引いた受信の費用 (約 600 ns) の 4 割余りに当たります。
-  0 埋めは次の接続に前の中身を残さないための規則なので、書いた範囲を覚える形でも同じ約束を保てます
+- chunk の 0 埋め:製品の build では埋めないことにしました ([置き場の chunk と古い byte](#置き場の-chunk-と古い-byte))。
+  上の内訳では segment ごとの時間の 4 割近くで、道具を引いた受信の費用 (約 600 ns) の 4 割余りに当たります
 - checksum:Go の核の実装より約 1.4 倍遅い 1 の補数の和を、64 bit の加算か vector の命令にします。
   受信と送信の両方の 1 segment ごとに約 140 ns です
 - qbench の起床の費用:20 Mbit/s の経路の byte あたりの CPU (約 7.5 ns) は、速さを外した経路 (約 1 ns) の 7 倍で、packet ごとの起床と system call の固定の費用です。
