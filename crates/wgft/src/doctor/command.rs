@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 
-use wgft_agent::config::agent::{flow_cap, run_specs};
+use wgft_agent::config::agent::{batch_mib, flow_cap, run_specs};
 use wgft_agent::config::dotenv::ReadError;
 use wgft_agent::config::{self, Config, Defaults, Env, Source};
 use wgft_agent::{AgentError, Refusal};
@@ -69,6 +69,8 @@ pub fn input_from(
     let mut input = Input::for_host(dir);
     input.max_udp_flows = udp;
     input.max_tcp_flows = tcp;
+    // 値の誤りは agent run が拒む。ここでは上界の表示のために読み、読めなければ既定の式の値にする
+    input.batch_mib = batch_mib(c.get("WGFT_AGENT_BATCH_MIB")).unwrap_or(None);
     input.data_dir_assumed = unreadable.is_some() && from_default;
     input.data_dir_default = from_default;
     input.config_unreadable = unreadable;
