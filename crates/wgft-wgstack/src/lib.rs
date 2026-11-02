@@ -47,6 +47,11 @@ pub use stack::{
 };
 #[cfg(any(test, feature = "harness"))]
 pub use stack::{Spare, TouchedCheck};
+/// 試験と道具の build で、輪が取る chunk を埋める目印の byte です。書いていない byte を読む経路があると、
+/// 読み取りか送る segment にこの値が出ます。製品の build は chunk を埋めません
+/// (`docs/design/v2/wgstack-rs.md` の「置き場の chunk と古い byte」)。
+#[cfg(any(test, feature = "harness"))]
+pub const CHUNK_SENTINEL: u8 = buf::chunk::SENTINEL;
 pub use tcp::conn::ConnId;
 pub use time::Time;
 pub use udp::{UdpFault, UdpId};
