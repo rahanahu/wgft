@@ -31,7 +31,10 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 cache=${XDG_CACHE_HOME:-$HOME/.cache}/wgft-agent-perf
 
 base="" rounds=7 packets=200000 burst=64 modes="send recv" sizes="1408 64"
-head_bin="" base_bin="" netns=1 measure=0
+head_bin="" base_bin="" netns=1
+# The script runs itself a second time inside the namespace; WGFT_PERF_MEASURE marks that phase,
+# so it is not an option of the command line.
+measure=${WGFT_PERF_MEASURE:-0}
 while (($#)); do
   case $1 in
     --base) base=$2; shift 2 ;;
@@ -43,7 +46,6 @@ while (($#)); do
     --head-bin) head_bin=$2; shift 2 ;;
     --base-bin) base_bin=$2; shift 2 ;;
     --no-netns) netns=0; shift ;;
-    --measure) measure=1; shift ;;
     -h | --help) sed -n '2,/^set -euo/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "agent-perf-stat: unknown option $1" >&2; exit 2 ;;
   esac
@@ -59,8 +61,10 @@ if ((!measure)); then
     mkdir -p "$cache"
     tmp=$(mktemp -d "$cache/run.XXXXXX")
     wt=$tmp/wt
+    # Any failure from here on removes the worktree and tmp. The exec below replaces this shell, so
+    # the trap does not run when phase 2 starts, and phase 2 removes tmp itself (WGFT_PERF_TMP).
+    trap 'git -C "$root" worktree remove --force "$wt" >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
     git -C "$root" worktree add --detach "$wt" "$base" >&2
-    trap 'git -C "$root" worktree remove --force "$wt" >/dev/null 2>&1 || true' EXIT
     if git -C "$root" cat-file -e "$base:crates/wgft-agent-perf/Cargo.toml" 2>/dev/null; then
       echo "agent-perf-stat: base uses its own copy of the tool" >&2
     else
@@ -74,11 +78,11 @@ if ((!measure)); then
     cp "$cache/base-target/release/wgft-agent-perf" "$tmp/base-bin"
     base_bin=$tmp/base-bin
     git -C "$root" worktree remove --force "$wt" >&2
-    trap - EXIT
     export WGFT_PERF_TMP=$tmp
   fi
-  args=(--measure --rounds "$rounds" --packets "$packets" --burst "$burst" --modes "$modes" --sizes "$sizes" --head-bin "$head_bin")
-  [[ -n $base_bin ]] && args+=(--base "${base:-base}" --base-bin "$base_bin")
+  args=(--rounds "$rounds" --packets "$packets" --burst "$burst" --modes "$modes" --sizes "$sizes" --head-bin "$head_bin")
+  if [[ -n $base_bin ]]; then args+=(--base "${base:-base}" --base-bin "$base_bin"); fi
+  export WGFT_PERF_MEASURE=1
   if ((netns)); then
     exec unshare -rn bash -c 'ip link set lo up && exec "$0" "$@"' "$0" "${args[@]}"
   fi
@@ -106,16 +110,22 @@ fi
 work=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/wgft-agent-perf-run.XXXXXX")
 trap 'rm -rf "$work" ${WGFT_PERF_TMP:+"$WGFT_PERF_TMP"}' EXIT
 
+# awk function that turns an event column of perf stat -x, into the name used below: it drops the
+# PMU prefix and the modifier, and names the hybrid atom core's L1 event like the other PMUs do.
+awk_norm='function norm(ev) {
+  sub(/^cpu_[a-z]+\//, "", ev); sub(/\/u*$/, "", ev); sub(/:[a-zA-Z]+$/, "", ev)
+  if (ev == "mem_load_uops_retired.l1_miss") ev = "L1-dcache-load-misses"
+  return ev
+}'
+
 # Preflight on the measured CPU: all four events must count.
 need_events="cache-misses L1-dcache-load-misses instructions cycles"
 check_events() {
   local file=$1 ev
   for ev in $need_events; do
-    awk -F, -v want="$ev" '
+    awk -F, -v want="$ev" "$awk_norm"'
       /^#/ || NF < 3 { next }
-      { e = $3; sub(/^cpu_[a-z]+\//, "", e); sub(/\/u*$/, "", e); sub(/:[a-zA-Z]+$/, "", e)
-        if (e == "mem_load_uops_retired.l1_miss") e = "L1-dcache-load-misses"
-        if (e == want && $1 ~ /^[0-9]+$/) found = 1 }
+      { if (norm($3) == want && $1 ~ /^[0-9]+$/) found = 1 }
       END { exit !found }' "$file" || { echo "agent-perf-stat: event $ev is missing, not counted or not supported on CPU $cpu_main (events: $events)" >&2; return 1; }
   done
 }
@@ -131,7 +141,7 @@ run_one() {
     --cpu-main "$cpu_main" --cpu-peer "$cpu_peer" >"$work/tool.out" 2>"$work/tool.err" \
     || { echo "agent-perf-stat: $arm $mode $size failed: $(cat "$work/tool.err")" >&2; exit 1; }
   check_events "$work/perf.csv" || exit 1
-  awk -F, -v arm="$arm" -v mode="$mode" -v size="$size" '
+  awk -F, -v arm="$arm" -v mode="$mode" -v size="$size" "$awk_norm"'
     FNR == NR {
       n = split($0, words, " ")
       if (words[1] == "RESULT") for (i = 2; i <= n; i++) { split(words[i], kv, "="); r[kv[1]] = kv[2] }
@@ -139,9 +149,7 @@ run_one() {
     }
     /^#/ || NF < 3 { next }
     {
-      ev = $3; sub(/^cpu_[a-z]+\//, "", ev); sub(/\/u*$/, "", ev); sub(/:[a-zA-Z]+$/, "", ev)
-      if (ev == "mem_load_uops_retired.l1_miss") ev = "L1-dcache-load-misses"
-      v[ev] = $1
+      v[norm($3)] = $1
     }
     END {
       if (r["packets"] == "") exit 1
@@ -159,7 +167,7 @@ echo "agent-perf-stat: kernel=$(uname -r) cpu=$(grep -m1 'model name' /proc/cpui
 for ((r = 1; r <= rounds; r++)); do
   for mode in $modes; do
     for size in $sizes; do
-      [[ -n $base_bin ]] && run_one base "$base_bin" "$mode" "$size"
+      if [[ -n $base_bin ]]; then run_one base "$base_bin" "$mode" "$size"; fi
       run_one head "$head_bin" "$mode" "$size"
     done
   done
