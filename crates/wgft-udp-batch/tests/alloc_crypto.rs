@@ -95,6 +95,7 @@ fn connected() -> (Device, Device, SocketAddr, Instant) {
 fn the_crypto_workers_allocate_nothing_per_packet() {
     rounds();
     pipelined_opening();
+    pipelined_sealing();
 }
 
 /// 回ごとに待つ形の暗号化と復号。
@@ -234,4 +235,69 @@ fn pipelined_opening() {
     assert_eq!(delivered, BATCHES * n);
     assert_eq!(server.drops().total(), 0);
     assert_eq!(calls, 0, "heap allocations in pipelined batches");
+}
+
+/// 送信の重ね。
+fn pipelined_sealing() {
+    let (mut agent, mut server, from, now) = connected();
+    let slots = 30;
+    let mut stores = [
+        TxBatch::new(slots, false, agent.mtu(), agent.max_transmit_len(), LANES),
+        TxBatch::new(slots, false, agent.mtu(), agent.max_transmit_len(), LANES),
+    ];
+    let mut crypto = Crypto::new(LANES, 0);
+    let cap = crypto.seal_pipeline_slots(&stores[0]);
+    assert!(cap > 0);
+    let pkt = packet(1400, 7);
+    let mut plain = vec![0u8; usize::from(u16::MAX)];
+    let mut delivered = 0;
+    let mut calls = 0;
+    let mut deliver = |tx: &TxBatch, server: &mut wgft_wireguard::Device| {
+        let mut got = 0;
+        for j in 0..tx.n_sealed {
+            let (_, d) = tx.datagram(j);
+            if server.handle_datagram(now, from, d, &mut plain).is_some() {
+                got += 1;
+            }
+        }
+        got
+    };
+    for batch in 0..BATCHES {
+        let cur = batch % 2;
+        let before = process_alloc_calls();
+        {
+            let tx = &mut stores[cur];
+            tx.clear();
+            let mut slots = tx.packet_slots();
+            for i in 0..cap {
+                slots.slot(i)[..pkt.len()].copy_from_slice(&pkt);
+                slots.set_len(i, pkt.len());
+            }
+        }
+        assert_eq!(
+            crypto.begin_seal_pipelined(cur, &stores[cur], &mut agent, now, cap),
+            cap
+        );
+        let [a, b] = &mut stores;
+        let (this, other) = if cur == 0 { (a, b) } else { (b, a) };
+        let prev = crypto.seal_in_flight();
+        if let Some(p) = prev {
+            crypto.finish_seal_pipelined(p, other).unwrap();
+        }
+        crypto.offer_seal_pipelined(cur, this).unwrap();
+        if batch >= WARM {
+            calls += process_alloc_calls() - before;
+        }
+        // 受け手の側の復号は数えない (確保しない受け手ではないので)
+        if prev.is_some() {
+            delivered += deliver(other, &mut server);
+        }
+    }
+    let last = crypto.seal_in_flight().unwrap();
+    crypto
+        .finish_seal_pipelined(last, &mut stores[last])
+        .unwrap();
+    delivered += deliver(&stores[last], &mut server);
+    assert_eq!(delivered, BATCHES * cap);
+    assert_eq!(calls, 0, "heap allocations in pipelined sealing");
 }

@@ -172,54 +172,124 @@ pub(super) struct Outbox {
     pub(super) send_errors: u64,
     /// カーネルが UDP の GSO の message を拒んだ。このソケットでは以後 1 つずつ送る。
     gso_refused: bool,
+    /// 暗号の作業者とレーン。置き場がレーンに分かれている (Linux のバッチの道で作業者がいる) ときだけあり、
+    /// そのときは受信と送信の暗号をすべてこれで行う (`docs/design/v2/agent-crypto-workers.md`)。
+    pub(super) crypto: Option<Crypto>,
+    /// 作業者が panic した。駆動の task はこの世代を終える。
+    pub(super) poisoned: bool,
+    /// 作業者と重ねる送信の相の 2 つ目の置き場。作業者がいる Linux のバッチの道だけにある。
+    pub(super) tx2: Option<TxBatch>,
+    /// 暗号化を終えて送る順を待つ置き場。古い (番号の小さい) ものが先である。
+    pend: [Option<usize>; 2],
 }
 
 impl Outbox {
-    pub(super) fn new(batching: Batching, mtu: usize, max_datagram: usize) -> Self {
+    /// `lanes` は置き場のレーンの数で、2 つ以上なら暗号の作業者を作る。
+    pub(super) fn new(batching: Batching, mtu: usize, max_datagram: usize, lanes: usize) -> Self {
+        let tx = tx_store(batching, mtu, max_datagram, lanes);
+        let crypto = (tx.sealed.len() > 1).then(|| Crypto::new(lanes, PARALLEL_MIN_BYTES));
+        let tx2 = crypto
+            .as_ref()
+            .filter(|c| c.workers() > 0 && cfg!(target_os = "linux"))
+            .map(|_| tx_store(batching, mtu, max_datagram, lanes));
         Self {
-            tx: tx_store(batching, mtu, max_datagram),
+            tx,
             queued: None,
             send_errors: 0,
             gso_refused: false,
+            crypto,
+            poisoned: false,
+            tx2,
+            pend: [None, None],
+        }
+    }
+
+    /// 送信の置き場 `i` (0 か 1)。
+    pub(super) fn store(&mut self, i: usize) -> &mut TxBatch {
+        match (i, self.tx2.as_mut()) {
+            (1, Some(t)) => t,
+            _ => &mut self.tx,
+        }
+    }
+
+    /// 暗号の作業者と送信の置き場 `i`、借用を分けて。作業者のいる道だけで呼ぶ。
+    fn crypto_and_store(&mut self, i: usize) -> (&mut Crypto, &mut TxBatch) {
+        let tx = match (i, self.tx2.as_mut()) {
+            (1, Some(t)) => t,
+            _ => &mut self.tx,
+        };
+        let crypto = self
+            .crypto
+            .as_mut()
+            .expect("the pipelined send runs with the crypto workers");
+        (crypto, tx)
+    }
+
+    /// 置き場 `i` のバッチを、送る順の最後に並べる。
+    fn push_pending(&mut self, i: usize) {
+        if self.pend[0].is_none() {
+            self.pend[0] = Some(i);
+        } else {
+            self.pend[1] = Some(i);
         }
     }
 
     /// 送り切っていないものがあるか。
     pub(super) fn is_blocked(&self) -> bool {
-        self.tx.is_pending() || self.queued.is_some()
+        self.tx.is_pending()
+            || self.tx2.as_ref().is_some_and(TxBatch::is_pending)
+            || self.queued.is_some()
     }
 
-    /// バッチの残りの message を送る。送り切れば `true`。
+    /// 送る順を待つバッチを古いものから送る。送り切れば `true`。
     fn flush_batch(&mut self, sink: &mut impl Sink) -> bool {
-        while self.tx.is_pending() {
-            match sink.send_batch(&mut self.tx) {
+        while let Some(i) = self.pend[0] {
+            if !self.flush_store(i, sink) {
+                return false;
+            }
+            self.pend = [self.pend[1], None];
+        }
+        self.flush_store(0, sink)
+    }
+
+    /// 置き場 `i` のバッチの残りの message を送る。送り切れば `true`。
+    fn flush_store(&mut self, i: usize, sink: &mut impl Sink) -> bool {
+        let gso_refused = &mut self.gso_refused;
+        let send_errors = &mut self.send_errors;
+        let tx = match (i, self.tx2.as_mut()) {
+            (1, Some(t)) => t,
+            _ => &mut self.tx,
+        };
+        let refused = gso_refused;
+        while tx.is_pending() {
+            match sink.send_batch(tx) {
                 // 1 つも受け付けずに誤りも返さないことは無いはずだが、来たら書けないときと同じに扱う
                 Ok(0) => return false,
-                Ok(n) => self.tx.next += n.min(self.tx.n_msgs - self.tx.next),
+                Ok(n) => tx.next += n.min(tx.n_msgs - tx.next),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return false,
-                Err(e) if self.tx.msgs[self.tx.next].count > 1 && gso_refusal(&e) => {
+                Err(e) if tx.msgs[tx.next].count > 1 && gso_refusal(&e) => {
                     // 拒まれた message は UDP_SEGMENT の制御の message を持つ。経路の MTU を超える segment
                     // や checksum の offload の無い装置では、カーネルが GSO を拒む。同じ datagram を 1 つずつ
                     // 送り直し、このソケットでは GSO を使わない
-                    if !self.gso_refused {
-                        let m = self.tx.msgs[self.tx.next];
+                    if !*refused {
+                        let m = tx.msgs[tx.next];
                         crate::logf!(
                             "tunnel: the kernel refused a UDP GSO send of {} datagrams of {} bytes on the WireGuard socket: {e}; sending one datagram per message on this socket from now on",
                             m.count,
                             m.seg
                         );
                     }
-                    self.gso_refused = true;
-                    self.tx.lay_out_without_gso();
+                    *refused = true;
+                    tx.lay_out_without_gso();
                 }
                 Err(_) => {
-                    self.send_errors += u64::from(self.tx.msgs[self.tx.next].count);
-                    self.tx.next += 1;
+                    *send_errors += u64::from(tx.msgs[tx.next].count);
+                    tx.next += 1;
                 }
             }
         }
-        self.tx.clear();
+        tx.clear();
         true
     }
 
@@ -303,10 +373,9 @@ pub(super) fn send_batch<U: Upper>(
         }
         return (0, Sent::Idle);
     }
-    let tx = &mut outbox.tx;
-    let vlen = vlen.clamp(1, tx.slots());
+    let vlen = vlen.clamp(1, outbox.tx.slots());
     let mut pulled = 0;
-    let mut slots = tx.packet_slots();
+    let mut slots = outbox.tx.packet_slots();
     while pulled < vlen {
         let Some(len) = upper.poll_transmit(now, slots.slot(pulled)) else {
             break;
@@ -314,16 +383,25 @@ pub(super) fn send_batch<U: Upper>(
         slots.set_len(pulled, len);
         pulled += 1;
     }
-    // UDP の中継の datagram を TCP の segment の後ろに並べない
-    for udp in [true, false] {
-        for i in 0..pulled {
-            if tx.is_udp_slot(i) != udp {
-                continue;
-            }
-            let (packet, sealed) = tx.seal_slot(i);
-            // 上の層は buf より長い長さを返さない。返したら seal_slot が切り詰め、device の層が捨てる
-            if let Some(out) = device.handle_packet(now, packet, sealed) {
-                tx.push_sealed(out.to, out.len);
+    if let Some(crypto) = &mut outbox.crypto {
+        // 作業者と分けて暗号化する。番号は UDP を先にした送る順にここで取り、送る順もその順である
+        if crypto.seal(&mut outbox.tx, device, now, pulled).is_err() {
+            outbox.poisoned = true;
+            return (pulled, Sent::Blocked);
+        }
+    } else {
+        let tx = &mut outbox.tx;
+        // UDP の中継の datagram を TCP の segment の後ろに並べない
+        for udp in [true, false] {
+            for i in 0..pulled {
+                if tx.is_udp_slot(i) != udp {
+                    continue;
+                }
+                let (packet, sealed) = tx.seal_slot(i);
+                // 上の層は buf より長い長さを返さない。返したら seal_slot が切り詰め、device の層が捨てる
+                if let Some(out) = device.handle_packet(now, packet, sealed) {
+                    tx.push_sealed(out.to, out.len);
+                }
             }
         }
     }
@@ -721,6 +799,18 @@ fn send_phase<U: Upper>(
     if inner.upper.poll_timeout().is_some_and(|t| t <= *now) {
         inner.upper.handle_timeout(*now);
     }
+    if outbox.tx2.is_some() {
+        return send_pipelined(
+            &mut inner.device,
+            &mut inner.upper,
+            peer,
+            outbox,
+            io,
+            pace,
+            wake,
+            now,
+        );
+    }
     let mut tx_done = 0;
     loop {
         let vlen = if wake.timed {
@@ -750,6 +840,128 @@ fn send_phase<U: Upper>(
             return true;
         }
     }
+}
+
+/// 送信の相を、暗号の作業者と重ねて行う (`docs/design/v2/agent-crypto-workers.md` の「送信の重ね」)。
+/// 2 つの送信の置き場を交互に使う。
+///
+/// - 先に、device の層の datagram と送る順を待つバッチを送る。送れなければ核から引かない
+/// - セッションがあれば、核から作業者のレーンの枠までの packet を引く。枠を満たしたら、UDP を先に送る順に
+///   番号を取り、作業者にある前のバッチを取り戻して送る順に並べ、引いたバッチを作業者に渡してから、前の
+///   バッチを送る。作業者は、前のバッチの `sendmmsg` と次の引き出しの間に暗号化する
+/// - 枠を満たさないバッチ (核に送るものが残っていない) は重ねない。作業者にあるバッチを取り戻して並べ、
+///   引いたバッチはここで暗号化してその後ろに並べ、両方を送る。何もしていない時の packet は待たない
+/// - 相の終わりには、作業者にあるバッチを取り戻して送る順に並べ、送れるだけ送る。作業者にバッチを残さない
+///
+/// 予算で止めて上の層にまだ送るものが残るかを返す。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the send phase's state lives in the driver's loop"
+)]
+pub(super) fn send_pipelined<U: Upper>(
+    device: &mut Device,
+    upper: &mut U,
+    peer: &PublicKey,
+    outbox: &mut Outbox,
+    sink: &mut impl Sink,
+    pace: &mut Pace,
+    wake: Wake,
+    now: &mut Instant,
+) -> bool {
+    let gso = sink.gso();
+    let mut done = 0;
+    let mut more = false;
+    loop {
+        if !outbox.drain(device, sink) {
+            break;
+        }
+        if !device.has_session(peer, *now) {
+            if device.start_handshake(*now, peer) {
+                outbox.drain(device, sink);
+            }
+            break;
+        }
+        let Some(crypto) = outbox.crypto.as_ref() else {
+            break;
+        };
+        // 作業者にあるバッチの置き場は送る順を待たず、もう 1 つの置き場は送り終えて空いている
+        let cur = crypto.seal_in_flight().map_or(0, |p| p ^ 1);
+        let cap = crypto.seal_pipeline_slots(&outbox.tx);
+        let vlen = pace.units(BATCH_TIME, cap).min(cap);
+        let mut pulled = 0;
+        {
+            let mut slots = outbox.store(cur).packet_slots();
+            while pulled < vlen {
+                let Some(len) = upper.poll_transmit(*now, slots.slot(pulled)) else {
+                    break;
+                };
+                slots.set_len(pulled, len);
+                pulled += 1;
+            }
+        }
+        // 枠を満たしたバッチ (核にまだ送るものがある) だけを作業者と重ねる。満たさないバッチは、作業者に
+        // あるバッチを取り戻して送る順に並べてから、ここで (大きければ回ごとに待つ形で) 暗号化して後ろに
+        // 並べる。何もしていない時の 1 つの datagram は作業者を起こさず、待たない
+        let full = pulled == vlen && pulled >= 2;
+        if full {
+            let (crypto, tx) = outbox.crypto_and_store(cur);
+            crypto.begin_seal_pipelined(cur, tx, device, *now, pulled);
+        }
+        if let Some(p) = outbox.crypto.as_ref().and_then(Crypto::seal_in_flight)
+            && !collect_sealed(outbox, p, gso)
+        {
+            return false;
+        }
+        if full {
+            let (crypto, tx) = outbox.crypto_and_store(cur);
+            if crypto.offer_seal_pipelined(cur, tx).is_err() {
+                outbox.poisoned = true;
+                return false;
+            }
+        } else if pulled > 0 {
+            let gso = gso && !outbox.gso_refused;
+            let (crypto, tx) = outbox.crypto_and_store(cur);
+            if crypto.seal(tx, device, *now, pulled).is_err() {
+                outbox.poisoned = true;
+                return false;
+            }
+            tx.lay_out(0, gso);
+            outbox.push_pending(cur);
+        }
+        let sent = outbox.drain(device, sink);
+        done += pulled;
+        let after = clock::now();
+        pace.record(after.saturating_duration_since(*now), pulled);
+        *now = after;
+        if !sent || pulled < vlen {
+            break;
+        }
+        if wake.spent(*now, done) {
+            more = true;
+            break;
+        }
+    }
+    if let Some(p) = outbox.crypto.as_ref().and_then(Crypto::seal_in_flight) {
+        if !collect_sealed(outbox, p, gso) {
+            return false;
+        }
+        outbox.drain(device, sink);
+    }
+    more
+}
+
+/// 作業者から送信の置き場 `p` のバッチを取り戻し、message に並べて送る順の最後に置く。作業者が panic
+/// していれば毒の印を付けて `false` を返す。
+fn collect_sealed(outbox: &mut Outbox, p: usize, gso: bool) -> bool {
+    let gso = gso && !outbox.gso_refused;
+    let (crypto, tx) = outbox.crypto_and_store(p);
+    if crypto.finish_seal_pipelined(p, tx).is_err() {
+        outbox.poisoned = true;
+        return false;
+    }
+    tx.lay_out(0, gso);
+    outbox.push_pending(p);
+    true
 }
 
 /// 起床の終わり:device の event を流し、上の層の waker とログを引き、水位を残し、次の timer の時刻を返す。
@@ -803,25 +1015,25 @@ pub(super) async fn drive<U: Upper>(
     // 暗号の作業者は Linux のバッチの道だけで、起動の時に 1 回だけ決めた数を使う
     let lanes = batching.crypto_lanes();
     let mut rx = rx_store(batching, max_datagram, lanes);
-    let mut crypto = (lanes > 1 && rx.batched()).then(|| Crypto::new(lanes, PARALLEL_MIN_BYTES));
-    // 作業者と重ねる受信の相の 2 つ目の置き場。メモリの上界の `batch` の項に数える
-    let mut rx2 = crypto
-        .as_ref()
-        .filter(|c| c.workers() > 0)
-        .map(|_| rx_store(batching, max_datagram, lanes));
-    if let Some(c) = &crypto {
-        crate::logf!(
-            "tunnel crypto: {} worker threads beside the data plane for receive rounds of {} KiB or more",
-            c.workers(),
-            PARALLEL_MIN_BYTES >> 10
-        );
-    }
     // Linux でバッチを使うときだけ時間で区切る。1 つずつ送受信する道 (Windows、macOS、
     // WGFT_AGENT_BATCH_MIB=0) は、バッチの前と同じく 1 回の起床を数で区切り、時計をバッチごとに読まない
     let timed = rx.batched();
     let mut rx_pace = Pace::default();
     let mut tx_pace = Pace::default();
-    let mut outbox = Outbox::new(batching, mtu, max_datagram);
+    let mut outbox = Outbox::new(batching, mtu, max_datagram, lanes);
+    // 作業者と重ねる受信の相の 2 つ目の置き場。メモリの上界の `batch` の項に数える
+    let mut rx2 = outbox
+        .crypto
+        .as_ref()
+        .filter(|c| c.workers() > 0)
+        .map(|_| rx_store(batching, max_datagram, lanes));
+    if let Some(c) = &outbox.crypto {
+        crate::logf!(
+            "tunnel crypto: {} worker threads beside the data plane for rounds of {} KiB or more",
+            c.workers(),
+            PARALLEL_MIN_BYTES >> 10
+        );
+    }
     let mut io = Io::new(&socket, batching);
     let mut receive_errors = 0u64;
     let mut wakers = Vec::new();
@@ -838,7 +1050,7 @@ pub(super) async fn drive<U: Upper>(
         // 引くので、ACK は起床ごとに 1 回の割で作られる
         let mut rx_more = false;
         let mut rx_done = 0;
-        if let (Some(c), Some(rx2)) = (crypto.as_mut(), rx2.as_mut()) {
+        if let (Some(c), Some(rx2)) = (outbox.crypto.as_mut(), rx2.as_mut()) {
             rx_more = receive_pipelined(
                 &local,
                 &mut io,
@@ -862,7 +1074,7 @@ pub(super) async fn drive<U: Upper>(
                     &local,
                     &mut io,
                     &mut rx,
-                    crypto.as_mut(),
+                    outbox.crypto.as_mut(),
                     now,
                     vlen,
                     &mut receive_errors,
@@ -895,6 +1107,11 @@ pub(super) async fn drive<U: Upper>(
             wake,
             &mut now,
         );
+        if outbox.poisoned {
+            return Err(io::Error::other(
+                "a crypto worker panicked, which ended this tunnel generation",
+            ));
+        }
         let more = rx_more || tx_more;
         let deadline = finish_wake(&local, &events, high_water, &mut wakers);
         for waker in wakers.drain(..) {
