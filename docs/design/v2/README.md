@@ -41,6 +41,7 @@ v1.x は Go のまま保守だけを続けます。
 
 Rust の agent が Go の v1 の agent のユーザー空間モードを置き換えるための設計は、[Rust の agent が Go の agent を置き換えるための設計](agent-parity.md)にあります。
 速さを制限しない経路の基準の値と、トンネルの送受信をまとめる設計 (バッチ) の目標と規則は、[速さを制限しない経路の agent の性能](agent-throughput.md)にあります。
+WireGuard の暗号を別のスレッドでも行う設計 (検証中) は、[データプレーンの暗号の作業者](agent-crypto-workers.md)にあります。
 
 ## 文書の一覧
 
@@ -53,6 +54,7 @@ Rust の agent が Go の v1 の agent のユーザー空間モードを置き�
 | [agent の WireGuard の device の層](wireguard-device.md) | sanstun の上の sans-IO の device、キュー、ハンドシェイクの規則 | 核と中継だけを変える場合 |
 | [wgstack の Rust 版](wgstack-rs.md) | 核の API、データプレーンの駆動、メモリ、SYN cookie、検証、qbench | device の層と制御プレーンだけを変える場合 |
 | [速さを制限しない経路の agent の性能](agent-throughput.md) | 速さと byte あたりの CPU の基準の値、バッチの目標と規則と作り、判定の手順 | 性能に関わらない変更では不要です |
+| [データプレーンの暗号の作業者](agent-crypto-workers.md) | 暗号を別のスレッドでも行う設計 (検証中)、device の層の段に分けた口、判定 | 暗号の作業者に関わらない変更では不要です |
 | [v2 の試験の道具](test-tooling.md) | 台本、runner、DUT の口、Go の wgstack の記録、qbench、fuzz、関門 | 製品のコードだけを変える場合は、関門の節だけで足ります |
 | [メモリの上界の表 (agent)](agent-bound.md) と [同 (wgstack)](wgstack-bound.md) | 試験が生成する表で、手で読む必要はありません | 上界の式を変えない場合は不要です |
 
