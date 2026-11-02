@@ -49,6 +49,15 @@
 //! stays the same, so a base build and a head build stay comparable. In `recv` mode the second
 //! thread sends with the same path, so with batching the measured end reads GRO buffers that
 //! loopback hands over whole.
+//!
+//! Crypto workers. `--crypto-workers N` runs the measured end's crypto through the data plane's
+//! crypto lanes (`wgft_udp_batch::crypto`, `docs/design/v2/agent-crypto-workers.md`) with `N`
+//! workers, pinned with `--cpu-workers`; `0` runs the same split device calls on the measured
+//! thread alone, the comparison for a run with workers. The `RESULT` line then also has the
+//! workers' CPU time over the bursts (`worker_ns`, from the scheduler's statistics), the median and
+//! 99th percentile of one burst's wall time on the measured thread, and the thread CPU time of one
+//! encryption and one decryption of the packet timed alone on the measured CPU (`seal_ns`,
+//! `open_ns`), from which the crypto's share of a run is read.
 
 #[cfg(target_os = "linux")]
 mod linux;

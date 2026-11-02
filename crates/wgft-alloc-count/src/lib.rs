@@ -15,7 +15,8 @@
 //!   数えでは測りの値に混ざることがあります。スレッドを持たない核 (wgstack) を試験のスレッドから駆動して測る
 //!   試験はこちらを使います
 //!
-//! 確保の呼び出しの数 ([`thread_alloc_calls`]、[`ThreadWindow::calls`]) はスレッドごとです。データプレーンの
+//! 確保の呼び出しの数は、スレッドごと ([`thread_alloc_calls`]、[`ThreadWindow::calls`]) とプロセスの全体
+//! ([`process_alloc_calls`]) があります。スレッドごとの数では、データプレーンの
 //! スレッドの外へ移した確保 (`spawn_blocking` など) は見えません。packet ごとの確保の許容を守る試験が使います。
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -24,6 +25,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+static CALLS: AtomicUsize = AtomicUsize::new(0);
 
 // スレッドの数えです。const の初期値で Drop を持たない型なので、読み書きは確保もデストラクタの登録もせず、
 // 割り当て器の中から使えます。他のスレッドが確保した領域をこのスレッドが解放すると負になるので符号付きです。
@@ -39,6 +41,7 @@ pub struct CountingAlloc;
 
 /// 確保の呼び出し (alloc、alloc_zeroed、realloc) を 1 回数える。解放は数えない。
 fn called() {
+    CALLS.fetch_add(1, Ordering::Relaxed);
     THREAD_CALLS.set(THREAD_CALLS.get().wrapping_add(1));
 }
 
@@ -96,6 +99,13 @@ unsafe impl GlobalAlloc for CountingAlloc {
         }
         p
     }
+}
+
+/// プロセスのすべてのスレッドの確保の呼び出し (alloc、alloc_zeroed、realloc) の数です。データプレーンの
+/// スレッドと、それが仕事を渡すスレッド (暗号の作業者) を合わせて数える試験が使います。並行に動くほかの試験の
+/// 確保も混ざるので、cargo-nextest のように試験ごとにプロセスを分けて流します。
+pub fn process_alloc_calls() -> usize {
+    CALLS.load(Ordering::Relaxed)
 }
 
 /// このスレッドのこれまでの確保の呼び出しの数。別のスレッドで動く task の確保を、そのスレッドの上で

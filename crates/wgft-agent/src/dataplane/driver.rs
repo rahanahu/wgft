@@ -149,7 +149,7 @@ impl Source for Io<'_> {
             };
         }
         let _ = vlen;
-        let (n, from) = self.socket.try_recv_from(&mut rx.data[..RX_SLOT])?;
+        let (n, from) = self.socket.try_recv_from(&mut rx.data_mut()[..RX_SLOT])?;
         rx.meta[0] = RxMeta {
             from: Some(from),
             len: u32::try_from(n).unwrap_or(0),
@@ -305,11 +305,12 @@ pub(super) fn send_batch<U: Upper>(
     let tx = &mut outbox.tx;
     let vlen = vlen.clamp(1, tx.slots());
     let mut pulled = 0;
+    let mut slots = tx.packet_slots();
     while pulled < vlen {
-        let Some(len) = upper.poll_transmit(now, tx.packet_slot(pulled)) else {
+        let Some(len) = upper.poll_transmit(now, slots.slot(pulled)) else {
             break;
         };
-        tx.set_len(pulled, len);
+        slots.set_len(pulled, len);
         pulled += 1;
     }
     // UDP の中継の datagram を TCP の segment の後ろに並べない
@@ -397,7 +398,7 @@ pub(super) async fn receive_batch<U: Upper>(
         let inner = &mut *guard;
         let end = decrypt(&mut inner.device, rx, n, now);
         let upper = &mut inner.upper;
-        let (udp, others) = each_packet(&rx.plain[..end], true, |p| upper.handle_packet(now, p));
+        let (udp, others) = each_packet(&rx.plain[0][..end], true, |p| upper.handle_packet(now, p));
         (end, udp, others)
     };
     if others == 0 {
@@ -420,7 +421,7 @@ pub(super) async fn receive_batch<U: Upper>(
     }
     let mut guard = local.0.borrow();
     let upper = &mut guard.upper;
-    each_packet(&rx.plain[..end], false, |p| upper.handle_packet(now, p));
+    each_packet(&rx.plain[0][..end], false, |p| upper.handle_packet(now, p));
     Ok((n, yielded))
 }
 

@@ -43,6 +43,59 @@ pub(super) fn pin(cpu: Option<usize>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Pins each thread of this process named `name` to the next CPU of `cpus`, in thread id order.
+pub(super) fn pin_named(name: &str, cpus: &[usize]) -> std::io::Result<()> {
+    for (tid, &cpu) in named_threads(name)?.into_iter().zip(cpus) {
+        set_affinity(tid, cpu)?;
+    }
+    Ok(())
+}
+
+/// The ids of this process's threads named `name`, in id order.
+fn named_threads(name: &str) -> std::io::Result<Vec<libc::pid_t>> {
+    let mut tids = Vec::new();
+    for entry in std::fs::read_dir("/proc/self/task")? {
+        let entry = entry?;
+        let comm = std::fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+        if comm.trim_end() == name
+            && let Some(tid) = entry.file_name().to_str().and_then(|s| s.parse().ok())
+        {
+            tids.push(tid);
+        }
+    }
+    tids.sort_unstable();
+    Ok(tids)
+}
+
+/// The CPU time all threads named `name` have run, from the scheduler's statistics.
+pub(super) fn named_cpu(name: &str) -> std::io::Result<Duration> {
+    let mut ns = 0u64;
+    for tid in named_threads(name)? {
+        let stat = std::fs::read_to_string(format!("/proc/self/task/{tid}/schedstat"))?;
+        ns += stat
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+    }
+    Ok(Duration::from_nanos(ns))
+}
+
+fn set_affinity(tid: libc::pid_t, cpu: usize) -> std::io::Result<()> {
+    // SAFETY: as in pin, for the thread tid of this process.
+    unsafe {
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        if cpu >= 8 * size_of::<libc::cpu_set_t>() {
+            return Err(std::io::Error::other("cpu number too large"));
+        }
+        libc::CPU_SET(cpu, &mut set);
+        if libc::sched_setaffinity(tid, size_of::<libc::cpu_set_t>(), &raw const set) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 /// The calling thread's CPU time.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Cpu {

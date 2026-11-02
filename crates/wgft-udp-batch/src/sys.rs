@@ -11,6 +11,7 @@
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::fd::RawFd;
+use std::sync::Arc;
 
 use crate::{Msg, RxBatch, RxMeta, Sealed, TxBatch};
 
@@ -117,10 +118,12 @@ impl RxBatch {
         let Some(headers) = self.headers.as_mut() else {
             return Ok(0);
         };
+        let data = Arc::get_mut(&mut self.data)
+            .expect("no crypto worker holds the receive store between batches");
         recv(
             fd,
             headers,
-            &mut self.data,
+            data,
             parts,
             vlen,
             &mut self.meta,
@@ -142,7 +145,15 @@ impl TxBatch {
             return Ok(0);
         };
         let msgs = &self.msgs[self.next..self.n_msgs];
-        send(fd, headers, &self.sealed, self.stride, &self.out, msgs)
+        send(
+            fd,
+            headers,
+            &self.sealed,
+            self.per,
+            self.stride,
+            &self.out,
+            msgs,
+        )
     }
 }
 
@@ -281,31 +292,31 @@ fn recv(
     Ok(n)
 }
 
-/// Sends `msgs` with one `sendmmsg`: each message is the datagrams `first..first + count` of
-/// `sealed` (`stride` bytes apart, lengths in `out`) to the address of its first datagram, as one
-/// UDP GSO send with the segment size `seg` when it has more than one. Returns how many messages
-/// the kernel took; an error means it took none.
+/// Sends `msgs` with one `sendmmsg`: each message is the datagrams `first..first + count` of `out`,
+/// whose bytes are in the sealed lanes (`per` slots of `stride` bytes each), to the address of its
+/// first datagram, as one UDP GSO send with the segment size `seg` when it has more than one.
+/// Returns how many messages the kernel took; an error means it took none.
 fn send(
     fd: RawFd,
     h: &mut Headers,
-    sealed: &[u8],
+    sealed: &[Box<[u8]>],
+    per: usize,
     stride: usize,
     out: &[Sealed],
     msgs: &[Msg],
 ) -> io::Result<usize> {
     let n = msgs.len().min(h.hdrs.len());
-    let base = sealed.as_ptr();
     for (k, msg) in msgs[..n].iter().enumerate() {
         let first = usize::from(msg.first);
         let count = usize::from(msg.count);
-        for (s, (iov, sealed)) in h.iov[first..first + count]
+        for (iov, &s) in h.iov[first..first + count]
             .iter_mut()
             .zip(&out[first..first + count])
-            .enumerate()
         {
+            let bytes = crate::sealed_bytes(sealed, per, stride, s);
             *iov = libc::iovec {
-                iov_base: base.wrapping_add((first + s) * stride).cast_mut().cast(),
-                iov_len: sealed.len as usize,
+                iov_base: bytes.as_ptr().cast_mut().cast(),
+                iov_len: bytes.len(),
             };
         }
         h.names[k] = addr_to_name(out[first].to);
@@ -331,7 +342,7 @@ fn send(
     }
     let count = libc::c_uint::try_from(n).unwrap_or(0);
     // SAFETY: 見出しの先頭の n 個は、この呼び出しの間生きている名前、制御の領域、iovec を指し、iovec は
-    // sealed の中の暗号文を指す。カーネルはそれらを読むだけで、見出しの msg_len だけを書く
+    // sealed の枠の中の暗号文を指す。カーネルはそれらを読むだけで、見出しの msg_len だけを書く
     let sent = unsafe { libc::sendmmsg(fd, h.hdrs.as_mut_ptr(), count, 0) };
     usize::try_from(sent).map_err(|_| io::Error::last_os_error())
 }
