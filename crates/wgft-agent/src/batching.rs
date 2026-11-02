@@ -140,8 +140,11 @@ impl Batching {
     /// CPUs allocates no more.
     #[must_use]
     pub fn bytes(self) -> usize {
-        let b = self.running();
-        crate::dataplane::batch::store_bytes(b, wgft_wgstack::MAX_MTU, self.bound_lanes())
+        crate::dataplane::batch::all_store_bytes(
+            self.running(),
+            wgft_wgstack::MAX_MTU,
+            self.bound_lanes(),
+        )
     }
 
     /// The crypto lanes the bound counts: those of the most crypto workers this build starts.
@@ -213,14 +216,16 @@ pub fn derived_budget(limits: flowpool::Limits) -> u64 {
     flow_caps_memory(limits).saturating_mul(SHARE_NUM) / SHARE_DEN
 }
 
-/// The batch store of `slots` slots per direction with batching on, at the largest MTU.
+/// The batch stores of `slots` slots per direction with batching on, at the largest MTU and with
+/// the most crypto lanes: what the setting's budget must hold.
 fn store_of(slots: usize) -> u64 {
     let b = Batching::On {
         slots,
         source: Source::Set,
     };
+    // 作業者と重ねる道の 2 つ目の置き場も含めて、予算の内に収める
     let lanes = crate::dataplane::batch::crypto_lanes(b, wgft_udp_batch::pool::MAX_WORKERS);
-    let bytes = crate::dataplane::batch::store_bytes(b, wgft_wgstack::MAX_MTU, lanes);
+    let bytes = crate::dataplane::batch::all_store_bytes(b, wgft_wgstack::MAX_MTU, lanes);
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
@@ -257,6 +262,21 @@ mod tests {
         };
         u64::try_from(budget)
             .is_ok_and(|budget| store_of(b.slots()) <= budget && store_of(next.slots()) > budget)
+    }
+
+    #[test]
+    fn the_setting_bounds_every_batch_store() {
+        let caps = flowpool::Limits::default();
+        for mib in 1..=48 {
+            let b = Batching::new(Some(mib), caps);
+            let budget = usize::try_from(mib).unwrap() << 20;
+            if cfg!(target_os = "linux") {
+                assert!(b.bytes() <= budget, "{mib} MiB: {} bytes", b.bytes());
+            }
+            // 減らしたと書くのは、最大の枠の数の置き場でも予算に余るときだけ
+            let full = u64::try_from(budget).unwrap() > store_of(MAX_SLOTS);
+            assert_eq!(b.source() == Some(Source::Lowered), full, "{mib} MiB");
+        }
     }
 
     #[test]

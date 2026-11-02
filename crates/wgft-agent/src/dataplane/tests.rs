@@ -16,7 +16,7 @@ use wgft_wireguard::{
 
 use super::batch::TxBatch;
 use super::batch::{RX_SLOT, RxBatch, RxMeta};
-use super::driver::{Outbox, Sink, Source, pump, receive_batch};
+use super::driver::{Outbox, Sink, Source, Wake, pump, receive_batch, receive_pipelined};
 use super::{Carry, Dataplane, Generations, Settings, Upper, UpperError, UpperInit, clock};
 use crate::batching::Batching;
 
@@ -1128,4 +1128,130 @@ fn an_interrupted_send_is_retried_and_a_send_of_nothing_keeps_the_batch() {
     let got: Vec<u32> = t.deliver().iter().map(|p| seq(p)).collect();
     assert_eq!(got, vec![3, 4]);
     assert_eq!(t.outbox.send_errors, 0);
+}
+
+/// 作業者と重ねる受信の相を、`datagrams` を読み切るまで流す。上の層に渡った packet の順と device を返す。
+/// 遅い build では時間の予算が相を早く区切るので、読ませるものが無くなるまで相を繰り返す。`poison` なら
+/// 先に作業者に毒の印を付け、相の誤りを返す。
+async fn pipelined_phase(
+    datagrams: Vec<Vec<u8>>,
+    from: SocketAddr,
+    a: Device,
+    poison: bool,
+) -> io::Result<(Vec<u32>, Device)> {
+    let local = super::Local(std::rc::Rc::new(super::Shared {
+        inner: std::cell::RefCell::new(super::Inner {
+            device: a,
+            upper: Stub::new(None),
+        }),
+        poisoned: std::cell::Cell::new(false),
+        wake: super::Wake::default(),
+    }));
+    let mut feed = Feed(datagrams.into_iter().map(|d| (from, d)).collect());
+    // 密な部分を枠の全体にして、枠 i が data の i × RX_SLOT から始まるようにする
+    let mut a_store = RxBatch::new(8, false, RX_SLOT, 3);
+    let mut b_store = RxBatch::new(8, false, RX_SLOT, 3);
+    let mut crypto =
+        wgft_udp_batch::crypto::Crypto::new(3, wgft_udp_batch::crypto::PARALLEL_MIN_BYTES);
+    assert_eq!(crypto.workers(), 2);
+    if poison {
+        crypto.poison();
+    }
+    // 最初のバッチが枠をすべて求めるように、速い費用を記録しておく
+    let mut pace = super::batch::Pace::default();
+    pace.record(Duration::from_nanos(8), 8);
+    let (mut errors, mut wakers) = (0, Vec::new());
+    while !feed.0.is_empty() {
+        let mut now = clock::now();
+        let wake = Wake {
+            start: now,
+            timed: true,
+        };
+        receive_pipelined(
+            &local,
+            &mut feed,
+            [&mut a_store, &mut b_store],
+            &mut crypto,
+            wake,
+            &mut now,
+            &mut pace,
+            &mut errors,
+            &mut wakers,
+        )
+        .await?;
+        assert_eq!(crypto.in_flight(), None, "no batch stays with the workers");
+    }
+    assert_eq!(errors, 0);
+    for rx in [&mut a_store, &mut b_store] {
+        assert!(
+            rx.plain.iter().all(|l| !l.is_empty()),
+            "the plaintext lanes came back"
+        );
+        let _ = rx.data_mut();
+    }
+    let got = local.with(|s| s.got.iter().map(|p| seq(p)).collect());
+    let Ok(shared) = std::rc::Rc::try_unwrap(local.0) else {
+        panic!("the data plane is still shared");
+    };
+    Ok((got, shared.inner.into_inner().device))
+}
+
+/// server の側 (B) が agent (A) に送る TCP の packet `seqs` の datagram。
+fn sealed_from_b(t: &mut Bench, seqs: std::ops::Range<u32>) -> Vec<Vec<u8>> {
+    let now = clock::now();
+    let mut out = vec![0u8; t.b.max_transmit_len()];
+    seqs.map(|i| {
+        let mut p = packet(SERVER_IP, AGENT_IP, i);
+        p[9] = 6;
+        let o = t.b.handle_packet(now, &p, &mut out).unwrap();
+        out[..o.len].to_vec()
+    })
+    .collect()
+}
+
+#[tokio::test]
+async fn a_short_read_after_a_pipelined_batch_leaves_nothing_with_the_workers() {
+    let mut t = Bench::new(0);
+    t.connected();
+    let datagrams = sealed_from_b(&mut t, 0..11);
+    let (got, device) = pipelined_phase(datagrams, B_ADDR.parse().unwrap(), t.a, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        got,
+        (0..11).collect::<Vec<_>>(),
+        "accepted in arrival order"
+    );
+    assert_eq!(device.drops().total(), 0);
+}
+
+#[tokio::test]
+async fn a_datagram_that_is_not_data_waits_for_the_batch_with_the_workers() {
+    let mut t = Bench::new(0);
+    t.connected();
+    let mut datagrams = sealed_from_b(&mut t, 0..8);
+    // ハンドシェイクの開始の型の、壊れた datagram。作業者にある前のバッチを受け付けた後に扱う
+    let mut junk = vec![0u8; 148];
+    junk[0] = 1;
+    datagrams.push(junk);
+    datagrams.extend(sealed_from_b(&mut t, 8..10));
+    let (got, device) = pipelined_phase(datagrams, B_ADDR.parse().unwrap(), t.a, false)
+        .await
+        .unwrap();
+    assert_eq!(got, (0..10).collect::<Vec<_>>());
+    assert_eq!(device.drops().total(), 1, "{:?}", device.drops());
+}
+
+#[tokio::test]
+async fn a_worker_panic_ends_the_pipelined_receive_with_an_error() {
+    let mut t = Bench::new(0);
+    t.connected();
+    let datagrams = sealed_from_b(&mut t, 0..8);
+    let Err(e) = pipelined_phase(datagrams, B_ADDR.parse().unwrap(), t.a, true).await else {
+        panic!("a poisoned pool ends the phase");
+    };
+    assert!(
+        e.to_string().contains("ended this tunnel generation"),
+        "{e}"
+    );
 }

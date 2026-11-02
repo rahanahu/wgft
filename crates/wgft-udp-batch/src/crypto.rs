@@ -14,12 +14,13 @@
 //!   確保は無い
 
 use std::mem;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
 use wgft_wireguard::{Device, OpenJob, Opened, Outgoing, SealJob};
 
-use crate::pool::{Poisoned, Pool, Run};
+use crate::pool::{Offered, Poisoned, Pool, Run};
 use crate::{MAX_SLOTS, RX_SLOT, RxBatch, TxBatch, is_udp};
 
 /// The most decryption jobs in one lane per round. A round with more datagrams closes there and
@@ -178,6 +179,63 @@ fn seal_lane_mut(l: &mut Option<Lane>) -> &mut SealLane {
     }
 }
 
+/// The most worker lanes a pipelined batch has.
+const MAX_LANES: usize = crate::pool::MAX_WORKERS;
+
+/// Calls `f` with each datagram of the first `n` filled slots of `rx` in arrival order, GRO buffers
+/// split into their segments: its sender, its offset in the datagram area (`None` when it crosses
+/// its slot's two parts), its length and its slot. Stops and returns `false` when `f` does.
+fn each_datagram(
+    rx: &RxBatch,
+    n: usize,
+    mut f: impl FnMut(SocketAddr, Option<usize>, usize, usize) -> bool,
+) -> bool {
+    for (i, m) in rx.meta.iter().enumerate().take(n) {
+        let Some(from) = m.from else { continue };
+        let len = (m.len as usize).min(RX_SLOT);
+        let seg = match m.seg as usize {
+            0 => len.max(1),
+            s => s,
+        };
+        let mut start = 0;
+        while start < len {
+            let stop = (start + seg).min(len);
+            if !f(from, rx.piece(i, start, stop), stop - start, i) {
+                return false;
+            }
+            start = stop;
+        }
+    }
+    true
+}
+
+/// One receive store's worker lanes for a pipelined batch: lane `i` decrypts into the store's
+/// plaintext lane `i + 1`.
+#[derive(Debug)]
+struct PipeSet {
+    lanes: Box<[Option<Lane>]>,
+    offered: Option<Offered>,
+}
+
+impl PipeSet {
+    fn new(workers: usize) -> Self {
+        Self {
+            lanes: (0..workers)
+                .map(|_| {
+                    Some(Lane::Open(OpenLane {
+                        data: None,
+                        plain: Box::default(),
+                        fill: 0,
+                        bytes: 0,
+                        jobs: Vec::with_capacity(LANE_JOBS),
+                    }))
+                })
+                .collect(),
+            offered: None,
+        }
+    }
+}
+
 /// The crypto workers of one tunnel generation and the lanes they work on. Make it on the data-plane
 /// thread; dropping it stops the workers.
 #[derive(Debug)]
@@ -187,6 +245,11 @@ pub struct Crypto {
     open: Box<[Option<Lane>]>,
     seal: Box<[Option<Lane>]>,
     min_bytes: usize,
+    /// The pipelined opening: per receive store, the workers' lanes of its batch.
+    pipe: [PipeSet; 2],
+    /// The store whose batch is with the workers. Only one is at a time: the workers have one place
+    /// each.
+    in_flight: Option<usize>,
     /// The batch being opened: its filled slots, the next datagram (slot, offset) and the bytes left.
     n: usize,
     slot: usize,
@@ -226,10 +289,20 @@ impl Crypto {
                 })
                 .collect(),
             min_bytes,
+            pipe: [PipeSet::new(lanes - 1), PipeSet::new(lanes - 1)],
+            in_flight: None,
             n: 0,
             slot: 0,
             start: 0,
             left: 0,
+        }
+    }
+
+    /// Marks the workers poisoned, as a worker's panic does, for tests of the data plane's handling.
+    #[cfg(feature = "test-hooks")]
+    pub fn poison(&self) {
+        if let Some(p) = &self.pool {
+            p.poison();
         }
     }
 
@@ -239,13 +312,17 @@ impl Crypto {
         self.pool.as_ref().map_or(0, Pool::workers)
     }
 
-    /// The bytes [`Crypto::new`] holds for `lanes` lanes: the job lists, the lanes and the pool of
+    /// The bytes [`Crypto::new`] holds for `lanes` lanes: the job lists of the rounds and of the
+    /// pipelined batches, the lanes and the pool of
     /// `lanes - 1` workers with their stacks. The lanes' buffers belong to the stores.
     #[must_use]
     pub const fn bytes(lanes: usize) -> usize {
         let lanes = if lanes == 0 { 1 } else { lanes };
+        // 回のレーンと、受信の 2 つの置き場ごとの作業者のレーン
+        let workers = lanes - 1;
         lanes * (LANE_JOBS * size_of::<OpenEntry>() + MAX_SLOTS * size_of::<SealEntry>())
-            + 2 * lanes * size_of::<Option<Lane>>()
+            + 2 * workers * LANE_JOBS * size_of::<OpenEntry>()
+            + (2 * lanes + 2 * workers) * size_of::<Option<Lane>>()
             + crate::pool::bytes::<Lane>(lanes - 1)
     }
 
@@ -274,6 +351,10 @@ impl Crypto {
         device: &mut Device,
         now: Instant,
     ) -> Result<bool, Poisoned> {
+        assert!(
+            self.in_flight.is_none(),
+            "a round runs while no pipelined batch is with the workers"
+        );
         let lanes = self.open.len().min(rx.plain.len());
         for l in &mut self.open[..lanes] {
             let l = open_lane_mut(l);
@@ -410,6 +491,240 @@ impl Crypto {
         ran
     }
 
+    /// Plans the first `n` filled slots of `rx` as one pipelined batch, calling `f` with each
+    /// datagram in arrival order: its sender, its offset and length in the datagram area, its slot
+    /// and the workers' lane it goes to. The lanes get about the same bytes each; a lane also ends
+    /// when its jobs or its plaintext lane are full. Returns `false`, before calling `f`, when the
+    /// batch does not fit: a datagram that is not a data message or crosses its slot's two parts,
+    /// or more jobs or bytes than the lanes hold.
+    fn plan(
+        &self,
+        rx: &RxBatch,
+        n: usize,
+        mut f: impl FnMut(SocketAddr, usize, usize, usize, usize),
+    ) -> bool {
+        // 持ち主のレーンの 1 つを除いた数。begin_pipelined は組のレーンを外に出して呼ぶので、組からは数えない
+        let workers = self.open.len().saturating_sub(1).min(MAX_LANES);
+        if workers == 0 || self.pool.is_none() || rx.plain.len() < workers + 1 {
+            return false;
+        }
+        let mut total = 0;
+        let ok = each_datagram(rx, n, |_, at, size, _| {
+            total += size.saturating_sub(HEADER);
+            at.is_some_and(|at| Device::is_data_message(&rx.data[at..at + size]))
+        });
+        if !ok {
+            return false;
+        }
+        let target = total.div_ceil(workers);
+        // 1 回目は収まるかを確かめるだけ、2 回目に f を呼ぶ。割り振りは同じ規則なので同じになる
+        for call in [false, true] {
+            let mut lane = 0;
+            let mut jobs = [0usize; MAX_LANES];
+            let mut bytes = [0usize; MAX_LANES];
+            let fits = each_datagram(rx, n, |from, at, size, slot| {
+                let need = size.saturating_sub(HEADER);
+                let full = |l: usize, jobs: &[usize], bytes: &[usize]| {
+                    jobs[l] == LANE_JOBS || rx.plain[l + 1].len() - bytes[l] < need
+                };
+                while lane + 1 < workers && (bytes[lane] >= target || full(lane, &jobs, &bytes)) {
+                    lane += 1;
+                }
+                if full(lane, &jobs, &bytes) {
+                    return false;
+                }
+                if call {
+                    f(from, at.unwrap_or(0), size, slot, lane);
+                }
+                jobs[lane] += 1;
+                bytes[lane] += need;
+                true
+            });
+            if !fits {
+                debug_assert!(!call, "the plan does not change between its two passes");
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Whether the first `n` filled slots of `rx` can go to the workers as one pipelined batch: the
+    /// workers exist, every datagram is a data message in one piece, and the workers' lanes hold
+    /// the batch's jobs and plaintext when each lane takes about the same bytes. It reads only the
+    /// slots' records and the datagrams' type fields.
+    pub fn can_pipeline(&self, rx: &RxBatch, n: usize) -> bool {
+        self.plan(rx, n, |_, _, _, _, _| {})
+    }
+
+    /// Begins the first `n` filled slots of `rx` in arrival order into the workers' lanes of store
+    /// `set` (0 or 1); [`Crypto::offer_pipelined`] then offers them. [`Crypto::can_pipeline`] must
+    /// hold. A datagram the device drops takes no job.
+    ///
+    /// # Panics
+    ///
+    /// When the batch does not fit or store `set`'s batch is with the workers: a fault of the
+    /// caller.
+    pub fn begin_pipelined(
+        &mut self,
+        set: usize,
+        rx: &RxBatch,
+        n: usize,
+        device: &mut Device,
+        now: Instant,
+    ) {
+        assert_ne!(
+            self.in_flight,
+            Some(set),
+            "the store's batch is with the workers"
+        );
+        let mut lanes = mem::take(&mut self.pipe[set].lanes);
+        for l in &mut lanes {
+            let l = open_lane_mut(l);
+            l.fill = 0;
+            l.bytes = 0;
+            l.jobs.clear();
+        }
+        let planned = self.plan(rx, n, |from, at, size, slot, lane| {
+            let Some(job) = device.begin_datagram(now, from, &rx.data[at..at + size]) else {
+                return;
+            };
+            let l = open_lane_mut(&mut lanes[lane]);
+            l.jobs.push(OpenEntry {
+                at: u32::try_from(at).unwrap_or(u32::MAX),
+                len: u32::try_from(size).unwrap_or(u32::MAX),
+                slot: u16::try_from(slot).unwrap_or(u16::MAX),
+                out: u32::try_from(l.fill).unwrap_or(u32::MAX),
+                delivered: 0,
+                state: OpenState::Pending(job),
+            });
+            let need = size.saturating_sub(HEADER);
+            l.fill += need;
+            l.bytes += need;
+        });
+        self.pipe[set].lanes = lanes;
+        assert!(planned, "a pipelined batch fits its lanes");
+    }
+
+    /// Offers the batch [`Crypto::begin_pipelined`] began in store `set` to the workers and returns
+    /// without waiting. The store's plaintext lanes stay with the workers, and the store must not be
+    /// read into, until [`Crypto::finish_pipelined`].
+    ///
+    /// # Errors
+    ///
+    /// [`Poisoned`] after a worker panicked.
+    ///
+    /// # Panics
+    ///
+    /// While another store's batch is with the workers: finish it first. Each worker has one place,
+    /// and a second offer would take it.
+    pub fn offer_pipelined(&mut self, set: usize, rx: &mut RxBatch) -> Result<(), Poisoned> {
+        assert!(
+            self.in_flight.is_none(),
+            "one batch is with the workers at a time"
+        );
+        let ps = &mut self.pipe[set];
+        // 仕事の無いレーンは置き場の buffer を持たず、作業者にも渡らない (Run::is_idle)
+        for (j, l) in ps.lanes.iter_mut().enumerate() {
+            let l = open_lane_mut(l);
+            if l.has_pending() {
+                l.data = Some(Arc::clone(&rx.data));
+                l.plain = mem::take(&mut rx.plain[j + 1]);
+            }
+        }
+        match &self.pool {
+            Some(pool) => ps.offered = Some(pool.offer(&mut ps.lanes)?),
+            None => {
+                for l in &mut ps.lanes {
+                    open_lane_mut(l).run();
+                }
+            }
+        }
+        self.in_flight = Some(set);
+        Ok(())
+    }
+
+    /// The store whose batch is with the workers, if any.
+    #[must_use]
+    pub fn in_flight(&self) -> Option<usize> {
+        self.in_flight
+    }
+
+    /// Takes the batch of store `set` back from the workers, running a lane no worker started here,
+    /// and finishes it in arrival order; [`Crypto::each_pipelined`] then walks its packets.
+    ///
+    /// # Errors
+    ///
+    /// [`Poisoned`] after a worker panicked; the store is then unusable and the generation ends.
+    ///
+    /// # Panics
+    ///
+    /// When store `set`'s batch is not with the workers.
+    pub fn finish_pipelined(
+        &mut self,
+        set: usize,
+        rx: &mut RxBatch,
+        device: &mut Device,
+        now: Instant,
+    ) -> Result<(), Poisoned> {
+        assert_eq!(
+            self.in_flight,
+            Some(set),
+            "the store's batch is with the workers"
+        );
+        self.in_flight = None;
+        let ps = &mut self.pipe[set];
+        if let (Some(pool), Some(offered)) = (&self.pool, ps.offered.take()) {
+            pool.collect(&mut ps.lanes, offered)?;
+        }
+        for (j, l) in ps.lanes.iter_mut().enumerate() {
+            let l = open_lane_mut(l);
+            if !l.plain.is_empty() {
+                rx.plain[j + 1] = mem::take(&mut l.plain);
+            }
+            l.data = None;
+            for e in &mut l.jobs {
+                let OpenState::Opened(o) = mem::replace(&mut e.state, OpenState::Empty) else {
+                    continue;
+                };
+                let Some(from) = rx.meta[usize::from(e.slot)].from else {
+                    continue;
+                };
+                let (out, len) = (e.out as usize, e.len as usize);
+                let plain = &rx.plain[j + 1][out..out + len - HEADER];
+                let got = device.finish_datagram(now, from, len, o, plain);
+                e.delivered = u32::try_from(got.unwrap_or(0)).unwrap_or(0);
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Crypto::each_packet`] for the batch [`Crypto::finish_pipelined`] finished in store `set`.
+    pub fn each_pipelined(
+        &self,
+        set: usize,
+        rx: &RxBatch,
+        udp: bool,
+        mut f: impl FnMut(&[u8]),
+    ) -> (usize, usize) {
+        let (mut taken, mut others) = (0, 0);
+        for (j, l) in self.pipe[set].lanes.iter().enumerate() {
+            for e in &open_lane(l.as_ref()).jobs {
+                if e.delivered == 0 {
+                    continue;
+                }
+                let at = e.out as usize;
+                let p = &rx.plain[j + 1][at..at + e.delivered as usize];
+                if is_udp(p) == udp {
+                    f(p);
+                    taken += 1;
+                } else {
+                    others += 1;
+                }
+            }
+        }
+        (taken, others)
+    }
+
     /// Walks the packets the last round delivered, in the order they arrived, and calls `f` on
     /// those whose being UDP is `udp`. Returns how many it passed to `f` and how many of the other
     /// kind it passed over.
@@ -447,6 +762,10 @@ impl Crypto {
         now: Instant,
         pulled: usize,
     ) -> Result<(), Poisoned> {
+        assert!(
+            self.in_flight.is_none(),
+            "a send batch runs while no pipelined batch is with the workers"
+        );
         let lanes = self.seal.len().min(tx.sealed.len());
         for l in &mut self.seal[..lanes] {
             let l = seal_lane_mut(l);
@@ -805,22 +1124,243 @@ mod tests {
 
     #[test]
     fn the_crypto_bytes_cover_its_job_lists() {
+        let open =
+            |l: &Option<Lane>| open_lane(l.as_ref()).jobs.capacity() * size_of::<OpenEntry>();
+        let seal = |l: &Option<Lane>| match l {
+            Some(Lane::Seal(l)) => l.jobs.capacity() * size_of::<SealEntry>(),
+            _ => 0,
+        };
         for lanes in 1..=3 {
             let c = Crypto::new(lanes, 0);
-            let lists: usize = c
-                .open
-                .iter()
-                .map(|l| open_lane(l.as_ref()).jobs.capacity() * size_of::<OpenEntry>())
-                .sum::<usize>()
-                + c.seal
+            let lists: usize = c.open.iter().map(open).sum::<usize>()
+                + c.seal.iter().map(seal).sum::<usize>()
+                + c.pipe
                     .iter()
-                    .map(|l| match l {
-                        Some(Lane::Seal(l)) => l.jobs.capacity() * size_of::<SealEntry>(),
-                        _ => 0,
-                    })
+                    .flat_map(|p| p.lanes.iter())
+                    .map(open)
                     .sum::<usize>();
-            assert!(Crypto::bytes(lanes) >= lists);
+            let places =
+                (c.open.len() + c.seal.len() + c.pipe.iter().map(|p| p.lanes.len()).sum::<usize>())
+                    * size_of::<Option<Lane>>();
+            assert_eq!(
+                Crypto::bytes(lanes),
+                lists + places + crate::pool::bytes::<Lane>(lanes - 1)
+            );
             assert_eq!(c.workers(), lanes - 1);
         }
+    }
+
+    /// `sizes` の大きさの TCP の packet を agent が暗号化し、`rx` の枠 1 つずつに置く。置いた packet と
+    /// datagram を返す。
+    fn fill(
+        pair: &mut Pair,
+        rx: &mut RxBatch,
+        sizes: &[usize],
+        tag: u8,
+    ) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+        let now = pair.now;
+        let from = pair.agent_addr;
+        let (mut sent, mut dgs) = (Vec::new(), Vec::new());
+        for (i, &len) in sizes.iter().enumerate() {
+            let p = packet(6, len, tag.wrapping_add(u8::try_from(i).unwrap()));
+            let d = seal_one(&mut pair.agent, now, &p);
+            put(rx, i, &d, 0, from);
+            sent.push(p);
+            dgs.push(d);
+        }
+        (sent, dgs)
+    }
+
+    fn pipelined(c: &Crypto, set: usize, rx: &RxBatch) -> Vec<Vec<u8>> {
+        let mut got = Vec::new();
+        c.each_pipelined(set, rx, true, |p| got.push(p.to_vec()));
+        c.each_pipelined(set, rx, false, |p| got.push(p.to_vec()));
+        got
+    }
+
+    fn stores() -> [RxBatch; 2] {
+        [
+            RxBatch::new(8, false, 1440, 3),
+            RxBatch::new(8, false, 1440, 3),
+        ]
+    }
+
+    #[test]
+    fn a_pipelined_batch_is_accepted_before_the_next_in_arrival_order() {
+        let mut pair = connected();
+        let now = pair.now;
+        let from = pair.agent_addr;
+        let mut st = stores();
+        let mut c = Crypto::new(3, PARALLEL_MIN_BYTES);
+        let (first, first_dgs) = fill(&mut pair, &mut st[0], &[1000, 1200, 900, 1400, 600], 0);
+        assert!(c.can_pipeline(&st[0], 5));
+        c.begin_pipelined(0, &st[0], 5, &mut pair.server, now);
+        c.offer_pipelined(0, &mut st[0]).unwrap();
+        assert_eq!(c.in_flight(), Some(0));
+        // 次のバッチを、前のバッチを受け付ける前に始める。前のバッチの 3 つ目の写しを含む
+        let (second, _) = fill(&mut pair, &mut st[1], &[700, 800, 900], 50);
+        put(&mut st[1], 3, &first_dgs[2], 0, from);
+        assert!(c.can_pipeline(&st[1], 4));
+        c.begin_pipelined(1, &st[1], 4, &mut pair.server, now);
+        let [a, b] = &mut st;
+        c.finish_pipelined(0, a, &mut pair.server, now).unwrap();
+        assert_eq!(pipelined(&c, 0, a), first);
+        c.offer_pipelined(1, b).unwrap();
+        c.finish_pipelined(1, b, &mut pair.server, now).unwrap();
+        assert_eq!(pipelined(&c, 1, b), second, "the copy is accepted once");
+        assert_eq!(c.in_flight(), None);
+        assert_eq!(
+            pair.server
+                .drops()
+                .get(wgft_wireguard::DropReason::Replayed),
+            1
+        );
+        for rx in &mut st {
+            assert!(Arc::get_mut(&mut rx.data).is_some());
+            assert!(rx.plain.iter().all(|l| !l.is_empty()));
+        }
+    }
+
+    #[test]
+    fn a_pipelined_batch_that_leaves_a_lane_idle_gives_the_store_back() {
+        let mut pair = connected();
+        let now = pair.now;
+        let mut st = stores();
+        let mut c = Crypto::new(3, PARALLEL_MIN_BYTES);
+        // 2 つ目の受け手の index を壊して、始める時に捨てさせ、2 つ目のレーンの仕事を無くす
+        let (sent, _) = fill(&mut pair, &mut st[0], &[1000, 1000], 0);
+        let at = st[0].dense() + 5;
+        st[0].data_mut()[at] ^= 1;
+        assert!(c.can_pipeline(&st[0], 2));
+        c.begin_pipelined(0, &st[0], 2, &mut pair.server, now);
+        c.offer_pipelined(0, &mut st[0]).unwrap();
+        c.finish_pipelined(0, &mut st[0], &mut pair.server, now)
+            .unwrap();
+        assert_eq!(pipelined(&c, 0, &st[0]), vec![sent[0].clone()]);
+        assert!(
+            Arc::get_mut(&mut st[0].data).is_some(),
+            "no lane keeps the datagrams"
+        );
+        assert!(st[0].plain.iter().all(|l| !l.is_empty()));
+    }
+
+    #[test]
+    fn a_batch_of_a_tunnel_replaced_while_with_the_workers_is_dropped() {
+        let mut pair = connected();
+        let now = pair.now;
+        let mut st = stores();
+        let mut c = Crypto::new(3, PARALLEL_MIN_BYTES);
+        let _ = fill(&mut pair, &mut st[0], &[1000, 1000, 1000], 0);
+        c.begin_pipelined(0, &st[0], 3, &mut pair.server, now);
+        c.offer_pipelined(0, &mut st[0]).unwrap();
+        // agent が答えないまま、server の側のトンネルは期限切れで取り替わる
+        let later = now + Duration::from_secs(600);
+        pair.server.handle_timeout(later);
+        c.finish_pipelined(0, &mut st[0], &mut pair.server, later)
+            .unwrap();
+        assert_eq!(pipelined(&c, 0, &st[0]), Vec::<Vec<u8>>::new());
+        assert_eq!(
+            pair.server
+                .drops()
+                .get(wgft_wireguard::DropReason::UnknownPeer),
+            3
+        );
+    }
+
+    #[test]
+    fn the_plan_takes_what_the_worker_lanes_hold_and_no_more() {
+        let pair = connected();
+        let from = pair.agent_addr;
+        let c = Crypto::new(3, PARALLEL_MIN_BYTES);
+        // 枠の全体を密な部分にして、どの datagram も 1 つの部分に収める。作業者のレーンは 2 つ
+        let mut rx = RxBatch::new(64, false, RX_SLOT, 3);
+        let lane = rx.plain[1].len();
+        let dg = |len: usize| {
+            let mut d = vec![0u8; len];
+            d[0] = 4;
+            d
+        };
+        // byte:1 つのレーンより多く、2 つのレーンに収まる。収まらない数は断る
+        let big = 64_000;
+        let fits = 2 * (lane / (big - HEADER));
+        for i in 0..=fits {
+            put(&mut rx, i, &dg(big), 0, from);
+        }
+        assert!(fits * big > lane);
+        assert!(c.can_pipeline(&rx, fits));
+        assert!(!c.can_pipeline(&rx, fits + 1));
+        // 仕事の数:GRO の枠 1 つに 60 個の小さな datagram。2 つのレーンで 2 × LANE_JOBS まで
+        let mut small = RxBatch::new(64, false, RX_SLOT, 3);
+        for i in 0..5 {
+            put(&mut small, i, &dg(48).repeat(60), 48, from);
+        }
+        assert!(c.can_pipeline(&small, (2 * LANE_JOBS) / 60));
+        assert!(!c.can_pipeline(&small, (2 * LANE_JOBS) / 60 + 1));
+        // データでない datagram と、2 つの部分にまたがる datagram
+        let mut odd = RxBatch::new(4, false, 1000, 3);
+        put(&mut odd, 0, &dg(500), 0, from);
+        let mut hs = dg(148);
+        hs[0] = 1;
+        put(&mut odd, 1, &hs, 0, from);
+        assert!(c.can_pipeline(&odd, 1));
+        assert!(!c.can_pipeline(&odd, 2));
+        put(&mut odd, 1, &dg(1800), 600, from);
+        assert!(
+            !c.can_pipeline(&odd, 2),
+            "the second segment crosses the slot's two parts"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "one batch is with the workers at a time")]
+    fn a_second_batch_is_not_offered_while_one_is_with_the_workers() {
+        let mut pair = connected();
+        let now = pair.now;
+        let mut st = stores();
+        let mut c = Crypto::new(3, PARALLEL_MIN_BYTES);
+        let _ = fill(&mut pair, &mut st[0], &[1000, 1000], 0);
+        let _ = fill(&mut pair, &mut st[1], &[1000, 1000], 9);
+        c.begin_pipelined(0, &st[0], 2, &mut pair.server, now);
+        c.offer_pipelined(0, &mut st[0]).unwrap();
+        c.begin_pipelined(1, &st[1], 2, &mut pair.server, now);
+        let [_, b] = &mut st;
+        let _ = c.offer_pipelined(1, b);
+    }
+
+    #[test]
+    fn a_long_pipeline_with_the_workers_never_stalls() {
+        // 前のバッチを受け付ける前に次を渡す誤りは、作業者の枠を取り合って止まった。止まらずに
+        // 終わることを、見張りの時間の内で確かめる
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut pair = connected();
+            let now = pair.now;
+            let mut st = stores();
+            let mut c = Crypto::new(3, PARALLEL_MIN_BYTES);
+            let mut delivered = 0;
+            for k in 0..300usize {
+                let cur = k % 2;
+                let _ = fill(&mut pair, &mut st[cur], &[1400; 8], 0);
+                c.begin_pipelined(cur, &st[cur], 8, &mut pair.server, now);
+                let [a, b] = &mut st;
+                let (this, other) = if cur == 0 { (a, b) } else { (b, a) };
+                if let Some(prev) = c.in_flight() {
+                    c.finish_pipelined(prev, other, &mut pair.server, now)
+                        .unwrap();
+                    delivered += pipelined(&c, prev, other).len();
+                }
+                c.offer_pipelined(cur, this).unwrap();
+            }
+            let last = c.in_flight().unwrap();
+            let [a, b] = &mut st;
+            let rx = if last == 0 { a } else { b };
+            c.finish_pipelined(last, rx, &mut pair.server, now).unwrap();
+            delivered += pipelined(&c, last, rx).len();
+            done_tx.send(delivered).unwrap();
+        });
+        let delivered = done_rx
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the pipeline stalled");
+        assert_eq!(delivered, 300 * 8);
     }
 }

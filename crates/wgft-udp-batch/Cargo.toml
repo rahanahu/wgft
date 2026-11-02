@@ -13,6 +13,10 @@ wgft-wireguard.workspace = true
 [target."cfg(target_os = \"linux\")".dependencies]
 libc.workspace = true
 
+[features]
+# 試験だけが使う。作業者の panic と同じ毒の印を付ける口を開ける
+test-hooks = []
+
 [lints]
 workspace = true
 

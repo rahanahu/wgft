@@ -45,6 +45,18 @@ pub(crate) fn store_bytes(b: Batching, mtu: usize, lanes: usize) -> usize {
     )
 }
 
+/// The bytes of every batch store the data plane allocates for `b` with `lanes` crypto lanes: the
+/// store of [`store_bytes`] and, with the workers (`lanes > 1`), the second receive store of the
+/// pipelined receive. `WGFT_AGENT_BATCH_MIB` bounds this sum.
+pub(crate) fn all_store_bytes(b: Batching, mtu: usize, lanes: usize) -> usize {
+    let second = if lanes > 1 {
+        wgft_udp_batch::rx_store_bytes(b.slots(), b.is_on(), lanes)
+    } else {
+        0
+    };
+    store_bytes(b, mtu, lanes) + second
+}
+
 /// The store's receive side for `b`, whose slots hold the peer's longest datagram,
 /// `max_datagram` bytes, one after the other, with its plaintext area cut into `lanes` lanes.
 pub(super) fn rx_store(b: Batching, max_datagram: usize, lanes: usize) -> RxBatch {
@@ -119,7 +131,13 @@ mod tests {
             assert_eq!(tx.slots(), b.slots());
             assert_eq!(rx.batched(), b.is_on());
             assert_eq!(rx.plain.len(), lanes);
-            assert_eq!(b.bytes(), store_bytes(b, mtu, lanes));
+            let second = if lanes > 1 {
+                wgft_udp_batch::rx_store_bytes(b.slots(), b.is_on(), lanes)
+            } else {
+                0
+            };
+            assert_eq!(b.bytes(), store_bytes(b, mtu, lanes) + second);
+            assert_eq!(b.bytes(), all_store_bytes(b, mtu, lanes));
             // 作業者の少ないホストの置き場は、上界が数える置き場より大きくならない
             for workers in 0..wgft_udp_batch::pool::MAX_WORKERS {
                 assert!(store_bytes(b, mtu, crypto_lanes(b, workers)) <= b.bytes());
