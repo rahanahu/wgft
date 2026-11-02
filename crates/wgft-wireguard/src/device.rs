@@ -16,7 +16,9 @@
 //! - endpoint の更新:ハンドシェイクかデータを受け付けた後だけ、その datagram の送信元に移す
 //! - 中身の検査:IPv4 のヘッダを確かめ、詰め物を全長で切る
 //! - キューの上界:device が持つものはすべて件数とバイト数の上限を持ち、溢れたものは捨てて数える。
-//!   暗号の処理はその呼び出しの中で済ませるので、暗号の処理を待つキューは無い
+//!   暗号の処理を待つキューは持たない。暗号を別のスレッドで行う呼び手は、段に分けた口
+//!   (`begin_datagram`、`OpenJob::open`、`finish_datagram`、`begin_packet`、`SealJob::seal`) で仕事を
+//!   自分で持つ
 //! - 誤り:相手には何も返さず、[`Drops`] で数える
 
 use std::collections::{HashMap, VecDeque};
@@ -29,7 +31,9 @@ use crate::config::{ConfigError, DeviceConfig, Limits, MAX_UNIX_TIME, MIN_MTU, R
 use crate::drops::{DropReason, Drops};
 use crate::ip::{IPV4_MIN_HEADER, parse_ipv4};
 use crate::keys::PublicKey;
-use crate::protocol::{DATA_OVERHEAD, Inbound, PeerId, ProtoEvent, Protocol, inner_mtu};
+use crate::protocol::{
+    self, Begun, DATA_OVERHEAD, Inbound, PeerId, ProtoEvent, Protocol, inner_mtu,
+};
 use crate::queue::{BoundedQueue, ByteLen};
 use zeroize::Zeroizing;
 
@@ -49,6 +53,82 @@ pub struct Outgoing {
     pub to: SocketAddr,
     /// Its length: the first `len` bytes of the buffer the caller passed.
     pub len: usize,
+}
+
+/// A data message that passed the checks before decryption, from [`Device::begin_datagram`].
+///
+/// It holds a copy of the session key, the message's counter and nothing else, so it can be
+/// decrypted on any thread; the copy of the key is zeroed when it is dropped. Pass the result of
+/// [`OpenJob::open`] to [`Device::finish_datagram`] of the same device, in the order the datagrams
+/// arrived.
+#[derive(Debug)]
+pub struct OpenJob(protocol::OpenJob);
+
+impl OpenJob {
+    /// Decrypts `datagram`, the one passed to [`Device::begin_datagram`], into `out`, which must hold
+    /// the datagram's length minus 16 bytes; a shorter `out` makes the message count as malformed. It
+    /// touches nothing but `out`.
+    #[must_use]
+    pub fn open(self, datagram: &[u8], out: &mut [u8]) -> Opened {
+        Opened(self.0.open(datagram, out))
+    }
+}
+
+/// A decrypted data message, not accepted until [`Device::finish_datagram`] takes it.
+#[derive(Debug)]
+pub struct Opened(protocol::Opened);
+
+impl Opened {
+    /// The bytes at the start of the `out` passed to [`OpenJob::open`] that hold the plaintext,
+    /// padding included; 0 when the message did not decrypt.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether no plaintext came out.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.len() == 0
+    }
+}
+
+/// A packet whose message counter [`Device::begin_packet`] reserved, to be encrypted with
+/// [`SealJob::seal`] on any thread.
+///
+/// Counters are reserved in the order of the calls, and the peer accepts a counter only once within
+/// its replay window, so the caller sends the datagrams in the order it began them. It holds a copy
+/// of the session key, zeroed when it is dropped.
+#[derive(Debug)]
+pub struct SealJob {
+    job: protocol::SealJob,
+    to: SocketAddr,
+    /// The packet's length without the bytes after its IPv4 total length.
+    packet_len: usize,
+}
+
+impl SealJob {
+    /// The length of the datagram the job writes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.job.len()
+    }
+
+    /// Whether the datagram is empty; never, a data message has a header and a tag.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.job.len() == 0
+    }
+
+    /// Encrypts `packet`, the one passed to [`Device::begin_packet`], into `out` and names the
+    /// datagram. `None` only when `out` is shorter than the length given to `begin_packet`; the
+    /// reserved counter is then skipped, never reused. It touches nothing but `out`.
+    #[must_use]
+    pub fn seal(self, packet: &[u8], out: &mut [u8]) -> Option<Outgoing> {
+        let packet = packet.get(..self.packet_len)?;
+        let len = self.job.seal(packet, out).ok()?;
+        Some(Outgoing { to: self.to, len })
+    }
 }
 
 impl ByteLen for Transmit {
@@ -320,15 +400,83 @@ impl Device {
         datagram: &[u8],
         out: &mut [u8],
     ) -> Option<usize> {
+        let job = self.begin_datagram(now, from, datagram)?;
+        let opened = job.open(datagram, out);
+        self.finish_datagram(now, from, datagram.len(), opened, out)
+    }
+
+    /// Whether `datagram` is a WireGuard data message by its type field. [`Device::begin_datagram`]
+    /// returns a job for such a datagram unless it drops it, and handles every other datagram
+    /// itself.
+    #[must_use]
+    pub fn is_data_message(datagram: &[u8]) -> bool {
+        datagram.first_chunk::<4>().copied().map(u32::from_le_bytes) == Some(DATA_MESSAGE_TYPE)
+    }
+
+    /// [`Device::handle_datagram`] in three steps, so that the decryption can run on another thread:
+    /// this call, [`OpenJob::open`] and [`Device::finish_datagram`].
+    ///
+    /// A data message that passes the checks before decryption (a current session for its index,
+    /// and a counter inside the replay window and not yet accepted) comes back as a job. Every
+    /// other datagram is handled here as `handle_datagram` would: handshake messages and cookie
+    /// replies, and data messages dropped and counted. A caller with jobs in flight finishes them
+    /// before it passes a datagram that is not a data message ([`Device::is_data_message`]), so that
+    /// a handshake sees the data that arrived before it. The replay window is checked again when
+    /// the job is finished: of copies of one message begun together, only the first is accepted,
+    /// and a forged copy is counted as unauthenticated instead of replayed.
+    pub fn begin_datagram(
+        &mut self,
+        now: Instant,
+        from: SocketAddr,
+        datagram: &[u8],
+    ) -> Option<OpenJob> {
         let now = self.clock(now);
-        let inbound = match self.proto.receive(now, from, datagram, out) {
-            Ok(inbound) => inbound,
+        match self.proto.begin(now, from, datagram) {
+            Ok(Begun::Open(job)) => Some(OpenJob(job)),
+            Ok(Begun::Done(inbound)) => {
+                self.accept(now, from, datagram.len(), inbound, &[]);
+                None
+            }
             Err(reason) => {
                 self.drops.add(reason, 1);
-                return None;
+                None
             }
-        };
-        let rx = datagram.len() as u64;
+        }
+    }
+
+    /// Accepts a job's result: the replay check, the endpoint, the timers and the checks of the
+    /// packet, as [`Device::handle_datagram`] does after decrypting. Call it in the order the
+    /// datagrams arrived. `datagram_len` is the datagram's length and `plaintext` the `out` that
+    /// [`OpenJob::open`] wrote into. The result is as for `handle_datagram`: the packet is
+    /// `plaintext[..len]`.
+    pub fn finish_datagram(
+        &mut self,
+        now: Instant,
+        from: SocketAddr,
+        datagram_len: usize,
+        opened: Opened,
+        plaintext: &[u8],
+    ) -> Option<usize> {
+        let now = self.clock(now);
+        match self.proto.commit(now, opened.0) {
+            Ok(inbound) => self.accept(now, from, datagram_len, inbound, plaintext),
+            Err(reason) => {
+                self.drops.add(reason, 1);
+                None
+            }
+        }
+    }
+
+    /// 受け付けた datagram の後の仕事。データの packet は `plaintext` の先頭にある。
+    fn accept(
+        &mut self,
+        now: Instant,
+        from: SocketAddr,
+        datagram_len: usize,
+        inbound: Inbound,
+        plaintext: &[u8],
+    ) -> Option<usize> {
+        let rx = datagram_len as u64;
         match inbound {
             Inbound::CookieReply(reply) => self.push_transmit(from, reply),
             Inbound::CookieStored => {}
@@ -364,7 +512,8 @@ impl Device {
             }
             Inbound::Data { peer, len } => {
                 self.accepted_from(peer, from, rx);
-                let delivered = self.check_inbound(peer, &out[..len]);
+                // 平文の長さは呼び手の buffer に収まる (OpenJob::open が確かめた)
+                let delivered = self.check_inbound(peer, plaintext.get(..len).unwrap_or_default());
                 self.flush_staged(peer, now);
                 self.drain_proto_events(peer, now);
                 return delivered;
@@ -424,6 +573,24 @@ impl Device {
         packet: &[u8],
         out: &mut [u8],
     ) -> Option<Outgoing> {
+        let job = self.begin_packet(now, packet, out.len())?;
+        let sealed = job.seal(packet, out);
+        if sealed.is_none() {
+            self.drops.add(DropReason::Internal, 1);
+        }
+        sealed
+    }
+
+    /// [`Device::handle_packet`] in two steps, so that the encryption can run on another thread:
+    /// this call and [`SealJob::seal`].
+    ///
+    /// With a session and no packet waiting for a handshake, it reserves the packet's message
+    /// counter and returns the job; the datagram will be [`SealJob::len`] bytes long, which `out_len`,
+    /// the length of the buffer the caller will seal into, must hold, or the packet is dropped as
+    /// for `handle_packet`. Otherwise the packet waits for a handshake or was dropped and counted,
+    /// as for `handle_packet`. Counters follow the order of the calls: send the datagrams in that
+    /// order, after what [`Device::poll_transmit`] holds.
+    pub fn begin_packet(&mut self, now: Instant, packet: &[u8], out_len: usize) -> Option<SealJob> {
         let now = self.clock(now);
         let Some(header) = parse_ipv4(packet) else {
             self.drops.add(DropReason::InvalidInnerPacket, 1);
@@ -443,10 +610,18 @@ impl Device {
         };
         let packet = &packet[..header.total_len];
         if self.peers[peer].staged.is_empty() {
-            match self.proto.encapsulate_into(peer, now, packet, out) {
-                Ok(Some(len)) => {
-                    self.count_sent(peer, len);
-                    return Some(Outgoing { to, len });
+            if out_len < Protocol::sealed_len(packet.len()) {
+                self.drops.add(DropReason::Internal, 1);
+                return None;
+            }
+            match self.proto.begin_seal(peer, now, packet.len()) {
+                Ok(Some(job)) => {
+                    self.count_sent(peer, job.len());
+                    return Some(SealJob {
+                        job,
+                        to,
+                        packet_len: packet.len(),
+                    });
                 }
                 Ok(None) => {}
                 Err(reason) => {
@@ -781,6 +956,9 @@ impl Device {
         self.mtu
     }
 }
+
+/// The type field of a data message, little endian.
+const DATA_MESSAGE_TYPE: u32 = 4;
 
 const _: () = assert!(IPV4_MIN_HEADER <= MIN_MTU as usize);
 
