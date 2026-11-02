@@ -240,7 +240,7 @@ device が呼び出しの間に持つものと、既定の上限は次のとお�
 
 このほかに sanstun の状態があります。
 復号の行き先と暗号文の行き先は呼び手の buffer で、device は持ちません。
-agent のデータプレーンが起動の時に 1 回だけ確保する量は[メモリの上界の行](agent-parity.md#メモリの上界の行)の `device` の項に数えます。
+データプレーンが起動の時に確保して device に貸す buffer は、トンネルのバッチの置き場の枠で、[メモリの上界の行](agent-parity.md#メモリの上界の行)の `batch` の項に数えます。
 キューに積むのは、定常の経路を通らない message に限ります。
 sanstun の状態は、設定したピアの数と、作り直したトンネルの index に比例します。
 sanstun が設定に無い鍵のために状態を増やさないことは、sanstun の試験 (`initiations_from_unknown_peers_leave_no_state`) が確かめています。

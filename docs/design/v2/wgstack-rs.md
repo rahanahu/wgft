@@ -44,7 +44,7 @@ Go の文書と食い違う点は、この文書が理由と共に挙げたも�
 - 決定:適合の台本は混成で持ちます。直線の台本はデータにし、Go の runner と Rust の runner が同じファイルを流します。反応する台本と測る台本は Go のまま残し、Rust の試験用のプログラムを標準入出力で時計ごと動かします。C ABI は作りません (2026-11-01)
 - 決定:内部に触れる試験 (fuzz、不変条件、手で進める時計の試験、単体の試験) は実装と一緒に Rust に移します。実ネットワークの面から製品を確かめる試験は Go のまま残せます ([テスト](README.md#テスト))
 - 決定:割り当て器は、予算を持つ保持を自前の置き場から取ることを前提に、OS の標準と mimalloc を測ってから選びます (2026-11-01)
-- 決定:device の層は datagram ごとに確保せず、データプレーンが起動の時に確保した buffer を呼び手の buffer として使い回します。割り当て器は OS の標準のまま、Linux の build は musl の静的な build のままにします。glibc に動的に結ぶ build は、バッチの段で写しを減らした後に残る差を測り直してから決めます ([割り当て器と libc の比べ](#割り当て器と-libc-の比べ)、2026-11-02)
+- 決定:device の層は datagram ごとに確保せず、データプレーンが起動の時に確保した buffer を呼び手の buffer として使い回します。割り当て器は OS の標準のまま、Linux の build は musl の静的な build のままにします。glibc に動的に結ぶ build は、バッチの後に残る差を測り直してから決めます ([割り当て器と libc の比べ](#割り当て器と-libc-の比べ)、2026-11-02)
 - 決定:上界の表は `Bound` の計算から生成し、生成し直しの差分で検査します (2026-11-01)
 - 決定:wgstack の実装の担当は Linux の source を読みません。Linux の振る舞いは文書で渡します。実装の担当は wgft 自身のコードである Go の wgstack を読んで写せます。GotaTun (MPL-2.0) のコードは写しません。gVisor と smoltcp のコードも写しません (2026-10-30、2026-11-01)
 - 決定:需要で育つバッファは採用済みで、性能の段階の後に実装します ([決めたこと](../userspace/wgstack-buffers.md#決めたこと)、2026-10-31)
@@ -437,8 +437,8 @@ boost を accept の時に与える方針で受信のバッファが広がって
 
 1 つのスレッドにするのは、核の `&mut` を保ちながら、中継の読み書きと暗号を同じ所で済ませられるためです。
 暗号を含むデータプレーンが 1 つの CPU に縛られる点は危険として残ります。
-CPU の目標は置き換えの条件に入れないので ([置き換えの判定](#置き換えの判定))、byte あたりの CPU と速さは置き換えの後に測ります。
-足りなければ、暗号を別のスレッドに移す形を device の層の設計で決めます。
+CPU の目標は置き換えの条件に入れないので ([置き換えの判定](#置き換えの判定))、byte あたりの CPU と速さは置き換えの後に測り、基準の値は [agent の性能](agent-throughput.md#基準の値)にあります。
+足りない分は、暗号を別のスレッドに移すなど、データプレーンを複数のスレッドに分ける作業で決めます ([作業の順](agent-throughput.md#作業の順))。
 
 ### 世代と予算の受け渡し
 
@@ -705,196 +705,68 @@ boost の配列の貸し借りは値の移動です。
 
 ### 割り当て器と libc の比べ
 
-割り当て器と libc は、所有者の決定 (2026-11-01、割り当て器は OS の標準と mimalloc を測ってから選ぶ) に従って測りました。
-所有者はその値を受けて 2026-11-02 に決めました。
-決定は節の終わりの [決めたこと](#決めたこと) にあります。
+割り当て器と libc は、所有者の決定 (2026-11-01、割り当て器は OS の標準と mimalloc を測ってから選ぶ) に従って測り、所有者が 2026-11-02 に決めました。
+測定の表と build ごとの値は、この決定を作った PR にあります。
+この節には、決定とその理由、今も効く測定の要点、未確認の点を残します。
 
 #### datagram ごとの確保の所在
 
 速さを制限しない経路の測定 ([割り当て器と libc](agent-throughput.md#割り当て器と-libc)) で、musl の build の CPU の大きな部分が datagram ごとの `calloc` と `free` でした。
-この確保は sanstun の中ではなく、wgft の device の層 (`wgft-wireguard`) にあります。
-sanstun のデータの経路は呼び手の buffer を使います。
-`PendingDecapsulate::decrypt` は呼び手が渡す任意の buffer (`AsMut<[u8]>`) に復号し、`PendingEncapsulate::encrypt` は呼び手の slice に書きます。
-`Interface::receive` はデータの message のヘッダを読むだけで、確保しません。
-sanstun が確保するのは、ハンドシェイク、cookie の返事、keepalive の datagram (`Datagram` の `Box`) だけです。
+この確保は sanstun の中ではなく、wgft の device の層 (`wgft-wireguard`) にありました。
+sanstun のデータの経路は呼び手の buffer を使い、sanstun が確保するのは、ハンドシェイク、cookie の返事、keepalive の datagram だけです。
+device の層は今、呼び手の buffer に復号と暗号化を行い、データの packet は確保しません。
 
-device の層の確保は、バッチの段の最初の段階の前は、データの packet 1 つにつき次のとおりでした。
+#### 測定の要点
 
-- 受ける向き:`Protocol::receive` の復号の buffer (`vec!` の零埋め) と、`Device::deliver` の平文の写し (`to_vec`)
-- 送る向き:`Device::handle_packet` の packet の写し (`to_vec`) と、`Protocol::encapsulate` の datagram の buffer (`vec!` の零埋め)
+比べたのは、zig の同梱の libc と `c.malloc` (ラボの build、C)、glibc に動的に結ぶ build (A)、mimalloc (B)、解放した block を持つ自前の置き場 (D)、device の層の buffer の使い回し (E) です。
+1 stream の `lab paired` で、C に対する byte あたりの CPU の比は次のとおりでした。
 
-受けた packet の `Vec` は、駆動が核に渡した後に解放し、送る datagram の `Vec` は、駆動が送った後に解放していました。
-核と `wgft-netstack` の handle の層は、packet ごとに確保しません。
-
-#### 測った build
-
-| 印 | target と libc | 割り当て器 | device の層 |
-|---|---|---|---|
-| C | `x86_64-unknown-linux-musl` (`cargo zigbuild`)、zig の同梱の libc | zig の `c.malloc` (`heap.SmpAllocator`) | 今の形 |
-| A | `x86_64-unknown-linux-gnu.2.17` (`cargo zigbuild`)、glibc 2.17 以上に動的に結ぶ | glibc の `malloc` | 今の形 |
-| B | C と同じ | mimalloc 3.3.2 (crate `mimalloc` 0.1.52、既定の feature) | 今の形 |
-| D | C と同じ | 試作:OS の標準を包み、データプレーンのスレッドで解放した block を、全体で 8 個の枠に layout (大きさと整列) ごと持ち、layout のちょうど同じ確保にだけ返す。枠が埋まっていれば順に入れ替える | 今の形 |
-| E | C と同じ | C と同じ | 試作:復号は device が持つ 1 つの buffer に行い、渡す packet と送る datagram の buffer は呼び手が返したものを使い回す |
-| E+A | A と同じ | A と同じ | E と同じ |
-
-ラボの今の build は C です。
-C の libc は musl の名前の target ですが、`cargo zigbuild` は zig の同梱の libc を結び、`malloc` と `free` は zig の実装です。
-B から E は測るための試作で、製品には入れていません。
-
-E の試作の使い回しは向きごとに 8 個までで、容量が MTU と 32 byte を超える buffer は持たずに解放します。
-持つ量は 2 × 8 × (MTU + 32) byte で、最大の MTU (9216) で約 145 KiB の決まった項になります。
-復号の buffer は最大の datagram の 64 KiB で、今の上界の device の項が数える「復号に使う datagram 1 つ分」と同じ大きさです。
-渡す packet の buffer はどれも容量が MTU と 32 byte になり、送る datagram も buffer の容量で待ち行列の byte に数えます。
-このため小さな packet でも 1 つを MTU と 32 byte に数え、byte の上限の内に入る件数が減ります。
-既定の上限と MTU 1420 では、件数の上限 (256) に先に達するので変わりません。
-
-#### byte あたりの CPU と速さ
-
-`lab paired` の iperf3 で、速さを制限しない経路 (`fast`) を 1 stream、4 round × 3 回で流しました。
-比は、最後の行を除いて C を分母にした値で、括弧は 95% の区間です。
-区間は組を独立に引き直した bootstrap で、round の間の揺れのため、round を単位にした区間の約 0.7 倍の幅に狭く出ています ([round の間の揺れ](../userspace/wgstack-performance.md#round-の間の揺れ))。
-CPU はエージェントのプロセスの byte あたりの CPU (`RATIO`)、速さは同じ組の速さの比 (`MBITRATIO`) です。
-
-```sh
-# 例:A と C。B、D、E は試作の commit を作業ツリーにし、--base に C の commit を渡します。
-# WGFT_LAB_PAIR_CPUS は 2 台の VM を置く CPU の集合です (lab/README.md の「byte あたりの CPU を組にして比べる」)
-WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --tool iperf3 --direction down|up \
-  --rust-target x86_64-unknown-linux-gnu.2.17 --base <C> fast rust base:rust
-```
-
-| build | 送る向きの CPU | 送る向きの速さ | 受ける向きの CPU | 受ける向きの速さ |
-|---|---|---|---|---|
-| A (glibc) | 0.937 (0.928 から 0.954) | 1.054 (1.037 から 1.071) | 0.815 (0.810 から 0.821) | 1.203 (1.189 から 1.212) |
-| B (mimalloc) | 0.979 (0.963 から 0.988) | 1.021 (1.007 から 1.036) | 0.935 (0.924 から 0.941) | 1.070 (1.050 から 1.087) |
-| D (自前の置き場) | 0.978 (0.974 から 0.986) | 1.013 (1.006 から 1.025) | 0.929 (0.922 から 0.940) | 1.074 (1.053 から 1.092) |
-| E (device の層の使い回し) | 0.944 (0.922 から 0.959) | 1.061 (1.034 から 1.080) | 0.856 (0.849 から 0.860) | 1.130 (1.115 から 1.150) |
-| E+A を E で割った値 | 0.988 (0.978 から 0.996) | 1.009 (0.998 から 1.022) | 0.917 (0.910 から 0.926) | 1.077 (1.065 から 1.105) |
-
-E+A と C の比は、E と C の比に E+A と E の比を掛けた見積もりで、送る向きの CPU が約 0.93、受ける向きの CPU が約 0.79 です。
-直接は測っていません。
-C の速さは送る向きで約 1.6 から 1.7 Gbit/s、受ける向きで約 4.2 Gbit/s でした。
-E の送る向きは決まっていません。
-round の中央値は、x を VM a に置いた round で 0.977 と 1.013、VM b に置いた round で 0.864 と 0.906 に分かれ、`vm_a_over_b` は 1.053 でした。
-VM の側の差が比を左右しているので、E の送る向きは 0.9 から 1.0 の間とだけ言えます。
-
-D の最初の版は、枠が埋まると入れ替えずに素通しにしたので、起動の時の大きさの block が 8 個の枠を埋めたまま、熱い大きさが入りませんでした (送る向き 1.015、受ける向き 1.014)。
-表の値は、埋まった枠を順に入れ替える版の値です。
-
-ホストで device の層だけを 1400 byte の packet で回した測り (P コア 1 個) では、packet あたりの時間は次のとおりでした。
-
-| build | 受ける | 送る |
+| build | 送る向き | 受ける向き |
 |---|---|---|
-| C | 約 810 ns | 約 680 ns |
-| D (すべて置き場から取れた) | 約 790 ns | 約 660 ns |
-| C を glibc で | 約 650 ns | 約 540 ns |
-| E | 約 625 ns | 約 495 ns |
-| E を glibc で | 約 565 ns | 約 500 ns |
+| A (glibc) | 0.937 | 0.815 |
+| B (mimalloc) | 0.979 | 0.935 |
+| D (自前の置き場) | 0.978 | 0.929 |
+| E (device の層の使い回し) | 0.944 (決まっていません。0.9 から 1.0) | 0.856 |
 
-この測りでは、確保をすべて置き場から取っても 3% しか減りませんでした。
-差の大部分は、`calloc` の零埋めと、写しの `memcpy` と `memset` の速さです。
-E は `calloc` の零埋めと写し 1 回を除きます。
-glibc の build では、それに加えて `memcpy` が速いと考えます。
-ラボの D は受ける向きで 7% 減りました。
-ラボでの割り当て器の費用がこの測りより大きいためと見込みますが、理由は確かめていません。
+- E の後も glibc の build は受ける向きの CPU が 8% 少なく、速さが 8% 高くなりました。
+  差の大部分は `memcpy` と `memset` の速さと考えます
+- ホストで device の層だけを 1400 byte の packet で回すと、確保をすべて置き場から取っても 3% しか減りませんでした。
+  差の大部分は `calloc` の零埋めと写しの速さです
+- メモリ:mimalloc は起動の後の RSS が 25 MiB 多く、上界の固定の基礎 (32 MiB) の前提が崩れます。
+  zig の割り当て器は、UDP のセッションが閉じた後に RSS が 17 から 20 MiB 増えますが、glibc は増えず、洪水の RSS も 6 から 16 MiB 少なくなりました。
+  zig の割り当て器の増え方の理由は確かめていません
+- 配布:musl の build は静的な 1 つのファイルで、libc の無い環境でも動きます。
+  glibc の build は glibc 2.17 以上に動的に結び、Alpine と libc を持たない image では動きません。
+  名前の解決は glibc の `getaddrinfo` で `/etc/nsswitch.conf` の module に従います。
+  agent の image (`deploy/Dockerfile.agent`) は libc を持たない土台なので、glibc の build にすると土台と Docker の手順の文書も替わります。
+  Windows と macOS は、どの案でも OS の標準の割り当て器です
 
-#### メモリ
+#### D を採らない理由
 
-`lifecycle.sh kernel 5 5b` に一時的に足した測り (環境変数 `WGFT_LAB_RSS_PHASES=1`。決定の後に取り除いたので、Git の履歴の `lab/lifecycle.sh` にあります) を付けて流し、check 5 (UDP 4096、TCP 1024 の上限) の中でエージェントの RSS を段ごとに測りました。
-段は、起動の後、エージェントが 512 MiB を受けた後、洪水の最中、TCP の洪水の接続が閉じた後、エージェントが 512 MiB を送った後、UDP のセッションが無通信の期限 (120 秒) で閉じた後です。
-check 5 と 5b はどの build でも通りました。
-
-| build | 起動の後 | 受けた後 | 洪水 | TCP の洪水の後 | 送った後 | UDP の期限の後 | VmHWM | 5b の洪水 |
-|---|---|---|---|---|---|---|---|---|
-| C | 26 | 26 | 69 | 76 | 76 | 96 | 98 | 107 |
-| A | 27 | 28 | 62 | 66 | 66 | 67 | 67 | 92 |
-| B | 51 | 51 | 93 | 97 | 90 | 97 | 97 | 129 |
-| D | 26 | 26 | 70 | 76 | 76 | 94 | 96 | 107 |
-| E | 26 | 26 | 70 | 77 | 77 | 94 | 95 | 110 |
-| E+A | 28 | 28 | 63 | 67 | 67 | 68 | 68 | 91 |
-
-値は MiB です。
-起動の後から送った後までの段と 5b の洪水は 2 回ずつ測り (D と E+A は 1 回)、表は 2 回目の値です。
-2 回の差は、段の値で 1 MiB 以内、5b の洪水で最大 6 MiB (C で 113 と 107、B で 123 と 129) でした。
-UDP の期限の後と VmHWM は 1 回ずつの測りです。
-B は起動の直後から 25 MiB 多く、上界の固定の基礎 (32 MiB) の見積もりの前提が崩れます。
-どの build も、洪水の後に RSS を OS へ目立って返しませんでした。
-zig の割り当て器の C、D、E は、UDP のセッションが閉じた後に RSS が 17 から 20 MiB 増えました。
-glibc の A と E+A は同じ段で増えず、洪水の RSS も C より 6 から 16 MiB 少なくなりました。
-起動の後は glibc の方が 1 から 2 MiB 多くなりました。
-zig の割り当て器の増え方の理由は確かめていません。
-5b の洪水はどの build も上界 (1972 MiB) と余裕の和を大きく下回りました。
-
-#### 実行ファイルと配布
-
-| build | 実行ファイル (strip 済み) | 配布の帰結 |
-|---|---|---|
-| C、D、E | 約 6.0 MiB | 静的。libc の無い環境と Alpine でも動きます |
-| B | 約 6.1 MiB | 静的。mimalloc の C の source を zig の C の compiler で build します |
-| A、E+A | 約 6.1 MiB | glibc 2.17 以上に動的に結びます (`libc.so.6`、`libpthread.so.0`、`libdl.so.2`)。2012 年以降の glibc の Linux で動き、musl の Linux (Alpine) と libc を持たないコンテナの image では動きません。名前の解決は glibc の `getaddrinfo` で、`/etc/nsswitch.conf` の module (mDNS など) に従います |
-
-コンテナの image への影響は次のとおりです。
-agent の image (`deploy/Dockerfile.agent`) は libc を持たない `gcr.io/distroless/static-debian12` の上にあります。
-glibc の build にすると、glibc を持つ土台 (`gcr.io/distroless/base-debian12` か `cc-debian12`) に替え、image の大きさと Docker の手順の文書も変わります。
-
-Windows と macOS は、どの案でも OS の標準の割り当て器 (`HeapAlloc` と libmalloc) を使います。
-B を選べば、Windows と macOS も mimalloc に替わります。
-E は OS によりません。
-
-#### D の評価
-
-D は動き、Miri の試験も通りましたが、採用を勧めません。
-
-- 正しさ:置き場の block はすべて OS の標準の割り当て器が同じ layout で確保したもので、返すときも同じ layout で渡します。
-  大きさを丸めないので、ほかの確保の大きさは変わりません。
-  ほかのスレッドが確保した block を解放しても、その layout のまま置き場に入るだけです。
-  零埋めの確保は、置き場から取った block を `memset` します。
-  `realloc` はそのまま渡します
-- スレッドの終わり:スレッドの局所の値は const の初期化で `Drop` を持たず、確保の中で読んでも確保しません。
-  後始末はデータプレーンのスレッドの関数が持つ guard が行い、guard を落とすと置き場を OS の標準に返します
-- 上界:持つ量は 8 × 9280 byte (73 KiB) を超えず、決まった項として数えられます
-- 危険:unsafe の `GlobalAlloc` を製品に入れます。
-  置き場の block は sanitizer から見ると確保されたままなので、AddressSanitizer は置き場を通る解放の後の使用を見逃します。
-  glibc の tcache のような二重解放の検査もありません。
-  OS ごとの違いはスレッドの局所の値だけで、Windows と macOS では試していません
-- 検証に要るもの:Miri の試験 (layout の一致、スレッドをまたぐ解放、入れ替え、guard の後始末)、乱数の確保と解放の列の性質の試験、sanitizer の build で置き場を切る設定、lab の一式です。
-  今は Miri の試験だけを試作の中で流しました
-- 効果:E は datagram ごとの確保そのものを除くので、E の後の D は置き場に入れるものがほとんどありません。
-  E の後に D を重ねた値は測っていません
+D は動き、Miri の試験も通りましたが、unsafe の `GlobalAlloc` を製品に入れます。
+置き場の block は sanitizer から見ると確保されたままで、AddressSanitizer が解放の後の使用を見逃し、二重解放の検査もありません。
+効果は E より小さく、E の後に D に入れるものはほとんどありません。
 
 #### 決めたこと
 
 所有者が 2026-11-02 に次のとおり決めました。
 
-1. device の層を E の形にします。
-   E は、device の層の自前の buffer の使い回しで、unsafe も依存も使いません。
-   復号は device が持つ 1 つの buffer に行い、渡す packet と送る datagram の buffer は呼び手が返したものを向きごとに 8 個まで使い回します。
-   バッチの段の最初の段階の実装は、E の考えを、呼び手の buffer を取る API に進めた形です (実装の判断)。
+1. device の層は、呼び手の buffer を取る形にします (E の考えを進めた形)。
    device は buffer の `Vec` を持ちません。
    受ける向きは呼び手の復号の buffer に復号して先頭の長さを返し、送る向きは呼び手の buffer に暗号化して宛先と長さを返します。
-   E の使い回しの組は、受ける向きの packet の写し 1 回を残します。
-   借用で渡す形には、この写しも使い回しの組の管理も要りません。
-   最初の段階 (1 packet ずつ送受信する間) は、データプレーンが起動の時に 1 回だけ確保する 4 つの buffer を上界の device の項に数えます。
-   4 つは、受ける datagram と復号の行き先 (どちらも 65535 byte)、核が書く packet (MTU)、暗号文 (MTU と 32 byte) です。
-   device の受信の待ち行列 (`deliver` の上限) は無いので、device の項に入りません。
-   E の試作は unsafe も依存も増やさずに、C に対して受ける向きの CPU を 14% 減らしました。
-   送る向きは 0.9 から 1.0 の間で、決まっていません。
-   バッチの段が入った後の数え方は [バッチの作りの規則](agent-throughput.md#バッチの作りの規則) に従います。
-   E の効果はバッチの無い形で測った値で、[バッチで減らせる分の見積もり](agent-throughput.md#バッチで減らせる分の見積もり)の `malloc` と `free` の行 (送る向き 6.1%、受ける向き 14.6%) に当たります
+   buffer はデータプレーンが起動の時に確保し、トンネルのバッチの枠になって `batch` の項に数えます ([バッチの作りの規則](agent-throughput.md#バッチの作りの規則))。
+   unsafe も依存も増えません
 2. 割り当て器は OS の標準のままにし、mimalloc と自前の割り当て器 (D) は採りません。
-   mimalloc は起動の後の RSS が 25 MiB 増え、効果は E より小さいためです。
-   D は unsafe を製品に入れる割に、効果が E より小さく、E の後に残る効果は小さいためです
-3. Linux の build は、今は musl の静的な build (C の target) のままにします。
-   glibc に動的に結ぶ build (`x86_64-unknown-linux-gnu.2.17` と aarch64 の同じ形) は、バッチの段で写しを減らした後に、残る差を測り直してから決めます。
-   今の測りでは、E の後も glibc の build は受ける向きの CPU が 8% 少なく、速さが 8% 高くなりました。
-   メモリは起動の後に 1 から 2 MiB 多く、洪水の後は C より少なく、UDP のセッションが閉じた後に RSS が増える C の振る舞いもありません。
-   差の大部分は `memcpy` と `memset` の速さで、バッチの段で写しが減ると差も変わる見込みです。
-   glibc の build は、静的な 1 つのファイルで musl の Linux と libc を持たない image でも動く、という性質を失い、agent の image の土台も替わります ([実行ファイルと配布](#実行ファイルと配布))。
-   後で glibc に替える場合は、バッチの段の目標の基準の値 ([目標](agent-throughput.md#目標)) を測り直し、目標を導き直します。
-   替える前に、E+A と C の UDP の往復の遅れ (`--udp-ping`) を測ります
+   mimalloc は起動の後の RSS が増え、効果は E より小さいためです。
+   D は unsafe を製品に入れる割に、E の後に残る効果が小さいためです
+3. Linux の build は、musl の静的な build のままにします。
+   glibc に動的に結ぶ build (`x86_64-unknown-linux-gnu.2.17` と aarch64 の同じ形) は、バッチの後に残る差を測り直してから決めます。
+   glibc の build は、静的な 1 つのファイルで musl の Linux と libc を持たない image でも動く、という性質を失います。
+   替える場合は、目標の基準の値 ([目標](agent-throughput.md#目標)) を測り直し、目標を導き直します。
+   替える前に、UDP の往復の遅れ (`--udp-ping`) を測ります
 
 まだ確かめていないことは次のとおりです。
 
-- E+A と C を直接比べた値。表の値は掛け合わせた見積もりです
 - どの build の UDP の往復の遅れ (`--udp-ping`) も測っていません
 - glibc の build は glibc 2.41 (ラボの Debian 13) の上でだけ動かしました。2.41 より古い glibc の上では動かしていません
 - glibc の build で、NSS の module が名前の解決に使うメモリが、上界の名前の解決の項 (スレッドごとに `getaddrinfo` の作業の 64 KiB) に収まること
@@ -946,7 +818,7 @@ agent はどの OS でも利用者の権限で動き、Go の v1 のユーザー
 CI はこの 2 つの OS で build と単体の試験を流しますが、実機での動作は未確認です。
 
 device の層は packet ごとに確保せず、呼び手の buffer に復号と暗号化を行います。
-バッチの段では、この buffer がバッチの配列の枠になります ([速さを制限しない経路の agent の性能](agent-throughput.md#バッチの作りの規則))。
+この buffer はバッチの配列の枠で、`batch` の項に数えます ([バッチの作りの規則](agent-throughput.md#バッチの作りの規則))。
 
 ### 入口の検査
 
@@ -1203,7 +1075,7 @@ TIME_WAIT の 4 つ組への組も、TIME_WAIT を外さずに、使い直せな
 
 [目標と制約](../userspace/wgstack-performance.md#目標と制約)の性能の目標 (byte あたりの CPU が gVisor の 0.6 倍以下、スループットが Linux の 0.9 倍以上など) は置き換えの条件に入れません。
 置き換えの後に測り、性能の段階として追います。
-Linux の `sendmmsg` と UDP の GSO のような system call のまとめも、置き換えの後に回します。
+Linux の `sendmmsg` と UDP の GSO のような system call のまとめは、性能の作業として実装済みです ([速さを制限しない経路の agent の性能](agent-throughput.md#目標))。
 
 qbench の条件は関門の表で確かめました ([qbench での測定](#qbench-での測定))。
 
@@ -1951,8 +1823,8 @@ Rust が同じ loop を速く回す理由 (vector の命令にするか) は確�
 - checksum:Go の核の実装より約 1.4 倍遅い 1 の補数の和を、64 bit の加算か vector の命令にします。
   受信と送信の両方の 1 segment ごとに約 140 ns です
 - qbench の起床の費用:20 Mbit/s の経路の byte あたりの CPU (約 7.5 ns) は、速さを外した経路 (約 1 ns) の 7 倍で、packet ごとの起床と system call の固定の費用です。
-  製品のデータプレーンでも packet ごとに起きるので、`sendmmsg` と `recvmmsg` のまとめ ([置き換えの後の作業](#置き換えの後の作業)) で減る見込みです。
-  製品のデータプレーンの起床の費用は測っていません
+  製品のデータプレーンでも packet ごとに起きますが、`sendmmsg` と `recvmmsg` のまとめは実装済みです ([目標](agent-throughput.md#目標))。
+  実装後の製品のデータプレーンの起床の費用は測っていません
 - 並べ替えの直後の窓 (`send/reorder`):原因は上のとおり取り消しの判定で、直し方は [置き換えの後の作業](#置き換えの後の作業) に挙げます
 
 #### qbench の値で比べられるもの
@@ -2011,13 +1883,12 @@ agent の置き換えが終わった後に、次の作業を順に決めます�
 - 参照の Linux が 7.2 に移ったことで生じた受け手の変更の候補。
   候補の一覧は `docs/design/userspace/wgstack-receive-linux72.md` にあります
 - dial の側と server の Device ([dial の側を足す継ぎ目](#dial-の側を足す継ぎ目))
-- 送信の経路の system call のまとめ (Linux の `sendmmsg` と UDP の GSO) と、受信の経路のまとめ。
-  目標と制約は [速さを制限しない経路の agent の性能](agent-throughput.md#目標) にあります
+- データプレーンを複数のスレッドに分けること (暗号を並べて行うなど)。
+  受ける向きのバッチの結果が必達の線に届いていない点も、ここで見直します ([作業の順](agent-throughput.md#作業の順))
 - 受ける向きの大きな転送の間の UDP の遅れ:速さを制限しない経路で、client から LAN へ大きな TCP の転送が走る間、UDP の中継の往復の p50 が約 7 ms で、gVisor の約 3 ms より長くなります。
-  本番のゲームの UDP の流れに対する gVisor からの後退です。
   UDP の datagram は、WireGuard のソケットの受信の待ち行列に溜まった TCP のデータの後ろに並びます。
   待ち行列の量は wgstack が広告する受信の窓で決まり、窓の合計がソケットの受信のバッファより大きいときは、そのバッファの大きさで頭を打ちます ([UDP の往復の遅れ](agent-throughput.md#udp-の往復の遅れ))。
-  直し方は、遅れの目標で受信の窓を頭打ちにする変更として、バッチの作業の [受信の窓の段](agent-throughput.md#受信の窓の段) で行います
+  受信の窓を遅れの目標で頭打ちにする案は、設計の見直しの間は保留です ([受信の窓の頭打ちの候補](agent-throughput.md#受信の窓の頭打ちの候補))
 - 不要な速い再送の取り消し:再送を確認した最初の ACK で判定する Eifel の検出 (RFC 3522) と、RFC 4015 の応答。
   同じ TSval の刻みの中で再送した回復も取り消せるようにします ([qbench での測定](#qbench-での測定)の `send/reorder`)。
   凍結した Go の wgstack と出力が変わるので、Go の記録との bit の一致を求める期間が終わった後に入れます
@@ -2026,7 +1897,7 @@ agent の置き換えが終わった後に、次の作業を順に決めます�
 
 - 写さずに読み書きする口:`read_slices` と `write_slices` を足すか。CPU を測ってから決めます
 - 受け付けるアドレスが増えたときの待ち受けと UDP の endpoint の表の持ち方 (dial の側を足すときに決めます)
-- glibc に動的に結ぶ build:バッチの段で写しを減らした後に、musl の静的な build との差を測り直して決めます ([決めたこと](#決めたこと))
+- glibc に動的に結ぶ build:バッチの後に、musl の静的な build との差を測り直して決めます ([決めたこと](#決めたこと))
 - 割り当て器の丸めの係数:OS の標準の割り当て器の係数を測ります
 
 ## 未確認の点

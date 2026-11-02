@@ -3,7 +3,7 @@
 v2 は、agent と server の両方を Rust で書き直し、製品から Go を取り除く版です。
 この文書は移行の決定事項を定めます。
 Rust のコードは `crates/` 以下にあり、ビルドと検査は[テストの規範](../../development/testing.md)の B13 から B15 に従います。
-実装済みのものは agent のユーザー空間モードとその周りのコマンドで、wire の版 1 の型、WireGuard の device の層、wgstack の Rust 版、データプレーン、中継、制御プレーンを含みます。
+実装済みのものは agent のユーザー空間モードとその周りのコマンドで、wire の版 1 の型、WireGuard の device の層、wgstack の Rust 版、データプレーン、トンネルの送受信のバッチ、中継、制御プレーンを含みます。
 server と agent のカーネルモードは未実装です。
 
 ## 動機
@@ -40,7 +40,21 @@ v1.x は Go のまま保守だけを続けます。
 ## agent の置き換え
 
 Rust の agent が Go の v1 の agent のユーザー空間モードを置き換えるための設計は、[Rust の agent が Go の agent を置き換えるための設計](agent-parity.md)にあります。
-速さを制限しない経路の基準の値と、送受信をまとめる段の目標は、[速さを制限しない経路の agent の性能](agent-throughput.md)にあります。
+速さを制限しない経路の基準の値と、トンネルの送受信をまとめる設計 (バッチ) の目標と規則は、[速さを制限しない経路の agent の性能](agent-throughput.md)にあります。
+
+## 文書の一覧
+
+この節の文書は、必要な分野だけを読みます。
+
+| 文書 | 定めるもの | 読まなくてよい場合 |
+|---|---|---|
+| [agent の置き換え](agent-parity.md) | Go の agent の置き換えの完成の条件、UDP の中継、データプレーンの送る経路、メモリの上界の行、CLI と設定、ラボの切り替え | WireGuard の層か核だけを変える場合は、該当の節だけで足ります |
+| [Rust の agent の制御プレーン](agent-control.md) | server と話す制御の部分 | データプレーンだけを変える場合 |
+| [agent の WireGuard の device の層](wireguard-device.md) | sanstun の上の sans-IO の device、キュー、ハンドシェイクの規則 | 核と中継だけを変える場合 |
+| [wgstack の Rust 版](wgstack-rs.md) | 核の API、データプレーンの駆動、メモリ、SYN cookie、検証、qbench | device の層と制御プレーンだけを変える場合 |
+| [速さを制限しない経路の agent の性能](agent-throughput.md) | 速さと byte あたりの CPU の基準の値、バッチの目標と規則と作り、判定の手順 | 性能に関わらない変更では不要です |
+| [v2 の試験の道具](test-tooling.md) | 台本、runner、DUT の口、Go の wgstack の記録、qbench、fuzz、関門 | 製品のコードだけを変える場合は、関門の節だけで足ります |
+| [メモリの上界の表 (agent)](agent-bound.md) と [同 (wgstack)](wgstack-bound.md) | 試験が生成する表で、手で読む必要はありません | 上界の式を変えない場合は不要です |
 
 ## 設計の制約
 
