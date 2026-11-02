@@ -152,8 +152,9 @@ pub struct Status {
     pub send_errors: u64,
     /// Receive errors the data plane counted and skipped.
     pub receive_errors: u64,
-    /// Datagrams the kernel cut short or whose control message did not fit (`MSG_TRUNC`,
-    /// `MSG_CTRUNC`), dropped and counted.
+    /// Receive buffers the kernel cut short or whose control message did not fit (`MSG_TRUNC`,
+    /// `MSG_CTRUNC`), dropped and counted. A buffer is one datagram, or one UDP GRO buffer that
+    /// carries several segments, so a GRO buffer counts once.
     pub receive_truncated: u64,
     /// The socket's buffers, measured when it was opened.
     pub socket_buffers: SocketBuffers,
