@@ -11,6 +11,7 @@ use tokio::sync::{Mutex, Notify, watch};
 use wgft_proto::{GoTime, Heartbeat, Join, STATUS_ERROR, STATUS_OK, State, TunnelStatus, WgConfig};
 use zeroize::Zeroizing;
 
+use crate::batching::Batching;
 use crate::config::allow_targets::AllowList;
 use crate::credentials::{self, Credentials};
 use crate::ctlserver;
@@ -51,6 +52,8 @@ pub struct Options {
     pub allow_targets: Option<AllowList>,
     /// フロー数の上限 (`WGFT_MAX_UDP_FLOWS` と `WGFT_MAX_TCP_FLOWS`)。
     pub limits: Limits,
+    /// トンネルのバッチ (`WGFT_AGENT_BATCH_MIB`)。起動の時に 1 回だけ決める。
+    pub batching: Batching,
 }
 
 // 接続文字列は秘密なので Debug に出さない
@@ -70,6 +73,7 @@ impl std::fmt::Debug for Options {
             .field("version", &self.version)
             .field("allow_targets", &self.allow_targets)
             .field("limits", &self.limits)
+            .field("batching", &self.batching)
             .finish()
     }
 }
@@ -160,6 +164,7 @@ impl Agent {
                 cfg,
                 &mut self.dataplane,
                 wgft_wgstack::Limits::with_max_flows(self.opts.limits.tcp),
+                self.opts.batching,
                 Some(&clock),
                 Arc::clone(&self.tunnel_dead),
             )
@@ -196,7 +201,8 @@ impl Agent {
             self.bound_listeners = counts;
             let (tcp, udp) = counts;
             let bound =
-                crate::memory::MemoryBound::for_limits(self.opts.limits).with_listeners(tcp, udp);
+                crate::memory::MemoryBound::for_limits(self.opts.limits, self.opts.batching)
+                    .with_listeners(tcp, udp);
             logf!("{}", bound.listeners_line(tcp, udp));
         }
         saved.map_err(|e| format!("save credentials file: {e}"))
