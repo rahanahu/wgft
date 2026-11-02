@@ -7,7 +7,17 @@
 //! - `0` は両方の向きのバッチを切り、1 つずつ送受信する。空は v1 と同じくフロー数の上限から導く
 //! - Linux だけがバッチを使う。ほかの OS は 1 つずつ送受信し、枠は 1 つである
 
+use std::sync::OnceLock;
+
 use crate::flowpool;
+
+/// The crypto workers of this process's data plane, read once at start
+/// (`wgft_udp_batch::pool::worker_count`): the memory bound counts the most a build may start, and
+/// the data plane starts these.
+pub fn crypto_workers() -> usize {
+    static WORKERS: OnceLock<usize> = OnceLock::new();
+    *WORKERS.get_or_init(wgft_udp_batch::pool::worker_count)
+}
 
 /// The most slots per direction: datagrams one `recvmmsg` or `sendmmsg` call may carry. The
 /// wake-up's latency budget ends a batch long before this at the lab's per-packet cost, and it is
@@ -125,11 +135,37 @@ impl Batching {
         }
     }
 
-    /// The bytes of the batch buffers this build allocates for it, at the largest MTU: the memory
-    /// bound's `batch` term.
+    /// The bytes of the batch buffers this build allocates for it, at the largest MTU and with the
+    /// most crypto lanes a host can give it: the memory bound's `batch` term. A host with fewer
+    /// CPUs allocates no more.
     #[must_use]
     pub fn bytes(self) -> usize {
-        crate::dataplane::batch::store_bytes(self.running(), wgft_wgstack::MAX_MTU)
+        crate::dataplane::batch::all_store_bytes(
+            self.running(),
+            wgft_wgstack::MAX_MTU,
+            self.bound_lanes(),
+        )
+    }
+
+    /// The crypto lanes the bound counts: those of the most crypto workers this build starts.
+    fn bound_lanes(self) -> usize {
+        crate::dataplane::batch::crypto_lanes(self.running(), wgft_udp_batch::pool::MAX_WORKERS)
+    }
+
+    /// The bytes the crypto workers hold beyond the batch store, with the most workers this build
+    /// starts: their stacks, their places and the lanes' job lists. The memory bound's `crypto` term.
+    #[must_use]
+    pub fn crypto_bytes(self) -> usize {
+        match self.bound_lanes() {
+            1 => 0,
+            lanes => wgft_udp_batch::crypto::Crypto::bytes(lanes),
+        }
+    }
+
+    /// The crypto lanes the data plane runs with this host's [`crypto_workers`].
+    #[must_use]
+    pub fn crypto_lanes(self) -> usize {
+        crate::dataplane::batch::crypto_lanes(self.running(), crypto_workers())
     }
 
     /// The start line that says what the setting does, after the memory bound lines.
@@ -180,13 +216,16 @@ pub fn derived_budget(limits: flowpool::Limits) -> u64 {
     flow_caps_memory(limits).saturating_mul(SHARE_NUM) / SHARE_DEN
 }
 
-/// The batch store of `slots` slots per direction with batching on, at the largest MTU.
+/// The batch stores of `slots` slots per direction with batching on, at the largest MTU and with
+/// the most crypto lanes: what the setting's budget must hold.
 fn store_of(slots: usize) -> u64 {
     let b = Batching::On {
         slots,
         source: Source::Set,
     };
-    let bytes = crate::dataplane::batch::store_bytes(b, wgft_wgstack::MAX_MTU);
+    // 作業者と重ねる道の 2 つ目の置き場も含めて、予算の内に収める
+    let lanes = crate::dataplane::batch::crypto_lanes(b, wgft_udp_batch::pool::MAX_WORKERS);
+    let bytes = crate::dataplane::batch::all_store_bytes(b, wgft_wgstack::MAX_MTU, lanes);
     u64::try_from(bytes).unwrap_or(u64::MAX)
 }
 
@@ -221,8 +260,23 @@ mod tests {
             slots: b.slots() + 1,
             source: Source::Set,
         };
-        crate::dataplane::batch::store_bytes(b, wgft_wgstack::MAX_MTU) <= budget
-            && crate::dataplane::batch::store_bytes(next, wgft_wgstack::MAX_MTU) > budget
+        u64::try_from(budget)
+            .is_ok_and(|budget| store_of(b.slots()) <= budget && store_of(next.slots()) > budget)
+    }
+
+    #[test]
+    fn the_setting_bounds_every_batch_store() {
+        let caps = flowpool::Limits::default();
+        for mib in 1..=48 {
+            let b = Batching::new(Some(mib), caps);
+            let budget = usize::try_from(mib).unwrap() << 20;
+            if cfg!(target_os = "linux") {
+                assert!(b.bytes() <= budget, "{mib} MiB: {} bytes", b.bytes());
+            }
+            // 減らしたと書くのは、最大の枠の数の置き場でも予算に余るときだけ
+            let full = u64::try_from(budget).unwrap() > store_of(MAX_SLOTS);
+            assert_eq!(b.source() == Some(Source::Lowered), full, "{mib} MiB");
+        }
     }
 
     #[test]

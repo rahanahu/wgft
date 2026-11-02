@@ -675,6 +675,7 @@ Go の `memory soft limit:` の行の代わりで、ラボの `lifecycle.sh` の
 - WireGuard の device:[device のキューと上界](wireguard-device.md#キューと上界) の値です
 - トンネルのバッチ:WireGuard のソケットの受信と送信のバッチの置き場です。
   データプレーンが device の層に渡す buffer は、この置き場の枠です (下の実装の項を参照)
+- 暗号の作業者:Linux のバッチの道で暗号を行う作業者のスレッドのスタックと状態と、仕事の列です ([データプレーンの暗号の作業者](agent-crypto-workers.md))
 - TCP の中継:接続 1 本の固定の大きさと、データが流れる間だけ借りる写しのバッファ (向きごとに 32 KiB、Go の `internal/netpipe` と同じ) の和 × `WGFT_MAX_TCP_FLOWS` と、置き場に残す 16 × 32 KiB の和です
 - UDP の中継:応答のバッファの枠の 64 × 65535 byte と、セッション 1 つの固定の大きさ × `WGFT_MAX_UDP_FLOWS` です
 - 待ち受け:待ち受け 1 つの固定の大きさ × 開いた待ち受けの数です。
@@ -711,7 +712,13 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
   MTU は最大の 9216 で数えます。
   データの packet は、この枠を通るだけで、packet ごとに確保も写しもしません。
   試験 (`wgft-udp-batch` の `the_store_is_what_store_bytes_counts` と、`dataplane::batch` の `the_running_store_is_what_the_bound_counts`) が、置き場の確保した長さとこの項が一致することを確かめます。
-  置き場は起動の時に確保するので、ラボの check 5 と 5b の洪水が満たせる項に `batch` を加えます
+  置き場は起動の時に確保するので、ラボの check 5 と 5b の洪水が満たせる項に `batch` を加えます。
+  暗号の作業者を使う置き場は、受信の平文の領域をレーンに分けます ([データプレーンの暗号の作業者](agent-crypto-workers.md#メモリ))。
+  作業者と重ねる受信の相のための 2 つ目の受信の置き場も、この項に数えます
+  項はこのビルドが作る最も多い作業者のレーンで数えるので、CPU の少ないホストの置き場はこの項より大きくなりません
+- 暗号の作業者:`crypto` の項で、このビルドが作る最も多い作業者 (2 つ) のスタック (128 KiB)、スレッドの状態の許容 (4 KiB)、作業者ごとの枠と、レーンごとの仕事の列です (`Batching::crypto_bytes`)。
+  ホストの CPU の数に依らずに最も多い数で数えるので、起動の行と上界の表はホストで変わりません。
+  作業者を使わない道 (Windows、macOS、`WGFT_AGENT_BATCH_MIB=0`、枠が作業者の数以下) では 0 です
 - TCP の中継:接続 1 本につき、中継の task の future、tokio の task と I/O の登録の余裕 (各 512 byte)、両方の向きの大きいバッファ (32 KiB ずつ) です。
   データプレーンのスレッドが使い回しに残す大きいバッファ 16 個を足します。
   下の項の行では、接続ごとの task と登録の部分と、大きいバッファの部分を分けて書きます
@@ -769,7 +776,7 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
 行の値が RSS よりずっと大きいので、次の仕組みで上界を実際の保持と比べます。
 
 - 項の行:`memory bound:` の行の次に、項ごとの MiB を次の形の 1 行で書きます。
-  `memory bound terms: base <N> MiB, core fixed <N> MiB, core arrays <N> MiB, core flows <N> MiB, tables <N> MiB, driver <N> MiB, device <N> MiB, batch <N> MiB, tcp relay <N> MiB, tcp bulk <N> MiB, udp relay <N> MiB, resolver <N> MiB, state <N> MiB; per listener, not in the line: tcp <N> KiB, udp <N> KiB`
+  `memory bound terms: base <N> MiB, core fixed <N> MiB, core arrays <N> MiB, core flows <N> MiB, tables <N> MiB, driver <N> MiB, device <N> MiB, batch <N> MiB, crypto <N> MiB, tcp relay <N> MiB, tcp bulk <N> MiB, udp relay <N> MiB, resolver <N> MiB, state <N> MiB; per listener, not in the line: tcp <N> KiB, udp <N> KiB`
   核の項は、作成の時に作って流れによらず持つ固定の部分 (`Bound::fix`、`core fixed`)、接続の枠が初めて使われた時から持つ floor の記録の輪と区間の表 (`Bound::floor_arrays`、`core arrays`)、残り (`core flows`) に分けます。
   TCP の中継の項は、接続ごとの task と登録の部分 (`tcp relay`) と大きいバッファの部分 (`tcp bulk`) に分けます。
   形は保証の外で、ラボの check 5 と 5b が読みます

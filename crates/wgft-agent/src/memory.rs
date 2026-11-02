@@ -143,6 +143,9 @@ pub struct MemoryBound {
     /// buffers and their system call headers. The data plane passes its slots to the device, so no
     /// other buffer carries a packet.
     pub batch: usize,
+    /// The tunnel's crypto workers ([`Batching::crypto_bytes`]): their stacks and thread state,
+    /// their places and the lanes' job lists, for the most workers this build starts.
+    pub crypto: usize,
     /// The TCP relay without its bulk buffers: per connection its task and socket.
     pub tcp: usize,
     /// The TCP relay's bulk buffers: both directions' per connection, and the ones the data plane
@@ -189,6 +192,7 @@ impl MemoryBound {
         // device の層のキュー。データプレーンが device に渡す buffer はバッチの置き場の枠である
         let device = device_bytes();
         let batch = batching.bytes();
+        let crypto = batching.crypto_bytes();
         // 接続ごとの項と、データプレーンのスレッドが使い回しのために残す大きいバッファ
         let tcp = limits.tcp.saturating_mul(tcp_relay_conn());
         let tcp_bulk = limits
@@ -198,7 +202,7 @@ impl MemoryBound {
         let udp = REPLY_SLOTS * UDP_BUF + limits.udp.saturating_mul(udp_session());
         let resolver = (TARGET_PERMITS + ENDPOINT_PERMITS) * RESOLVER_THREAD;
         let parts = [
-            BASE, core, tables, driver, device, batch, tcp, tcp_bulk, udp, resolver, STATE,
+            BASE, core, tables, driver, device, batch, crypto, tcp, tcp_bulk, udp, resolver, STATE,
         ];
         Self {
             base: BASE,
@@ -209,6 +213,7 @@ impl MemoryBound {
             driver,
             device,
             batch,
+            crypto,
             tcp,
             tcp_bulk,
             udp,
@@ -241,7 +246,7 @@ impl MemoryBound {
 
     /// The terms in the order of the terms line, with their names there.
     #[must_use]
-    pub fn terms(&self) -> [(&'static str, usize); 13] {
+    pub fn terms(&self) -> [(&'static str, usize); 14] {
         [
             ("base", self.base),
             ("core fixed", self.core_fixed),
@@ -256,6 +261,7 @@ impl MemoryBound {
             ("driver", self.driver),
             ("device", self.device),
             ("batch", self.batch),
+            ("crypto", self.crypto),
             ("tcp relay", self.tcp),
             ("tcp bulk", self.tcp_bulk),
             ("udp relay", self.udp),

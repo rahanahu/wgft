@@ -26,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
+use wgft_udp_batch::crypto::{Crypto, PARALLEL_MIN_BYTES};
 use wgft_wireguard::{Device, Event, PublicKey, Transmit};
 
 use super::batch::{
@@ -368,11 +369,18 @@ pub(super) fn pump<U: Upper>(
 ///
 /// 読んだ datagram をすべて復号してから、UDP の packet を先に上の層に渡す。残りの packet もあれば、
 /// 起こす waker を起こして順を譲り、中継の task が UDP の datagram を先に運べるようにしてから、残りを
-/// 読んだ順に渡す。核に渡す TCP の segment の順は変えない。
+/// 読んだ順に渡す。核に渡す TCP の segment の順は変えない。暗号の作業者 (`crypto`) があれば、復号は
+/// 回 (round) ごとに作業者と分けて行い、この規則を回ごとに当てる
+/// (`docs/design/v2/agent-crypto-workers.md`)。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the receive batch's state lives in the driver's loop"
+)]
 pub(super) async fn receive_batch<U: Upper>(
     local: &Local<U>,
     source: &mut impl Source,
     rx: &mut RxBatch,
+    crypto: Option<&mut Crypto>,
     now: Instant,
     vlen: usize,
     receive_errors: &mut u64,
@@ -393,36 +401,230 @@ pub(super) async fn receive_batch<U: Upper>(
             return Ok((0, Duration::ZERO));
         }
     };
-    let (end, udp, others) = {
+    let Some(crypto) = crypto else {
+        let (end, udp, others) = {
+            let mut guard = local.0.borrow();
+            let inner = &mut *guard;
+            let end = decrypt(&mut inner.device, rx, n, now);
+            let upper = &mut inner.upper;
+            let (udp, others) =
+                each_packet(&rx.plain[0][..end], true, |p| upper.handle_packet(now, p));
+            (end, udp, others)
+        };
+        let yielded = if others > 0 {
+            let yielded = udp_first(local, udp, wakers).await?;
+            let mut guard = local.0.borrow();
+            let upper = &mut guard.upper;
+            each_packet(&rx.plain[0][..end], false, |p| upper.handle_packet(now, p));
+            yielded
+        } else {
+            Duration::ZERO
+        };
+        return Ok((n, yielded));
+    };
+    let yielded = open_and_deliver(local, crypto, rx, n, now, wakers).await?;
+    Ok((n, yielded))
+}
+
+/// 埋めた `n` 個の枠を暗号の作業者と回ごとに復号し、回ごとに UDP を先に上の層に渡す。譲っていた時間を返す。
+async fn open_and_deliver<U: Upper>(
+    local: &Local<U>,
+    crypto: &mut Crypto,
+    rx: &mut RxBatch,
+    n: usize,
+    now: Instant,
+    wakers: &mut Vec<Waker>,
+) -> io::Result<Duration> {
+    crypto.start_open(rx, n);
+    let mut yielded = Duration::ZERO;
+    loop {
+        let (udp, others) = {
+            let mut guard = local.0.borrow();
+            let inner = &mut *guard;
+            let opened = crypto
+                .open_round(rx, &mut inner.device, now)
+                .map_err(poisoned)?;
+            if !opened {
+                break;
+            }
+            let upper = &mut inner.upper;
+            crypto.each_packet(rx, true, |p| upper.handle_packet(now, p))
+        };
+        if others == 0 {
+            continue;
+        }
+        yielded += udp_first(local, udp, wakers).await?;
         let mut guard = local.0.borrow();
-        let inner = &mut *guard;
-        let end = decrypt(&mut inner.device, rx, n, now);
-        let upper = &mut inner.upper;
-        let (udp, others) = each_packet(&rx.plain[0][..end], true, |p| upper.handle_packet(now, p));
-        (end, udp, others)
+        let upper = &mut guard.upper;
+        crypto.each_packet(rx, false, |p| upper.handle_packet(now, p));
+    }
+    Ok(yielded)
+}
+
+fn poisoned(e: wgft_udp_batch::pool::Poisoned) -> io::Error {
+    io::Error::other(format!("{e}, which ended this tunnel generation"))
+}
+
+/// 作業者に渡した受信の置き場 `set` のバッチを取り戻して、届いた順に受け付ける。
+fn finish_pipelined<U: Upper>(
+    local: &Local<U>,
+    crypto: &mut Crypto,
+    rx: &mut RxBatch,
+    set: usize,
+    now: Instant,
+) -> io::Result<()> {
+    let mut guard = local.0.borrow();
+    crypto
+        .finish_pipelined(set, rx, &mut guard.device, now)
+        .map_err(poisoned)
+}
+
+/// 受け付けた置き場 `set` のバッチを、UDP を先に上の層に渡す。譲っていた時間を返す。
+async fn deliver_pipelined<U: Upper>(
+    local: &Local<U>,
+    crypto: &Crypto,
+    rx: &RxBatch,
+    set: usize,
+    now: Instant,
+    wakers: &mut Vec<Waker>,
+) -> io::Result<Duration> {
+    let (udp, others) = {
+        let mut guard = local.0.borrow();
+        let upper = &mut guard.upper;
+        crypto.each_pipelined(set, rx, true, |p| upper.handle_packet(now, p))
     };
     if others == 0 {
-        return Ok((n, Duration::ZERO));
+        return Ok(Duration::ZERO);
     }
-    let mut yielded = Duration::ZERO;
-    if udp > 0 {
-        local.0.borrow().upper.poll_wakers(wakers);
-        for waker in wakers.drain(..) {
-            waker.wake();
-        }
-        let before = clock::now();
-        tokio::task::yield_now().await;
-        yielded = clock::now().saturating_duration_since(before);
-        if local.is_poisoned() {
-            return Err(io::Error::other(
-                "a panic inside the TCP/IP core ended this tunnel generation",
-            ));
-        }
-    }
+    let yielded = udp_first(local, udp, wakers).await?;
     let mut guard = local.0.borrow();
     let upper = &mut guard.upper;
-    each_packet(&rx.plain[0][..end], false, |p| upper.handle_packet(now, p));
-    Ok((n, yielded))
+    crypto.each_pipelined(set, rx, false, |p| upper.handle_packet(now, p));
+    Ok(yielded)
+}
+
+/// 受信の相を、暗号の作業者と重ねて行う (`docs/design/v2/agent-crypto-workers.md` の「受信の重ね」)。
+/// 2 つの受信の置き場を交互に使う。
+///
+/// - 読んだバッチが求めた枠を満たし (ソケットにまだ待つものがあり)、作業者のレーンに収まるときは、
+///   そのバッチを届いた順に始め、作業者にあった前のバッチを受け付け、始めたバッチを作業者に渡し、
+///   前のバッチを UDP を先に上の層に渡し、次を読む。作業者は、前のバッチの核と中継の仕事と次の読みの
+///   間に復号する。作業者に渡すのは 1 度に 1 つのバッチだけである
+/// - ほかのバッチ (ソケットが空になった短い読み、データでない datagram を含むもの、収まらないもの) では、
+///   作業者にあるバッチを先に受け付けて渡してから、そのバッチを回ごとに扱う ([`open_and_deliver`])。
+///   ハンドシェイクは、それより前に届いたデータの後に扱われる
+/// - 相の終わりには、作業者にバッチを残さない。何もしていない時の datagram は待たない
+///
+/// 予算で止めたかを返す。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the receive phase's state lives in the driver's loop"
+)]
+pub(super) async fn receive_pipelined<U: Upper>(
+    local: &Local<U>,
+    source: &mut impl Source,
+    stores: [&mut RxBatch; 2],
+    crypto: &mut Crypto,
+    wake: Wake,
+    now: &mut Instant,
+    pace: &mut Pace,
+    receive_errors: &mut u64,
+    wakers: &mut Vec<Waker>,
+) -> io::Result<bool> {
+    let st = stores;
+    let mut cur = 0;
+    let mut done = 0;
+    let mut more = false;
+    loop {
+        let vlen = pace.units(BATCH_TIME, st[cur].slots());
+        let n = match source.recv(st[cur], vlen) {
+            Ok(n) => n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                0
+            }
+            Err(_) => {
+                *receive_errors += 1;
+                0
+            }
+        };
+        let mut yielded = Duration::ZERO;
+        if n >= 2 && n == vlen && crypto.can_pipeline(st[cur], n) {
+            {
+                let mut guard = local.0.borrow();
+                crypto.begin_pipelined(cur, st[cur], n, &mut guard.device, *now);
+            }
+            let prev = crypto.in_flight();
+            if let Some(p) = prev {
+                finish_pipelined(local, crypto, st[p], p, *now)?;
+            }
+            crypto.offer_pipelined(cur, st[cur]).map_err(poisoned)?;
+            if let Some(p) = prev {
+                yielded += deliver_pipelined(local, crypto, st[p], p, *now, wakers).await?;
+            }
+            cur ^= 1;
+        } else {
+            if let Some(p) = crypto.in_flight() {
+                finish_pipelined(local, crypto, st[p], p, *now)?;
+                yielded += deliver_pipelined(local, crypto, st[p], p, *now, wakers).await?;
+            }
+            if n > 0 {
+                yielded += open_and_deliver(local, crypto, st[cur], n, *now, wakers).await?;
+            }
+        }
+        done += n;
+        let after = clock::now();
+        // 中継の task に譲っていた時間は、このバッチの仕事ではない
+        pace.record(
+            after
+                .saturating_duration_since(*now)
+                .saturating_sub(yielded),
+            n,
+        );
+        *now = after;
+        if n < vlen {
+            break;
+        }
+        if wake.spent(*now, done) {
+            more = true;
+            break;
+        }
+    }
+    if let Some(p) = crypto.in_flight() {
+        finish_pipelined(local, crypto, st[p], p, *now)?;
+        deliver_pipelined(local, crypto, st[p], p, *now, wakers).await?;
+        *now = clock::now();
+    }
+    Ok(more)
+}
+
+/// UDP の packet を上の層に渡した後で、残りを渡す前に、起こす waker を起こして順を譲る。中継の task が
+/// UDP の datagram を先に運ぶ。譲っていた時間を返す。
+async fn udp_first<U: Upper>(
+    local: &Local<U>,
+    udp: usize,
+    wakers: &mut Vec<Waker>,
+) -> io::Result<Duration> {
+    if udp == 0 {
+        return Ok(Duration::ZERO);
+    }
+    local.0.borrow().upper.poll_wakers(wakers);
+    for waker in wakers.drain(..) {
+        waker.wake();
+    }
+    let before = clock::now();
+    tokio::task::yield_now().await;
+    let yielded = clock::now().saturating_duration_since(before);
+    if local.is_poisoned() {
+        return Err(io::Error::other(
+            "a panic inside the TCP/IP core ended this tunnel generation",
+        ));
+    }
+    Ok(yielded)
 }
 
 /// 埋めた `n` 個の枠の datagram を、GRO がまとめた列は segment ごとに、device の層で平文の領域に
@@ -482,10 +684,10 @@ impl Rest {
 
 /// 1 回の起床の始まりと、時間で区切るかどうか。
 #[derive(Clone, Copy)]
-struct Wake {
-    start: Instant,
+pub(super) struct Wake {
+    pub(super) start: Instant,
     /// Linux でバッチを使うときだけ時間で区切る。1 つずつ送受信する道は数で区切る。
-    timed: bool,
+    pub(super) timed: bool,
 }
 
 impl Wake {
@@ -598,7 +800,22 @@ pub(super) async fn drive<U: Upper>(
         .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
     let batching = settings.batching.running();
     // バッチの置き場は起動の時に 1 回だけ確保する。メモリの上界の `batch` の項が数える
-    let mut rx = rx_store(batching, max_datagram);
+    // 暗号の作業者は Linux のバッチの道だけで、起動の時に 1 回だけ決めた数を使う
+    let lanes = batching.crypto_lanes();
+    let mut rx = rx_store(batching, max_datagram, lanes);
+    let mut crypto = (lanes > 1 && rx.batched()).then(|| Crypto::new(lanes, PARALLEL_MIN_BYTES));
+    // 作業者と重ねる受信の相の 2 つ目の置き場。メモリの上界の `batch` の項に数える
+    let mut rx2 = crypto
+        .as_ref()
+        .filter(|c| c.workers() > 0)
+        .map(|_| rx_store(batching, max_datagram, lanes));
+    if let Some(c) = &crypto {
+        crate::logf!(
+            "tunnel crypto: {} worker threads beside the data plane for receive rounds of {} KiB or more",
+            c.workers(),
+            PARALLEL_MIN_BYTES >> 10
+        );
+    }
     // Linux でバッチを使うときだけ時間で区切る。1 つずつ送受信する道 (Windows、macOS、
     // WGFT_AGENT_BATCH_MIB=0) は、バッチの前と同じく 1 回の起床を数で区切り、時計をバッチごとに読まない
     let timed = rx.batched();
@@ -621,36 +838,52 @@ pub(super) async fn drive<U: Upper>(
         // 引くので、ACK は起床ごとに 1 回の割で作られる
         let mut rx_more = false;
         let mut rx_done = 0;
-        loop {
-            let vlen = if timed {
-                rx_pace.units(BATCH_TIME, rx.slots())
-            } else {
-                1
-            };
-            let (n, yielded) = receive_batch(
+        if let (Some(c), Some(rx2)) = (crypto.as_mut(), rx2.as_mut()) {
+            rx_more = receive_pipelined(
                 &local,
                 &mut io,
-                &mut rx,
-                now,
-                vlen,
+                [&mut rx, rx2],
+                c,
+                wake,
+                &mut now,
+                &mut rx_pace,
                 &mut receive_errors,
                 &mut wakers,
             )
             .await?;
-            rx_done += n;
-            if timed {
-                let after = clock::now();
-                // 中継の task に譲っていた時間は、このバッチの仕事ではない
-                let took = after.saturating_duration_since(now).saturating_sub(yielded);
-                rx_pace.record(took, n);
-                now = after;
-            }
-            if n < vlen {
-                break;
-            }
-            if wake.spent(now, rx_done) {
-                rx_more = true;
-                break;
+        } else {
+            loop {
+                let vlen = if timed {
+                    rx_pace.units(BATCH_TIME, rx.slots())
+                } else {
+                    1
+                };
+                let (n, yielded) = receive_batch(
+                    &local,
+                    &mut io,
+                    &mut rx,
+                    crypto.as_mut(),
+                    now,
+                    vlen,
+                    &mut receive_errors,
+                    &mut wakers,
+                )
+                .await?;
+                rx_done += n;
+                if timed {
+                    let after = clock::now();
+                    // 中継の task に譲っていた時間は、このバッチの仕事ではない
+                    let took = after.saturating_duration_since(now).saturating_sub(yielded);
+                    rx_pace.record(took, n);
+                    now = after;
+                }
+                if n < vlen {
+                    break;
+                }
+                if wake.spent(now, rx_done) {
+                    rx_more = true;
+                    break;
+                }
             }
         }
         let tx_more = send_phase(
@@ -692,7 +925,7 @@ pub(super) async fn drive<U: Upper>(
                         local: local_addr,
                         send_errors: outbox.send_errors,
                         receive_errors,
-                        receive_truncated: rx.truncated,
+                        receive_truncated: rx.truncated + rx2.as_ref().map_or(0, |r| r.truncated),
                         socket_buffers: buffers.clone(),
                         unix_high_water: inner.device.unix_high_water(),
                     });
