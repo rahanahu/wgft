@@ -479,6 +479,100 @@ impl Rest {
     }
 }
 
+/// 1 回の起床の始まりと、時間で区切るかどうか。
+#[derive(Clone, Copy)]
+struct Wake {
+    start: Instant,
+    /// Linux でバッチを使うときだけ時間で区切る。1 つずつ送受信する道は数で区切る。
+    timed: bool,
+}
+
+impl Wake {
+    /// 相を打ち切るか。時間で区切るときは起床の始めから [`WAKE_BUDGET`] が経ったとき、数で区切るときは
+    /// その相で `done` 個を処理したとき。
+    fn spent(self, now: Instant, done: usize) -> bool {
+        if self.timed {
+            now.saturating_duration_since(self.start) >= WAKE_BUDGET
+        } else {
+            done >= ONE_SLOT_CAP
+        }
+    }
+}
+
+/// 送信の相:時刻の来た timer を回し、受信の相が予算を使い切っても少なくとも 1 つのバッチを行う。送る向きが
+/// 受ける向きに飢えないためである。予算で止めて上の層にまだ送るものが残るかを返す。
+fn send_phase<U: Upper>(
+    local: &Local<U>,
+    peer: &PublicKey,
+    outbox: &mut Outbox,
+    io: &mut Io<'_>,
+    pace: &mut Pace,
+    wake: Wake,
+    now: &mut Instant,
+) -> bool {
+    let mut guard = local.0.borrow();
+    let inner = &mut *guard;
+    if inner.device.poll_timeout().is_some_and(|t| t <= *now) {
+        inner.device.handle_timeout(*now);
+    }
+    if inner.upper.poll_timeout().is_some_and(|t| t <= *now) {
+        inner.upper.handle_timeout(*now);
+    }
+    let mut tx_done = 0;
+    loop {
+        let vlen = if wake.timed {
+            pace.units(BATCH_TIME, outbox.tx.slots())
+        } else {
+            1
+        };
+        let (pulled, state) = send_batch(
+            &mut inner.device,
+            &mut inner.upper,
+            peer,
+            *now,
+            outbox,
+            io,
+            vlen,
+        );
+        tx_done += pulled;
+        if wake.timed {
+            let after = clock::now();
+            pace.record(after.saturating_duration_since(*now), pulled);
+            *now = after;
+        }
+        if state != Sent::Full {
+            return false;
+        }
+        if wake.spent(*now, tx_done) {
+            return true;
+        }
+    }
+}
+
+/// 起床の終わり:device の event を流し、上の層の waker とログを引き、水位を残し、次の timer の時刻を返す。
+fn finish_wake<U: Upper>(
+    local: &Local<U>,
+    events: &mpsc::Sender<Event>,
+    high_water: &AtomicU64,
+    wakers: &mut Vec<Waker>,
+) -> Option<Instant> {
+    let mut guard = local.0.borrow();
+    let inner = &mut *guard;
+    while let Some(event) = inner.device.poll_event() {
+        // 受け手が遅ければ捨てる。駆動の task を event の受け手に止めさせない
+        let _ = events.try_send(event);
+    }
+    inner.upper.poll_wakers(wakers);
+    while let Some(line) = inner.upper.poll_log() {
+        crate::logf!("{line}");
+    }
+    high_water.store(
+        duration_to_nanos(inner.device.unix_high_water()),
+        Ordering::Relaxed,
+    );
+    earliest(inner.device.poll_timeout(), inner.upper.poll_timeout())
+}
+
 /// 駆動の task。命令の channel が閉じるか止める命令で、最後の送り出しに要るものを返す。上の層の中の
 /// panic の後と、ソケットの準備を待てなくなったときに誤りを返す。
 pub(super) async fn drive<U: Upper>(
@@ -521,7 +615,7 @@ pub(super) async fn drive<U: Upper>(
         }
         let start = clock::now();
         let mut now = start;
-        let elapsed = |now: Instant| now.saturating_duration_since(start);
+        let wake = Wake { start, timed };
         // 受信の相:ソケットが空になるか、予算が尽きるまでバッチを読む。核の出力は送信の相でまとめて
         // 引くので、ACK は起床ごとに 1 回の割で作られる
         let mut rx_more = false;
@@ -553,70 +647,22 @@ pub(super) async fn drive<U: Upper>(
             if n < vlen {
                 break;
             }
-            if (timed && elapsed(now) >= WAKE_BUDGET) || (!timed && rx_done >= ONE_SLOT_CAP) {
+            if wake.spent(now, rx_done) {
                 rx_more = true;
                 break;
             }
         }
-        // 送信の相:受信の相が予算を使い切っても、少なくとも 1 つのバッチを行う。送る向きが受ける向きに
-        // 飢えないためである
-        let tx_more = {
-            let mut guard = local.0.borrow();
-            let inner = &mut *guard;
-            if inner.device.poll_timeout().is_some_and(|t| t <= now) {
-                inner.device.handle_timeout(now);
-            }
-            if inner.upper.poll_timeout().is_some_and(|t| t <= now) {
-                inner.upper.handle_timeout(now);
-            }
-            let mut tx_done = 0;
-            loop {
-                let vlen = if timed {
-                    tx_pace.units(BATCH_TIME, outbox.tx.slots())
-                } else {
-                    1
-                };
-                let (pulled, state) = send_batch(
-                    &mut inner.device,
-                    &mut inner.upper,
-                    &peer,
-                    now,
-                    &mut outbox,
-                    &mut io,
-                    vlen,
-                );
-                tx_done += pulled;
-                if timed {
-                    let after = clock::now();
-                    tx_pace.record(after.saturating_duration_since(now), pulled);
-                    now = after;
-                }
-                if state != Sent::Full {
-                    break false;
-                }
-                if (timed && elapsed(now) >= WAKE_BUDGET) || (!timed && tx_done >= ONE_SLOT_CAP) {
-                    break true;
-                }
-            }
-        };
+        let tx_more = send_phase(
+            &local,
+            &peer,
+            &mut outbox,
+            &mut io,
+            &mut tx_pace,
+            wake,
+            &mut now,
+        );
         let more = rx_more || tx_more;
-        let deadline = {
-            let mut guard = local.0.borrow();
-            let inner = &mut *guard;
-            while let Some(event) = inner.device.poll_event() {
-                // 受け手が遅ければ捨てる。駆動の task を event の受け手に止めさせない
-                let _ = events.try_send(event);
-            }
-            inner.upper.poll_wakers(&mut wakers);
-            while let Some(line) = inner.upper.poll_log() {
-                crate::logf!("{line}");
-            }
-            high_water.store(
-                duration_to_nanos(inner.device.unix_high_water()),
-                Ordering::Relaxed,
-            );
-            earliest(inner.device.poll_timeout(), inner.upper.poll_timeout())
-        };
+        let deadline = finish_wake(&local, &events, high_water, &mut wakers);
         for waker in wakers.drain(..) {
             waker.wake();
         }
