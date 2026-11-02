@@ -33,18 +33,10 @@
 //! - Loopback delivers inline in the sender's `sendto`, so the send mode's CPU time includes the
 //!   receiving socket's queueing, as the lab's veth path includes the softirq after a send.
 //!
-//! (The code is in `linux.rs`.)
-//!
-//! Extending it for stage 2 of the batching work. Everything the data plane would replace sits in
-//! three places: `Link::send_pending` (one `sendto` per datagram), `Link::receive_all` (one
-//! `recvfrom` per datagram plus the final `WouldBlock`) and the `encrypt` and `decrypt` adapters
-//! that call the device layer. When the data plane gets `sendmmsg` or `recvmmsg`, replace the
-//! loops in the first two with the batch call over a whole burst and count one data call per batch
-//! (`Syscalls::data`); for UDP GSO and GRO, pass the segment size and read the coalesced
-//! datagram, and count its segments as packets. The report then shows the drop in system calls per
-//! packet directly, and the cache and instruction counts show the layout effect. Keep the
-//! workload (sizes, burst, packet pattern) unchanged so that a base build and a head build stay
-//! comparable; change the adapters, not the workload, when the device layer's API changes.
+//! The code is in `linux.rs` and the modules under `linux/`: `cpu` (thread CPU time, pinning, the
+//! readiness check), `link` (one end: a socket and the device layer, the adapters a batched data
+//! plane would replace), `measure` (the two loops) and `error`. The plan for batching the data
+//! plane is in `docs/design/v2/agent-throughput.md`.
 
 #[cfg(target_os = "linux")]
 mod linux;
