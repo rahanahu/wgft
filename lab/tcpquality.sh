@@ -103,6 +103,15 @@
 # modes measured so by `lab/lab paired`. UDPPING=0 or unset turns it off. The UDP target is always
 # in the agent's allowlist, so that the agent's configuration does not depend on UDPPING.
 #
+# KERNEL_RMEM_MAX, a whole number of bytes, lowers the receiving end's TCP receive buffer maximum, the
+# third value of net.ipv4.tcp_rmem in the namespace of the process that reads (the LAN host on an
+# upload, the client on a download), for the kernel mode only; the other modes run with the
+# namespace's own value. The receive buffer autotuning of the kernel's TCP then advertises no more
+# than that buffer allows, which is how the receive-window stage of
+# docs/design/v2/agent-throughput.md sets the kernel mode it compares with. The default value of
+# tcp_rmem is lowered to the maximum when it is above it, and both are put back after the mode and at
+# exit. The result line then has rcv_rmem_max.
+#
 # With CPU=1 the result line also has the whole VM's CPU time per byte, vm_cpu_s_per_gb, and the
 # number of CPUs busy over the transfer, vm_cpu_share, from the busy times in /proc/stat: user,
 # nice, system, irq and softirq. Kernel work that runs in no process of the agent, such as kernel
@@ -136,6 +145,7 @@ UDPPING=${UDPPING:-}
 UDPPING_MS=${UDPPING_MS:-10}
 UDPPING_IDLE_S=${UDPPING_IDLE_S:-5}
 STREAMS=${STREAMS:-1}
+KERNEL_RMEM_MAX=${KERNEL_RMEM_MAX:-}
 if [ -n "${WGFT_BIN_DIR:-}" ]; then
   PATH=$WGFT_BIN_DIR:$PATH
   export PATH
@@ -291,9 +301,14 @@ case "$IPERF_MBIT" in
   *) [ "$TOOL" = iperf3 ] || { echo "tcpquality.sh: IPERF_MBIT needs TOOL=iperf3" >&2; exit 2; } ;;
 esac
 case "$STREAMS" in ''|*[!0-9]*|0) echo "tcpquality.sh: STREAMS is a whole number of 1 or more" >&2; exit 2 ;; esac
+case "$KERNEL_RMEM_MAX" in
+  '') ;;
+  *[!0-9]*) echo "tcpquality.sh: KERNEL_RMEM_MAX is a whole number of bytes" >&2; exit 2 ;;
+  *) [ "$KERNEL_RMEM_MAX" -ge 4096 ] || { echo "tcpquality.sh: KERNEL_RMEM_MAX is at least 4096 bytes" >&2; exit 2; } ;;
+esac
 case "$DIRECTION" in
-  down) transfer=download reader="the client" writer="the LAN host" dir_field= ;;
-  up) transfer=upload reader="the LAN host" writer="the client" dir_field="direction=up " ;;
+  down) transfer=download reader="the client" writer="the LAN host" dir_field= READER_NS=$CLIENT_NS ;;
+  up) transfer=upload reader="the LAN host" writer="the client" dir_field="direction=up " READER_NS=$LAN_NS ;;
   *) echo "tcpquality.sh: DIRECTION is down or up" >&2; exit 2 ;;
 esac
 # The agent's UDP segmentation offload is off on every path, for two reasons:
@@ -321,10 +336,24 @@ restore_gso() {
   echo "FAIL  cannot turn UDP segmentation offload back on on the agent's eth0"
   return 1
 }
+# the reader's tcp_rmem for KERNEL_RMEM_MAX: read once, lowered for the kernel mode, put back after it
+rmem_was=$(ip netns exec "$READER_NS" sysctl -n net.ipv4.tcp_rmem | tr -s ' \t' '  ')
+rmem_set=
+set_rmem() { # set_rmem <min default max>
+  ip netns exec "$READER_NS" sysctl -qw net.ipv4.tcp_rmem="$*" &&
+    [ "$(ip netns exec "$READER_NS" sysctl -n net.ipv4.tcp_rmem | tr -s ' \t' '  ')" = "$*" ]
+}
+restore_rmem() {
+  [ -n "$rmem_set" ] || return 0
+  set_rmem $rmem_was && { rmem_set=; return 0; }
+  echo "FAIL  cannot put tcp_rmem back to $rmem_was in the $READER_NS namespace"
+  return 1
+}
 on_exit() {
   local rc=$?
   cleanup
   restore_gso || rc=1
+  restore_rmem || rc=1
   exit "$rc"
 }
 trap on_exit EXIT
@@ -337,6 +366,18 @@ for mode in $MODES; do
     gvisor|wgstack) agent_env=(WGFT_MODE=userspace WGFT_AGENT_NETSTACK="$mode") ;;
     rust) agent_env=(-u WGFT_AGENT_NETSTACK WGFT_MODE=userspace) ;;
   esac
+  rmem_field=
+  if [ "$mode" = kernel ] && [ -n "$KERNEL_RMEM_MAX" ]; then
+    # shellcheck disable=SC2086 # the three values of tcp_rmem are words on purpose
+    set -- $rmem_was
+    rmem_set=1
+    set_rmem "$1" "$(( $2 < KERNEL_RMEM_MAX ? $2 : KERNEL_RMEM_MAX ))" "$KERNEL_RMEM_MAX" ||
+      { echo "FAIL  cannot set the tcp_rmem maximum to $KERNEL_RMEM_MAX in the $READER_NS namespace"; fail=1; restore_rmem; continue; }
+    echo "   $READER_NS tcp_rmem: $(ip netns exec "$READER_NS" sysctl -n net.ipv4.tcp_rmem)"
+    rmem_field="rcv_rmem_max=$KERNEL_RMEM_MAX "
+  else
+    restore_rmem || fail=1
+  fi
   if [ "$OUTAGE_S" = 0 ]; then outage="no outage"; else outage="${OUTAGE_S}s outage after ${OUTAGE_AFTER} bytes"; fi
   path="delay ${DELAY_MS}ms and loss ${LOSS_PCT}%${RATE_MBIT:+ at ${RATE_MBIT} Mbit/s with a ${QUEUE_PKTS}-packet queue}"
   if [ "$TOOL" = iperf3 ]; then size="${IPERF_S}-second"; else size="${BYTES}-byte"; fi
@@ -516,7 +557,7 @@ for mode in $MODES; do
     if [ "$(field undetermined "$stats")" = 1 ]; then
       echo "UNDETERMINED  agent $mode run $run: no reads on both sides of the outage; $stats"
     fi
-    echo "RESULT mode=$mode run=$run ${dir_field}delay_ms=$DELAY_MS loss_pct=$LOSS_PCT ${RATE_MBIT:+rate_mbit=$RATE_MBIT }$stats bytes=$(field received "$got") pass=$run_pass sync=$sync_state${udp_idle:+ $udp_idle}${udp_load:+ $udp_load}"
+    echo "RESULT mode=$mode run=$run ${dir_field}${rmem_field}delay_ms=$DELAY_MS loss_pct=$LOSS_PCT ${RATE_MBIT:+rate_mbit=$RATE_MBIT }$stats bytes=$(field received "$got") pass=$run_pass sync=$sync_state${udp_idle:+ $udp_idle}${udp_load:+ $udp_load}"
     echo "$stats" >> "$results"
   done
   echo "MEDIAN mode=$mode $($Q median "$results")"
