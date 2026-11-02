@@ -366,7 +366,9 @@ vm_install() {
   info "installed into VM $VM /usr/local/bin (use plain command names in the VM)$(rust_wanted && echo "; the Rust wgft as /usr/local/lib/wgft-rust/wgft")"
 }
 cmd_build() {
-  host_build
+  # 機能の確認 (labhost run all) が使う build なので、lifecycle.sh の check 5 と 5b の行を出す lab-observe を付ける。
+  # 性能を測る lab paired は付けない
+  LAB_RUST_FEATURES=lab-observe host_build
   if vm_exists && [[ $(vm_state) == RUNNING ]]; then vm_install; fi
 }
 

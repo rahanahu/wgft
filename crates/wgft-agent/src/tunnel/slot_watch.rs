@@ -3,7 +3,6 @@
 
 /// 使ったことのある接続の枠の数を書く行の刻みの下限です。
 #[cfg(any(test, feature = "lab-observe"))]
-#[cfg(any(test, feature = "lab-observe"))]
 const SLOT_STEP_MIN: usize = 64;
 
 /// 行の数の上限です。`slot_watch` は `Tunnel::start` ごとに最後に書いた値 `shown` を 0 から始めるので、トンネルを立てるたびに最大この行数です。刻みは接続の枠の数をこの値で割って決めます。

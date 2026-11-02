@@ -458,7 +458,9 @@ jobs:
               echo "cargo tree $args builds the wgstack core with its harness feature" >&2
               exit 1
             fi
-            if printf '%s\n' "$features" | grep -F 'wgft-agent feature "lab-observe"'; then
+            # the inverted tree lists the root package's own features too, which the plain tree leaves out
+            inverted=$(cargo tree $args -e features --target all --prefix none --locked -i wgft-agent)
+            if printf '%s\n%s\n' "$features" "$inverted" | grep -F 'feature "lab-observe"'; then
               echo "cargo tree $args builds the agent with its lab-observe feature" >&2
               exit 1
             fi

@@ -774,7 +774,7 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
   核の項は、作成の時に作って流れによらず持つ固定の部分 (`Bound::fix`、`core fixed`)、接続の枠が初めて使われた時から持つ floor の記録の輪と区間の表 (`Bound::floor_arrays`、`core arrays`)、残り (`core flows`) に分けます。
   TCP の中継の項は、接続ごとの task と登録の部分 (`tcp relay`) と大きいバッファの部分 (`tcp bulk`) に分けます。
   形は保証の外で、ラボの check 5 と 5b が読みます
-- 使った枠の行:`lab-observe` の feature を付けた build だけが書きます (ラボの `lab suite` の build が付けます)。製品の build は 1 秒ごとの起床も、データプレーンのスレッドへの呼び出しも持ちません。
+- 使った枠の行:`lab-observe` の feature を付けた build だけが書きます (ラボの `lab build` と `lab suite` の build が付け、性能を測る `lab paired` の build は付けません)。製品の build は 1 秒ごとの起床も、データプレーンのスレッドへの呼び出しも持ちません。
   feature を付けた agent は核を作ってから使ったことのある接続の枠 (floor の配列を持つ枠) の数を 1 秒ごとに読み、刻みの倍数に切り上げた値が増えたときだけ、`memory: connection slots used so far: at most <N> of <N_c>; their floor arrays hold <K> KiB` を書きます。
   核は枠が初めて配列を確保する時に数えて持つので (`Stack::slots_used`)、読むのは定数の手間で、データプレーンのスレッドで枠をたどりません。
   枠は配列を持ち続けるので数は減らず、行の値は読んだ時の数の上界です。
