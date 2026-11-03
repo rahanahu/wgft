@@ -964,12 +964,17 @@ paired_provision() {
   if [[ -n $split ]]; then
     names=("wgft-split-$$-agent" "wgft-split-$$-peer")
     vms=(agent peer)
-    PAIRED_SPLIT_NET=wgftsp$$
+    # 同じ名前のネットワークは、前の実行が残したもの (PID の使い回し) で VM が繋がっていることがあるので使わない。
+    # 名前を PAIRED_SPLIT_NET に入れる前に確かめ、片付けの trap が他人のネットワークを消さないようにする
+    local net=wgftsp$$
+    ! inc network show "$net" >/dev/null 2>&1 || die "the network $net exists already; delete it once no VM uses it"
+    PAIRED_SPLIT_NET=$net
     # 作成が 60 秒戻らないことが、前の組がネットワークを消した直後に 2 度あった (2026-11-04、手で流すと 0.05 秒)。
-    # 60 秒で切り、その間に作られていればそれを使い、無ければ 10 秒置いて 4 回まで流し直す
+    # 60 秒で切り、その間に作られていればそれを使い、無ければ 10 秒置いて 4 回まで流し直す。
+    # timeout は関数を呼べないので、inc (sg incus-admin の経路を含む) を子の bash に渡す
     local try
     for try in 1 2 3 4; do
-      timeout 60 incus network create "$PAIRED_SPLIT_NET" ipv4.address=none ipv6.address=none >/dev/null 2>&1 && break
+      timeout 60 bash -c "$(declare -f inc); inc network create $net ipv4.address=none ipv6.address=none" >/dev/null 2>&1 && break
       inc network show "$PAIRED_SPLIT_NET" >/dev/null 2>&1 && break
       ((try < 4)) || die "cannot create the network $PAIRED_SPLIT_NET"
       info "creating the network $PAIRED_SPLIT_NET did not finish in 60 s, try $try; trying again"
