@@ -269,9 +269,9 @@ elif [ "$DELAY_MS" != 0 ]; then
   fi
   RATE_ARGS=(limit "$NETEM_LIMIT")
 fi
-netem_drops() { # the packets both netem queues have dropped so far
+netem_drops() { # the packets both netem queues have dropped so far; tc -s prints "(dropped N, overlimits ..."
   { vps tc -s qdisc show dev pub1; router tc -s qdisc show dev wan0; } 2>/dev/null \
-    | awk '/qdisc netem/ { q = 1 } q && /dropped/ { for (i = 1; i < NF; i++) if ($i == "dropped") { v = $(i + 1); gsub(",", "", v); n += v } q = 0 } END { print n + 0 }'
+    | awk '/qdisc netem/ { q = 1 } q && /dropped/ { for (i = 1; i < NF; i++) if ($i == "(dropped") { v = $(i + 1); gsub(",", "", v); n += v } q = 0 } END { print n + 0 }'
 }
 if [ -n "$TCP_BUF_MAX" ]; then
   ip netns exec "$CLIENT_NS" sysctl -qw net.ipv4.tcp_rmem="4096 131072 $TCP_BUF_MAX" net.ipv4.tcp_wmem="4096 16384 $TCP_BUF_MAX"
@@ -649,7 +649,7 @@ for mode in $MODES; do
       # one line with received=, sent=, the receiver's duration and rate, and the sender's retransmits
       got=$($Q iperf "$W/wgft-tq-iperf-$mode.json")
       sent=$got
-      stats="undetermined=0 streams=$STREAMS duration_s=$(field duration_s "$got") overall_mbit=$(field mbit "$got") retransmits=$(field retransmits "$got")"
+      stats="undetermined=0 streams=$STREAMS duration_s=$(field duration_s "$got") overall_mbit=$(field mbit "$got") retransmits=$(field retransmits "$got")$(echo "$got" | grep -oE ' stream_(jain|min_over_max)=[^ ]*' | tr -d '\n')"
       c_us=; [ -n "$client_cg" ] && c_us=$(awk '$1 == "usage_usec" { print $2 }' "$client_cg/cpu.stat" 2>/dev/null)
       rmdir "$client_cg" 2>/dev/null
     else
