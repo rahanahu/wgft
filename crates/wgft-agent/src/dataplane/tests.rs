@@ -16,9 +16,7 @@ use wgft_wireguard::{
 
 use super::batch::TxBatch;
 use super::batch::{RX_SLOT, RxBatch, RxMeta};
-use super::driver::{
-    Outbox, Sink, Source, Wake, pump, receive_batch, receive_pipelined, send_pipelined,
-};
+use super::driver::{Outbox, Sink, Source, Wake, pump, receive_batch, receive_pipelined};
 use super::{Carry, Dataplane, Generations, Settings, Upper, UpperError, UpperInit, clock};
 use crate::batching::Batching;
 
@@ -1283,6 +1281,9 @@ fn the_send_batch_rules_hold_with_the_crypto_workers() {
     BENCH_LANES.set(1);
 }
 
+// 作業者と重ねる送信 (`send_pipelined`) は 2 つ目の置き場 `tx2` を使い、`tx2` は Linux のバッチの道だけにある
+// (`Outbox::new`)。ほかの OS では製品がこの道を通らないので、その試験も Linux だけで流す。
+#[cfg(target_os = "linux")]
 impl Bench {
     /// 作業者と重ねる送信の相を 1 回流す。最初のバッチが作業者のレーンの枠をすべて引くように、速い費用を
     /// 記録しておく。
@@ -1294,7 +1295,7 @@ impl Bench {
             start: now,
             timed: true,
         };
-        send_pipelined(
+        super::driver::send_pipelined(
             &mut self.a,
             &mut self.stub,
             &self.b_pub,
@@ -1315,6 +1316,7 @@ impl Bench {
 }
 
 /// 記録した datagram のうち、データの message の番号を送った順に返す。
+#[cfg(target_os = "linux")]
 fn counters(sent: &[Transmit]) -> Vec<u64> {
     sent.iter()
         .filter(|t| t.payload[0] == 4 && t.payload.len() > 32)
@@ -1323,6 +1325,7 @@ fn counters(sent: &[Transmit]) -> Vec<u64> {
 }
 
 /// UDP と TCP の packet を混ぜて `n` 個並べる。UDP は 5 つに 1 つ。
+#[cfg(target_os = "linux")]
 fn mixed(n: u32) -> Vec<Vec<u8>> {
     (0..n)
         .map(|i| {
@@ -1335,6 +1338,7 @@ fn mixed(n: u32) -> Vec<Vec<u8>> {
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn the_pipelined_send_keeps_the_counters_in_send_order_and_leaves_nothing_with_the_workers() {
     BENCH_LANES.set(3);
@@ -1360,6 +1364,7 @@ fn the_pipelined_send_keeps_the_counters_in_send_order_and_leaves_nothing_with_t
     assert_eq!(got, (0..100).collect::<Vec<_>>());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_full_socket_during_the_pipelined_send_keeps_both_batches_in_order() {
     BENCH_LANES.set(3);
@@ -1387,6 +1392,7 @@ fn a_full_socket_during_the_pipelined_send_keeps_both_batches_in_order() {
     assert_eq!(t.deliver().len(), 60);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn without_a_session_the_pipelined_send_pulls_nothing_and_starts_a_handshake() {
     BENCH_LANES.set(3);
@@ -1401,6 +1407,7 @@ fn without_a_session_the_pipelined_send_pulls_nothing_and_starts_a_handshake() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn the_final_flush_sends_what_the_pipelined_send_left_waiting() {
     BENCH_LANES.set(3);
@@ -1420,6 +1427,7 @@ fn the_final_flush_sends_what_the_pipelined_send_left_waiting() {
     assert_eq!(t.deliver().len() + t.stub.out.len(), 40);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_single_packet_on_an_idle_tunnel_wakes_no_worker() {
     BENCH_LANES.set(3);
@@ -1448,6 +1456,7 @@ fn a_single_packet_on_an_idle_tunnel_wakes_no_worker() {
     assert_eq!(t.in_flight(), None);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_worker_panic_during_the_pipelined_send_ends_the_generation() {
     BENCH_LANES.set(3);
