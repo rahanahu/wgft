@@ -826,3 +826,62 @@ fn a_delayed_cookie_ack_wins_over_a_later_row() {
     assert!(outs.iter().any(|o| o.has(FLAG_RST)), "{}", show(&outs));
     n.s.check_invariants().unwrap();
 }
+
+/// 握手の途中の行への SYN の再送を `count` 回、間を空けずに送り、核が返した SYN-ACK の数を返します。
+fn resend_syn(n: &mut TestNet, sport: u16, count: usize) -> usize {
+    let mut synacks = 0;
+    for _ in 0..count {
+        n.inject(&TSeg {
+            sport,
+            dport: 80,
+            seq: 1000,
+            flags: FLAG_SYN,
+            wnd: 65535,
+            mss: 1380,
+            ..TSeg::default()
+        });
+        synacks += n
+            .drain()
+            .iter()
+            .filter(|o| o.has(FLAG_SYN) && o.has(FLAG_ACK))
+            .count();
+    }
+    synacks
+}
+
+/// 相手が SYN を送り直し続けても、握手の途中の行は SYN-ACK の再送の回数で決まる約 63 秒で消えます。SYN の再送は
+/// 行の期限を延ばしません (監査で確かめた上界)。
+#[test]
+fn resent_syns_do_not_extend_a_half_open_row() {
+    let mut n = TestNet::new(small_limits());
+    let _l = n.listen(80);
+    let _p = n.syn_sack(40000, 80, false, false, false);
+    for _ in 0..62 {
+        n.advance(Duration::from_secs(1));
+        resend_syn(&mut n, 40000, 1);
+    }
+    assert_eq!(n.s.held().syn_rows, 1, "the row lives until its last retry");
+    n.advance(Duration::from_secs(2));
+    resend_syn(&mut n, 40000, 0);
+    assert_eq!(
+        n.s.held().syn_rows,
+        0,
+        "resent SYNs kept the row past its retries"
+    );
+}
+
+/// 監査の提案 (wire が変わるので Go との意図的な違いになり、所有者の決定が要ります):同じ SYN の再送ごとに SYN-ACK
+/// を返すので、偽の送信元の相手は行 1 つで SYN と同じ数の SYN-ACK を第三者へ反射させられます。Linux の
+/// `tcp_check_req` は `tcp_oow_rate_limited` で、行ごとに 500 ms に 1 回までに抑えます。
+#[test]
+#[ignore = "proposal: rate-limit SYN-ACKs to resent SYNs per row as Linux does; changes the wire output"]
+fn resent_syns_get_rate_limited_syn_acks() {
+    let mut n = TestNet::new(small_limits());
+    let _l = n.listen(80);
+    let _p = n.syn_sack(40000, 80, false, false, false);
+    let synacks = resend_syn(&mut n, 40000, 100);
+    assert!(
+        synacks <= 1,
+        "100 resent SYNs within one instant got {synacks} SYN-ACKs"
+    );
+}
