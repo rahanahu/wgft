@@ -217,10 +217,14 @@ Linux の WireGuard と wireguard-go と同じ扱いです。
 
 `Device` の `Debug` の出力は、ピアの数、キューの件数とバイト数、捨てた数だけで、packet の中身を出しません。
 
-暗号の処理は、入力を受けたその呼び出しの中で済ませます。
-暗号の処理を別のスレッドへ渡すキューは持ちません。
-sanstun は復号を別のスレッドへ回せる形の API を持ちますが、agent のピアは 1 つなので並列にする利点が小さいためです。
-並列にする場合は、復号を待つ仕事のキューにも件数とバイト数の上限を置きます。
+`handle_datagram` と `handle_packet` は、暗号の処理をその呼び出しの中で済ませます。
+暗号を別のスレッドで行う呼び手のために、device の層は同じ処理を段に分けた口も持ちます。
+受信は `begin_datagram`、`OpenJob::open`、`finish_datagram`、送信は `begin_packet` と `SealJob::seal` です。
+`open` と `seal` は呼び手の buffer に暗号の計算をするだけで、device の状態に触れません。
+状態の変更 (番号の取得、再送の窓、endpoint、timer) は `begin_*` と `finish_datagram` の中で、呼び手のスレッドで行います。
+仕事の待ち行列は device の中に持たず、仕事は呼び手が持ちます。
+暗号の作業者のデータプレーンは、仕事の数をレーンごとの上限で抑えます ([データプレーンの暗号の作業者](agent-crypto-workers.md))。
+呼び手の守ること (データでない datagram の前に仕事を受け付けること、届いた順に受け付けること、送る順に送ること) は、その文書と API の doc comment にあります。
 
 device が呼び出しの間に持つものと、既定の上限は次のとおりです (`Limits`)。
 

@@ -1041,7 +1041,7 @@ impl Source for Feed {
         let n = vlen.min(rx.slots()).min(self.0.len());
         for i in 0..n {
             let (from, d) = self.0.pop_front().unwrap();
-            rx.data[i * RX_SLOT..i * RX_SLOT + d.len()].copy_from_slice(&d);
+            rx.data_mut()[i * RX_SLOT..i * RX_SLOT + d.len()].copy_from_slice(&d);
             rx.meta[i] = RxMeta {
                 from: Some(from),
                 len: u32::try_from(d.len()).unwrap(),
@@ -1078,7 +1078,7 @@ async fn a_receive_batch_hands_udp_first_and_keeps_the_tcp_order() {
         wake: super::Wake::default(),
     }));
     // 密な部分を枠の全体にして、枠 i が data の i × RX_SLOT から始まるようにする
-    let mut rx = RxBatch::new(8, false, RX_SLOT);
+    let mut rx = RxBatch::new(8, false, RX_SLOT, 1);
     let (mut errors, mut wakers) = (0, Vec::new());
     let (n, _) = receive_batch(&local, &mut feed, &mut rx, now, 8, &mut errors, &mut wakers)
         .await

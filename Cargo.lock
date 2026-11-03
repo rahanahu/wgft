@@ -1725,6 +1725,8 @@ name = "wgft-udp-batch"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "wgft-alloc-count",
+ "wgft-wireguard",
 ]
 
 [[package]]

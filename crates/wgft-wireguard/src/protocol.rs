@@ -13,8 +13,9 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use sanstun::{
-    Committed, Error as SanstunError, Event as SanstunEvent, Interface, Received, ReceivedMessage,
-    StaticSecret, Tunnel, TunnelConfig, TunnelId,
+    Committed, Decrypted, Error as SanstunError, Event as SanstunEvent, Interface,
+    PendingDecapsulate, PendingEncapsulate, Received, ReceivedMessage, StaticSecret, Tunnel,
+    TunnelConfig, TunnelId,
 };
 use zeroize::Zeroizing;
 
@@ -77,6 +78,122 @@ pub(crate) enum ProtoEvent {
     /// 接続が期限切れになった。状態は捨て、新しいトンネルに取り替えた。`used` は、そのトンネルが
     /// ハンドシェイクを始めたか受けたかである。
     Expired { used: bool },
+}
+
+/// [`Protocol::begin`] の結果。
+#[derive(Debug)]
+pub(crate) enum Begun {
+    /// ハンドシェイク、cookie、またはそれへの返事。この呼び出しの中で済んだ。
+    Done(Inbound),
+    /// 復号の前の検査を通ったデータの message。
+    Open(OpenJob),
+}
+
+/// 復号を待つデータの message。sanstun の復号の前の検査 (セッションがあり、番号が再送の窓の先の検査を
+/// 通る) を通った。持つのはセッションの鍵の写しと index と番号だけで、復号はほかの状態に触れないので、
+/// どのスレッドで行ってもよい。鍵の写しは drop で 0 に戻る。
+///
+/// 再送の窓の本当の検査は [`Protocol::commit`] で、datagram の届いた順に行う。同じ番号の写しを同じ
+/// バッチで復号しても、受け付けるのは最初の 1 つだけである。
+pub(crate) struct OpenJob {
+    pending: PendingDecapsulate,
+    peer: PeerId,
+    tunnel: TunnelId,
+}
+
+impl std::fmt::Debug for OpenJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenJob")
+            .field("peer", &self.peer)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OpenJob {
+    /// `datagram` を呼び手の buffer `out` に復号する。`out` は datagram の長さから 16 byte を引いた長さが
+    /// 要り、足りなければ復号を始めずに不正な message とする。ほかの状態に触れない。
+    pub(crate) fn open(self, datagram: &[u8], out: &mut [u8]) -> Opened {
+        let Self {
+            pending,
+            peer,
+            tunnel,
+        } = self;
+        // datagram は sanstun が読んだデータの message なので、header と tag の 32 byte 以上ある
+        let Some(buffer) = out.get_mut(..datagram.len().saturating_sub(DATA_HEADER_LEN)) else {
+            return Opened {
+                decrypted: Err(DropReason::Malformed),
+                len: 0,
+                peer,
+                tunnel,
+            };
+        };
+        let mut len = 0;
+        let decrypted = pending.decrypt(datagram, buffer).map(|_, n| len = n);
+        Opened {
+            decrypted: Ok(decrypted),
+            len,
+            peer,
+            tunnel,
+        }
+    }
+}
+
+/// [`OpenJob::open`] の結果。[`Protocol::commit`] に渡すまで、平文はまだ受け付けていない。
+pub(crate) struct Opened {
+    decrypted: Result<Decrypted<()>, DropReason>,
+    /// 平文の長さ。詰め物を含み、復号できなければ 0。
+    len: usize,
+    peer: PeerId,
+    tunnel: TunnelId,
+}
+
+impl std::fmt::Debug for Opened {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Opened")
+            .field("peer", &self.peer)
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Opened {
+    /// 呼び手の buffer の先頭で平文を持つ長さ。詰め物を含み、復号できなかったときは 0。
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+}
+
+/// 番号を取った暗号化の仕事。セッションの鍵の写しと index と番号だけを持ち、暗号化はほかの状態に
+/// 触れないので、どのスレッドで行ってもよい。鍵の写しは drop で 0 に戻る。
+pub(crate) struct SealJob {
+    pending: PendingEncapsulate,
+    /// 暗号化した datagram の長さ。
+    len: usize,
+}
+
+impl std::fmt::Debug for SealJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SealJob")
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SealJob {
+    /// 暗号化した datagram の長さ。呼び手の buffer はこの長さが要る。
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    /// `packet` を呼び手の buffer `out` に暗号化し、書いた長さを返す。`out` が [`SealJob::len`] より短いと
+    /// `Err` で、取った番号は使わずに飛ばす (Linux の WireGuard と同じく、番号は使い回さない)。
+    pub(crate) fn seal(self, packet: &[u8], out: &mut [u8]) -> Result<usize, DropReason> {
+        Ok(self
+            .pending
+            .encrypt(packet, out)
+            .map_err(|e| map_error(&e))?
+            .len())
+    }
 }
 
 struct PeerProto {
@@ -179,20 +296,23 @@ impl Protocol {
             .ok_or(DropReason::UnknownPeer)
     }
 
-    /// 届いた datagram を検査し、設定したピアのものだけを受け付ける。
-    pub(crate) fn receive(
+    /// 届いた datagram を検査する。データの message は、復号の前の検査 (セッションと再送の窓の先の検査) を
+    /// 通ったら、復号の仕事 [`OpenJob`] を返す。復号は呼び手が [`OpenJob::open`] で行い、結果を
+    /// [`Protocol::commit`] に渡す。ほかの message はこの呼び出しの中で済ませる。
+    pub(crate) fn begin(
         &mut self,
         now: Instant,
         src: SocketAddr,
         datagram: &[u8],
-        out: &mut [u8],
-    ) -> Result<Inbound, DropReason> {
+    ) -> Result<Begun, DropReason> {
         let message = match self
             .interface
             .receive(src, datagram, now)
             .map_err(|e| map_error(&e))?
         {
-            Received::SendCookieReply(reply) => return Ok(Inbound::CookieReply(reply.to_vec())),
+            Received::SendCookieReply(reply) => {
+                return Ok(Begun::Done(Inbound::CookieReply(reply.to_vec())));
+            }
             Received::Message(message) => message,
         };
         match message {
@@ -208,10 +328,10 @@ impl Protocol {
                     .map_err(|e| map_error(&e))?;
                 self.peers[peer].used = true;
                 self.peers[peer].passive.on_send();
-                Ok(Inbound::InitiationAnswered {
+                Ok(Begun::Done(Inbound::InitiationAnswered {
                     peer,
                     response: response.to_vec(),
-                })
+                }))
             }
             ReceivedMessage::HandshakeResponse(response) => {
                 let peer = self.peer_by_tunnel(response.tunnel_id())?;
@@ -220,10 +340,10 @@ impl Protocol {
                     .handle_handshake_response(response, now)
                     .map_err(|e| map_error(&e))?;
                 self.peers[peer].passive.on_send();
-                Ok(Inbound::ResponseAccepted {
+                Ok(Begun::Done(Inbound::ResponseAccepted {
                     peer,
                     keepalive: keepalive.to_vec(),
-                })
+                }))
             }
             ReceivedMessage::CookieReply(reply) => {
                 let peer = self.peer_by_tunnel(reply.tunnel_id())?;
@@ -231,31 +351,50 @@ impl Protocol {
                     .tunnel
                     .handle_cookie_reply(reply, now)
                     .map_err(|e| map_error(&e))?;
-                Ok(Inbound::CookieStored)
+                Ok(Begun::Done(Inbound::CookieStored))
             }
             ReceivedMessage::TransportData(data) => {
-                let peer = self.peer_by_tunnel(data.tunnel_id())?;
-                let tunnel = &mut self.peers[peer].tunnel;
-                let pending = tunnel
+                let tunnel_id = data.tunnel_id();
+                let peer = self.peer_by_tunnel(tunnel_id)?;
+                let pending = self.peers[peer]
+                    .tunnel
                     .begin_decapsulate(data, now)
                     .map_err(|e| map_error(&e))?;
-                // 復号はこの呼び出しの中で、呼び手の buffer に済ませる。復号を待つキューは持たない。
-                // buffer が短ければ、復号を始めずに捨てる
-                let Some(buffer) = out.get_mut(..datagram.len() - DATA_HEADER_LEN) else {
-                    return Err(DropReason::Malformed);
-                };
-                let decrypted = pending.decrypt(datagram, buffer);
-                match tunnel
-                    .commit_decapsulate(decrypted, now)
-                    .map_err(|e| map_error(&e))?
-                {
-                    Committed::Data { len, .. } => {
-                        self.peers[peer].passive.on_data(now);
-                        Ok(Inbound::Data { peer, len })
-                    }
-                    Committed::Keepalive => Ok(Inbound::Keepalive { peer }),
-                }
+                Ok(Begun::Open(OpenJob {
+                    pending,
+                    peer,
+                    tunnel: tunnel_id,
+                }))
             }
+        }
+    }
+
+    /// 復号した結果を受け付ける。再送の窓の検査とセッションの確かめは、ここで datagram の届いた順に
+    /// 行う ([`OpenJob`])。
+    pub(crate) fn commit(&mut self, now: Instant, opened: Opened) -> Result<Inbound, DropReason> {
+        let Opened {
+            decrypted,
+            peer,
+            tunnel,
+            len: _,
+        } = opened;
+        let decrypted = decrypted?;
+        let p = &mut self.peers[peer];
+        // 復号の間にトンネルを取り替えていれば、古いトンネルの message である。1 つずつ扱う道では、
+        // 取り替えた後の datagram は index を引けずに捨てるので、同じ理由で捨てる
+        if p.tunnel.id() != tunnel {
+            return Err(DropReason::UnknownPeer);
+        }
+        match p
+            .tunnel
+            .commit_decapsulate(decrypted, now)
+            .map_err(|e| map_error(&e))?
+        {
+            Committed::Data { len, .. } => {
+                p.passive.on_data(now);
+                Ok(Inbound::Data { peer, len })
+            }
+            Committed::Keepalive => Ok(Inbound::Keepalive { peer }),
         }
     }
 
@@ -273,25 +412,35 @@ impl Protocol {
         packet: &[u8],
         out: &mut [u8],
     ) -> Result<Option<usize>, DropReason> {
-        let Some(out) = out.get_mut(..Self::sealed_len(packet.len())) else {
+        if out.len() < Self::sealed_len(packet.len()) {
             return Err(DropReason::Internal);
+        }
+        let Some(job) = self.begin_seal(peer, now, packet.len())? else {
+            return Ok(None);
         };
+        Ok(Some(job.seal(packet, out)?))
+    }
+
+    /// `len` byte の packet の暗号の番号を取り、暗号化の仕事 [`SealJob`] を返す。セッションが無ければ
+    /// `Ok(None)`。番号はこの呼び出しの順に付くので、呼び手は返した仕事の datagram をこの順に送る。
+    pub(crate) fn begin_seal(
+        &mut self,
+        peer: PeerId,
+        now: Instant,
+        len: usize,
+    ) -> Result<Option<SealJob>, DropReason> {
         let p = &mut self.peers[peer];
-        let pending = match p.tunnel.begin_encapsulate(now) {
+        match p.tunnel.begin_encapsulate(now) {
             Ok(pending) => {
                 p.passive.on_send();
-                pending
+                Ok(Some(SealJob {
+                    pending,
+                    len: Self::sealed_len(len),
+                }))
             }
-            Err(SanstunError::NoCurrentSession | SanstunError::ConnectionExpired) => {
-                return Ok(None);
-            }
-            Err(e) => return Err(map_error(&e)),
-        };
-        let len = pending
-            .encrypt(packet, out)
-            .map_err(|e| map_error(&e))?
-            .len();
-        Ok(Some(len))
+            Err(SanstunError::NoCurrentSession | SanstunError::ConnectionExpired) => Ok(None),
+            Err(e) => Err(map_error(&e)),
+        }
     }
 
     /// `packet` を新しい buffer に暗号化する。ハンドシェイクを待っていた packet を送るときの、

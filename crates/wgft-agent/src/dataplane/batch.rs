@@ -28,6 +28,7 @@ pub(crate) fn store_bytes(b: Batching, mtu: usize) -> usize {
         b.is_on(),
         mtu,
         mtu + wgft_wireguard::DATA_OVERHEAD,
+        1,
     )
 }
 
@@ -38,6 +39,7 @@ pub(super) fn rx_store(b: Batching, max_datagram: usize) -> RxBatch {
         b.slots(),
         b.is_on() && cfg!(target_os = "linux"),
         max_datagram,
+        1,
     )
 }
 
@@ -49,6 +51,7 @@ pub(super) fn tx_store(b: Batching, mtu: usize, max_datagram: usize) -> TxBatch 
         b.is_on() && cfg!(target_os = "linux"),
         mtu,
         max_datagram,
+        1,
     )
 }
 

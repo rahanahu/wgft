@@ -11,19 +11,20 @@ use wgft_wireguard::{
     PrivateKey, ProtocolTimers, PublicKey, Roaming,
 };
 
+mod calib;
 mod cpu;
 mod error;
 mod link;
 mod measure;
 
-use cpu::pin;
+use cpu::{pin, pin_named};
 use error::Error;
-use link::Link;
+use link::{Lanes, Link};
 use measure::{Plan, measure_recv, measure_send};
 
 /// The agent's tunnel address and the server's, as in the device layer's own tests.
 const AGENT_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 2);
-const SERVER_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 1);
+pub(super) const SERVER_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 1);
 /// The buffer the data plane asks for.
 const REQUESTED_BUFFER: usize = 7 << 20;
 
@@ -63,6 +64,18 @@ struct Args {
     /// plane's batch store with `sendmmsg`, `recvmmsg`, UDP GSO and GRO.
     #[arg(long)]
     one_by_one: bool,
+    /// Run the measured end's crypto on the data plane's crypto workers: this many workers, 0 for
+    /// the split device calls on the measured thread alone. Without it, the crypto runs inside the
+    /// device calls as before the workers.
+    #[arg(long)]
+    crypto_workers: Option<usize>,
+    /// With --crypto-workers, the bytes of a round below which the measured thread does all of its
+    /// crypto. The default is the data plane's.
+    #[arg(long, default_value_t = wgft_udp_batch::crypto::PARALLEL_MIN_BYTES)]
+    parallel_min_bytes: usize,
+    /// CPUs for the crypto workers, comma separated, one per worker.
+    #[arg(long, value_delimiter = ',')]
+    cpu_workers: Vec<usize>,
 }
 
 pub(crate) fn main() -> ExitCode {
@@ -79,6 +92,9 @@ pub(crate) fn main() -> ExitCode {
 }
 
 fn run(args: &Args) -> Result<String, Error> {
+    if args.crypto_workers.is_some() && args.one_by_one {
+        return Err(Error::failed("--crypto-workers needs the batched path"));
+    }
     if args.size < 20 || args.size > usize::from(DEFAULT_MTU) || args.burst == 0 {
         return Err(Error::failed(format!(
             "size must be 20 to {DEFAULT_MTU} and burst above zero"
@@ -115,9 +131,37 @@ fn run(args: &Args) -> Result<String, Error> {
             agent.mtu()
         )));
     }
-    let agent = Link::new(agent_socket, agent, !args.one_by_one);
-    let server = Link::new(server_socket, server, !args.one_by_one);
+    let lanes = args.crypto_workers.map(|w| Lanes {
+        lanes: w + 1,
+        min_bytes: args.parallel_min_bytes,
+    });
+    let (agent_lanes, server_lanes) = match args.mode {
+        Mode::Send => (lanes, None),
+        Mode::Recv => (None, lanes),
+    };
     let packet = inner_packet(args.size);
+    let (seal_cost, open_cost) = calib::crypto_cost(&packet)?;
+    let agent = Link::new(agent_socket, agent, !args.one_by_one, agent_lanes);
+    let server = Link::new(server_socket, server, !args.one_by_one, server_lanes);
+    let workers = match args.mode {
+        Mode::Send => agent.workers(),
+        Mode::Recv => server.workers(),
+    };
+    if let Some(w) = workers {
+        if Some(w) != args.crypto_workers {
+            return Err(Error::failed(format!("only {w} crypto workers started")));
+        }
+        if w > 0 {
+            // 作業者は作った時のスレッド (測るスレッド) の CPU を受け継ぐので、指定の CPU に置き直す
+            if args.cpu_workers.len() < w {
+                return Err(Error::failed(
+                    "--cpu-workers needs one CPU per crypto worker",
+                ));
+            }
+            pin_named("wgft-crypto", &args.cpu_workers[..w])
+                .map_err(|e| Error::context("cannot pin the crypto workers", &e))?;
+        }
+    }
     let bursts = args.packets.div_ceil(args.burst as u64);
     let plan = Plan {
         packet,
@@ -131,23 +175,30 @@ fn run(args: &Args) -> Result<String, Error> {
     };
     let packets = bursts * args.burst as u64;
     Ok(format!(
-        "RESULT mode={} size={} batch={} packets={packets} bytes={} cpu_ns={} user_ns={} sys_ns={} data_syscalls={} wake_syscalls={}",
+        "RESULT mode={} size={} batch={} workers={} packets={packets} bytes={} cpu_ns={} user_ns={} sys_ns={} worker_ns={} burst_p50_ns={} burst_p99_ns={} seal_ns={} open_ns={} data_syscalls={} wake_syscalls={}",
         match args.mode {
             Mode::Send => "send",
             Mode::Recv => "recv",
         },
         args.size,
         if args.one_by_one { "off" } else { "on" },
+        args.crypto_workers
+            .map_or_else(|| "none".to_string(), |w| w.to_string()),
         packets * args.size as u64,
         measured.cpu.total.as_nanos(),
         measured.cpu.user.as_nanos(),
         measured.cpu.sys.as_nanos(),
+        measured.worker.as_nanos(),
+        measured.burst_p50.as_nanos(),
+        measured.burst_p99.as_nanos(),
+        seal_cost.as_nanos(),
+        open_cost.as_nanos(),
         measured.calls.data,
         measured.calls.wake,
     ))
 }
 
-fn server_config(key: PrivateKey, agent: PublicKey) -> DeviceConfig {
+pub(super) fn server_config(key: PrivateKey, agent: PublicKey) -> DeviceConfig {
     DeviceConfig {
         private_key: key,
         mtu: DEFAULT_MTU,
