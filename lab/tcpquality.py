@@ -297,9 +297,16 @@ def iperf(jsonfile):
     if "error" in j or not rcv:
         print("received=0 sent=0 error=%s" % str(j.get("error", "no_result")).replace(" ", "_"))
         return 0
-    print("received=%d sent=%d duration_s=%.3f mbit=%.2f retransmits=%s"
+    # fairness between the streams of one run: Jain's index of the bytes each stream's receiver read
+    # (1 is equal shares) and the smallest stream over the largest; one stream gives no values
+    per = [s.get("receiver", {}).get("bytes", 0) for s in end.get("streams", [])]
+    fair = ""
+    if len(per) > 1 and sum(per) > 0:
+        fair = " stream_jain=%.4f stream_min_over_max=%.3f" % (
+            sum(per) ** 2 / (len(per) * sum(b * b for b in per)), min(per) / max(per) if max(per) else 0)
+    print("received=%d sent=%d duration_s=%.3f mbit=%.2f retransmits=%s%s"
           % (rcv["bytes"], snd.get("bytes", 0), rcv["seconds"], rcv["bits_per_second"] / 1e6,
-             snd.get("retransmits", "-")))
+             snd.get("retransmits", "-"), fair))
     return 0
 
 

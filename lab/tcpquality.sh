@@ -649,7 +649,7 @@ for mode in $MODES; do
       # one line with received=, sent=, the receiver's duration and rate, and the sender's retransmits
       got=$($Q iperf "$W/wgft-tq-iperf-$mode.json")
       sent=$got
-      stats="undetermined=0 streams=$STREAMS duration_s=$(field duration_s "$got") overall_mbit=$(field mbit "$got") retransmits=$(field retransmits "$got")"
+      stats="undetermined=0 streams=$STREAMS duration_s=$(field duration_s "$got") overall_mbit=$(field mbit "$got") retransmits=$(field retransmits "$got")$(echo "$got" | grep -oE ' stream_(jain|min_over_max)=[^ ]*' | tr -d '\n')"
       c_us=; [ -n "$client_cg" ] && c_us=$(awk '$1 == "usage_usec" { print $2 }' "$client_cg/cpu.stat" 2>/dev/null)
       rmdir "$client_cg" 2>/dev/null
     else
