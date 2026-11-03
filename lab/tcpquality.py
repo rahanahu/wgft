@@ -750,7 +750,7 @@ def snap_line(prefix, pid="", cg="", *specs):
                     if name.strip() == ifname:
                         n = nums.split()
                         out += ["if_%s_%s_%s=%s" % (ns, ifname, k, n[i])
-                                for k, i in (("rxb", 0), ("rxp", 1), ("rxdrop", 3), ("txb", 8), ("txp", 9), ("txdrop", 11))]
+                                for k, i in (("rxb", 0), ("rxp", 1), ("rxerr", 2), ("rxdrop", 3), ("txb", 8), ("txp", 9), ("txerr", 10), ("txdrop", 11))]
             elif kind == "snmp":
                 lines = got["snmp"].splitlines() + got["netstat"].splitlines()
                 for hdr, val in zip(lines[0::2], lines[1::2]):
@@ -817,8 +817,9 @@ def snapdiff(nbytes, window_s, direction, before, after):
                 put("%s_%sp_per_gb" % (name, dirn), pk / gb, "%.0f")
                 if pk > 0:
                     put("%s_%s_avg_b" % (name, dirn), by / pk, "%.0f")
-                if d(base + "_%sdrop" % dirn):
-                    put("%s_%sdrop" % (name, dirn), d(base + "_%sdrop" % dirn), "%.0f")
+                for e in ("drop", "err"):
+                    if d(base + "_%s%s" % (dirn, e)):
+                        put("%s_%s%s" % (name, dirn, e), d(base + "_%s%s" % (dirn, e)), "%.0f")
         elif k.startswith("snmp_") and gb > 0 and d(k) is not None:
             if any(k.endswith(c) for c in ("_insegs", "_outsegs", "_retrans", "_udp_in", "_udp_out")):
                 put(k[5:] + "_per_gb", d(k) / gb, "%.0f")
