@@ -757,6 +757,11 @@ struct Bench {
 const A_ADDR: &str = "127.0.0.2:40000";
 const B_ADDR: &str = "127.0.0.1:51820";
 
+std::thread_local! {
+    /// [`Bench::new`] のバッチの置き場のレーンの数。2 つ以上なら、暗号の作業者に小さなバッチも渡す。
+    static BENCH_LANES: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
+}
+
 impl Bench {
     fn new(packets: u32) -> Self {
         let (a_key, b_key) = keys();
@@ -776,7 +781,11 @@ impl Bench {
         let mut stub = Stub::new(None);
         stub.out
             .extend((0..packets).map(|i| packet(AGENT_IP, SERVER_IP, i)));
-        let outbox = Outbox::new(Batching::default(), a.mtu(), a.max_transmit_len());
+        let lanes = BENCH_LANES.get();
+        let mut outbox = Outbox::new(Batching::default(), a.mtu(), a.max_transmit_len(), lanes);
+        if lanes > 1 {
+            outbox.crypto = Some(wgft_udp_batch::crypto::Crypto::new(lanes, 0));
+        }
         Self {
             a,
             b,
@@ -1253,5 +1262,212 @@ async fn a_worker_panic_ends_the_pipelined_receive_with_an_error() {
     assert!(
         e.to_string().contains("ended this tunnel generation"),
         "{e}"
+    );
+}
+
+#[test]
+fn the_send_batch_rules_hold_with_the_crypto_workers() {
+    BENCH_LANES.set(3);
+    without_a_session_nothing_is_pulled_and_a_handshake_starts();
+    a_full_socket_stops_the_pulling_and_keeps_the_batch();
+    datagrams_the_device_queued_go_out_before_a_pending_batch();
+    a_batch_cut_by_a_full_socket_resumes_where_it_stopped();
+    udp_goes_out_before_the_tcp_of_its_batch_and_runs_share_a_message();
+    #[cfg(unix)]
+    a_refused_gso_send_goes_out_one_by_one();
+    the_cap_ends_a_wake_up_with_more_to_send();
+    send_errors_are_counted_and_skipped();
+    an_interrupted_send_is_retried_and_a_send_of_nothing_keeps_the_batch();
+    BENCH_LANES.set(1);
+}
+
+// 作業者と重ねる送信 (`send_pipelined`) は 2 つ目の置き場 `tx2` を使い、`tx2` は Linux のバッチの道だけにある
+// (`Outbox::new`)。ほかの OS では製品がこの道を通らないので、その試験も Linux だけで流す。
+#[cfg(target_os = "linux")]
+impl Bench {
+    /// 作業者と重ねる送信の相を 1 回流す。最初のバッチが作業者のレーンの枠をすべて引くように、速い費用を
+    /// 記録しておく。
+    fn pipe(&mut self) -> bool {
+        let mut pace = super::batch::Pace::default();
+        pace.record(Duration::from_nanos(8), 8);
+        let mut now = clock::now();
+        let wake = Wake {
+            start: now,
+            timed: true,
+        };
+        super::driver::send_pipelined(
+            &mut self.a,
+            &mut self.stub,
+            &self.b_pub,
+            &mut self.outbox,
+            &mut self.sink,
+            &mut pace,
+            wake,
+            &mut now,
+        )
+    }
+
+    fn in_flight(&self) -> Option<usize> {
+        self.outbox
+            .crypto
+            .as_ref()
+            .and_then(wgft_udp_batch::crypto::Crypto::seal_in_flight)
+    }
+}
+
+/// 記録した datagram のうち、データの message の番号を送った順に返す。
+#[cfg(target_os = "linux")]
+fn counters(sent: &[Transmit]) -> Vec<u64> {
+    sent.iter()
+        .filter(|t| t.payload[0] == 4 && t.payload.len() > 32)
+        .map(|t| u64::from_le_bytes(t.payload[8..16].try_into().unwrap()))
+        .collect()
+}
+
+/// UDP と TCP の packet を混ぜて `n` 個並べる。UDP は 5 つに 1 つ。
+#[cfg(target_os = "linux")]
+fn mixed(n: u32) -> Vec<Vec<u8>> {
+    (0..n)
+        .map(|i| {
+            let mut p = tcp_packet(i, 1200);
+            if i % 5 == 0 {
+                p[9] = 17;
+            }
+            p
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_pipelined_send_keeps_the_counters_in_send_order_and_leaves_nothing_with_the_workers() {
+    BENCH_LANES.set(3);
+    let mut t = Bench::new(0);
+    BENCH_LANES.set(1);
+    assert!(t.outbox.tx2.is_some());
+    t.connected();
+    t.sink.sent.clear();
+    t.stub.out.extend(mixed(100));
+    let mut calls = 0;
+    while !t.stub.out.is_empty() {
+        t.pipe();
+        assert_eq!(t.in_flight(), None, "no batch stays with the workers");
+        calls += 1;
+        assert!(calls < 100);
+    }
+    let c = counters(&t.sink.sent);
+    assert_eq!(c.len(), 100);
+    assert!(c.windows(2).all(|w| w[0] + 1 == w[1]), "{c:?}");
+    let mut got: Vec<u32> = t.deliver().iter().map(|p| seq(p)).collect();
+    assert_eq!(got.len(), 100);
+    got.sort_unstable();
+    assert_eq!(got, (0..100).collect::<Vec<_>>());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_socket_during_the_pipelined_send_keeps_both_batches_in_order() {
+    BENCH_LANES.set(3);
+    let mut t = Bench::new(0);
+    BENCH_LANES.set(1);
+    t.connected();
+    t.sink.sent.clear();
+    t.stub.out.extend(mixed(60));
+    // 最初のバッチの一部だけを受け付け、その後は書けない
+    t.sink.budget = Some(3);
+    t.pipe();
+    assert_eq!(t.in_flight(), None);
+    assert!(t.outbox.is_blocked());
+    let pulled = t.stub.pulls;
+    t.pipe();
+    assert_eq!(t.stub.pulls, pulled, "nothing is pulled while batches wait");
+    // 書けるようになれば、待っていたバッチを古いものから送り、続きを引く
+    t.sink.budget = None;
+    while !t.stub.out.is_empty() || t.outbox.is_blocked() {
+        t.pipe();
+    }
+    let c = counters(&t.sink.sent);
+    assert_eq!(c.len(), 60);
+    assert!(c.windows(2).all(|w| w[0] + 1 == w[1]), "{c:?}");
+    assert_eq!(t.deliver().len(), 60);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn without_a_session_the_pipelined_send_pulls_nothing_and_starts_a_handshake() {
+    BENCH_LANES.set(3);
+    let mut t = Bench::new(4);
+    BENCH_LANES.set(1);
+    t.pipe();
+    assert_eq!(t.stub.pulls, 0);
+    assert_eq!(t.in_flight(), None);
+    assert!(
+        t.sink.sent.iter().any(|tr| tr.payload[0] == 1),
+        "an initiation went out"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_final_flush_sends_what_the_pipelined_send_left_waiting() {
+    BENCH_LANES.set(3);
+    let mut t = Bench::new(0);
+    BENCH_LANES.set(1);
+    t.connected();
+    t.sink.sent.clear();
+    t.stub.out.extend(mixed(40));
+    t.sink.block = true;
+    t.pipe();
+    t.sink.block = false;
+    // 止めるときの最後の送り出し (Rest::flush) と同じく、pump が待っていたものを送る
+    assert!(!t.pump(4096));
+    assert!(!t.outbox.is_blocked());
+    let c = counters(&t.sink.sent);
+    assert!(c.windows(2).all(|w| w[0] + 1 == w[1]), "{c:?}");
+    assert_eq!(t.deliver().len() + t.stub.out.len(), 40);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_single_packet_on_an_idle_tunnel_wakes_no_worker() {
+    BENCH_LANES.set(3);
+    let mut t = Bench::new(0);
+    BENCH_LANES.set(1);
+    t.connected();
+    t.sink.sent.clear();
+    let crypto = |t: &Bench| t.outbox.crypto.as_ref().unwrap().offers();
+    // ゲームの応答の向き:1 つの UDP の datagram は、待たずにその相で出る
+    let mut p = tcp_packet(7, 120);
+    p[9] = 17;
+    t.stub.out.push_back(p);
+    t.pipe();
+    assert_eq!(crypto(&t), 0, "no worker was offered anything");
+    assert_eq!(t.in_flight(), None);
+    assert_eq!(
+        counters(&t.sink.sent).len(),
+        1,
+        "the datagram went out at once"
+    );
+    assert_eq!(t.deliver().len(), 1);
+    // 枠を満たすバッチは作業者に渡る
+    t.stub.out.extend(mixed(60));
+    t.pipe();
+    assert!(crypto(&t) > 0);
+    assert_eq!(t.in_flight(), None);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_worker_panic_during_the_pipelined_send_ends_the_generation() {
+    BENCH_LANES.set(3);
+    let mut t = Bench::new(0);
+    BENCH_LANES.set(1);
+    t.connected();
+    t.outbox.crypto.as_ref().unwrap().poison();
+    t.stub.out.extend(mixed(60));
+    assert!(!t.pipe());
+    assert!(
+        t.outbox.poisoned,
+        "the driver ends the generation on this mark"
     );
 }

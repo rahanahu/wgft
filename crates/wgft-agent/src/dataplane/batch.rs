@@ -33,7 +33,7 @@ pub(crate) fn crypto_lanes(b: Batching, workers: usize) -> usize {
 
 /// The bytes of the batch store for `b` with the tunnel MTU `mtu` and `lanes` crypto lanes: what the
 /// data plane allocates once at start. The memory bound counts it at the largest MTU. The receive
-/// side's plaintext area is cut into the lanes; the send side keeps one lane.
+/// side's plaintext area and the send side's sealed area are cut into the lanes.
 pub(crate) fn store_bytes(b: Batching, mtu: usize, lanes: usize) -> usize {
     wgft_udp_batch::store_bytes(
         b.slots(),
@@ -41,16 +41,23 @@ pub(crate) fn store_bytes(b: Batching, mtu: usize, lanes: usize) -> usize {
         mtu,
         mtu + wgft_wireguard::DATA_OVERHEAD,
         lanes,
-        1,
+        lanes,
     )
 }
 
 /// The bytes of every batch store the data plane allocates for `b` with `lanes` crypto lanes: the
-/// store of [`store_bytes`] and, with the workers (`lanes > 1`), the second receive store of the
-/// pipelined receive. `WGFT_AGENT_BATCH_MIB` bounds this sum.
+/// store of [`store_bytes`] and, with the workers (`lanes > 1`), the second receive and send stores
+/// of the pipelined receive and send. `WGFT_AGENT_BATCH_MIB` bounds this sum.
 pub(crate) fn all_store_bytes(b: Batching, mtu: usize, lanes: usize) -> usize {
     let second = if lanes > 1 {
         wgft_udp_batch::rx_store_bytes(b.slots(), b.is_on(), lanes)
+            + wgft_udp_batch::tx_store_bytes(
+                b.slots(),
+                b.is_on(),
+                mtu,
+                mtu + wgft_wireguard::DATA_OVERHEAD,
+                lanes,
+            )
     } else {
         0
     };
@@ -69,14 +76,14 @@ pub(super) fn rx_store(b: Batching, max_datagram: usize, lanes: usize) -> RxBatc
 }
 
 /// The store's send side for `b`, for packets of up to `mtu` bytes sealed into datagrams of up to
-/// `max_datagram` bytes.
-pub(super) fn tx_store(b: Batching, mtu: usize, max_datagram: usize) -> TxBatch {
+/// `max_datagram` bytes, with its sealed area cut into `lanes` lanes.
+pub(super) fn tx_store(b: Batching, mtu: usize, max_datagram: usize, lanes: usize) -> TxBatch {
     TxBatch::new(
         b.slots(),
         b.is_on() && cfg!(target_os = "linux"),
         mtu,
         max_datagram,
-        1,
+        lanes,
     )
 }
 
@@ -126,13 +133,21 @@ mod tests {
             let b = b.running();
             let lanes = crypto_lanes(b, wgft_udp_batch::pool::MAX_WORKERS);
             let rx = rx_store(b, mtu + wgft_wireguard::DATA_OVERHEAD, lanes);
-            let tx = tx_store(b, mtu, mtu + wgft_wireguard::DATA_OVERHEAD);
+            let tx = tx_store(b, mtu, mtu + wgft_wireguard::DATA_OVERHEAD, lanes);
             assert_eq!(rx.slots(), b.slots());
             assert_eq!(tx.slots(), b.slots());
             assert_eq!(rx.batched(), b.is_on());
             assert_eq!(rx.plain.len(), lanes);
+            assert_eq!(tx.sealed.len(), lanes);
             let second = if lanes > 1 {
                 wgft_udp_batch::rx_store_bytes(b.slots(), b.is_on(), lanes)
+                    + wgft_udp_batch::tx_store_bytes(
+                        b.slots(),
+                        b.is_on(),
+                        mtu,
+                        mtu + wgft_wireguard::DATA_OVERHEAD,
+                        lanes,
+                    )
             } else {
                 0
             };
