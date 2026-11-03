@@ -362,6 +362,23 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --vcpus 8 --tool iperf3 -
   2 つの腕を同じ条件で比べる主な値です。
   `PEERVM` の行は相手の VM、`HOSTQEMU` の行は 2 台の qemu の全スレッドのホストでの時間です。
   ホストの値は `paired.log` の `host_*` にあり、`host_pcore_busy_s` は測定の外の P コアの負荷を示します
+- ホストでの時間の内訳:`host_<vm>_s_per_gb` は VM ごとの qemu の全スレッドの時間で、`HOSTAGENT` と `HOSTPEER` の行がその比です。
+  vCPU のスレッドは、ゲストの中の時間 (`host_<vm>_vcpu_guest_s`)、ホストのカーネルの KVM の時間 (`_vcpu_kvm_s`、VM exit の処理、割り込みの注入、halt polling)、qemu のユーザー空間の時間 (`_vcpu_qemu_s`) に分けます。
+  この 3 つは clock tick で数えるので、10 秒の窓で約 1 % の粒度です。
+  `_vcpu_beyond_guest_s_per_gb` は vCPU のスレッドの時間からゲストが忙しいと数えた時間を引いた値で、ゲストから見えないホストの費用です。
+  `_vcpu_blocks_per_s` は vCPU のスレッドが実際に眠った回数、`_vcpu_wait_s` は実行を待った時間、`_vcpucpu_irq_s` は vCPU を固定した CPU の irq と softirq の時間です。
+  ホストの値は root の権限なしに qemu の `/proc` から読みます
+- ゲストの値:両方の VM の割り込み (virtio の vector、`LOC`、`RES`、`CAL` など) と softirq を秒あたりで、data の NIC の `ethtool -S` の packet と kick (ゲストからホストへの通知) を GB あたりで記録します。
+  cpuidle の driver があれば idle の状態ごとの回数と割合も記録します。
+  2 台の cpuidle の driver、clock source、data の NIC の virtio の device と feature は `guestinfo.txt` に残します
+- ホストの halt polling:`PAIRED_HOSTPOLL_X` と `PAIRED_HOSTPOLL_Y` (`on` か `off`) は、その腕の前に VM のホストの halt polling を入れるか切ります。
+  片方だけを指定すると、もう片方の腕は `on` です。
+  2 つの値が違えば、同じ腕を 2 つ並べて halt polling だけを比べられます (`rust rust` など)。
+  `PAIRED_HOSTPOLL_VMS` (`agent`、`peer`、`both`、既定は `both`) で VM を選びます。
+  ゲストの root が `MSR_KVM_POLL_CONTROL` を書くので、ホストの設定は変わらず、VM を消すと元に戻ります。
+  CPU のモデルに `kvm-poll-control` が無いと止まります。
+  腕の行には `hostpoll=` が付きます
+- KVM の統計:root が `python3 lab/tcpquality.py kvmsample <file> 0.5` を測定の間に動かし、`PAIRED_KVM_SAMPLES=<file>` を渡すと、VM ごとの exit の数と halt polling の時間 (`host_<vm>_kvm_*`) が加わります
 
 `--target local` は転送先 (LAN のホストの役) を agent のマシンに置きます。
 LAN のホストのアドレス `192.168.50.3` を agent の VM の `home` の `lo` に付け、iperf3 のサーバと UDP の echo を `home` で動かします。

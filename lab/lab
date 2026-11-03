@@ -869,6 +869,12 @@ paired_validate() {
   [[ -z $delayms || $path == delay ]] || die "--delay-ms goes with the delay path"
   [[ -z $peervcpus || -n $split ]] || die "--peer-vcpus goes with --split"
   [[ -z $target || ( -n $split && ( $target == lan || $target == local ) ) ]] || die "--target wants lan or local, with --split"
+  local hp
+  for hp in "${PAIRED_HOSTPOLL_X:-}" "${PAIRED_HOSTPOLL_Y:-}"; do
+    [[ -z $hp || ( -n $split && ( $hp == on || $hp == off ) ) ]] || die "PAIRED_HOSTPOLL_X and PAIRED_HOSTPOLL_Y want on or off, with --split"
+  done
+  [[ ${PAIRED_HOSTPOLL_VMS:-both} =~ ^(agent|peer|both)$ ]] || die "PAIRED_HOSTPOLL_VMS wants agent, peer or both"
+  [[ -z ${PAIRED_KVM_SAMPLES:-} || -n $split ]] || die "PAIRED_KVM_SAMPLES goes with --split"
   [[ $target != local || ( $tool == iperf3 && -z $rmemmax ) ]] || die "--target local wants --tool iperf3 and no --kernel-rmem-max"
   [[ -z $peervcpus ]] || require_uint --peer-vcpus "$peervcpus"
   { is_uint "$rounds" && ((rounds % 2 == 0)); } || die "--rounds wants an even number, so that each arm runs as often in each VM"
@@ -885,7 +891,9 @@ paired_validate() {
   [[ -z $agentgso || $agentgso == off || ( $agentgso == on && $path == fast ) ]] || die "--agent-gso wants off, or on with the fast path"
   [[ -z $rmemmax ]] || { is_uint "$rmemmax" && ((rmemmax >= 4096)); } || die "--kernel-rmem-max wants a whole number of bytes of 4096 or more"
   [[ -z $rmemmax || ${spec_x#base:} == kernel || ${spec_y#base:} == kernel ]] || die "--kernel-rmem-max sets the receiver of a kernel arm; neither arm is kernel"
-  [[ $spec_x != "$spec_y" ]] || die "the two arms are the same: $spec_x"
+  # 同じ腕は、--split でホストの halt polling だけを腕の間で替える比べ (PAIRED_HOSTPOLL_X と _Y が違う) に限る
+  [[ $spec_x != "$spec_y" || ( -n $split && ${PAIRED_HOSTPOLL_X:-on} != "${PAIRED_HOSTPOLL_Y:-on}" ) ]] \
+    || die "the two arms are the same: $spec_x; with --split, the same arm twice needs PAIRED_HOSTPOLL_X and PAIRED_HOSTPOLL_Y that differ"
   uses_base=0 rust=0
   for s in "$spec_x" "$spec_y"; do
     m=${s#base:}
@@ -996,6 +1004,8 @@ paired_provision() {
     if [[ -n $split ]]; then
       echo "lab paired: split: forwarding target ${target:-lan} (lan: a host on the LAN in the peer VM; local: on the agent's machine, over loopback)"
       echo "lab paired: split: agent VM ${names[0]} limits.cpu=${pins[0]} qemu $SPLIT_QEMU_AGENT, peer VM ${names[1]} limits.cpu=${pins[1]} qemu $SPLIT_QEMU_PEER, network $PAIRED_SPLIT_NET (taps$SPLIT_TAPS, queue ${PAIRED_TAP_QLEN:-4096}, NIC queues $SPLIT_PEER_Q), agentd $SPLIT_AGENT_AT, kernel $kern, template $SUITE_TEMPLATE"
+      [[ -z ${PAIRED_HOSTPOLL_X:-}${PAIRED_HOSTPOLL_Y:-} ]] || echo "lab paired: split: host halt polling of the ${PAIRED_HOSTPOLL_VMS:-both} VM(s), set by the guests: x ${PAIRED_HOSTPOLL_X:-on}, y ${PAIRED_HOSTPOLL_Y:-on} (hostpoll= in paired.log)"
+      [[ -z ${PAIRED_KVM_SAMPLES:-} ]] || echo "lab paired: split: KVM statistics from $PAIRED_KVM_SAMPLES (tcpquality.py kvmsample, started by root)"
       echo "lab paired: split: the arms take turns in the same two VMs; vm=a in paired.log is the arm that ran first in the round. vhost and qemu's other threads are not pinned (host samples in host-samples.txt)"
     else
       echo "lab paired: VM a ${names[0]} limits.cpu=${pins[0]}, VM b ${names[1]} limits.cpu=${pins[1]}, kernel $kern, template $SUITE_TEMPLATE"
@@ -1043,6 +1053,12 @@ paired_split_setup() {
       || die "cannot set the NIC of ${names[i]} to $q queue(s)"
   done
   SPLIT_PEER_Q="agent ${PAIRED_AGENT_QUEUES:-1}, peer ${PAIRED_PEER_QUEUES:-1}"
+  # 2 台の idle の仕方と data の NIC の形を 1 度だけ残す (ホストでの時間の内訳を読むときに要る)
+  for i in 0 1; do
+    { echo "VM ${vms[i]} ${names[i]}"
+      (VM=${names[i]}; in_vm ip netns exec "$([[ $i == 0 ]] && echo home || echo homerouter)" python3 "$SHARE/lab/tcpquality.py" guestinfo "$([[ $i == 0 ]] && echo eth0 || echo lan0)") 2>&1
+    } >>"$out/guestinfo.txt"
+  done
   if [[ $target == local ]]; then
     # --target local:転送先を agent のマシンに置く。LAN のホストのアドレスを agent の VM の home の lo に移し、
     # 相手の VM の lan の netns からは外す。agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に入る
@@ -1070,6 +1086,7 @@ paired_run_split_round() {
   for k in 0 1; do
     spec=${spec_of[${arms[k]}]}
     mode=${spec#base:}
+    paired_hostpoll "${arms[k]}"
     env=(RUNS="$runs" DIRECTION="$direction" AGENT_AT="$SPLIT_AGENT_AT")
     [[ $target != local ]] || env+=(TARGET_LOCAL=1)
     paired_round_env
@@ -1080,10 +1097,28 @@ paired_run_split_round() {
       fails=1
     fi
     { grep '^RESULT ' "$log" || true; } \
-      | sed "s/^RESULT /PAIRED round=$r vm=${vms_order[k]} arm=${arms[k]} name=$spec clock_offset_s=$off /" \
+      | sed "s/^RESULT /PAIRED round=$r vm=${vms_order[k]} arm=${arms[k]} name=$spec clock_offset_s=$off${SPLIT_HOSTPOLL:+ hostpoll=$SPLIT_HOSTPOLL} /" \
       | awk -v o="$off" '{ for (i = 1; i <= NF; i++) if ($i ~ /^t_(start|end)=/) { split($i, kv, "="); $i = sprintf("%s=%.3f", kv[1], kv[2] - o) } print }' >>"$out/paired.log"
   done
   echo "lab paired: round $r of $rounds done, ${arms[0]} first, $((SECONDS - t0)) s"
+}
+
+# paired_hostpoll <arm>:PAIRED_HOSTPOLL_X、PAIRED_HOSTPOLL_Y (on か off、片方だけなら他方は on) があれば、その腕の前に
+# PAIRED_HOSTPOLL_VMS (agent、peer、both、既定 both) の VM のホストの halt polling を入れるか切る。ゲストの root が
+# MSR_KVM_POLL_CONTROL を書くので、ホストの設定は変わらず、VM を消せば元に戻る。腕の行に hostpoll= を付ける
+paired_hostpoll() {
+  local want i vm
+  SPLIT_HOSTPOLL=""
+  [[ -n ${PAIRED_HOSTPOLL_X:-}${PAIRED_HOSTPOLL_Y:-} ]] || return 0
+  # 片方だけ指定したときは、もう片方の腕を on に戻す (前の腕の設定を引き継がない)
+  if [[ $1 == x ]]; then want=${PAIRED_HOSTPOLL_X:-on}; else want=${PAIRED_HOSTPOLL_Y:-on}; fi
+  for i in 0 1; do
+    vm=$([[ $i == 0 ]] && echo agent || echo peer)
+    [[ ${PAIRED_HOSTPOLL_VMS:-both} == both || ${PAIRED_HOSTPOLL_VMS:-both} == "$vm" ]] || continue
+    (VM=${names[i]}; in_vm sh -c "modprobe msr && python3 $SHARE/lab/tcpquality.py pollctl $want") >>"$out/vm-${vms[i]}.log" 2>&1 \
+      || die "cannot turn the host's halt polling $want for the $vm VM; see $out/vm-${vms[i]}.log"
+  done
+  SPLIT_HOSTPOLL="$want:${PAIRED_HOSTPOLL_VMS:-both}"
 }
 
 # paired_round_env:spec と mode の腕の tcpquality.sh の環境を env に足す (2 つの round の流し方で共通)
@@ -1146,7 +1181,7 @@ paired_report() {
   if [[ -n $PAIRED_SAMPLER ]]; then
     kill "$PAIRED_SAMPLER" 2>/dev/null || true
     PAIRED_SAMPLER=""
-    python3 "$REPO/lab/tcpquality.py" hostwin "$out/host-samples.txt" "$out/paired.log" || rc=1
+    python3 "$REPO/lab/tcpquality.py" hostwin "$out/host-samples.txt" "$out/paired.log" "${PAIRED_KVM_SAMPLES:-}" || rc=1
   fi
   python3 "$REPO/lab/tcpquality.py" cpupaired "$out/paired.log" >"$out/result.txt" || rc=1
   if [[ -n $udpping ]]; then
@@ -1159,7 +1194,7 @@ paired_report() {
 
 cmd_paired() {
   local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes="" tool="" streams="" udpping="" bulkmbit="" agentgso="" rmemmax="" rtarget_flag=""
-  local split="" peervcpus="" delayms="" target="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
+  local split="" peervcpus="" delayms="" target="" SPLIT_HOSTPOLL="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
   local rest=() path spec_x spec_y uses_base rust pins=() names=() vms=() t0 run_timeout r
   local rc=0 fails=0 prev_offs=()
   paired_parse_args "$@"

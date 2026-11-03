@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 # Golden test of the paired estimators of tcpquality.py (the cpupaired subcommand and its
-# MBITRATIO) on two tiny synthetic logs: python3 lab/tcpquality_test.py
+# MBITRATIO) on two tiny synthetic logs, and tests of the host and guest counters that
+# `lab/lab paired --split` records: python3 lab/tcpquality_test.py
+import importlib.util
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -77,6 +80,174 @@ class CpuPaired(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("failed=2", out)
         self.assertNotIn("Traceback", out)
+
+
+def load_tq():
+    spec = importlib.util.spec_from_file_location("tcpquality", TQ)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+tq = load_tq()
+
+INTERRUPTS = """            CPU0       CPU1
+  24:          5          7  PCI-MSIX-0000:01:00.0   0-edge      virtio1-config
+  25:        100        200  PCI-MSIX-0000:01:00.0   1-edge      virtio1-input.0
+  26:         10         20  PCI-MSIX-0000:01:00.0   2-edge      virtio1-output.0
+  27:          1          2  PCI-MSIX-0000:01:00.0   3-edge      virtio1-input.1
+  28:          3          4  IO-APIC   1-edge      i8042
+ LOC:       1000       2000   Local timer interrupts
+ RES:         30         40   Rescheduling interrupts
+ CAL:          5          6   Function call interrupts
+ ERR:          0
+"""
+
+SOFTIRQS = """                    CPU0       CPU1
+          HI:          0          0
+       TIMER:         10         20
+      NET_TX:          1          2
+      NET_RX:        300        400
+"""
+
+
+def thread(comm, allowed, proc=0, **vals):
+    base = {k: 0 for k in tq.THREAD_KEYS}
+    base.update(vals)
+    return (comm, proc, allowed, base)
+
+
+class GuestCounters(unittest.TestCase):
+    def test_interrupts(self):
+        self.assertEqual(tq.parse_interrupts(INTERRUPTS), {
+            "irq_virtio1_config": 12, "irq_virtio1_input": 303, "irq_virtio1_output": 30,
+            "irq_LOC": 3000, "irq_RES": 70, "irq_CAL": 11})
+
+    def test_softirqs(self):
+        self.assertEqual(tq.parse_softirqs(SOFTIRQS), {"sirq_HI": 0, "sirq_TIMER": 30, "sirq_NET_TX": 3, "sirq_NET_RX": 700})
+
+    def test_cpuidle(self):
+        with tempfile.TemporaryDirectory() as d:
+            for cpu in (0, 1):
+                for st, name, usage, us in ((0, "POLL", 5, 50), (1, "C1", 10, 1000)):
+                    sd = os.path.join(d, "cpu%d" % cpu, "cpuidle", "state%d" % st)
+                    os.makedirs(sd)
+                    for f, v in (("name", name), ("usage", usage), ("time", us)):
+                        with open(os.path.join(sd, f), "w") as g:
+                            g.write("%s\n" % v)
+            os.makedirs(os.path.join(d, "cpufreq"))
+            self.assertEqual(tq.cpuidle_counters(d), {"idle_POLL_usage": 10, "idle_POLL_us": 100,
+                                                      "idle_C1_usage": 20, "idle_C1_us": 2000})
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "cpu0"))
+            self.assertEqual(tq.cpuidle_counters(d), {})
+
+    def test_ethstats_keep(self):
+        got = tq.ethstats_keep({"rx_queue_0_packets": 1, "rx_queue_0_bytes": 2, "rx_queue_0_kicks": 3,
+                                "tx_queue_0_kicks": 4, "tx-queue-0-drops": 5, "tx_queue_0_xdp_tx": 6})
+        self.assertEqual(got, {"rx_queue_0_packets": 1, "rx_queue_0_kicks": 3, "tx_queue_0_kicks": 4, "tx_queue_0_drops": 5})
+
+    def test_snapdiff_rates(self):
+        before = "peervm_t=0 peervm_busy_us=0 peervm_user_us=0 peervm_sys_us=0 peervm_soft_us=0 peervm_irq_us=0 peervm_steal_us=0 " \
+                 "peervm_irq_virtio1_input=100 peervm_irq_RES=0 peervm_sirq_NET_RX=0 peervm_idle_C1_usage=0 peervm_idle_C1_us=0 " \
+                 "eth_homerouter_lan0_tx_queue_0_kicks=0"
+        after = "peervm_t=10 peervm_busy_us=5000000 peervm_user_us=0 peervm_sys_us=0 peervm_soft_us=0 peervm_irq_us=0 peervm_steal_us=0 " \
+                "peervm_irq_virtio1_input=2100 peervm_irq_RES=500 peervm_sirq_NET_RX=0 peervm_idle_C1_usage=1000 peervm_idle_C1_us=4000000 " \
+                "eth_homerouter_lan0_tx_queue_0_kicks=3000"
+        p = subprocess.run([sys.executable, TQ, "snapdiff", "2000000000", "10", "down", before, after],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        got = dict(kv.split("=") for kv in p.stdout.split())
+        self.assertEqual(got["peervm_irq_virtio1_input_per_s"], "200")
+        self.assertEqual(got["peervm_irq_virtio1_input_per_gb"], "1000")
+        self.assertEqual(got["peervm_irq_RES_per_s"], "50")
+        self.assertNotIn("peervm_sirq_NET_RX_per_s", got)
+        self.assertEqual(got["peervm_idle_C1_per_s"], "100")
+        self.assertEqual(got["peervm_idle_C1_share"], "0.400")
+        self.assertEqual(got["homerouter_lan0_tx_queue_0_kicks_per_gb"], "1500")
+        self.assertEqual(got["homerouter_lan0_tx_queue_0_kicks_per_s"], "300")
+
+
+class HostCounters(unittest.TestCase):
+    def test_sampler_keeps_exited_threads_and_counts_new_ones(self):
+        s = tq.HostSampler(pcores={0})
+        busy, irq = {16: 100, 17: 50}, {16: 4, 17: 1}
+        parts = s.vm("agent", 7, {"1": thread("qemu-system-x86", "0-23", run=1000),
+                                  "2": thread("qemu-system-x86", "16", run=5000, guest=3, stime=1, vcs=2),
+                                  "3": thread("vhost-7", "0-23", proc=0, run=100)}, busy, irq)
+        got = dict(p.split("=") for p in parts)
+        self.assertEqual((got["agent_vcpu_ns"], got["agent_vhost_ns"], got["agent_other_ns"]), ("5000", "100", "1000"))
+        self.assertEqual((got["agent_vcpucpu_busy"], got["agent_vcpucpu_irq"], got["agent_vcpucpu_n"]), ("100", "4", "1"))
+        # thread 1 exits, thread 4 is born, the vhost worker moves to an E-core
+        parts = s.vm("agent", 7, {"2": thread("qemu-system-x86", "16", run=6000, guest=5, stime=2, vcs=3),
+                                  "3": thread("vhost-7", "0-23", proc=9, run=150),
+                                  "4": thread("qemu-system-x86", "0-23", run=40)}, busy, irq)
+        got = dict(p.split("=") for p in parts)
+        self.assertEqual((got["agent_vcpu_ns"], got["agent_vhost_ns"], got["agent_other_ns"]), ("6000", "150", "1040"))
+        self.assertEqual((got["agent_vcpu_guest"], got["agent_vcpu_stime"], got["agent_vcpu_vcs"]), ("5", "2", "3"))
+        self.assertEqual((got["agent_vhostp_ns"], got["agent_vhoste_ns"]), ("0", "50"))
+
+    def test_hostwin_line_splits_the_vcpu_time(self):
+        hz = os.sysconf("SC_CLK_TCK")
+        rows = []
+        for t, k in ((0.0, 0), (10.0, 1)):
+            rows.append({"t": t, "hcpu0": 1000 * hz / 100 * k, "hirq0": 10 * hz / 100 * k,
+                         "peer_pid": 42.0, "peer_vcpu_ns": 8e9 * k, "peer_vhost_ns": 1e9 * k, "peer_other_ns": 0.0,
+                         "peer_vhostp_ns": 0.0, "peer_vhoste_ns": 1e9 * k,
+                         "peer_vcpu_guest": 3 * hz * k, "peer_vcpu_utime": 3.5 * hz * k, "peer_vcpu_stime": 4.5 * hz * k,
+                         "peer_vcpu_wait": 0.2e9 * k, "peer_vcpu_vcs": 1000.0 * k, "peer_vcpu_nvcs": 10.0 * k,
+                         "peer_vhost_vcs": 500.0 * k,
+                         "peer_vcpucpu_busy": 8.5 * hz * k, "peer_vcpucpu_irq": 0.25 * hz * k})
+        kvm = [{"t": 0.0, "kvm_42_halt_poll_success_ns": 0.0, "kvm_42_exits": 0.0},
+               {"t": 10.0, "kvm_42_halt_poll_success_ns": 4e9, "kvm_42_exits": 1e6}]
+        r = {"t_start": "0", "t_end": "10", "window_s": "10", "bytes": "2000000000", "peervm_cpu_share": "0.3"}
+        got = dict(x.split("=") for x in tq.hostwin_line(r, rows, hz, set(), kvm))
+        want = {"host_peer_vcpu_s": "8.000", "host_peer_s": "9.000", "host_peer_s_per_gb": "4.500",
+                "host_peer_vcpu_guest_s": "3.000", "host_peer_vcpu_kvm_s": "4.500", "host_peer_vcpu_qemu_s": "0.500",
+                "host_peer_vcpu_wait_s": "0.200", "host_peer_vcpu_blocks_per_s": "100", "host_peer_vcpu_preempt_per_s": "1",
+                "host_peer_vhost_blocks_per_s": "50", "host_peer_vcpucpu_irq_s": "0.250", "host_peer_vcpucpu_not_vcpu_s": "0.500",
+                "host_peer_vcpu_beyond_guest_s": "5.000", "host_peer_vcpu_beyond_guest_s_per_gb": "2.500",
+                "host_peer_kvm_halt_poll_success_s": "4.000", "host_peer_kvm_exits_per_s": "100000",
+                "host_qemu_s_per_gb": "4.500", "host_vhost_pcore_frac": "0.00", "host_irq_s": "0.100"}
+        for k, v in want.items():
+            self.assertEqual(got.get(k), v, k)
+
+    def test_kvmsample_reads_debugfs(self):
+        with tempfile.TemporaryDirectory() as d:
+            vm = os.path.join(d, "1234-11")
+            os.makedirs(os.path.join(vm, "vcpu0"))
+            for name, v in (("halt_poll_success_ns", 7), ("exits", 9), ("pages_4k", 3)):
+                with open(os.path.join(vm, name), "w") as f:
+                    f.write("%d\n" % v)
+            out = os.path.join(d, "kvm.txt")
+            self.assertEqual(tq.kvmsample(out, "0", d), 0)
+            with open(out) as f:
+                line = f.read().split()
+            self.assertEqual(line[1:], ["kvm_1234_exits=9", "kvm_1234_halt_poll_success_ns=7"])
+
+    def test_pollctl_writes_every_cpu(self):
+        with tempfile.TemporaryDirectory() as d:
+            for c in (0, 1):
+                os.makedirs(os.path.join(d, str(c)))
+                with open(os.path.join(d, str(c), "msr"), "wb") as f:
+                    f.truncate(tq.MSR_KVM_POLL_CONTROL + 8)
+                with open(os.path.join(d, str(c), "cpuid"), "wb") as f:
+                    f.seek(tq.KVM_CPUID_FEATURES)
+                    f.write(struct.pack("4I", 1 << tq.KVM_FEATURE_POLL_CONTROL, 0, 0, 0))
+            self.assertEqual(tq.pollctl("on", d), 0)
+            for c in (0, 1):
+                with open(os.path.join(d, str(c), "msr"), "rb") as f:
+                    f.seek(tq.MSR_KVM_POLL_CONTROL)
+                    self.assertEqual(struct.unpack("<Q", f.read(8))[0], 1)
+            self.assertEqual(tq.pollctl("off", d), 0)
+            with open(os.path.join(d, "1", "msr"), "rb") as f:
+                f.seek(tq.MSR_KVM_POLL_CONTROL)
+                self.assertEqual(struct.unpack("<Q", f.read(8))[0], 0)
+            with open(os.path.join(d, "0", "cpuid"), "r+b") as f:
+                f.seek(tq.KVM_CPUID_FEATURES)
+                f.write(struct.pack("4I", 0, 0, 0, 0))
+            self.assertEqual(tq.pollctl("on", d), 1)
+
 
 
 if __name__ == "__main__":
