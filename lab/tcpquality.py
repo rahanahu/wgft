@@ -314,8 +314,22 @@ def cpupaired(logfile):
     else:
         rc = cpupaired_key(data, "agent_cpu_s_per_gb", vm=False)
     with open(logfile) as f:
-        if any(l.startswith("PAIRED ") and " vm_cpu_s_per_gb=" in l for l in f):
-            rc = cpupaired_key(data, "vm_cpu_s_per_gb", vm=True) or rc
+        text = f.read()
+    plan = data[0]
+    split = plan.get("split") == "1"
+    if " vm_cpu_s_per_gb=" in text:
+        # with --split the VM line is both VMs together, so the busy share is checked against both
+        vcpus = int(plan.get("vcpus", "4")) + (int(plan.get("peer_vcpus", "0")) if split else 0)
+        rc = cpupaired_key(data, "vm_cpu_s_per_gb", vm=True, vcpus=vcpus) or rc
+    if split:
+        # the agent VM alone: the agent's process and the kernel work of its NIC, or kernel WireGuard,
+        # on the agent's vCPUs only; then the peer VM, and the host's threads of both VMs
+        for key, pre, share, vcpus in (
+                ("agentvm_cpu_s_per_gb", "AGENTVM", "agentvm_cpu_share", int(plan.get("vcpus", "4"))),
+                ("peervm_cpu_s_per_gb", "PEERVM", "peervm_cpu_share", int(plan.get("peer_vcpus", "4"))),
+                ("host_qemu_s_per_gb", "HOSTQEMU", "host_qemu_share", None)):
+            if " %s=" % key in text:
+                rc = cpupaired_key(data, key, vm=vcpus is not None, pre=pre, share_key=share, vcpus=vcpus) or rc
     rc = paired_ratio(data, "overall_mbit", "MBITRATIO", sender_check=True) or rc
     return rc
 
@@ -413,9 +427,13 @@ def paired_ratio(data, key, label, sender_check=False):
     return 0
 
 
-def cpupaired_key(data, key, vm):
+def cpupaired_key(data, key, vm, pre=None, share_key="vm_cpu_share", vcpus=None):
+    # vm: the key is a VM's CPU per byte, so the busy share is checked against the VM's vCPUs.
+    # pre, share_key and vcpus name another such value: `lab/lab paired --split` has the agent VM,
+    # the peer VM and the host
     plan, names, runs = data
-    pre = "VM" if vm else ""
+    if pre is None:
+        pre = "VM" if vm else ""
     keys = planned_keys(plan, runs)
     expected = {"a": 0, "b": 0}
     pairs = {"a": [], "b": []}
@@ -436,8 +454,8 @@ def cpupaired_key(data, key, vm):
         if why:
             counts[why] += 1
             continue
-        vals = [(float(r[key]), float(r["overall_mbit"]), float(r["agent_cpu_share"]), sender_share(r),
-                 float(r.get("vm_cpu_share", "nan"))) for r in (x, y)]
+        vals = [(float(r[key]), float(r["overall_mbit"]), float(r.get("agent_cpu_share", "nan")), sender_share(r),
+                 float(r.get(share_key, "nan"))) for r in (x, y)]
         arm_vals["x"].append(vals[0])
         arm_vals["y"].append(vals[1])
         ratio = vals[0][0] / vals[1][0]
@@ -455,10 +473,10 @@ def cpupaired_key(data, key, vm):
         c = [r[0] for r in rs]
         q1, _, q3 = statistics.quantiles(c, n=4, method="inclusive")
         print("%sCPU arm=%s name=%s runs=%d cpu_s_per_gb=%.3f q1=%.3f q3=%.3f min=%.3f max=%.3f "
-              "mbit=%.1f agent_cpu_share=%.2f sender_cpu_share=%.2f vm_cpu_share=%.2f"
+              "mbit=%.1f agent_cpu_share=%.2f sender_cpu_share=%.2f %s=%.2f"
               % (pre, arm, names.get(arm, arm), len(rs), statistics.median(c), q1, q3, min(c), max(c),
                  statistics.median(r[1] for r in rs), statistics.median(r[2] for r in rs),
-                 statistics.median(r[3] for r in rs), statistics.median(r[4] for r in rs)))
+                 statistics.median(r[3] for r in rs), share_key, statistics.median(r[4] for r in rs)))
     for rnd in sorted(by_round):
         print(pre + "ROUND round=%d x_in_vm=%s pairs=%d ratio_median=%.3f" % (rnd, side_of(rnd), len(by_round[rnd]),
                                                                          statistics.median(by_round[rnd])))
@@ -491,7 +509,8 @@ def cpupaired_key(data, key, vm):
              names.get("x", "x"), names.get("y", "y")))
     if vm:
         # the VMs' vCPU count comes from the PLAN line; runs from before it was written there had 4
-        vcpus = int(plan.get("vcpus", "4"))
+        if vcpus is None:
+            vcpus = int(plan.get("vcpus", "4"))
         limit = VM_BUSY_SHARE * vcpus
         for arm in ("x", "y"):
             busy = [r[4] for r in arm_vals[arm] if r[4] == r[4]]
@@ -499,7 +518,8 @@ def cpupaired_key(data, key, vm):
                 print(pre + "WARN arm %s (%s) keeps %.2f of the VM's %d CPUs busy, above %.2f: that VM is near saturation, "
                       "so its CPU per byte includes contention the other VM may not have and the ratio is not like for like"
                       % (arm, names.get(arm, arm), statistics.median(busy), vcpus, limit))
-    if overlap is not None and overlap < OVERLAP_WARN:
+    # --split runs the arms one after the other, so they never overlap and nothing is to warn about
+    if overlap is not None and overlap < OVERLAP_WARN and plan.get("split") != "1":
         print(pre + "WARN overlap %.2f is below %.1f: the faster arm's run ends first and the slower arm finishes without "
               "the other VM's load, so the slower arm's CPU per byte comes out low; with the 3-5%% the VMs add to each "
               "other, the ratio of the faster arm over the slower one may be about %.1f%% too high"
@@ -607,6 +627,464 @@ def latpaired(logfile):
     return rc
 
 
+# ---- lab/lab paired --split: the agent in a VM of its own ----
+# The agent VM holds only the home namespace; the peer VM holds the client, the vps, the router and
+# the LAN host. tcpquality.sh runs in the peer VM and reaches the agent VM through agentd.
+
+CLONE_NEWNET = 0x40000000
+
+
+def read_netns(ns, paths):
+    # the contents of /proc/thread-self/net/<path> in the network namespace ns ("" is the caller's),
+    # read by this thread alone after setns, so that a threaded agentd is not disturbed
+    out = {}
+    own = None
+    try:
+        if ns:
+            own = os.open("/proc/thread-self/ns/net", os.O_RDONLY)
+            fd = os.open("/run/netns/" + ns, os.O_RDONLY)
+            try:
+                os.setns(fd, CLONE_NEWNET)
+            finally:
+                os.close(fd)
+        for p in paths:
+            try:
+                with open("/proc/thread-self/net/" + p) as f:
+                    out[p] = f.read()
+            except OSError:
+                out[p] = ""
+    finally:
+        if own is not None:
+            os.setns(own, CLONE_NEWNET)
+            os.close(own)
+    return out
+
+
+SNMP_KEYS = {("TcpExt", "TCPOFOQueue"): "tcp_ofoq", ("TcpExt", "TCPOFODrop"): "tcp_ofodrop",
+             ("TcpExt", "TCPRcvQDrop"): "tcp_rcvqdrop", ("TcpExt", "TCPBacklogDrop"): "tcp_backlogdrop",
+             ("TcpExt", "PruneCalled"): "tcp_prune", ("TcpExt", "TCPDSACKRecv"): "tcp_dsackrecv",
+             ("TcpExt", "TCPSACKReorder"): "tcp_sackreorder", ("TcpExt", "TCPTSReorder"): "tcp_tsreorder",
+             ("TcpExt", "TCPLostRetransmit"): "tcp_lostretrans", ("TcpExt", "TCPSpuriousRTOs"): "tcp_spurrto",
+             ("TcpExt", "TCPFastRetrans"): "tcp_fastretrans", ("TcpExt", "TCPTimeouts"): "tcp_timeouts",
+             ("Tcp", "InSegs"): "tcp_insegs", ("Tcp", "OutSegs"): "tcp_outsegs",
+             ("Tcp", "RetransSegs"): "tcp_retrans", ("Udp", "InDatagrams"): "udp_in",
+             ("Udp", "OutDatagrams"): "udp_out", ("Udp", "RcvbufErrors"): "udp_rcvbuferr",
+             ("Udp", "SndbufErrors"): "udp_sndbuferr"}
+
+
+def snap_line(prefix, pid="", cg="", *specs):
+    # one line of cumulative counters, each key starting with <prefix>_:
+    #   busy_us, user_us, sys_us, soft_us, irq_us, steal_us and cpu<N>_us (busy per CPU) from
+    #   /proc/stat, busy being user, nice, system, irq and softirq as in tcpquality.sh; ctxt;
+    #   with a pid, proc_us (from the cgroup's cpu.stat when cg is given) and proc_vcs and
+    #   proc_nvcs, the voluntary and involuntary context switches summed over its threads.
+    # specs: if:<ns>:<ifname> adds if_<ns>_<ifname>_{rxp,rxb,txp,txb} from /proc/net/dev and
+    # snmp:<ns> adds snmp_<ns>_<counter> from /proc/net/snmp, read in that namespace.
+    hz = os.sysconf("SC_CLK_TCK")
+    us = lambda ticks: int(ticks) * 1000000 // hz
+    kv = [("t", "%.6f" % time.time())]
+    with open("/proc/stat") as f:
+        for line in f:
+            v = line.split()
+            if not v:
+                continue
+            if v[0] == "cpu":
+                kv += [("busy_us", us(sum(int(v[i]) for i in (1, 2, 3, 6, 7)))), ("user_us", us(int(v[1]) + int(v[2]))),
+                       ("sys_us", us(v[3])), ("irq_us", us(v[6])), ("soft_us", us(v[7])), ("steal_us", us(v[8]))]
+            elif v[0].startswith("cpu"):
+                kv.append((v[0] + "_us", us(sum(int(v[i]) for i in (1, 2, 3, 6, 7)))))
+            elif v[0] == "ctxt":
+                kv.append(("ctxt", v[1]))
+    # the per-CPU input backlog: packets dropped because netdev_max_backlog was full, and rounds of
+    # net_rx_action that ran out of budget or time (hex columns 2 and 3)
+    try:
+        with open("/proc/net/softnet_stat") as f:
+            rows = [l.split() for l in f if l.strip()]
+        kv += [("softnet_drop", sum(int(r[1], 16) for r in rows)), ("softnet_squeeze", sum(int(r[2], 16) for r in rows))]
+    except (OSError, ValueError, IndexError):
+        pass
+    if pid:
+        if cg:
+            with open(cg + "/cpu.stat") as f:
+                kv.append(("proc_us", next(l.split()[1] for l in f if l.startswith("usage_usec"))))
+        else:
+            with open("/proc/%s/stat" % pid) as f:
+                st = f.read().rsplit(")", 1)[1].split()
+            kv.append(("proc_us", us(int(st[11]) + int(st[12]))))
+        vcs = nvcs = 0
+        for tid in os.listdir("/proc/%s/task" % pid):
+            try:
+                with open("/proc/%s/task/%s/status" % (pid, tid)) as f:
+                    for l in f:
+                        if l.startswith("voluntary_ctxt_switches"):
+                            vcs += int(l.split()[1])
+                        elif l.startswith("nonvoluntary_ctxt_switches"):
+                            nvcs += int(l.split()[1])
+            except OSError:
+                pass
+        kv += [("proc_vcs", vcs), ("proc_nvcs", nvcs)]
+    out = ["%s_%s=%s" % (prefix, k, v) for k, v in kv]
+    by_ns = {}
+    for spec in specs:
+        kind, _, rest = spec.partition(":")
+        ns = rest.split(":")[0]
+        by_ns.setdefault(ns, []).append((kind, rest))
+    for ns, items in by_ns.items():
+        got = read_netns(ns, ["dev", "snmp", "netstat"])
+        # the WireGuard interface of a kernel-mode agent or server, when the namespace has one: its
+        # drops show packets lost inside WireGuard's queues, which no other counter here sees
+        if any(kind == "if" for kind, _ in items) and any(l.split(":")[0].strip() == "wgft0" for l in got["dev"].splitlines()):
+            items = items + [("if", ns + ":wgft0")]
+        for kind, rest in items:
+            if kind == "if":
+                ifname = rest.split(":")[1]
+                for l in got["dev"].splitlines():
+                    name, _, nums = l.partition(":")
+                    if name.strip() == ifname:
+                        n = nums.split()
+                        out += ["if_%s_%s_%s=%s" % (ns, ifname, k, n[i])
+                                for k, i in (("rxb", 0), ("rxp", 1), ("rxdrop", 3), ("txb", 8), ("txp", 9), ("txdrop", 11))]
+            elif kind == "snmp":
+                lines = got["snmp"].splitlines() + got["netstat"].splitlines()
+                for hdr, val in zip(lines[0::2], lines[1::2]):
+                    h, v = hdr.split(), val.split()
+                    for name, num in zip(h[1:], v[1:]):
+                        k = SNMP_KEYS.get((h[0].rstrip(":"), name))
+                        if k:
+                            out.append("snmp_%s_%s=%s" % (ns, k, num))
+    return " ".join(out)
+
+
+def snap(prefix, pid="", cg="", *specs):
+    print(snap_line(prefix, pid, cg, *specs))
+    return 0
+
+
+def snapdiff(nbytes, window_s, direction, before, after):
+    # the run's values from two snap lines (several snap lines joined by spaces): per VM prefix
+    # (agentvm, peervm, and vm in a single-VM lab) its CPU per GB, its busy share and the shares of
+    # user, system, softirq, irq and steal time, the busiest single CPU and the context switches;
+    # for the agent process its CPU per GB, share and context switches; per interface packets per GB
+    # and the mean packet size; per namespace TCP segments and UDP datagrams per GB. With both
+    # agentvm and peervm, vm_cpu_s_per_gb and vm_cpu_share are the two VMs together. The tunnel
+    # (vps pub1) is split into the data direction and the reverse, the ACKs.
+    b = dict(kv.split("=", 1) for kv in before.split() if "=" in kv)
+    a = dict(kv.split("=", 1) for kv in after.split() if "=" in kv)
+    n, t = float(nbytes), float(window_s)
+    gb = n / 1e9
+    d = lambda k: float(a[k]) - float(b[k]) if k in a and k in b else None
+    out = []
+    put = lambda k, v, fmt="%.3f": out.append(("%s=" + fmt) % (k, v))
+    prefixes = sorted({k.split("_", 1)[0] for k in a if k.endswith("_busy_us")})
+    total = 0.0
+    for p in prefixes:
+        busy = d(p + "_busy_us") / 1e6
+        total += busy
+        if p != "vm":
+            put(p + "_cpu_s_per_gb", busy / gb if gb > 0 else -1)
+            put(p + "_cpu_share", busy / t)
+        for k in ("user", "sys", "soft", "irq", "steal"):
+            put("%s_%s_share" % (p, k), d("%s_%s_us" % (p, k)) / 1e6 / t)
+        cpus = [d(k) for k in a if k.startswith(p + "_cpu") and k.endswith("_us") and k[len(p) + 4:-3].isdigit()]
+        if cpus:
+            put(p + "_maxcpu", max(cpus) / 1e6 / t, "%.2f")
+        for k in ("softnet_drop", "softnet_squeeze"):
+            if d("%s_%s" % (p, k)):
+                put("%s_%s" % (p, k), d("%s_%s" % (p, k)), "%.0f")
+        if d(p + "_ctxt") is not None:
+            put(p + "_ctxt_per_s", d(p + "_ctxt") / t, "%.0f")
+        if d(p + "_proc_us") is not None:
+            put(p + "_proc_cs_per_s", (d(p + "_proc_vcs") + d(p + "_proc_nvcs")) / t, "%.0f")
+            put(p + "_proc_nvcs_per_s", d(p + "_proc_nvcs") / t, "%.0f")
+    if "agentvm" in prefixes and "peervm" in prefixes:
+        put("vm_cpu_s_per_gb", total / gb if gb > 0 else -1)
+        put("vm_cpu_share", total / t)
+    for k in sorted(a):
+        if k.startswith("if_") and k.endswith("_rxp"):
+            base = k[:-4]
+            for dirn in ("rx", "tx"):
+                pk, by = d(base + "_%sp" % dirn), d(base + "_%sb" % dirn)
+                if pk is None or gb <= 0:
+                    continue
+                name = base[3:]
+                put("%s_%sp_per_gb" % (name, dirn), pk / gb, "%.0f")
+                if pk > 0:
+                    put("%s_%s_avg_b" % (name, dirn), by / pk, "%.0f")
+                if d(base + "_%sdrop" % dirn):
+                    put("%s_%sdrop" % (name, dirn), d(base + "_%sdrop" % dirn), "%.0f")
+        elif k.startswith("snmp_") and gb > 0 and d(k) is not None:
+            if any(k.endswith(c) for c in ("_insegs", "_outsegs", "_retrans", "_udp_in", "_udp_out")):
+                put(k[5:] + "_per_gb", d(k) / gb, "%.0f")
+            elif d(k):
+                # error and TcpExt counters: the count in the window, only when not zero
+                put(k[5:], d(k), "%.0f")
+    # the tunnel at the server's end: on a download the agent sends the data and the vps receives it
+    rx, tx = d("if_vps_pub1_rxp"), d("if_vps_pub1_txp")
+    if rx is not None and gb > 0:
+        data, ack = (rx, tx) if direction == "down" else (tx, rx)
+        put("tun_data_pkts_per_gb", data / gb, "%.0f")
+        put("tun_ack_pkts_per_gb", ack / gb, "%.0f")
+    # the TCP receiver's segments after GRO: the client on a download, the LAN host on an upload
+    seg = d("snmp_client_tcp_insegs" if direction == "down" else "snmp_lan_tcp_insegs")
+    if seg:
+        put("recv_seg_avg_b", n / seg, "%.0f")
+    print(" ".join(out))
+    return 0
+
+
+def agentd(ip, port, tokenfile):
+    # the agent VM's end: one JSON request per connection, {"token", "op": "run", "argv", "env",
+    # "timeout"} runs a command and {"op": "snap", "args"} takes a snapshot in this process, with
+    # no fork, so that reading the counters costs the agent VM almost nothing. The token, which the
+    # host puts into both VMs, keeps other guests on the bridge out.
+    import json
+    import hmac
+    import subprocess
+    import threading
+    with open(tokenfile) as f:
+        token = f.read().strip().encode()
+
+    def one(c):
+        with c:
+            f = c.makefile("rwb")
+            try:
+                req = json.loads(f.readline())
+            except ValueError:
+                return
+            if not hmac.compare_digest(str(req.get("token", "")).encode(), token):
+                return
+            rc, out, err = 0, "", ""
+            try:
+                if req.get("op") == "snap":
+                    out = snap_line(*req["args"]) + "\n"
+                else:
+                    env = dict(os.environ)
+                    env.update(req.get("env", {}))
+                    for k in req.get("unset", []):
+                        env.pop(k, None)
+                    p = subprocess.run(req["argv"], env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                                       timeout=req.get("timeout", 120))
+                    rc, out, err = p.returncode, p.stdout.decode(errors="replace"), p.stderr.decode(errors="replace")
+            except subprocess.TimeoutExpired:
+                rc, err = 124, "agentd: timed out\n"
+            except (OSError, KeyError, StopIteration, ValueError) as e:
+                rc, err = 1, "agentd: %s\n" % e
+            f.write((json.dumps({"rc": rc, "out": out, "err": err}) + "\n").encode())
+            f.flush()
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((ip, int(port)))
+    srv.listen(16)
+    print("agentd: listening on %s:%s" % (ip, port), flush=True)
+    while True:
+        c, _ = srv.accept()
+        threading.Thread(target=one, args=(c,), daemon=True).start()
+
+
+def agentx(addr, tokenfile, *args):
+    # the peer VM's end: agentx <ip:port> <tokenfile> [--env K=V]... [--unset K]... -- argv...,
+    # or agentx <ip:port> <tokenfile> --snap <snap args...>. Prints what the command printed and
+    # exits with its status.
+    import json
+    env, unset, argv, op = {}, [], [], "run"
+    i = 0
+    while i < len(args):
+        if args[i] == "--env":
+            k, _, v = args[i + 1].partition("=")
+            env[k] = v
+            i += 2
+        elif args[i] == "--unset":
+            unset.append(args[i + 1])
+            i += 2
+        elif args[i] == "--snap":
+            op, argv = "snap", list(args[i + 1:])
+            break
+        elif args[i] == "--":
+            argv = list(args[i + 1:])
+            break
+        else:
+            argv = list(args[i:])
+            break
+    with open(tokenfile) as f:
+        token = f.read().strip()
+    host, port = addr.rsplit(":", 1)
+    req = {"token": token, "op": op, "env": env, "unset": unset, "timeout": 120}
+    req["args" if op == "snap" else "argv"] = argv
+    try:
+        with socket.create_connection((host, int(port)), timeout=150) as c:
+            c.sendall((json.dumps(req) + "\n").encode())
+            f = c.makefile("rb")
+            resp = json.loads(f.readline() or b"{}")
+    except (OSError, ValueError) as e:
+        print("agentx: %s: %s" % (addr, e), file=sys.stderr)
+        return 1
+    if "rc" not in resp:
+        print("agentx: %s refused the request; check the token" % addr, file=sys.stderr)
+        return 1
+    sys.stdout.write(resp["out"])
+    sys.stderr.write(resp["err"])
+    return resp["rc"]
+
+
+def pcores():
+    # the P-cores of a hybrid Intel host, from the cpu_core PMU; empty elsewhere
+    try:
+        with open("/sys/devices/cpu_core/cpus") as f:
+            spec = f.read().strip()
+    except OSError:
+        return set()
+    out = set()
+    for part in spec.split(","):
+        lo, _, hi = part.partition("-")
+        out.update(range(int(lo), int(hi or lo) + 1))
+    return out
+
+
+def hostsample(out, interval, *specs):
+    # on the host, every <interval> seconds until killed: the busy time of every host CPU (ticks)
+    # and, per VM given as <label>=<qemu pid>, the run time (ns, schedstat) of its vCPU threads,
+    # its vhost workers and its other threads, and the vhost run time split by whether the
+    # worker sat on a P-core at the sample. Incus pins only the vCPU threads, so the vhost workers
+    # and the rest of qemu float over the host; these lines show where their time went.
+    pc = pcores()
+    last, vhost_p, vhost_e, kind = {}, {}, {}, {}
+    step = float(interval)
+    with open(out, "a") as f:
+        while True:
+            t0 = time.time()
+            parts = ["t=%.3f" % t0]
+            with open("/proc/stat") as st:
+                for line in st:
+                    v = line.split()
+                    if v and v[0].startswith("cpu") and v[0] != "cpu":
+                        parts.append("h%s=%d" % (v[0], sum(int(v[i]) for i in (1, 2, 3, 6, 7))))
+            for spec in specs:
+                if spec.startswith("tap:"):
+                    # tap:<label>=<host interface>: the drops of a VM's tap; tx is towards the guest
+                    label, dev = spec[4:].split("=")
+                    for k in ("tx_dropped", "rx_dropped", "tx_packets"):
+                        try:
+                            with open("/sys/class/net/%s/statistics/%s" % (dev, k)) as g:
+                                parts.append("tap_%s_%s=%s" % (label, k, g.read().strip()))
+                        except OSError:
+                            pass
+                    continue
+                label, pid = spec.split("=")
+                cat = {"vcpu": 0, "vhost": 0, "other": 0}
+                vhost_p.setdefault(label, 0)
+                vhost_e.setdefault(label, 0)
+                try:
+                    tids = os.listdir("/proc/%s/task" % pid)
+                except OSError:
+                    tids = []
+                for tid in tids:
+                    try:
+                        with open("/proc/%s/task/%s/comm" % (pid, tid)) as g:
+                            comm = g.read().strip()
+                        with open("/proc/%s/task/%s/schedstat" % (pid, tid)) as g:
+                            ns = int(g.read().split()[0])
+                        with open("/proc/%s/task/%s/stat" % (pid, tid)) as g:
+                            proc = int(g.read().rsplit(")", 1)[1].split()[36])
+                    except (OSError, ValueError, IndexError):
+                        continue
+                    if tid not in kind:
+                        # Incus pins each vCPU thread to one CPU and leaves the rest of qemu on every CPU; the
+                        # vCPU threads keep qemu's name, so they are told apart by that pinning
+                        try:
+                            with open("/proc/%s/task/%s/status" % (pid, tid)) as g:
+                                allowed = next(l.split()[1] for l in g if l.startswith("Cpus_allowed_list"))
+                        except (OSError, StopIteration):
+                            allowed = "-"
+                        kind[tid] = ("vhost" if comm.startswith("vhost-") else
+                                     "vcpu" if comm.startswith("CPU ") or (comm.startswith("qemu") and allowed.isdigit())
+                                     else "other")
+                    c = kind[tid]
+                    cat[c] += ns
+                    if c == "vhost":
+                        dlt = ns - last.get(tid, ns)
+                        last[tid] = ns
+                        if proc in pc:
+                            vhost_p[label] += dlt
+                        else:
+                            vhost_e[label] += dlt
+                parts += ["%s_%s_ns=%d" % (label, k, v) for k, v in cat.items()]
+                parts += ["%s_vhostp_ns=%d" % (label, vhost_p[label]), "%s_vhoste_ns=%d" % (label, vhost_e[label])]
+            f.write(" ".join(parts) + "\n")
+            f.flush()
+            time.sleep(max(0.0, step - (time.time() - t0)))
+
+
+def hostwin(samples, logfile):
+    # adds to every PAIRED line of <logfile> with t_start and t_end (host clock) the host's values
+    # over that window, interpolated between the samples of hostsample: host_busy_s (all host CPUs),
+    # host_pcore_busy_s, and per VM label host_<label>_{vcpu,vhost,other}_s; host_qemu_s_per_gb and
+    # host_qemu_share are all threads of all VMs, the cost of the guests on the host including the
+    # threads Incus does not pin; host_vhost_pcore_frac is the share of vhost time on P-cores.
+    rows = []
+    with open(samples) as f:
+        for line in f:
+            kv = dict(x.split("=", 1) for x in line.split() if "=" in x)
+            if "t" in kv:
+                rows.append({k: float(v) for k, v in kv.items()})
+    if len(rows) < 2:
+        print("hostwin: fewer than two samples in %s" % samples, file=sys.stderr)
+        return 1
+    hz = os.sysconf("SC_CLK_TCK")
+    pc = pcores()
+
+    def at(key, t):
+        for i in range(1, len(rows)):
+            if rows[i]["t"] >= t:
+                r0, r1 = rows[i - 1], rows[i]
+                if key not in r0 or key not in r1:
+                    return None
+                w = (t - r0["t"]) / (r1["t"] - r0["t"]) if r1["t"] > r0["t"] else 1.0
+                w = min(max(w, 0.0), 1.0)
+                return r0[key] + w * (r1[key] - r0[key])
+        return rows[-1].get(key)
+
+    keys = sorted(rows[-1])
+    labels = sorted({k.split("_", 1)[0] for k in keys if k.endswith("_vcpu_ns")})
+    drops = [k for k in keys if k.startswith("tap_") and k.endswith("_dropped")]
+    out = []
+    with open(logfile) as f:
+        lines = f.read().splitlines()
+    for line in lines:
+        if not line.startswith("PAIRED ") or " t_start=" not in line or " host_busy_s=" in line:
+            out.append(line)
+            continue
+        r = dict(x.split("=", 1) for x in line.split()[1:] if "=" in x)
+        t0, t1 = float(r["t_start"]), float(r["t_end"])
+        if t0 < rows[0]["t"] or t1 > rows[-1]["t"]:
+            out.append(line)
+            continue
+        dl = lambda k: (at(k, t1) or 0.0) - (at(k, t0) or 0.0)
+        win = t1 - t0
+        busy = sum(dl(k) for k in keys if k.startswith("hcpu")) / hz
+        pbusy = sum(dl(k) for k in keys if k.startswith("hcpu") and int(k[4:]) in pc) / hz
+        add = ["host_busy_s=%.3f" % busy, "host_pcore_busy_s=%.3f" % pbusy, "host_cpu_share=%.3f" % (busy / win)]
+        if drops:
+            # packets the hosts' taps between the two VMs dropped in the window: the lab, not the agent
+            add.append("host_tap_drops=%d" % round(sum(dl(k) for k in drops)))
+        qemu = vp = ve = 0.0
+        for lb in labels:
+            for c in ("vcpu", "vhost", "other"):
+                v = dl("%s_%s_ns" % (lb, c)) / 1e9
+                qemu += v
+                add.append("host_%s_%s_s=%.3f" % (lb, c, v))
+            vp += dl(lb + "_vhostp_ns")
+            ve += dl(lb + "_vhoste_ns")
+        gb = float(r.get("bytes", "0") or 0) / 1e9
+        add += ["host_qemu_s=%.3f" % qemu, "host_qemu_share=%.3f" % (qemu / win),
+                "host_qemu_s_per_gb=%.3f" % (qemu / gb if gb > 0 else -1),
+                "host_vhost_pcore_frac=%s" % ("%.2f" % (vp / (vp + ve)) if vp + ve > 0 else "-")]
+        out.append(line + " " + " ".join(add))
+    with open(logfile, "w") as f:
+        f.write("\n".join(out) + "\n")
+    return 0
+
+
 SIOCETHTOOL = 0x8946
 ETHTOOL_GSTRINGS, ETHTOOL_GSSET_INFO, ETHTOOL_GFEATURES, ETHTOOL_SFEATURES = 0x1B, 0x37, 0x3A, 0x3B
 ETH_SS_FEATURES, ETH_GSTRING_LEN = 4, 32
@@ -617,6 +1095,33 @@ def ethtool(sock, ifname, buf):
     # struct ifreq: the name, then ifr_data pointing at the ethtool command, padded to 40 bytes
     ifr = bytearray(struct.pack("16sP", ifname.encode(), ctypes.addressof(buf)).ljust(40, b"\0"))
     fcntl.ioctl(sock.fileno(), SIOCETHTOOL, ifr)
+
+
+ETHTOOL_GCHANNELS, ETHTOOL_SCHANNELS = 0x3C, 0x3D
+
+
+def channels(ifname, count=""):
+    # reads, or sets to <count>, the device's combined channels (queue pairs) through SIOCETHTOOL, as
+    # `ethtool -L <ifname> combined <count>` would; prints the combined count read back
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        buf = ctypes.create_string_buffer(struct.pack("9I", ETHTOOL_GCHANNELS, *([0] * 8)))
+        ethtool(s, ifname, buf)
+        v = list(struct.unpack("9I", buf.raw[:36]))
+        if count:
+            v[0], v[8] = ETHTOOL_SCHANNELS, int(count)
+            ethtool(s, ifname, ctypes.create_string_buffer(struct.pack("9I", *v)))
+            buf = ctypes.create_string_buffer(struct.pack("9I", ETHTOOL_GCHANNELS, *([0] * 8)))
+            ethtool(s, ifname, buf)
+            v = list(struct.unpack("9I", buf.raw[:36]))
+    except OSError as e:
+        print("channels: %s: %s" % (ifname, e), file=sys.stderr)
+        return 1
+    print("combined=%d max_combined=%d" % (v[8], v[4]))
+    if count and v[8] != int(count):
+        print("channels: %s: combined stays %d" % (ifname, v[8]), file=sys.stderr)
+        return 1
+    return 0
 
 
 def udpgso(ifname, op):
@@ -663,4 +1168,5 @@ if __name__ == "__main__":
     cmd, args = sys.argv[1], sys.argv[2:]
     sys.exit({"serve": serve, "fetch": fetch, "push": push, "analyze": analyze, "median": median,
               "cpuratio": cpuratio, "cpupaired": cpupaired, "udpgso": udpgso, "iperf": iperf,
-              "uecho": uecho, "uping": uping, "latpaired": latpaired}[cmd](*args))
+              "uecho": uecho, "uping": uping, "latpaired": latpaired, "snap": snap, "snapdiff": snapdiff,
+              "agentd": agentd, "agentx": agentx, "channels": channels, "hostsample": hostsample, "hostwin": hostwin}[cmd](*args))
