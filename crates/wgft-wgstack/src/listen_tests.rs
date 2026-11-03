@@ -870,18 +870,38 @@ fn resent_syns_do_not_extend_a_half_open_row() {
     );
 }
 
-/// 監査の提案 (wire が変わるので Go との意図的な違いになり、所有者の決定が要ります):同じ SYN の再送ごとに SYN-ACK
-/// を返すので、偽の送信元の相手は行 1 つで SYN と同じ数の SYN-ACK を第三者へ反射させられます。Linux の
-/// `tcp_check_req` は `tcp_oow_rate_limited` で、行ごとに 500 ms に 1 回までに抑えます。
+/// 今の挙動を固定します:握手の途中の行は、同じ SYN の再送に速さの制限なく SYN-ACK を返します (凍結した Go の
+/// wgstack と同じで、Go の記録は再送の SYN を多く含みます)。行の出力は印 1 つなので、出力を読む前に届いた再送の束は
+/// SYN-ACK 1 つにまとまり、出力を読んだ後の再送はそれぞれ SYN-ACK 1 つを得ます。行が SYN の再送で延びず約 63 秒で
+/// 消えることは `resent_syns_do_not_extend_a_half_open_row` が確かめます。
 #[test]
-#[ignore = "proposal: rate-limit SYN-ACKs to resent SYNs per row as Linux does; changes the wire output"]
-fn resent_syns_get_rate_limited_syn_acks() {
+fn resent_syns_before_a_poll_collapse_into_one_syn_ack() {
     let mut n = TestNet::new(small_limits());
     let _l = n.listen(80);
-    let _p = n.syn_sack(40000, 80, false, false, false);
-    let synacks = resend_syn(&mut n, 40000, 100);
+    let p = n.syn_sack(40000, 80, false, false, false);
+    let syn = TSeg {
+        sport: 40000,
+        dport: 80,
+        seq: 1000,
+        flags: FLAG_SYN,
+        wnd: 65535,
+        mss: 1380,
+        ..TSeg::default()
+    };
+    for _ in 0..100 {
+        n.inject(&syn);
+    }
+    let outs = n.drain();
     assert!(
-        synacks <= 1,
-        "100 resent SYNs within one instant got {synacks} SYN-ACKs"
+        outs.len() == 1 && outs[0].flags == FLAG_SYN | FLAG_ACK,
+        "100 resent SYNs before one poll: expected one SYN-ACK, got {}",
+        show(&outs)
     );
+    assert_eq!(outs[0].seq, p.dut_iss, "the SYN-ACK keeps the row's ISN");
+    assert_eq!(
+        resend_syn(&mut n, 40000, 5),
+        5,
+        "each resent SYN after a poll gets its own SYN-ACK"
+    );
+    assert_eq!(n.s.held().syn_rows, 1);
 }
