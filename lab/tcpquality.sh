@@ -269,9 +269,9 @@ elif [ "$DELAY_MS" != 0 ]; then
   fi
   RATE_ARGS=(limit "$NETEM_LIMIT")
 fi
-netem_drops() { # the packets both netem queues have dropped so far
+netem_drops() { # the packets both netem queues have dropped so far; tc -s prints "(dropped N, overlimits ..."
   { vps tc -s qdisc show dev pub1; router tc -s qdisc show dev wan0; } 2>/dev/null \
-    | awk '/qdisc netem/ { q = 1 } q && /dropped/ { for (i = 1; i < NF; i++) if ($i == "dropped") { v = $(i + 1); gsub(",", "", v); n += v } q = 0 } END { print n + 0 }'
+    | awk '/qdisc netem/ { q = 1 } q && /dropped/ { for (i = 1; i < NF; i++) if ($i == "(dropped") { v = $(i + 1); gsub(",", "", v); n += v } q = 0 } END { print n + 0 }'
 }
 if [ -n "$TCP_BUF_MAX" ]; then
   ip netns exec "$CLIENT_NS" sysctl -qw net.ipv4.tcp_rmem="4096 131072 $TCP_BUF_MAX" net.ipv4.tcp_wmem="4096 16384 $TCP_BUF_MAX"
