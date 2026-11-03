@@ -396,6 +396,13 @@ fn bound_fragment_flood() {
             && n.s.s.frag.evicted() > 0,
         "used {used} entries {entries} pieces {pieces}"
     );
+    // 追い出しは Stats に数えます。datagram ごとに 2 つの断片を送ったので、表に残る項目のほかは追い出されています。
+    assert_eq!(n.s.stats().fragments_evicted, n.s.s.frag.evicted());
+    assert_eq!(
+        n.s.stats().fragments_evicted,
+        2000 - entries as u64,
+        "every datagram not left in the table was evicted"
+    );
     assert!(n.s.bound().frag >= used as u64);
     for _ in 0..40 {
         n.advance(Duration::from_secs(1));

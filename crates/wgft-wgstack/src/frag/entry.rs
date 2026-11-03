@@ -88,6 +88,8 @@ impl<H: Hook> Stack<H> {
             s.frag_notice(&n, &[], now);
             res = s.frag.process(pkt, time(now));
         }
+        // 追い出しは表の中で起きるので、表の数を写します (wgstack.md の「尽きたときの動作」)。
+        s.stats.fragments_evicted = s.frag.evicted();
         match res {
             Outcome::Held => {
                 s.stats.fragments_dropped += 1;

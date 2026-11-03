@@ -1386,6 +1386,8 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   endpoint の列では、送り始めた先頭を飛ばした捨てが 2 番目を外すことがあり、`unlink_tx` はそれ以外の位置を会計の不整合 (`UdpFault::SendListBroken`) にします。
   不変条件の `check_invariants` は、送信の FIFO の前の指しと入れた時刻の順、endpoint の列の datagram の世代と順、列の長さが endpoint の送信の予算の件数に等しいことを確かめます
 - 断片の数:`fragments_dropped` は、Go の `FragmentsDropped` と同じく、datagram を完成させなかった断片 (保持した断片、重なった断片、捨てた断片) を数えます
+- 追い出した datagram の数:`fragments_evicted` は、表が満杯でほかの datagram のために外した未完成の datagram を数えます。
+  Go の `ipv4frag` の `Evicted` と同じ数で、[尽きたときの動作](../userspace/wgstack.md#尽きたときの動作)が求める追い出しの数です。出力は変わりません
 - 再組み立ての表の掃除の期限:`poll_timeout` は、表が項目を持つ間だけ次の掃除の時刻を返します (Go の `nextDeadline`)。
   呼び手の待ちのたびに表の全体をたどらないよう、表は使っている項目の数を持ちます
 - 誤り:`Error` は UDP と ICMP のために `InvalidAddress`、`MessageTooLong`、`UdpStopped`、`TableFull`、`InvalidMessage`、`NoBufferSpace` を持ちます。

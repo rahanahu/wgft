@@ -127,6 +127,9 @@ pub struct Stats {
     /// 再組み立ての表が保持したか捨てた断片です。datagram を完成させた断片は数えません (Go の
     /// `FragmentsDropped` と同じ数え方です)。
     pub fragments_dropped: u64,
+    /// 再組み立ての表が満杯で、ほかの datagram のために外した未完成の datagram の数です (Go の `ipv4frag` の
+    /// `Evicted`)。外した datagram の断片は `fragments_dropped` に数え済みです。
+    pub fragments_evicted: u64,
     /// 捨てた UDP の datagram です。予算で断ったものと、壊れたものと、会計の不整合の後に届いたものを含みます。
     pub udp_dropped: u64,
     /// endpoint 1 つの上限で断った受信の datagram です。
