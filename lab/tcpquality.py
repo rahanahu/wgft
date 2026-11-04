@@ -1074,6 +1074,106 @@ class ThreadSampler:
 
 THREAD_SAMPLERS = {}
 
+# the agent's threads by name: the data-plane thread, the crypto workers of builds that have them,
+# and the rest (control, resolver and the runtime's own)
+THREAD_GROUPS = (("wgft-dataplane", "dp"), ("wgft-crypto", "crypto"))
+
+
+def thread_group(comm):
+    return next((label for name, label in THREAD_GROUPS if comm == name), "other")
+
+
+class ThreadsSampler:
+    # like ThreadSampler, every 0.1 s instead of 0.05, for every thread of a process, summed per group (thread_group): samples,
+    # running and per CPU the samples there, cumulative; and at each snapshot the scheduler's run and
+    # wait time and the migrations, summed over the group's threads as increments since the last
+    # snapshot, so that threads that come and go do not make the sums go back
+    def __init__(self, pid, ncpu, interval=0.1, proc="/proc"):
+        self.pid, self.proc, self.interval, self.ncpu = str(pid), proc, interval, ncpu
+        self.groups = {}
+        self.last, self.tot = {}, {}
+        self.alive = True
+
+    def group(self, label):
+        return self.groups.setdefault(label, {"samples": 0, "running": 0, "oncpu": [0] * self.ncpu})
+
+    def sample(self):
+        # one read per thread: the comm, state and CPU all come from the thread's stat line
+        try:
+            tids = os.listdir("%s/%s/task" % (self.proc, self.pid))
+        except OSError:
+            self.alive = False
+            return
+        for tid in tids:
+            try:
+                with open("%s/%s/task/%s/stat" % (self.proc, self.pid, tid)) as f:
+                    line = f.read()
+                head, _, rest = line.rpartition(")")
+                comm = head.partition("(")[2]
+                st = rest.split()
+                state, cpu = st[0], int(st[36])
+            except (OSError, ValueError, IndexError):
+                continue
+            g = self.group(thread_group(comm))
+            g["samples"] += 1
+            g["running"] += state == "R"
+            if 0 <= cpu < self.ncpu:
+                g["oncpu"][cpu] += 1
+
+    def start(self):
+        import threading
+
+        def loop():
+            while self.alive:
+                self.sample()
+                time.sleep(self.interval)
+        threading.Thread(target=loop, daemon=True).start()
+        return self
+
+    def counters(self):
+        base = "%s/%s/task/" % (self.proc, self.pid)
+        try:
+            tids = os.listdir(base)
+        except OSError:
+            tids = []
+        for tid in tids:
+            try:
+                with open(base + tid + "/comm") as f:
+                    label = thread_group(f.read().strip())
+                with open(base + tid + "/schedstat") as f:
+                    ss = f.read().split()
+                vals = {"run_us": int(ss[0]) // 1000, "wait_us": int(ss[1]) // 1000}
+                with open(base + tid + "/sched") as f:
+                    mig = parse_thread_sched(f.read())
+                if mig is not None:
+                    vals["mig"] = mig
+            except (OSError, ValueError, IndexError):
+                continue
+            prev = self.last.get(tid, {k: 0 for k in vals})
+            t = self.tot.setdefault(label, {})
+            for k, v in vals.items():
+                t[k] = t.get(k, 0) + v - prev.get(k, 0)
+            self.last[tid] = vals
+            self.group(label)
+        kv = []
+        for label, g in sorted(self.groups.items()):
+            p = "thr_%s_" % label
+            kv += [(p + "samples", g["samples"]), (p + "running", g["running"])]
+            kv += [(p + "oncpu%d" % i, c) for i, c in enumerate(g["oncpu"])]
+            kv += [(p + k, v) for k, v in sorted(self.tot.get(label, {}).items())]
+        return kv
+
+
+def threads_counters_of(pid):
+    # snap_line's threads:all: the sampler of every thread of pid, started on the first call
+    key = (str(pid), "*")
+    s = THREAD_SAMPLERS.get(key)
+    if s is None or not s.alive:
+        for k in [k for k, v in THREAD_SAMPLERS.items() if not v.alive]:
+            del THREAD_SAMPLERS[k]
+        s = THREAD_SAMPLERS[key] = ThreadsSampler(pid, os.cpu_count() or 1).start()
+    return s.counters()
+
 # the kernel threads bound to one CPU: workqueue workers (kworker/<N>:<id>, which run, among other
 # work, kernel WireGuard's per-CPU crypto) and the softirq threads (ksoftirqd/<N>)
 KTHREAD_KINDS = (("kw", re.compile(r"kworker/(\d+):")), ("ksi", re.compile(r"ksoftirqd/(\d+)$")))
@@ -1273,7 +1373,8 @@ def snap_line(prefix, pid="", cg="", *specs):
     # snmp:<ns> adds snmp_<ns>_<counter> from /proc/net/snmp, read in that namespace;
     # nicirq:<ns>:<ifname> adds nicirq_cpu<N> and nicirq_eff (nicirq_counters) and, with a pid,
     # thread:<label>:<comm> adds thr_<label>_* (ThreadSampler, which keeps sampling between calls in
-    # a long-lived process such as agentd); kthreads adds the per-CPU kernel workers' time
+    # a long-lived process such as agentd), threads:all the same per thread group of every thread
+    # (ThreadsSampler: dp, crypto, other); kthreads adds the per-CPU kernel workers' time
     # (kthread_counters).
     hz = os.sysconf("SC_CLK_TCK")
     us = lambda ticks: int(ticks) * 1000000 // hz
@@ -1328,13 +1429,15 @@ def snap_line(prefix, pid="", cg="", *specs):
             kv += nicirq_counters(*rest.split(":", 1))
         elif kind == "thread" and pid:
             kv += thread_counters_of(pid, *rest.split(":", 1))
+        elif kind == "threads" and pid:
+            kv += threads_counters_of(pid)
         elif kind == "kthreads":
             kv += kthread_counters()
     out = ["%s_%s=%s" % (prefix, k, v) for k, v in kv]
     by_ns = {}
     for spec in specs:
         kind, _, rest = spec.partition(":")
-        if kind in ("nicirq", "thread", "kthreads"):
+        if kind in ("nicirq", "thread", "threads", "kthreads"):
             continue
         ns = rest.split(":")[0]
         by_ns.setdefault(ns, []).append((kind, rest))
