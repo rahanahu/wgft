@@ -8,7 +8,8 @@
 //!    が壊れただけの入力が入口で落ちるのを避けるためで、bit の立たない packet は壊れたまま渡します
 //! 2. 要求の frame (長さ、種類、本体) の列。壊れた frame とその後は捨てます
 //!
-//! 最初の要求が `HELLO` なら、その輻輳の制御、boost の方針、アドレス、MTU、種で核を作ります。上限の組は使わず、
+//! 最初の要求が `HELLO` なら、その輻輳の制御、boost の方針、アドレス、MTU、種で核を作ります。入力のおよそ半分は
+//! 送信の番を有効にした核で流します ([`super::send_turn_for`])。上限の組は使わず、
 //! 速さのために小さな表 ([`super::fuzz_limits`]) にします。核がまだ持たない選択と範囲の外の値は、持つ選択と
 //! 既定の値に替えます。最初が `HELLO` でなければ既定の `HELLO` で作ります。
 //!
@@ -23,8 +24,8 @@ use wgft_tcpharness::frame::{self, Clock, Hello, Msg, VERSION};
 use wgft_wgstack::{BoostPolicy, Config, Congestion, MAX_MTU, MIN_MTU, Spare, TouchedCheck};
 
 use super::net::{
-    Check, DUT, MTU, fuzz_limits, options, put_budget, put_spare, set_digest, take_budget,
-    take_spare,
+    Check, DUT, MTU, fuzz_limits, options, put_budget, put_spare, send_turn_for, set_digest,
+    take_budget, take_spare,
 };
 use crate::dut::WgstackDut;
 use crate::rec::Recording;
@@ -199,13 +200,14 @@ pub fn replay(data: &[u8]) {
         }
     };
     let mut budget = take_budget(fuzz_limits().boost_slots);
-    let mut dut = match WgstackDut::for_fuzz(&hello, fuzz_limits(), budget, spare()) {
+    let turn = send_turn_for(data);
+    let mut dut = match WgstackDut::for_fuzz(&hello, fuzz_limits(), turn, budget, spare()) {
         Ok(d) => d,
         Err((_, b)) => {
             // アドレスが核の受け付けない値なら、既定のアドレスで作り直す
             budget = b;
             let h = Hello { addr: DUT, ..hello };
-            match WgstackDut::for_fuzz(&h, fuzz_limits(), budget, spare()) {
+            match WgstackDut::for_fuzz(&h, fuzz_limits(), turn, budget, spare()) {
                 Ok(d) => d,
                 Err((e, b)) => {
                     put_budget(b);

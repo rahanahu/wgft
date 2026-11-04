@@ -27,8 +27,8 @@ mod replay;
 pub use adversary::{AdversaryCfg, adversarial_sender, adversarial_sender_seed};
 pub use core::core;
 pub use net::{
-    Check, DUT, HarnessOptions, MTU, Net, PEER, fuzz_limits, last_digest, put_spare, set_options,
-    small_limits, take_spare,
+    Check, DUT, HarnessOptions, MTU, Net, PEER, fuzz_limits, last_digest, put_spare, send_turn_for,
+    set_options, small_limits, take_spare, with_send_turn_for,
 };
 pub use peer::{PeerConn, SackPeer};
 pub use raw::{raw_adversary, raw_adversary_input, raw_adversary_seed};
