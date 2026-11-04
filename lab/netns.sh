@@ -7,6 +7,13 @@
 # home と lan は homerouter の中の 1 つのブリッジ(br0)にぶら下がる、同じ自宅 LAN セグメント。
 #
 # 使い方: netns.sh up | down | status
+#         netns.sh up-split-peer <IF> | up-split-agent <IF>
+#
+# up-split-* は `lab/lab paired --split` の 2 台の VM の片方を組む。agent の VM は home だけを持ち、VM の NIC <IF> を
+# home の eth0 にする。相手の VM は home 以外の 4 つを持ち、VM の NIC <IF> を homerouter の lan0 にして br0 に繋ぐ。
+# 2 台の NIC はホストの専用のブリッジで繋がるので、home は今と同じアドレスで同じ LAN セグメントに乗る。
+# 1 台の VM の netns と違い、agent の VM の CPU は agent と、その NIC とカーネルの仕事だけが使う。
+# カーネルモードの WireGuard の暗号の kworker はその VM の全 CPU に配られるので、CPU を分けるには VM を分ける
 set -euo pipefail
 
 # netns の名前は環境変数で差し替えられる。未設定なら今までと同じ名前を使うので、共有の
@@ -124,6 +131,81 @@ check() {
   echo "lab topology is up"
 }
 
+# move_if <IF> <ns> <name>:VM の NIC を netns に移して名前を変え、up する
+move_if() {
+  ip link show "$1" >/dev/null 2>&1 || die "no interface $1 in this VM"
+  ip link set "$1" netns "$2"
+  ip -n "$2" link set "$1" name "$3"
+  ip -n "$2" link set "$3" up
+}
+
+up_split_peer() {
+  local nic=$1
+  down
+  NAMESPACES=("$CLIENT_NS" "$VPS_NS" "$ROUTER_NS" "$LAN_NS")
+  for ns in "${NAMESPACES[@]}"; do
+    ip netns add "$ns"
+    ip -n "$ns" link set lo up
+  done
+  ip netns exec "$VPS_NS" sysctl -qw net.ipv4.ip_local_reserved_ports="$RESERVED_PORTS"
+  link "$CLIENT_NS" eth0 "$VPS_NS" pub0
+  ip -n "$CLIENT_NS" addr add "$CLIENT_ADDR/24" dev eth0
+  ip -n "$VPS_NS" addr add "$VPS_PUB0/24" dev pub0
+  ip -n "$CLIENT_NS" route add default via "$VPS_PUB0"
+  ip -n "$CLIENT_NS" addr add "$CLIENT_ADDR6/64" dev eth0 nodad
+  ip -n "$VPS_NS" addr add "$VPS_PUB0_6/64" dev pub0 nodad
+  link "$VPS_NS" pub1 "$ROUTER_NS" wan0
+  ip -n "$VPS_NS" addr add "$VPS_PUB1/24" dev pub1
+  ip -n "$ROUTER_NS" addr add "$HR_WAN/24" dev wan0
+  ip -n "$ROUTER_NS" route add default via "$VPS_PUB1"
+  move_if "$nic" "$ROUTER_NS" lan0
+  link "$ROUTER_NS" lan1 "$LAN_NS" eth0
+  ip -n "$ROUTER_NS" link add br0 type bridge
+  ip -n "$ROUTER_NS" link set lan0 master br0
+  ip -n "$ROUTER_NS" link set lan1 master br0
+  ip -n "$ROUTER_NS" link set br0 up
+  ip -n "$ROUTER_NS" addr add "$HR_LAN/24" dev br0
+  ip -n "$LAN_NS" addr add "$LAN_ADDR/24" dev eth0
+  ip -n "$LAN_NS" route add default via "$HR_LAN"
+  ip netns exec "$ROUTER_NS" sysctl -qw net.ipv4.ip_forward=1
+  ip netns exec "$ROUTER_NS" nft -f - <<'NFT'
+table ip nat {
+  chain postrouting {
+    type nat hook postrouting priority srcnat;
+    oifname "wan0" masquerade
+  }
+}
+NFT
+  ip netns exec "$CLIENT_NS" ping -c1 -W2 "$VPS_PUB0" >/dev/null || die "client -> vps に届かない"
+  ip netns exec "$LAN_NS" ping -c1 -W2 "$HR_LAN" >/dev/null || die "lan -> homerouter に届かない"
+  ip netns exec "$ROUTER_NS" ping -c1 -W2 "$VPS_PUB1" >/dev/null || die "homerouter -> vps に届かない"
+  # veth は送ったスレッドの CPU の backlog に積むので、送り手 (iperf3 など) が CPU を移ると、同じ flow の packet が 2 つの
+  # CPU で並行に処理されて順が崩れる。8 vCPU の相手の VM では LAN のホストから agent への TCP で 1 実行に千から数万件の
+  # out-of-order が出た (2026-11-04)。全 veth の受信に RPS を掛け、flow ごとに受ける CPU を 1 つにして順を保つ
+  local all ns dev
+  all=$(printf '%x' $(( (1 << $(nproc)) - 1 )))
+  for ns in "${NAMESPACES[@]}"; do
+    for dev in $(ip -n "$ns" -o link show type veth | awk -F': ' '{ sub(/@.*/, "", $2); print $2 }'); do
+      ip netns exec "$ns" sh -c "echo $all > /sys/class/net/$dev/queues/rx-0/rps_cpus" || die "cannot set RPS on $dev in $ns"
+    done
+  done
+  # RPS で 1 つの CPU に流れを寄せると、既定の netdev_max_backlog (1000) を溢れることがあった (1 実行に 23 packet)
+  sysctl -qw net.core.netdev_max_backlog=10000
+  echo "lab split topology (peer) is up; home is in the agent VM; RPS on every veth over CPUs $all; netdev_max_backlog 10000"
+}
+
+up_split_agent() {
+  local nic=$1
+  down
+  NAMESPACES=("$HOME_NS")
+  ip netns add "$HOME_NS"
+  ip -n "$HOME_NS" link set lo up
+  move_if "$nic" "$HOME_NS" eth0
+  ip -n "$HOME_NS" addr add "$HOME_ADDR/24" dev eth0
+  ip -n "$HOME_NS" route add default via "$HR_LAN"
+  echo "lab split topology (agent) is up; the router is in the peer VM"
+}
+
 status() {
   for ns in "${NAMESPACES[@]}"; do
     if ip netns list | grep -qw "^$ns"; then
@@ -140,5 +222,7 @@ case "${1:-}" in
   up) up ;;
   down) down ;;
   status) status ;;
-  *) echo "usage: $0 up|down|status" >&2; exit 2 ;;
+  up-split-peer) up_split_peer "${2:?up-split-peer <IF>}" ;;
+  up-split-agent) up_split_agent "${2:?up-split-agent <IF>}" ;;
+  *) echo "usage: $0 up|down|status|up-split-peer <IF>|up-split-agent <IF>" >&2; exit 2 ;;
 esac

@@ -333,6 +333,52 @@ iperf3 は送り手と受け手の byte あたりの CPU が `tcpquality.py` よ
 VM は終わると消し、`--keep` を付けると残します。
 残った VM は `lab/lab suite-gc` が消します。
 
+### agent を専用の VM に置く (`--split`)
+
+```sh
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --vcpus 2 --tool iperf3 fast rust kernel
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --vcpus 8 --tool iperf3 --delay-ms 10 delay rust kernel
+```
+
+既定の `lab paired` は 1 台の VM に 5 つの netns を置くので、client、server、ルータの CPU が agent の CPU と混ざります。
+`--split` は agent を専用の VM に置き、agent の CPU と周辺の CPU を分けて測ります。
+
+- 構成:agent の VM は `home` の netns だけを持ち、相手の VM は `client`、`vps`、`homerouter`、`lan` を持ちます。
+  2 台は Incus の専用のブリッジ (IP なし) で繋ぎ、agent の VM の NIC を `home` の `eth0`、相手の VM の NIC を `homerouter` の `lan0` にします (`lab/netns.sh up-split-agent`、`up-split-peer`)
+- VM を分ける理由:カーネルモードの WireGuard は暗号の kworker を VM の全 CPU に配ります。
+  1 台の VM の中で CPU の集合を分けても、カーネルモードの agent と server の暗号が互いの CPU で走ります
+- 固定:`WGFT_LAB_PAIR_CPUS` の 1 つ目の集合の先頭 `--vcpus` 個に agent の VM、2 つ目の集合の先頭 `--peer-vcpus` 個 (既定 8) に相手の VM を固定します。
+  Incus が固定するのは vCPU のスレッドだけで、vhost と qemu のほかのスレッドはホストの全 CPU に浮きます。
+  固定には root の権限が要るので、ラボはこれらを固定しません。
+  代わりに、ホストの `tcpquality.py hostsample` が 0.5 秒ごとにそれらの時間と、vhost が P コアに載った割合を記録します
+- round:2 つの腕を同じ VM の組で順に流します。
+  奇数の round は x が先、偶数の round は y が先です。
+  `paired.log` の `vm=a` は先に流れた腕、`vm=b` は後の腕で、解析は順の差を `vm_a_over_b` として打ち消します。
+  2 つの腕は同時に走らないので、始まりの同期と重なりの値はありません
+- 操作:相手の VM の `tcpquality.sh` が `AGENT_AT` を受け、agent の VM の `tcpquality.py agentd` を通して `lab/tqagent.sh` で agent を起動、停止します。
+  agentd は incusbr0 の上の agent の VM のアドレスで待ち、ホストが 2 台に置いた token を持たない要求を断ります
+- 解析:`VM` の行は 2 台の和です。
+  `AGENTVM` の行は agent の VM だけの byte あたりの CPU で、Rust の agent ではプロセスとその NIC のカーネルの仕事、カーネルモードではカーネルの WireGuard の仕事です。
+  2 つの腕を同じ条件で比べる主な値です。
+  `PEERVM` の行は相手の VM、`HOSTQEMU` の行は 2 台の qemu の全スレッドのホストでの時間です。
+  ホストの値は `paired.log` の `host_*` にあり、`host_pcore_busy_s` は測定の外の P コアの負荷を示します
+
+`--target local` は転送先 (LAN のホストの役) を agent のマシンに置きます。
+LAN のホストのアドレス `192.168.50.3` を agent の VM の `home` の `lo` に付け、iperf3 のサーバと UDP の echo を `home` で動かします。
+agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に入ります。
+既定の `--target lan` は、転送先を相手の VM の `lan` に置き、agent と同じ LAN にある別のホストとして扱います。
+`--target local` は `--tool iperf3` を要します。
+
+`--x-agent-env WGFT_NAME=VALUE` と `--y-agent-env WGFT_NAME=VALUE` は、腕 x と腕 y の agent にだけ環境変数を足します (繰り返せます)。
+既定で無効の実験の設定を、片方の腕だけで有効にして比べるときに使います。
+
+`delay` の経路は、vps と homerouter の間の両方の向きに `--delay-ms` の遅れを netem で入れます。
+netem の待ち行列の長さは `tcpquality.sh` が決め、20 Gbit/s で遅れの間に飛ぶ packet の 2 倍にします。
+待ち行列で packet が落ちた実行は失敗にします。
+client と LAN のホストの TCP のバッファの上限は 64 MiB に上げ、カーネルの TCP の端が速さを抑えないようにします。
+
+`tcpquality.sh` の `CPU=1` の結果の行には、interface ごとの packet の数と平均の大きさ、namespace ごとの TCP の segment と UDP の datagram の数、tunnel を戻る ACK の数 (`tun_ack_pkts_per_gb`)、受け手の GRO の後の segment の大きさ (`recv_seg_avg_b`) も入ります。
+
 ## 対応する VPS の環境
 
 カーネルと nftables の対応範囲は[セットアップの前提](../docs/manual/setup.md)に従います。

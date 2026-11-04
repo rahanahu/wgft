@@ -7,7 +7,8 @@
 #   lab/lab exec vm env DIRECTION=up bash /wgft/lab/tcpquality-cpu.sh rate
 #
 # fast is the path without netem and a 1 GiB transfer; rate is 25 ms each way at 20 Mbit/s with a
-# 200-packet queue, no loss and a 32 MiB transfer. BYTES overrides the size. DIRECTION=up makes the
+# 200-packet queue, no loss and a 32 MiB transfer; delay is DELAY_MS each way, no loss and no rate,
+# with the netem queue tcpquality.sh sizes from the delay (NETEM_LIMIT), and the size of fast. BYTES overrides the size. DIRECTION=up makes the
 # agent's netstack the receiver, as in tcpquality.sh. Neither path has an outage.
 #
 # It runs tcpquality.sh with CPU=1 ROUNDS times, RUNS runs of each netstack a round, and swaps which
@@ -26,8 +27,14 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 case "${1:-}" in
   fast) export DELAY_MS=0 LOSS_PCT=0 BYTES=${BYTES:-1073741824}; unset RATE_MBIT ;;
+  delay)
+    case ${DELAY_MS:-} in ''|*[!0-9]*|0) echo "tcpquality-cpu.sh: the delay path wants DELAY_MS, a whole number of ms each way above 0" >&2; exit 2 ;; esac
+    export DELAY_MS LOSS_PCT=0 BYTES=${BYTES:-1073741824}; unset RATE_MBIT
+    # DELAY_RATE_MBIT puts a bottleneck of that rate on the path, with DELAY_QUEUE_PKTS packets of
+    # drop-tail queue (default 4000) on top of the packets the delay holds, as a real link spaces bursts
+    if [ -n "${DELAY_RATE_MBIT:-}" ]; then export RATE_MBIT=$DELAY_RATE_MBIT QUEUE_PKTS=${DELAY_QUEUE_PKTS:-4000}; fi ;;
   rate) export DELAY_MS=25 LOSS_PCT=0 RATE_MBIT=20 QUEUE_PKTS=200 BYTES=${BYTES:-33554432} ;;
-  *) echo "usage: tcpquality-cpu.sh fast|rate [mode]" >&2; exit 2 ;;
+  *) echo "usage: tcpquality-cpu.sh fast|rate|delay [mode]" >&2; exit 2 ;;
 esac
 export CPU=1 OUTAGE_S=0 RUNS=${RUNS:-3} DIRECTION=${DIRECTION:-down}
 ROUNDS=${ROUNDS:-3}
