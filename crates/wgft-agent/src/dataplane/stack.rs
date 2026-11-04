@@ -81,14 +81,10 @@ pub(crate) struct StackSettings {
 impl StackSettings {
     /// The core's configuration for the tunnel MTU `mtu`.
     pub(crate) fn config(&self, mtu: usize) -> Config {
-        let c = Config {
+        Config {
             limits: self.limits,
+            send_turn: self.send_turn,
             ..Config::new(self.addr, mtu)
-        };
-        if self.send_turn {
-            c.with_send_turn()
-        } else {
-            c
         }
     }
 }

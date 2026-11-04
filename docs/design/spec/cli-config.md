@@ -9,7 +9,7 @@ fixture は `testdata/spec/config/` に置き、`cmd/wgft/spec_config_test.go` �
 
 | コマンド | 動かす場所 | 引数 | 常駐 | 読む設定 |
 | --- | --- | --- | --- | --- |
-| `wgft agent run` | agent のホスト | なし | する | 設定項目の一覧のすべて |
+| `wgft agent run` | agent のホスト | なし | する | 設定項目の一覧のすべてと、[実験の設定](#実験の設定) |
 | `wgft agent pubkey` | agent のホスト | なし | しない | `WGFT_DATA_DIR` |
 | `wgft agent rotate-key` | agent のホスト | なし | しない | `WGFT_DATA_DIR` |
 | `wgft agent doctor` | agent のホスト | なし | しない | 設定項目の一覧のすべて。フラグは一部だけ |
@@ -208,10 +208,23 @@ server と CLI の既定の dotenv は、同じディレクトリの `server.env
 ### 知らない名前
 
 dotenv と環境変数にある `WGFT_*` のうち、そのコマンドが読まない名前は、誤りにも警告にもせず無視します([11a 節](../security/configuration.md#11a-設定の渡し方))。
+例外は、コマンドが読む[実験の設定](#実験の設定)です。
 知らない名前と、`WGFT_ADMIN` や `WGFT_WG_ADDRESS` のような他のプロセス向けの名前の両方が対象です。
 dotenv のキーは大文字と小文字を区別するので、`wgft_mode` は `WGFT_MODE` ではありません。
 `WGFT_MODE` と `WGFT_WG_INTERFACE` は、server と agent が同じ名前で読みます。
 同じファイルを両方に渡すと、同じ値が両方に効きます。
+
+### 実験の設定
+
+名前に `EXPERIMENTAL` を含む `WGFT_*` は実験の設定です。
+実験の設定は設定項目の一覧の外にあり、互換の保証に含めず、予告なく変えるか消します。
+フラグと dotenv の鍵を持たず、プロセスの環境変数だけから読みます。
+dotenv のファイルに書いた値は使いません。
+有効な設定の行と `--help` にも出しません。
+コマンドが読む実験の設定の値が誤っていれば、設定の誤りとして終了コード 3 で止めます。
+コマンドが読まない実験の設定は、知らない名前と同じく無視します。
+実験の設定で機能を有効にした時は、実験の機能であることを英語の 1 行で起動ログに出します。
+今の実験の設定は、`wgft agent run` が読む `WGFT_AGENT_EXPERIMENTAL_SEND_TURN` です ([送信の番の設定](../v2/wgstack-rs.md#送信の番の設定))。
 
 ## 設定項目
 

@@ -71,6 +71,7 @@ UDP の応答の観測([10.2a 節](../diagnosis/server-observations.md#102a-転�
 [11a 節](../security/configuration.md#11a-設定の渡し方)が定める名前と意味を維持します。
 同じ名前をフラグとファイル(dotenv)の両方から渡せることと、優先順位(フラグ、環境変数、ファイル、既定の順)も保証に含みます。
 `--force`・`--purge`・`--adopt-existing`・`--yes`・`--dry-run` の 5 つは 1 回限りの操作なので、これらに対応する `WGFT_*` を新設しないことも保証に含みます([11a 節](../security/configuration.md#11a-設定の渡し方))。
+名前に `EXPERIMENTAL` を含む `WGFT_*` は実験の設定で、名前、値、有無のどれも保証に含みません([11a 節](../security/configuration.md#11a-設定の渡し方))。
 
 保たないものは、値の構文検査の追加・強化です。
 検査を新設・強化して今まで通っていた誤った値を拒むようにすることは、[11a 節](../security/configuration.md#11a-設定の渡し方)の「設定起因の失敗は終了コード 3」の原則に沿う限り互換の維持とみなします。

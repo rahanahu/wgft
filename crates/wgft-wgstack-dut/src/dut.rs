@@ -191,11 +191,9 @@ impl WgstackDut {
         budget: Budget,
         spare: Spare,
     ) -> Result<Self, (HelloError, Budget)> {
-        let config = Self::config(h, limits);
-        let config = if send_turn {
-            config.with_send_turn()
-        } else {
-            config
+        let config = Config {
+            send_turn,
+            ..Self::config(h, limits)
         };
         let hook = DutHook::default();
         let stack = Stack::new_reusing(config, budget, spare, &h.seed, hook.clone())
@@ -244,7 +242,7 @@ impl WgstackDut {
                 frame::Boost::Never => BoostPolicy::Never,
             },
             // 記録の HELLO は送信の番を持たず、凍結した Go の wgstack にも番は無いので、照合は番の無い核で流す。
-            send_turn: 0,
+            send_turn: false,
         }
     }
 
