@@ -486,6 +486,8 @@ pub struct Mismatch {
     pub request: usize,
     /// Rust の応答の frame の bytes。DUT が壊れた時は空です
     pub got: Vec<u8>,
+    /// この要求の後に破れた核の不変条件。破れていれば、意図した違いの一覧の行があっても照合は落ちます
+    pub invariant: Option<String>,
     /// 人が読む説明。要求、期待した応答、得た応答と、その前の要求と応答です
     pub detail: String,
 }
@@ -546,6 +548,7 @@ pub fn replay(rec: &Recording) -> Result<Outcome, String> {
             return Ok(Outcome::Diverged(Mismatch {
                 request: 0,
                 got: Vec::new(),
+                invariant: None,
                 detail: format!(
                     "request 0: {}\n  Go    {}\n  Rust  HELLO failed: {e}",
                     show(hreq.kind, hreq.body),
@@ -583,13 +586,18 @@ pub fn replay(rec: &Recording) -> Result<Outcome, String> {
             }
             Err(e) => (Vec::new(), format!("the DUT broke: {e}")),
         };
-        let broken = if each || n == rest.len() {
+        let mut broken = if each || n == rest.len() {
             dut.check_invariants().err()
         } else {
             None
         };
         if same(kind, want, &got) && broken.is_none() {
             continue;
+        }
+        // 照合はここで止まるので、要求ごとに確かめない記録も、食い違った所の不変条件を確かめます。
+        // 意図した違いの一覧の行が、その先の破れを隠さないためです。
+        if broken.is_none() && !(each || n == rest.len()) {
+            broken = dut.check_invariants().err();
         }
         let mut detail = String::new();
         let now = dut.now().map_or(0, |d| d.as_nanos());
@@ -610,7 +618,7 @@ pub fn replay(rec: &Recording) -> Result<Outcome, String> {
         let _ = writeln!(detail, "  request {n}: {msg}");
         let _ = writeln!(detail, "    Go    {}", show(want.kind, want.body));
         let _ = writeln!(detail, "    Rust  {got_text}");
-        if let Some(e) = broken {
+        if let Some(e) = &broken {
             let _ = writeln!(detail, "    invariant: {e}");
         }
         let _ = writeln!(detail, "    Rust frame {}", hex(&got));
@@ -618,6 +626,7 @@ pub fn replay(rec: &Recording) -> Result<Outcome, String> {
             request: n,
             got,
             detail,
+            invariant: broken,
         }));
     }
     Ok(Outcome::Match {
@@ -628,7 +637,8 @@ pub fn replay(rec: &Recording) -> Result<Outcome, String> {
 /// 照合の結果を意図した違いの一覧と照らします。通るなら 1 行の説明を、落ちるなら理由を返します。
 ///
 /// 一覧に行の無い記録は、すべての応答が一致すれば通ります。行を持つ記録は、行と同じ要求で同じ応答の frame に
-/// 食い違えば既知の違いとして通り、位置か応答が違うか、最後まで一致すれば落ちます。
+/// 食い違えば既知の違いとして通り、位置か応答が違うか、最後まで一致すれば落ちます。核の不変条件が破れた記録は、
+/// 行と同じ位置と応答でも落ちます。
 pub fn judge(rec: &Recording, out: &Outcome, divs: &[Divergence]) -> Result<String, String> {
     let id = rec.id();
     let row = divs.iter().find(|d| d.record == id);
@@ -655,7 +665,9 @@ pub fn judge(rec: &Recording, out: &Outcome, divs: &[Divergence]) -> Result<Stri
             d.request
         )),
         (Outcome::Diverged(m), Some(d))
-            if d.request == m.request && response_is(&d.response, &m.got) =>
+            if d.request == m.request
+                && response_is(&d.response, &m.got)
+                && m.invariant.is_none() =>
         {
             Ok(format!(
                 "{id}: intended divergence at request {}: {}",

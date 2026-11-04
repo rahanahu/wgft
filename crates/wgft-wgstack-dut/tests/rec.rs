@@ -260,3 +260,56 @@ fn full_divergence_rows_match_by_name_or_content() {
     let row = list(&r.id(), None, m.request, &resp).for_recording(&r);
     assert!(rec::judge(&r, &good, row.as_slice()).is_err());
 }
+
+/// 核の不変条件が破れた食い違いは、意図した違いの一覧の行が位置と応答に当たっても落ちることの確かめです。
+#[test]
+fn a_declared_row_does_not_hide_an_invariant_break() {
+    use sha2::{Digest, Sha256};
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/wgstack-rec/stream-tx");
+    let r = rec::read_file(&dir.join("seed-1.4b.rec.gz")).expect("read");
+    let end = {
+        let pairs = r.pairs().expect("frames");
+        let (_, resp) = pairs
+            .iter()
+            .find(|(q, a)| q.kind == frame::Kind::Poll as u8 && a.bytes.len() > 9 + 20)
+            .expect("a POLL that returned a packet");
+        resp.bytes.as_ptr() as usize - r.frames.as_ptr() as usize + resp.bytes.len() - 1
+    };
+    let mut bad = r.clone();
+    bad.frames[end] ^= 0x01;
+    let out = rec::replay(&bad).expect("replay");
+    let rec::Outcome::Diverged(m) = &out else {
+        panic!("a changed byte replays as {out:?}");
+    };
+    // 変えたのは記録の応答だけなので、核の不変条件は保たれています。
+    assert_eq!(m.invariant, None, "{}", m.detail);
+    let git_row = rec::Divergence {
+        record: bad.id(),
+        request: m.request,
+        response: rec::hex(&m.got),
+        reason: "test".to_owned(),
+    };
+    let full = rec::FullDivergences::parse(
+        format!(
+            r#"[{{"record": "{}", "request": {}, "response_sha256": "{}", "reason": "test"}}]"#,
+            bad.id(),
+            m.request,
+            rec::hex(&Sha256::digest(&m.got))
+        )
+        .as_bytes(),
+    )
+    .expect("list");
+    let full_row = full.for_recording(&bad).expect("row");
+    for row in [&git_row, &full_row] {
+        assert!(rec::judge(&bad, &out, std::slice::from_ref(row)).is_ok());
+        let mut broken = m.clone();
+        broken.invariant = Some("the send window is not the one of the ACK at SND.UNA".to_owned());
+        let err = rec::judge(
+            &bad,
+            &rec::Outcome::Diverged(broken),
+            std::slice::from_ref(row),
+        )
+        .expect_err("a declared row hid an invariant break");
+        assert!(err.contains("expects request"), "{err}");
+    }
+}
