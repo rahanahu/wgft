@@ -116,7 +116,7 @@ RFC 9438 4.6 も、輻輳の窓から計算する実装を挙げています。
   RTO の後の slow start で、伸びが前の往復の 1.7 倍未満になった最初の往復の窓を、DUT の ssthresh とみなします。
   伸びが 1.7 倍から 2 倍の間で ssthresh に達した場合は、輻輳の回避の 1 往復だけ遅れて読むので、1 segment 大きく見えます。
   RFC 5681 3.1 は RTO の後の ssthresh を FlightSize の半分以下とし、RFC 6675 5.1 は RTO の後の ssthresh を定めないので、RFC の文面は 2 segment までを許します。
-  参照の Linux は、回復の途中の RTO では回復で下げた ssthresh を保ちます(`tcp_enter_loss`)。
+  参照の Linux は、回復の途中の RTO では回復で下げた ssthresh を保ちます。
   この値が損失の前の窓以下で、その 4 分の 1 以上であることを確かめます。
   上限を 0.7 倍でなく窓そのものにするのは、SACK で確認された幅を含めた FlightSize の半分を ssthresh にする送り手を通すためです。
   下限は、回復と RTO で 2 回半分にする送り手も通す値です。

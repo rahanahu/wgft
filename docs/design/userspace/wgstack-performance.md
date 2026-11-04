@@ -182,16 +182,16 @@ qbench の実行は接続が 1 本なので、floor への戻りは別の接続�
   記録を分けないので、記録の輪の容量は変わりません。
   輻輳の窓は変えません。
   記録に SACK 済みの印を付けるのは、SACK の block が記録の全体を覆ったときだけです
-- SACK の取り消し:Linux の `tcp_check_sack_reneging` と同じ時期で扱います。
+- SACK の取り消し:Linux と同じ時期で扱います。
   SND.UNA を進める ACK の後に先頭の記録が SACK 済みのままなら、相手が SACK 済みのデータを捨てた疑いとして、再送のタイマーを max(SRTT/2, 10 ms) の後に早めます。
   期限までに先頭を確認する ACK が来れば、次の ACK が再送のタイマーを張り直すので何もしません。
-  期限が来ると RTO の処理に入り、先頭の記録がまだ SACK 済みか、同じ SND.UNA で 2 回目の RTO なら、すべての記録の SACK 済みの印を世代の番号で消します(Linux の `tcp_timeout_mark_lost`)。
+  期限が来ると RTO の処理に入り、先頭の記録がまだ SACK 済みか、同じ SND.UNA で 2 回目の RTO なら、すべての記録の SACK 済みの印を世代の番号で消します(Linux と同じ)。
   ACK の時点で印を消さないのは、輻輳の窓を下げないまま全部の記録を損失にしないためです。
   印を消した記録は RTO の規則で損失になり、送信の輪にあるデータから送り直します
 - 窓と再送:窓の外から始まる記録は再送しません。
-  先頭の記録は、窓が 0 でも窓の probe を兼ねて再送します(Linux の `tcp_retransmit_skb`)。
+  先頭の記録は、窓が 0 でも窓の probe を兼ねて再送します(Linux と同じ)。
   RTO の後に失われた記録だけが残り、窓が 0 の間は、窓の probe に移ります
-- RTT の測定:ACK が再送した記録を 1 つでも確認したときは、timestamp の無い接続の RTT を測りません(Linux の `FLAG_RETRANS_DATA_ACKED`)。
+- RTT の測定:ACK が再送した記録を 1 つでも確認したときは、timestamp の無い接続の RTT を測りません(Linux と同じ)。
   記録が RTO の後も残るので、再送を待つ間に届いていた元の segment で測ると、穴が埋まるまでの時間を RTT に含めるためです
 
 #### ACK 1 つの手間の上界
@@ -203,7 +203,7 @@ RFC 6675 の pipe と IsLost を記録を順に調べて求めると、1 回の�
 - 上界の形:ACK 1 つの手間は、SACK の block の数 × log(記録の数) と、印付けの均した手間と、定数の更新の和を超えません
 - 数の欄:SACK 済みの記録の byte の和、今の世代で再送した記録の byte の和を接続の欄に持ち、印を付けるときと外すときに増減します。
   pipe は SND.MAX - SND.UNA から、SACK 済みの byte と、損失の境目より手前の SACK 済みでない byte を引き、再送した byte を足して求め、記録を調べません。
-  SACK を交渉しない接続では、回復の外で重複した ACK 2 つまでを受け手が受けた segment として pipe から引き、RFC 3042 の Limited Transmit にします(Linux の `tcp_add_reno_sack`)
+  SACK を交渉しない接続では、回復の外で重複した ACK 2 つまでを受け手が受けた segment として pipe から引き、RFC 3042 の Limited Transmit にします(Linux と同じ)
 - IsLost:損失の境目の位置と、その位置から先にある SACK 済みの byte の和と記録の数を持ちます。
   境目の記録より先の SACK 済みの量が RFC 6675 の閾値(DupThresh 個の記録か (DupThresh - 1) × SMSS byte を超える量)に届く間、境目を先へ進めます。
   境目は後ろへ戻らないので、記録ごとに 1 回だけ通り過ぎます。
@@ -236,7 +236,7 @@ RFC 6675 の pipe と IsLost を記録を順に調べて求めると、1 回の�
   list に入っている印と RACK の損失の印は再送の世代の番号で有効にし、RTO と PMTU の引き下げは世代を進めて 2 つの list を一度に空にします。
   RACK の状態(届いた記録のうち最も後に送った記録の時刻と端、RACK の RTT、届いた最も右の端、並べ替えを見たか)、最小の RTT、TLP の状態は接続の欄に置きます
 - RACK の判定:累積の確認と SACK で新しく届いた記録で RACK の状態を更新し、再送した記録のうち元の segment への確認かもしれないものは使いません(RFC 8985 6.2 の手順 2)。
-  元の segment への確認かは Linux の `tcp_rack_advance` と同じく最小の RTT だけで見分け、RFC 8985 の TSecr による判定は使いません。
+  元の segment への確認かは Linux と同じく最小の RTT だけで見分け、RFC 8985 の TSecr による判定は使いません。
   穴のある間の SACK の TSecr は受け手の TS.Recent で穴より前の segment の時刻のままなので、再送への SACK をすべて元の segment への確認とみなし、再送の損失を見つけられなくなるためです。
   並べ替えの窓は、並べ替えを見ていない間は回復の中か SACK 済みの記録が DupThresh 個以上なら 0 で、ほかは min(最小の RTT / 4, SRTT) です。
   D-SACK を受けた往復ごとに並べ替えの窓の倍率を 1 つ上げ(1 往復に 1 回)、16 回の回復の間保ってから 1 に戻します(RFC 8985 6.2 の手順 4)。
@@ -276,12 +276,12 @@ RFC 6675 の pipe と IsLost を記録を順に調べて求めると、1 回の�
   SND.UNA がその番号に届く前に回復に入るときは、ssthresh を下げ直さず、PRR は今の ssthresh を目指し、回復はその番号で終わります。
   その番号より先に送ったデータの損失は、次の回復で窓を下げます。
   probe の確認と同じ ACK で RACK が別の損失を見つけた場合も同じで、縮小は 1 回だけです。
-  probe を送った時の SND.NXT の確認が、SND.UNA を進めず新しい SACK も無い重複した ACK なら、損失は無かったとみなします(Linux の `tcp_process_tlp_ack`)
+  probe を送った時の SND.NXT の確認が、SND.UNA を進めず新しい SACK も無い重複した ACK なら、損失は無かったとみなします(Linux と同じ)
 - タイマーの規則:RTO の期限は接続の欄に別に持ち、再送のタイマーの節には、RTO、並べ替えの期限、TLP の probe の期限のうち最も早いものを張ります。
   並べ替えの期限で起きたときは、処理の後に残る期限のうち最も早いものを張り直すので、RTO の期限を後ろへずらしません。
-  TLP の probe を送った後は、RFC 8985 7.3 と Linux の `tcp_send_loss_probe` と同じく RTO を今から張り直します。
+  TLP の probe を送った後は、RFC 8985 7.3 と同じく、Linux も RTO を今から張り直します。
   前の累積の確認から数えた RTO の期限を保つと、PTO が 2 × SRTT なので、SRTT が RTO の 3 分の 1 を超える経路(RTO が SRTT + 200 ms なら SRTT が 100 ms より長い経路)では、probe の確認が戻る前に RTO が起きて輻輳の窓を 1 segment にします。
-  先頭の記録を再送したときは、Linux の `tcp_xmit_retransmit_queue` と同じく RTO を張り直します。
+  先頭の記録を再送したときは、Linux と同じく RTO を張り直します。
   PTO を RTO の期限に揃えたときは probe を先に処理し、その時刻の RTO は起きません。
   確認の途絶えた通信量の少ない stream では、最後の確認から RTO の後に probe を送り、その後に RTO、2 × RTO、4 × RTO の間隔で再送します。
   RTO は SRTT に 4 × RTTVAR と 200 ms の大きい方を足した値です([TCP の機能](wgstack.md#完成に含める機能)の RFC 6298)。
@@ -363,7 +363,7 @@ RFC 6675 の pipe と IsLost を記録を順に調べて求めると、1 回の�
 ### 受け手の ACK と D-SACK
 
 - 規格:RFC 9293 と RFC 1122 の遅延 ACK、RFC 2883 の D-SACK です
-- 方針(実装済み):受けた segment から相手の MSS を推定し、確認していない byte が推定を超えたら ACK を遅らせずに返します(Linux の `__tcp_ack_snd_check`)。
+- 方針(実装済み):受けた segment から相手の MSS を推定し、確認していない byte が推定を超えたら ACK を遅らせずに返します(Linux と同じ)。
   Linux と同じく、接続の始めの最初のデータと、RTO より長く黙った後のデータで、遅らせずに返す ACK の数(quickack)を広告した窓の 2 MSS ごとに 1 つ、2 から 16 の間で補い、対話の流れでない間は ACK を遅らせません。
   重複した segment(RCV.NXT より前の重複と、順序外の区間の内側の重複)には、その範囲を D-SACK の block として次の ACK の先頭に 1 回だけ載せ、quickack を 2 以上に補います
 - 使う構造:推定した MSS、quickack の残り、返す D-SACK の block 1 つを接続の欄に置きます
@@ -380,7 +380,7 @@ RFC 6675 の pipe と IsLost を記録を順に調べて求めると、1 回の�
   gVisor の相手の 2 秒の途絶は、どの実装でも約 4.3 か約 10.5 Mbit/s の 2 つの値に分かれ、中央値は 7.37 から 4.40 Mbit/s になりましたが、種ごとの比の区間は前後のどちらも約 0.44 から 1.02 で重なります。
   ほかの受ける向きの場合は下がりませんでした(測った値は #542 にあります)
   対話の流れは、データを受けてから遅延 ACK の時間の内にデータを送ったときに印を付け、遅延 ACK の期限で印を外します(Linux の pingpong)。
-  推定した MSS は初期の値を min(536, 自分の MSS) とし、推定以上の segment で更新します(Linux の `tcp_measure_rcv_mss`)。
+  推定した MSS は初期の値を min(536, 自分の MSS) とし、推定以上の segment で更新します(Linux と同じ)。
   この規則が無いと、通信量の少ない stream の受け手は 2 つ目の segment を待たずに遅延 ACK の期限でだけ ACK を返し、送り手の ACK の数が半分になります。
   gVisor の送り手は、輻輳の窓が埋まって新しいデータを送れない間もアプリケーションの書き込みのたびに PTO を張り直すので、末尾の損失と ACK の損失が重なると、書き込みが止まるまで probe も RTO も送らず、損失 5% の通信量の少ない stream の p99 が数秒になりました
 - 不変条件:ACK の数は受けた segment の数を超えないので、I5 に触れません
@@ -406,15 +406,15 @@ wgstack との違いと適合の場面は、決定ではなく計画と未確認
 この節の参照は、ラボの VM のカーネルだった Debian の 6.1.0-53 の TCP の受け手で、この節の挙動は 6.1 から導きました。
 基の版は mainline の `v6.1` のタグで、Debian の bookworm の changelog では 6.1.0-38 が 6.1.147-1 なので、6.1.0-53 は `v6.1` の後の次の修正を含みます。
 
-- `tcp: fix quick-ack counting to count actual ACKs of new data`(Debian 6.1.64-1 から):quickack の残りの減らし方が変わります(後述)
-- `tcp: fix delayed ACKs for MSS boundary condition`(6.1.64-1 から):推定した MSS と同じ大きさで PSH を持つ segment も、読み終えた時の ACK の「小さな segment」に数えます
-- `tcp: enforce receive buffer memory limits by allowing the tcp window to shrink`(6.1.64-1 から):`tcp_shrink_window` を足し、既定の 0 では窓を縮めない今までの規則のままです
-- `tcp: fix mishandling when the sack compression is deferred.`(6.1.37-1 から):圧縮した ACK のタイマーが、アプリケーションがソケットを持つ間に切れた場合も ACK を送ります
-- `tcp: always seek for minimal rtt in tcp_rcv_rtt_update()`(6.1.147-1 から):受け手の RTT の推定の平滑が変わります(後述)
-- `tcp: fix initial tp->rcvq_space.space value for passive TS enabled flows`(6.1.147-1 から):受信の窓の自動調整の最初の値が少し小さくなります(後述)
-- `tcp: fix tcp_ofo_queue() to avoid including too much DUP SACK range`(6.1.148-1 から):順序外のデータを順序どおりにする時の D-SACK の範囲を重なりだけにします
+- changelog の quickack の数え方の修正(Debian 6.1.64-1 から):quickack の残りの減らし方が変わります(後述)
+- changelog の遅らせた ACK の MSS の境界の修正(6.1.64-1 から):推定した MSS と同じ大きさで PSH を持つ segment も、読み終えた時の ACK の「小さな segment」に数えます
+- changelog の受信のバッファの上限のために窓を縮める変更(6.1.64-1 から):`tcp_shrink_window` を足し、既定の 0 では窓を縮めない今までの規則のままです
+- changelog の圧縮した SACK の ACK の遅れの修正(6.1.37-1 から):圧縮した ACK のタイマーが、アプリケーションがソケットを持つ間に切れた場合も ACK を送ります
+- changelog の受け手の RTT の平滑の修正(6.1.147-1 から):受け手の RTT の推定の平滑が変わります(後述)
+- changelog の受信の窓の最初の目標の修正(6.1.147-1 から):受信の窓の自動調整の最初の値が少し小さくなります(後述)
+- changelog の D-SACK の範囲の修正(6.1.148-1 から):順序外のデータを順序どおりにする時の D-SACK の範囲を重なりだけにします
 
-VM で確かめるには、`uname -v` で Debian の package の版を読み、`/usr/share/doc/linux-image-$(uname -r)/changelog.gz` を上の件名で探します。
+VM で確かめるには、`uname -v` で Debian の package の版を読み、`/usr/share/doc/linux-image-$(uname -r)/changelog.gz` で上の版の項を見ます。
 上の Debian の版は bookworm の changelog の値です。
 VM の changelog では、受け手の RTT の推定の最小の取り方と自動調整の最初の値の 2 つを確かめ、ほかはまだ確かめていません。
 
@@ -429,15 +429,15 @@ VM の changelog では、受け手の RTT の推定の最小の取り方と自�
 #### 受け手の MSS の推定
 
 Linux は ACK の判定に、相手が送る segment の大きさの推定(rcv_mss)を使います。
-最初の値は、自分の MSS、相手の MSS、最初の窓の半分、536 の最小で、88 を下限にします(`tcp_initialize_rcv_mss`)。
+最初の値は、自分の MSS、相手の MSS、最初の窓の半分、536 の最小で、88 を下限にします。
 推定以上の大きさの segment を受けると、推定をその大きさ(自分の広告した MSS 以下)にします。
-推定より小さい segment は、PSH の無い segment か 536 byte 以上の segment が同じ大きさで 2 つ続いたときだけ推定を下げます(`tcp_measure_rcv_mss`)。
+推定より小さい segment は、PSH の無い segment か 536 byte 以上の segment が同じ大きさで 2 つ続いたときだけ推定を下げます。
 推定より小さい segment を受けた事実は、読み取りの時の ACK の判定に残します。
 wgstack は推定を実装済みで([受け手の ACK と D-SACK](#受け手の-ack-と-d-sack))、この節の規則はこの推定を使います。
 
 #### ACK を返す時期
 
-Linux は data を持つ segment を処理するたびに、次の順で ACK を返すかを決めます(`__tcp_ack_snd_check`)。
+Linux は data を持つ segment を処理するたびに、次の順で ACK を返すかを決めます。
 前に ACK を送ってから data を送った場合は、その segment が ACK を運んだので判定しません。
 
 1. 2 segment の規則:前に窓を広告した時の RCV.NXT から、推定した MSS より多く受けていて、かつ今広告できる窓が前に広告した窓の大きさ以上なら、すぐに ACK を返します。
@@ -478,7 +478,7 @@ RFC 5681 3.2 と 4.2 は、順序外の segment ごとにすぐに重複した A
 
 遅延 ACK のタイマーの長さは、データの到着の間隔から決める ato です。
 ato の最初の値と下限は 40 ms です。
-間隔が 20 ms 以下なら ato を半分にして 20 ms を足し、間隔が ato より短ければ半分にして間隔を足し(RTO を上限)、間隔が RTO より長ければ quickack の数を補います(`tcp_event_data_recv`)。
+間隔が 20 ms 以下なら ato を半分にして 20 ms を足し、間隔が ato より短ければ半分にして間隔を足し(RTO を上限)、間隔が RTO より長ければ quickack の数を補います。
 タイマーの長さは ato です。
 ato が 40 ms より大きいときは、SRTT(40 ms 以上)で抑えます。
 どの場合も 200 ms(`TCP_DELACK_MAX`)を上限にします。
@@ -486,7 +486,7 @@ ato が 40 ms より大きいときは、SRTT(40 ms 以上)で抑えます。
 タイマーが切れた時に対話の流れでなければ ato を 2 倍(RTO まで)にし、対話の流れなら対話の流れの印を外して ato を 40 ms に戻します。
 対話の流れの印は、data を受けてから ato の内に data を送った時に付きます。
 
-読み取りの後にも、次の条件で ACK を返します(`tcp_cleanup_rbuf`)。
+読み取りの後にも、次の条件で ACK を返します。
 
 - 2 segment 分:ACK を待つ間に、前に窓を広告した時から推定した MSS より多く受けていれば返します
 - 読み終えた時:ACK を待つ間に、読み取りで受信のメモリがすべて空になり、推定より小さい segment を受けていて、対話の流れでなければ返します。
@@ -509,14 +509,14 @@ PAWS で捨てた segment も同じ速さの制限の内側で重複した ACK �
 #### quickack の数
 
 quickack の残りは、遅らせずに返す ACK の数です。
-補う時は、今の受信の窓を推定した MSS の 2 倍で割った数を、上限(16 か 2)で抑え、0 なら 2 にし、残りより大きいときだけ置き換えます(`tcp_incr_quickack`)。
+補う時は、今の受信の窓を推定した MSS の 2 倍で割った数を、上限(16 か 2)で抑え、0 なら 2 にし、残りより大きいときだけ置き換えます。
 補う時と上限は次のとおりです。
 
 - 接続の最初の data:上限 16
 - RTO より長い間の後の data:上限 16
-- RCV.NXT より前の data と、窓の右端ちょうどから始まる data:上限 16 で、対話の流れの印を外し、ato を 40 ms に戻します(`tcp_enter_quickack_mode`)
+- RCV.NXT より前の data と、窓の右端ちょうどから始まる data:上限 16 で、対話の流れの印を外し、ato を 40 ms に戻します
 - ECN の CE:上限 2(wgstack は ECN を交渉しないので当たりません)
-- rcv_ssthresh を広げた segment:順序外の segment を含み、残りの最も下の bit を立てます(`tcp_grow_window`)。
+- rcv_ssthresh を広げた segment:順序外の segment を含み、残りの最も下の bit を立てます。
   残りが偶数なら 1 増え、奇数ならそのままです。
   rcv_ssthresh を広げている間は、広げた segment のたびに ACK をすぐに返します
 
@@ -532,12 +532,12 @@ rcv_ssthresh を広げた segment ごとの quickack は、この原因の候補
 
 #### SACK の block
 
-Linux は最近の順の SACK の block を 4 つまで覚えます(`tcp_sack_new_ofo_skb`)。
+Linux は最近の順の SACK の block を 4 つまで覚えます。
 
 - 順序外の segment:segment の範囲が覚えた block に接するか重なれば、その block を伸ばして先頭に移し、伸ばした block が後ろの block に接するか重なればまとめます。
   接する block が無ければ、新しい block を先頭に置き、4 つを超えた最も古い block を忘れます
 - 順序外の区間の内側の重複:segment を捨て、範囲を含む block を先頭に移します
-- RCV.NXT が進んだ時:RCV.NXT までに入った block を消し、順序外のデータが無くなればすべて消します(`tcp_sack_remove`)
+- RCV.NXT が進んだ時:RCV.NXT までに入った block を消し、順序外のデータが無くなればすべて消します
 - 順序外のデータを捨てた時:すべての block を忘れます(後述の受信のバッファの圧迫)
 
 ACK に載せる block は、D-SACK の block、覚えた block の最近の順の並びで、option の残りの空きに入るだけです。
@@ -549,7 +549,7 @@ RFC 2018 4 節は、先頭の block を ACK を起こした segment を含む bl
 
 #### D-SACK
 
-D-SACK(RFC 2883)は SACK を交渉した接続だけで、`tcp_dsack=1` のときに返します(`tcp_dsack_set`、`tcp_dsack_extend`)。
+D-SACK(RFC 2883)は SACK を交渉した接続だけで、`tcp_dsack=1` のときに返します。
 範囲は次のとおりです。
 
 - RCV.NXT より前の data だけを持つ segment:segment の範囲です
@@ -574,21 +574,21 @@ RCV.NXT をまたぐ segment の D-SACK は quickack を伴いません。
 
 Linux は受信のメモリを segment の確保の大きさ(truesize)で数え、ソケットの受信のバッファの上限(rcvbuf)と比べます。
 `tcp_adv_win_scale=1` では、メモリの半分を窓に換算します。
-6.6 から、この換算はソケットごとの比に替わりました(`tcp: get rid of sysctl_tcp_adv_win_scale`)。
+6.6 から、この換算はソケットごとの比に替わりました。
 ラボの 6.1 は半分の換算です。
 
-segment を受信の待ち行列か順序外の待ち行列に入れる前に、使っているメモリが rcvbuf を超えているか、メモリを確保できなければ、次の順に空けます(`tcp_try_rmem_schedule`、`tcp_prune_queue`)。
+segment を受信の待ち行列か順序外の待ち行列に入れる前に、使っているメモリが rcvbuf を超えているか、メモリを確保できなければ、次の順に空けます。
 受信の待ち行列が空の時の順序どおりの segment は、この確かめをせずに必ず受け入れます。
 
 1. 窓の締め付け:使っているメモリが rcvbuf 以上なら、quickack の残りを 0 にします。
    rcvbuf が `tcp_rmem` の上限より小さく、ソケットに SO_RCVBUF が設定されておらず、システム全体のメモリの圧迫が無ければ、rcvbuf を使っている量(上限まで)に上げます。
-   それでも使っている量が rcvbuf を超えていれば、rcv_ssthresh を窓の上限と自分の MSS の 2 倍の小さい方にします(`tcp_clamp_window`)。
+   それでも使っている量が rcvbuf を超えていれば、rcv_ssthresh を窓の上限と自分の MSS の 2 倍の小さい方にします。
    システム全体のメモリの圧迫の間は、rcv_ssthresh を MSS の 4 倍以下にします
-2. まとめ直し:順序外の待ち行列の連続した範囲と、未読のデータを、確保の無駄の少ない buffer に写し直します(`tcp_collapse`)。
+2. まとめ直し:順序外の待ち行列の連続した範囲と、未読のデータを、確保の無駄の少ない buffer に写し直します。
    1 つの segment だけからなり中身が 1 page より小さい順序外の範囲は写しません。
    そのような範囲の確保の合計が rcvbuf の 8 分の 1 を超えると、順序外の待ち行列のまとめ直しをそこでやめます
 3. 順序外のデータの取り消し:それでも上限を超えていれば、最も大きな番号の segment から順に、rcvbuf の 8 分の 1 以上を捨て、上限を下回るまで続けます。
-   捨てた後は、すべての SACK の block を忘れます(`tcp_prune_ofo_queue`)。
+   捨てた後は、すべての SACK の block を忘れます。
    最も遠いデータから捨てるのは、穴が埋まる見込みを残し、多数の segment が待つ遅れを避けるためです
 4. 届いた segment の破棄:それでも上限を超えれば、届いた segment を捨てます
 
@@ -600,7 +600,7 @@ wgstack が SACK で知らせたデータを取り消すのは、枠の取り合
 
 #### 広告する窓
 
-Linux は ACK を送るたびに窓を選びます(`__tcp_select_window`、`tcp_select_window`)。
+Linux は ACK を送るたびに窓を選びます。
 
 - 空き:rcvbuf から使っているメモリを引いた量の半分です。
   順序外のデータと未読のデータは、確保の大きさで空きを減らします
@@ -616,13 +616,13 @@ Linux は ACK を送るたびに窓を選びます(`__tcp_select_window`、`tcp_
 空きが rcv_ssthresh より小さい間は、選んだ窓が前の残りより小さくなりやすく、そのときは縮めない規則で前と同じ右端を広告するので、重複した ACK の窓の欄は変わりません。
 rcv_ssthresh が小さい方の間は、順序外の segment が rcv_ssthresh を約 2 MSS ずつ広げるので、選んだ窓が前の残りを超え、重複した ACK ごとに窓の欄が大きくなります。
 RFC 5681 2 節の重複した ACK の定義(e)は窓の欄が変わらないことを求め、gVisor の送り手はこの定義で重複した ACK を数えます。
-SACK を交渉しない接続で Linux が順序外の segment で rcv_ssthresh を広げないのは、窓の欄を変えずに重複した ACK を数えさせるためです(`tcp_data_queue_ofo`)。
+SACK を交渉しない接続で Linux が順序外の segment で rcv_ssthresh を広げないのは、窓の欄を変えずに重複した ACK を数えさせるためです。
 
 rcv_ssthresh は、窓を一度に広げないための窓の上限です。
 
 - 最初の値:握手で決めた最初の窓です。
   受動の open では rcvbuf の最初の値(`tcp_rmem` の 2 つ目の値、既定 128 KiB)の半分を MSS の倍数に切り下げた値で、約 64 KB です
-- 広げる時:順序どおりの 128 byte 以上の data と、SACK を交渉した接続の順序外の data を受けた時です(`tcp_grow_window`)。
+- 広げる時:順序どおりの 128 byte 以上の data と、SACK を交渉した接続の順序外の data を受けた時です。
   広げる余地は、窓の上限と空きの小さい方から rcv_ssthresh を引いた量で、余地が無いか、システム全体のメモリの圧迫の間は広げません
 - 広げる量:segment の確保の大きさが中身の 2 倍以下なら、自分の MSS の 2 倍と中身の 2 倍の大きい方です。
   確保の大きさが中身の 2 倍を超えるなら、rcv_ssthresh が `tcp_rmem` の上限に中身と確保の大きさの比(2 のべきに切り下げた比)を掛けた値以下の間だけ、推定した MSS の 2 倍(中身の 2 倍以上)です。
@@ -638,14 +638,14 @@ rcv_ssthresh は、窓を一度に広げないための窓の上限です。
 性能の参照の Linux(`linuxdut.PinPerformance` と、待ち受けに SO_RCVBUF を与えない `linuxdut.NewPerformance`)はこの条件を満たします。
 適合の試験の固定の値(`tcp_moderate_rcvbuf=0` と待ち受けの SO_RCVBUF)では、自動調整も、窓の締め付けでの rcvbuf の引き上げも働きません。
 
-Linux の受信の窓の自動調整(`tcp_rcv_space_adjust`、Dynamic Right-Sizing)は、rcvbuf と窓の上限だけを広げ、広告する窓を直接は広げません。
+Linux の受信の窓の自動調整(Dynamic Right-Sizing)は、rcvbuf と窓の上限だけを広げ、広告する窓を直接は広げません。
 広告する窓は前節の空きと rcv_ssthresh で決まるので、窓は届いた segment ごとに rcv_ssthresh が広がる分だけ開きます。
 
-受け手の RTT の推定(`rcv_rtt_est`)は 2 つの標本で決めます。
+受け手の RTT の推定(`ss -i` の `rcv_rtt` に見える値)は 2 つの標本で決めます。
 
-- 窓による標本:どの接続でも、data を受けるたびに、標本の始めの RCV.NXT に窓を足した番号を RCV.NXT が越えたかを見て、越えるまでの時間を標本にします(`tcp_rcv_rtt_measure`)。
+- 窓による標本:どの接続でも、data を受けるたびに、標本の始めの RCV.NXT に窓を足した番号を RCV.NXT が越えたかを見て、越えるまでの時間を標本にします。
   この標本は、今の推定より小さいときだけ推定を下げます
-- timestamp による標本:timestamp を使う接続では加えて、推定した MSS 以上の data を持ち、前の標本と違う TSecr を持つ segment ごとに、今の時刻と TSecr の差を標本にします(`tcp_rcv_rtt_measure_ts`)。
+- timestamp による標本:timestamp を使う接続では加えて、推定した MSS 以上の data を持ち、前の標本と違う TSecr を持つ segment ごとに、今の時刻と TSecr の差を標本にします。
   ラボのカーネルでは、今の推定より小さい標本をそのまま推定にし、大きい標本は 8 分の 1 の重みで平滑します。
   `v6.1` のタグは、timestamp による標本を、小さい標本も含めて平滑していました。
   窓による標本は、`v6.1` のタグでも今と同じく最小だけを取ります
@@ -788,7 +788,7 @@ SACK の圧縮は今の設定でも既定のまま有効です。
   このため、Linux の実行ではソケットのメモリ(`ss -m`)を記録します。
   空きが窓の上限の半分を下回るまでは、rcv_ssthresh を広げる quickack で segment ごとに ACK が出ることがあるので、違い 2 の窓の条件は空きが半分を下回った後の ACK でだけ測ります。
   その後アプリケーションがすべてを読みます。
-  確かめは、読み取りの後、壁時計では 100 ms 以内、手で進める時計では時計を進める前に、窓の欄が読み取りの前の残りの窓の 2 倍以上の ACK が出ることです(Linux の `tcp_cleanup_rbuf`)。
+  確かめは、読み取りの後、壁時計では 100 ms 以内、手で進める時計では時計を進める前に、窓の欄が読み取りの前の残りの窓の 2 倍以上の ACK が出ることです(Linux と同じ)。
   読み取りで受信のバッファが空になる場合と、半分だけ読む場合の 2 つを流します。
   3 つ目の場合として、穴の後ろに順序外のデータを持ったまま読めるデータをすべて読ませ、読み終えた時の ACK が出ないことを Linux で測り、wgstack の値と比べます。
   この場合も読み取りの後の窓の更新の ACK は出うるので、残りの窓を窓の上限の半分より大きく保つか、出た ACK を窓の欄で窓の更新と見分けます
@@ -834,7 +834,7 @@ D-SACK と違い 2 の窓の条件は、まだ台本がありません。
   RFC 9937 の SafeACK による PRR-SSRB と PRR-CRB の切り替えは持たず、送る量は RFC 6937 の PRR-SSRB のままです
 - 輻輳の回避:epoch の最初の ACK で K と原点を決め、1 RTT 先の W_cubic を [cwnd, 1.5 cwnd] に収めた目標へ ACK ごとに近づけます。
   W_cubic(t) が W_est より小さい間は W_est に従います(4.3 節)。
-  RTO の後は Linux の `bictcp_reset` と同じく状態を消し、送り残しの無い休みの後は Linux の `CA_EVENT_TX_START` と同じく休んだ時間だけ epoch を後ろへずらし、今より先へはずらしません
+  RTO の後は Linux と同じく状態を消し、送り残しの無い休みの後は休んだ時間だけ epoch を後ろへずらし、今より先へはずらしません
 - 不変条件:影響は輻輳の窓の値だけで、送る量は今と同じく相手の窓と送信の輪で抑えます
 - 危険:正しさへの危険は低く、主な危険は窓の急な増加によるまとまった送信です
 - 期待する効果:20 Mbit/s と往復 50 ms では BDP が小さいので、主に損失への応じ方(0.7 倍)で損失 1% の速さに効きます。
@@ -892,13 +892,13 @@ CPU の目標は、qbench の待ち行列の大きな測定で定常の速さが
 この場合は損失が無いので、再送はすべて不要です。
 `Stats` で数えると、受け手の SACK は D-SACK を返さず(gVisor の受け手)、8 秒の実行ごとに 9 から 10 回の高速の回復に入り、そのたびに輻輳の窓を下げていました。
 原因は、並べ替えを見た後も RFC 6675 の DupThresh の境目が、3 つの SACK 済みの segment の手前の記録を損失とみなすことです。
-Linux は RACK を使う間は DupThresh で損失を決めず(`tcp_time_to_recover`)、並べ替えの窓(最小の RTT の 4 分の 1)より短い遅れでは回復に入りません。
+Linux は RACK を使う間は DupThresh で損失を決めず、並べ替えの窓(最小の RTT の 4 分の 1)より短い遅れでは回復に入りません。
 
 - 規格:RFC 8985、RFC 3708(D-SACK による不要な再送の発見)、RFC 3522 と RFC 4015(timestamp による Eifel の発見と応答)、RFC 5682(F-RTO)です
 - RACK だけで決める損失:並べ替えを見た(`reorderSeen`)後は、DupThresh の境目を進めず、3 つの重複した ACK でも回復に入りません。
   損失は RACK の時刻だけで決めます。
   並べ替えを見る前は今と同じく RFC 6675 の規則も使うので、並べ替えの無い経路の振る舞いは変わりません
-- 取り消しの印:回復に入る時と、回復の外の最初の RTO の時に、その時の輻輳の窓と ssthresh と SND.UNA を覚え、取り消しの印を付けます(Linux の `tcp_init_undo`)。
+- 取り消しの印:回復に入る時と、回復の外の最初の RTO の時に、その時の輻輳の窓と ssthresh と SND.UNA を覚え、取り消しの印を付けます(Linux と同じ)。
   その後の最初の再送の時刻(自分の TSval)と、まだ D-SACK で知らされていない再送の数を数えます。
   印の後にまだ再送していなければ、数による取り消しはしません
 - D-SACK の数え方:D-SACK の block は、範囲が相手の窓の最大より広いものと、接続の D-SACK の累計が再送の累計を超えたものを疑わしいとして使いません。
@@ -907,8 +907,8 @@ Linux は RACK を使う間は DupThresh で損失を決めず(`tcp_time_to_reco
   SND.UNA より先の block は、範囲の中の再送した記録を数えます。調べる記録は ACK ごとに 4 つまでです。
   TLP の probe の再送の D-SACK(probe の時の SND.MAX で終わる 1 segment 以下の block)は、取り消しにも並べ替えの窓にも数えません。
   これで、再送していないデータの偽の D-SACK、前の回復の遅れた D-SACK、probe の D-SACK が本当の損失の縮小を取り消さなくなります
-- 不要と分かる条件:再送の数がすべて D-SACK で知らされたか(RFC 3708)、確認の TSecr が最初の再送の時刻より前(元の segment への確認、RFC 3522)のときです(Linux の `tcp_may_undo`)
-- 取り消し:回復を終える ACK で不要と分かれば、輻輳の窓と ssthresh を覚えた値以上に戻し、並べ替えを見たことにします(Linux の `tcp_try_undo_recovery`、RFC 4015 の応答)。
+- 不要と分かる条件:再送の数がすべて D-SACK で知らされたか(RFC 3708)、確認の TSecr が最初の再送の時刻より前(元の segment への確認、RFC 3522)のときです(Linux と同じ)
+- 取り消し:回復を終える ACK で不要と分かれば、輻輳の窓と ssthresh を覚えた値以上に戻し、並べ替えを見たことにします(Linux と同じで、RFC 4015 の応答にあたります)。
   回復の途中の取り消しと、D-SACK だけによる回復の途中の取り消しは持ちません
 - RTO の後の回復の終わり:SND.UNA が RTO の時の SND.MAX に届いた ACK で、不要と分かれば窓を戻し、F-RTO の段階と取り消しの印を終えます。
   1 つの ACK がこの境を越えた場合も F-RTO の段階を残しません
@@ -1360,10 +1360,10 @@ commit が分からない時は書き出しを始めず、作業中の変更が�
 3. RACK-TLP
 4. 輻輳の制御の interface と CUBIC:RACK-TLP の後の日常の行列で、損失 1% と 5% の送る向きの差が損失への応じ方に残ったので、HyStart++ より前に置きます
 5. HyStart++
-6. 輻輳の窓の検証(RFC 7661):送り残しが輻輳の窓より少ない、アプリケーションに制限された間は、Linux の `tcp_is_cwnd_limited` と同じく slow start と輻輳の回避で窓を増やしません。
+6. 輻輳の窓の検証(RFC 7661):送り残しが輻輳の窓より少ない、アプリケーションに制限された間は、Linux と同じく slow start と輻輳の回避で窓を増やしません。
    通信量の少ない stream の間に使わない窓が育ち、後のまとまった転送を一度に送るのを防ぎます。
    CUBIC と NewReno の両方で、2 segment ずつ送る 60 秒の間に窓が 10 から 70 segment に育つことをレビューで確かめたので加えます。
-   窓の使い方は 1 往復(その窓の間に送った最後の番号の確認まで)ごとに数え、その往復の間に輻輳の窓が新しいデータを止めたか、slow start の間は窓が送り残しの最大の 2 倍に届いていないときだけ窓を増やします(Linux の `tcp_cwnd_validate` と `tcp_is_cwnd_limited`)。
+   窓の使い方は 1 往復(その窓の間に送った最後の番号の確認まで)ごとに数え、その往復の間に輻輳の窓が新しいデータを止めたか、slow start の間は窓が送り残しの最大の 2 倍に届いていないときだけ窓を増やします(Linux と同じ)。
    窓を下げる RFC 7661 の pipeACK の仕組みは持ちません
 7. 受信の窓と boost の方針:前の段と独立しているので、診断の結果によっては 2 の段と並べて進めます
 8. 受け手の ACK と D-SACK

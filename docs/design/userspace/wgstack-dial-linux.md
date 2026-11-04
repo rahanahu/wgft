@@ -24,12 +24,12 @@ wgstack との違いと適合の台本は、決定ではなく選ぶ点と案と
 ラボの VM のカーネルは Debian の 6.1.0-53 で、package の版は 6.1.187-1 です。
 基の版は mainline の `v6.1` のタグで、接続を張る側に効く次の修正を Debian の stable の更新で含みます。
 
-- `tcp_metrics: properly set tp->snd_ssthresh in tcp_init_metrics()` と `tcp_metrics: do not create an entry from tcp_init_metrics()`(Debian 6.1.64-1 から):確立の時の ssthresh の扱いが変わります(後述)
-- `tcp: Don't drop SYN+ACK for simultaneous connect().`(6.1.112-1 から):同時の open で相手の SYN-ACK を受け入れます(後述)
-- `tcp: avoid reusing FIN_WAIT2 when trying to find port in connect() process`(6.1.115-1 から):FIN_WAIT_2 の間の 4 つ組を新しい接続に使い直しません(後述)
-- `tcp: fix __tcp_close() to only send RST when required`(6.1.158-1 から):閉じる時に読まれていないデータがあるかの判定から、FIN だけを除きます
+- changelog の宛先ごとの記録の 2 つの修正(Debian 6.1.64-1 から):確立の時の ssthresh の扱いが変わります(後述)
+- changelog の同時の open の SYN-ACK の修正(6.1.112-1 から):同時の open で相手の SYN-ACK を受け入れます(後述)
+- changelog の FIN_WAIT_2 の 4 つ組の修正(6.1.115-1 から):FIN_WAIT_2 の間の 4 つ組を新しい接続に使い直しません(後述)
+- changelog の閉じる時の RST の判定の修正(6.1.158-1 から):閉じる時に読まれていないデータがあるかの判定から、FIN だけを除きます
 
-VM で確かめるには、`uname -v` で `Debian 6.1.187-1` を読み、`/usr/share/doc/linux-image-$(uname -r)/changelog.gz` を上の件名で探します。
+VM で確かめるには、`uname -v` で `Debian 6.1.187-1` を読み、`/usr/share/doc/linux-image-$(uname -r)/changelog.gz` で上の版の項を見ます。
 このカーネルの changelog の名前は `changelog.gz` で、`changelog.Debian.gz` はありません。
 上の 4 つの版は、この VM の changelog で確かめた値です。
 
@@ -39,8 +39,8 @@ VM で確かめるには、`uname -v` で `Debian 6.1.187-1` を読み、`/usr/s
 この文書の 7.2 の挙動は `v7.2` のタグのソースから読み、各変化の最初の版を mainline のタグで示します。
 Debian の 7.2.11 の stable の修正は、VM の `/usr/share/doc/linux-image-$(uname -r)/changelog.Debian.gz` で、接続を張る側に効く次の 2 点だけを確かめました。
 
-- `tcp: refresh TS.Recent for accepted old ACKs`(7.2.10-1 から):mainline では v7.3 の変化で、[7.2 の後の変化](#72-の後の変化)の 1 つです
-- `net: advertise TCP MSS from the configured MTU, not the learned PMTU` とその取り消しは、7.2.11 までの changelog にありません。
+- changelog の受け入れた古い ACK の TS.Recent の修正(7.2.10-1 から):mainline では v7.3 の変化で、[7.2 の後の変化](#72-の後の変化)の 1 つです
+- SYN の MSS を学んだ path MTU で下げない変更とその取り消しは、7.2.11 までの changelog にありません。
   SYN の MSS は `v7.2` のタグと同じく学んだ path MTU に従うと読めますが、観測していません([option と並び](#option-と並び))
 `v7.2` の後から読んだ時点の mainline までの変化は、[7.2 の後の変化](#72-の後の変化)に書きます。
 
@@ -90,7 +90,7 @@ Debian の 7.2.11 の stable の修正は、VM の `/usr/share/doc/linux-image-$
 
 ## ISN と timestamp の offset
 
-ISN は、4 つ組の鍵付きの hash に、64 ns ごとに 1 進む時計を足した値です(`secure_tcp_seq`)。
+ISN は、4 つ組の鍵付きの hash に、64 ns ごとに 1 進む時計を足した値です。
 鍵は起動ごとに 1 つで、network namespace によりません。
 ISN は一時ポートを選んだ後に求めます。
 時計は 1 µs に 15.625 進み、約 274 秒で 1 周します。
@@ -109,10 +109,10 @@ timestamp の時計は 1 ms ごとに進みます。
 v6.7 からは、経路に `tcp_usec_ts` の印を付けると 1 µs の時計を使えますが、既定では使いません。
 offset の求め方は版で違います。
 
-- 6.1:アドレスの組の鍵付きの hash です(`secure_tcp_ts_off`)。
+- 6.1:アドレスの組の鍵付きの hash です。
   同じ相手への接続の TSval は、ポートが違っても続いた値になります。
   観測では、ポートの違う接続の TSval が 1 ms の時計どおりに続きました
-- 7.2:ISN と同じ 4 つ組の hash から求めます(v7.0 の `tcp: secure_seq: add back ports to TS offset`)。
+- 7.2:ISN と同じ 4 つ組の hash から求めます(v7.0)。
   同じ 4 つ組の接続の TSval は続き、ポートの違う接続の TSval は互いに無関係になります。
   ホストの 7.2 の観測では、ポートの違う接続の TSval がばらばらでした
 
@@ -126,7 +126,7 @@ TIME_WAIT の 4 つ組を使い直す SYN だけは、前の接続の TS.Recent 
 一時ポートの幅は既定で 32768 から 60999 で、28232 個です。
 RFC 6056 3.2 は 1024 から 65535 の全体を使うことを勧め、Linux の既定はその一部です。
 
-Linux は RFC 6056 3.3.4 の Algorithm 4(double-hash)を変えた形でポートを選びます(`__inet_hash_connect`)。
+Linux は RFC 6056 3.3.4 の Algorithm 4(double-hash)を変えた形でポートを選びます。
 
 - 表:65536 個の数の表を起動の後の最初の使用で乱数で埋めます
 - 鍵:自分のアドレス、相手のアドレス、相手のポートと、10 秒ごとに変わる値の鍵付きの hash から、表の位置と最初の offset を決めます
@@ -171,7 +171,7 @@ Linux は表を大きくし、偶奇で分け、乱数で進めます。
 既定の `tcp_tw_reuse=2` は、自分か相手のアドレスが loopback の接続だけで使い直しを許します。
 トンネルのアドレスの接続では、TIME_WAIT の 4 つ組を使い直さず、そのポートを飛ばします。
 
-`tcp_tw_reuse=1` では、次の条件をすべて満たす TIME_WAIT の 4 つ組を使い直します(`tcp_twsk_unique`)。
+`tcp_tw_reuse=1` では、次の条件をすべて満たす TIME_WAIT の 4 つ組を使い直します。
 
 - timestamp:前の接続が timestamp を使っていました
 - 状態:TIME_WAIT の状態で、閉じたソケットの FIN_WAIT_2 ではありません。
@@ -202,7 +202,7 @@ RFC 6191 は、その受ける側の判定に timestamp を使う方法です。
 
 ### option と並び
 
-SYN の option は、MSS、SACK-permitted、timestamp、NOP、窓の scale の順で、20 byte です(`tcp_syn_options`、`tcp_options_write`)。
+SYN の option は、MSS、SACK-permitted、timestamp、NOP、窓の scale の順で、20 byte です。
 SACK-permitted と timestamp は 1 つの 4 byte の境界の組にまとめ、NOP を挟みません。
 timestamp を使わない設定では、MSS、NOP、NOP、SACK-permitted、NOP、窓の scale の順です。
 6.1、ラボの 7.2、ホストの 7.2 で、どの SYN もこの並びでした。
@@ -222,8 +222,8 @@ timestamp を使わない設定では、MSS、NOP、NOP、SACK-permitted、NOP�
 同じ宛先への後の接続の SYN も同じ MSS でした。
 ホストの 7.2 では、同じ ICMP の後も SYN の MSS が 1380 のままでした。
 `v7.2` のタグのソースは 6.1 と同じく、SYN ごとに学んだ path MTU から MSS を求め直します。
-v7.3-rc1 の `net: advertise TCP MSS from the configured MTU, not the learned PMTU` は、学んだ path MTU で示す MSS を下げない変更で、stable にも送られました。
-その後の mainline はこの変更を戻しました(`Revert "net: advertise TCP MSS from the configured MTU, not the learned PMTU"`)。
+v7.3-rc1 で入った、学んだ path MTU で示す MSS を下げない変更は、stable にも送られました。
+その後の mainline はこの変更を戻しました。
 戻した理由は、ICMP を捨てる中継の後ろの相手が大きな segment を送り、握手の後に止まったことです(RFC 2923 2.1 の path MTU の black hole)。
 ホストの 7.2 が 1380 を示したのは、Fedora の 7.2.13 がこの stable の変更を含むためと見込みますが、確かめていません。
 参照の Debian の 7.2.11 の changelog は、この変更も取り消しも含みません([7.2](#72))。
@@ -232,14 +232,14 @@ v7.3-rc1 の `net: advertise TCP MSS from the configured MTU, not the learned PM
 ### 窓と IP の欄
 
 SYN の窓の欄は scale を掛けない値です(RFC 7323 2.2)。
-値は、最初の受信のバッファ(`tcp_rmem` の 2 つ目の値、128 KiB)を窓に換算した 64 KiB を MSS の倍数に切り下げ、65535 で抑えた値です(`tcp_select_initial_window`)。
+値は、最初の受信のバッファ(`tcp_rmem` の 2 つ目の値、128 KiB)を窓に換算した 64 KiB を MSS の倍数に切り下げ、65535 で抑えた値です。
 MSS 1380 では 64860 で、6.1 とホストの 7.2 の観測もこの値でした。
 TS.Recent を引き継いだ接続(TIME_WAIT の 4 つ組の使い直し)は、MSS から timestamp の 12 byte を引いた値で切り下げます。
 観測では、MSS 960 で 65412、MSS 1380 で 64296 でした。
 経路に `initrwnd` があれば、その MSS 倍で抑えます。
 rcv_ssthresh の最初の値はこの窓です。
 
-v6.10 で受信の窓の最初の値の 64 KB の上限が外れましたが(`tcp: remove 64 KByte limit for initial tp->rcv_wnd value`)、SYN の欄は 65535 を超えず、既定の設定では値は変わりません。
+v6.10 で受信の窓の最初の値の 64 KB の上限が外れましたが、SYN の欄は 65535 を超えず、既定の設定では値は変わりません。
 
 IP の欄は、DF を立て、TTL は 64、ID はソケットごとの乱数から始めて 1 ずつ増やします。
 `tcp_ecn=2` では ECE と CWR を立てません。
@@ -283,9 +283,9 @@ SYN-ACK の option は、自分の SYN に載せた種類だけを読みます�
 再送の SYN は、同じ ISN、同じ option、新しい TSval を持ちます。
 
 - 6.1:再送のたびに RTO を倍にし、120 秒で抑えます。
-  再送の回数が `tcp_syn_retries` に届いた後の次の期限で打ち切ります(`tcp_write_timeout`)。
+  再送の回数が `tcp_syn_retries` に届いた後の次の期限で打ち切ります。
   既定では SYN を 0、1、3、7、15、31、63 秒に送り、127 秒で打ち切ります
-- 7.2:最初の `tcp_syn_linear_timeouts`(4)回の再送は RTO を 1 秒のまま保ち、その後に倍にします(v6.5 の `tcp: make the first N SYN RTO backoffs linear`)。
+- 7.2:最初の `tcp_syn_linear_timeouts`(4)回の再送は RTO を 1 秒のまま保ち、その後に倍にします(v6.5)。
   回数の上限は `tcp_syn_retries` に `tcp_syn_linear_timeouts` を足した 10 です。
   時間の上限は 6.1 と同じく、`tcp_syn_retries` 回を倍にした場合の 127 秒です。
   既定では SYN を 0、1、2、3、4、5、7、11、19、35、67 秒に送り、回数の上限で 131 秒に打ち切ります
@@ -319,7 +319,7 @@ Linux の既定の約 2 分はこの求めより短く、Linux の RFC からの
 
 ### アプリケーションの期限
 
-Go の dialer と同じく、非同期の `connect` の後に期限でソケットを閉じると、SYN-SENT の接続は segment を送らずに消え、ポートを返します(`tcp_close`)。
+Go の dialer と同じく、非同期の `connect` の後に期限でソケットを閉じると、SYN-SENT の接続は segment を送らずに消え、ポートを返します。
 後から届いた SYN-ACK は、どの接続にも当たらない segment として、番号を SEG.ACK にした ACK の無い RST を受けます。
 6.1 とホストの 7.2 で観測しました。
 
@@ -347,7 +347,7 @@ Go の dialer と同じく、非同期の `connect` の後に期限でソケッ�
 
 ## SYN-SENT の入力
 
-SYN-SENT の接続は、届いた segment を次の順に確かめます(`tcp_rcv_synsent_state_process`)。
+SYN-SENT の接続は、届いた segment を次の順に確かめます。
 
 ### ACK を持つ segment
 
@@ -415,7 +415,7 @@ challenge ACK はソケットごとに `tcp_invalid_ratelimit`(500 ms)に 1 つ�
 
 ### SYN-SENT での ICMP の誤り
 
-ICMP の誤りは、引用された TCP の header の 4 つ組で接続を探し、引用された番号が SND.UNA から SND.NXT の範囲(ISS か ISS+1)にあるときだけ扱います(`tcp_v4_err`)。
+ICMP の誤りは、引用された TCP の header の 4 つ組で接続を探し、引用された番号が SND.UNA から SND.NXT の範囲(ISS か ISS+1)にあるときだけ扱います。
 外側の送信元は確かめません。
 
 - Destination Unreachable(code 15 以下で、Fragmentation Needed を除く)、Time Exceeded、Parameter Problem:接続をすぐに閉じ、`connect` は[errno の一覧](#errno-の一覧)の errno を返します
@@ -443,7 +443,7 @@ mainline の v6.8 で一部の code の打ち切りをやめる変更が入り�
 
 ### 確立の処理
 
-受け入れられる SYN-ACK で、Linux は次の値を決めて ESTABLISHED に移ります(`tcp_finish_connect`、`tcp_init_transfer`)。
+受け入れられる SYN-ACK で、Linux は次の値を決めて ESTABLISHED に移ります。
 
 - RCV.NXT:SYN-ACK の番号の次です
 - 送る窓:SYN-ACK の窓の欄です
@@ -523,11 +523,11 @@ Linux は RFC 6928 に従います。
 
 ### TIME_WAIT の長さと挙動
 
-TIME_WAIT の長さは、RTO や MSL によらず 60 秒です(`tcp_time_wait`)。
+TIME_WAIT の長さは、RTO や MSL によらず 60 秒です。
 観測では、6.1 で 61.2 秒から 62.4 秒の間、ホストの 7.2 で約 61.3 秒の後に、同じ 4 つ組の接続を張れました(1.2 秒ごとに試した値)。
 RFC 9293 3.6.1 は TIME-WAIT を MSL の 2 倍とし(MUST-13)、3.4.2 は MSL を 2 分とするので、Linux の 60 秒はこの求めより短く、RFC からの逸脱です。
 
-TIME_WAIT の接続は、届いた segment を次のように扱います(`tcp_timewait_state_process`)。
+TIME_WAIT の接続は、届いた segment を次のように扱います。
 
 - 再送された FIN:ACK を返し、期限を 60 秒から数え直します。
   観測では ACK を返しました(6.1 とホストの 7.2)
@@ -574,12 +574,12 @@ TIME_WAIT の数は `tcp_max_tw_buckets` までです。
 
 | 項目 | 6.1.0-53 | 7.2(ソース) | 変わった版 | ホストの 7.2 |
 |---|---|---|---|---|
-| timestamp の offset | アドレスの組の hash | 4 つ組の hash | v7.0 `tcp: secure_seq: add back ports to TS offset` | 4 つ組ごとに違う値を観測 |
-| SYN の再送の間隔 | 1 秒から倍 | 最初の 4 回は 1 秒、その後に倍 | v6.5 `tcp: make the first N SYN RTO backoffs linear` | 観測 |
+| timestamp の offset | アドレスの組の hash | 4 つ組の hash | v7.0 | 4 つ組ごとに違う値を観測 |
+| SYN の再送の間隔 | 1 秒から倍 | 最初の 4 回は 1 秒、その後に倍 | v6.5 | 観測 |
 | 既定の SYN の数と打ち切り | 7 回、127 秒 | 11 回、131 秒 | v6.5 | 11 回、134.1 秒を観測 |
 | 5 秒の期限までの SYN | 3 回(3.5 秒の期限で観測) | 5 回 | v6.5 | 3.5 秒の期限で 4 回を観測 |
 | `TCP_SYNCNT` の意味 | 再送の回数の上限 | 回数の上限に 4 を足し、時間の上限が先に来ることがあります | v6.5 | 観測 |
-| TIME_WAIT の使い直しの待ち(`tcp_tw_reuse=1`) | TS.Recent の更新の秒より後の秒(0 から 1 秒) | TIME_WAIT に入ってから 1000 ms(`tcp_tw_reuse_delay`) | v6.14 `tcp: Measure TIME-WAIT reuse delay with millisecond precision` | 0.3 秒で拒み 1.4 秒で使い直しを観測 |
+| TIME_WAIT の使い直しの待ち(`tcp_tw_reuse=1`) | TS.Recent の更新の秒より後の秒(0 から 1 秒) | TIME_WAIT に入ってから 1000 ms(`tcp_tw_reuse_delay`) | v6.14 | 0.3 秒で拒み 1.4 秒で使い直しを観測 |
 | 一時ポートの歩幅の乱数化 | 無し | `ip_local_port_step_width`、既定 0 で無効 | v7.1 | 既定の 0 を観測 |
 | ソケットごとのポートの幅の偶奇 | 偶奇で分けます | `IP_LOCAL_PORT_RANGE` の接続は分けません | v6.8 | 観測していません |
 | Fragmentation Needed の後の SYN の MSS | 下がった path MTU に従う(観測) | 6.1 と同じ(ソース) | v7.3-rc1 で変わり、後に戻りました。stable への送りで point release ごとに違いえます | 1380 のまま(stable の変更を含むと見込みます) |
