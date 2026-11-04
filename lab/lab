@@ -739,6 +739,8 @@ cmd_suite() {
 PAIRED_BASE_WT=""
 PAIRED_SPLIT_NET=""
 PAIRED_SAMPLER=""
+PAIRED_AGENTLOAD_VM=""
+PAIRED_AGENTLOAD_LOG=""
 PAIRED_AGENT_AT=""
 PAIRED_OUT=""
 paired_cleanup() {
@@ -1275,6 +1277,7 @@ paired_run_split_round() {
 # 転送 1 回ごとではない
 paired_agentload_start() {
   [[ -n $agentload ]] || return 0
+  PAIRED_AGENTLOAD_VM=${names[0]} PAIRED_AGENTLOAD_LOG=$out/vm-${vms[0]}.log
   (VM=${names[0]}; suite_timeout 60 in_vm python3 "$SHARE/lab/agentload.py" start "${agentload%%:*}" "${agentload##*:}" /run/wgft-agentload) >>"$out/vm-${vms[0]}.log" 2>&1 \
     || die "cannot start the load on ${names[0]}; see $out/vm-${vms[0]}.log"
 }
@@ -1297,8 +1300,9 @@ paired_agentload_stop() {
 }
 # paired_agentload_kill:負荷を SIGKILL し、状態のファイルを消す (できる範囲で。失敗しても続ける)
 paired_agentload_kill() {
-  [[ -n $agentload && -n ${names[0]:-} ]] || return 0
-  (VM=${names[0]}; suite_timeout 60 in_vm python3 "$SHARE/lab/agentload.py" kill /run/wgft-agentload) >>"$out/vm-${vms[0]}.log" 2>&1 || true
+  # EXIT の trap からも呼ばれ、そのとき cmd_paired の local は消えている。global だけを使う
+  [[ -n ${PAIRED_AGENTLOAD_VM:-} ]] || return 0
+  (VM=$PAIRED_AGENTLOAD_VM; suite_timeout 60 in_vm python3 "$SHARE/lab/agentload.py" kill /run/wgft-agentload) >>"${PAIRED_AGENTLOAD_LOG:-/dev/null}" 2>&1 || true
 }
 
 # paired_hostpoll <arm>:PAIRED_HOSTPOLL_X、PAIRED_HOSTPOLL_Y (on か off、片方だけなら他方は on) があれば、その腕の前に
