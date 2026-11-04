@@ -334,7 +334,9 @@ def cpupaired(logfile):
         for key, pre, share, vcpus in (
                 ("agentvm_cpu_s_per_gb", "AGENTVM", "agentvm_cpu_share", int(plan.get("vcpus", "4"))),
                 ("peervm_cpu_s_per_gb", "PEERVM", "peervm_cpu_share", int(plan.get("peer_vcpus", "4"))),
-                ("host_qemu_s_per_gb", "HOSTQEMU", "host_qemu_share", None)):
+                ("host_qemu_s_per_gb", "HOSTQEMU", "host_qemu_share", None),
+                ("host_agent_s_per_gb", "HOSTAGENT", "host_qemu_share", None),
+                ("host_peer_s_per_gb", "HOSTPEER", "host_qemu_share", None)):
             if " %s=" % key in text:
                 rc = cpupaired_key(data, key, vm=vcpus is not None, pre=pre, share_key=share, vcpus=vcpus) or rc
     rc = paired_ratio(data, "overall_mbit", "MBITRATIO", sender_check=True) or rc
@@ -667,6 +669,230 @@ def read_netns(ns, paths):
     return out
 
 
+def in_netns(ns, fn):
+    # fn() run by this thread alone in the network namespace ns ("" is the caller's), as read_netns
+    own = None
+    try:
+        if ns:
+            own = os.open("/proc/thread-self/ns/net", os.O_RDONLY)
+            fd = os.open("/run/netns/" + ns, os.O_RDONLY)
+            try:
+                os.setns(fd, CLONE_NEWNET)
+            finally:
+                os.close(fd)
+        return fn()
+    finally:
+        if own is not None:
+            os.setns(own, CLONE_NEWNET)
+            os.close(own)
+
+
+# the rows of /proc/interrupts that are not numbered: timer, rescheduling and function call IPIs, TLB
+# shootdowns, IRQ work, and the posted-interrupt vectors
+NAMED_IRQS = ("LOC", "RES", "CAL", "TLB", "IWI", "PIN", "NPI", "PIW", "NMI")
+
+
+def parse_interrupts(text):
+    # /proc/interrupts summed over CPUs: the named rows, and per virtio device its input, output and
+    # config vectors (virtio<N>-input.<q> adds to virtio<N>_input)
+    out = {}
+    lines = text.splitlines()
+    if not lines:
+        return out
+    ncpu = len(lines[0].split())
+    for l in lines[1:]:
+        v = l.split()
+        if not v:
+            continue
+        label = v[0].rstrip(":")
+        nums = []
+        for x in v[1:1 + ncpu]:
+            if not x.isdigit():
+                break
+            nums.append(int(x))
+        if label in NAMED_IRQS:
+            out["irq_" + label] = out.get("irq_" + label, 0) + sum(nums)
+        elif label.isdigit() and v[-1].startswith("virtio"):
+            dev, _, kind = v[-1].partition("-")
+            kind = kind.split(".")[0] or "other"
+            k = "irq_%s_%s" % (dev, kind)
+            out[k] = out.get(k, 0) + sum(nums)
+    return out
+
+
+def parse_softirqs(text):
+    # /proc/softirqs summed over CPUs, as sirq_<name>
+    out = {}
+    for l in text.splitlines()[1:]:
+        v = l.split()
+        if v and v[0].endswith(":"):
+            out["sirq_" + v[0][:-1]] = sum(int(x) for x in v[1:] if x.isdigit())
+    return out
+
+
+def cpuidle_counters(base="/sys/devices/system/cpu"):
+    # per idle state of the guest's cpuidle driver, summed over CPUs: how often the CPUs entered it
+    # and for how long (us); nothing when the guest has no cpuidle driver
+    out = {}
+    try:
+        cpus = [d for d in os.listdir(base) if d.startswith("cpu") and d[3:].isdigit()]
+    except OSError:
+        return out
+    for c in cpus:
+        d = os.path.join(base, c, "cpuidle")
+        try:
+            states = [s for s in os.listdir(d) if s.startswith("state")]
+        except OSError:
+            continue
+        for st in states:
+            try:
+                with open(os.path.join(d, st, "name")) as f:
+                    name = f.read().strip().replace("-", "_").replace(" ", "_")
+                with open(os.path.join(d, st, "usage")) as f:
+                    usage = int(f.read())
+                with open(os.path.join(d, st, "time")) as f:
+                    us = int(f.read())
+            except (OSError, ValueError):
+                continue
+            out["idle_%s_usage" % name] = out.get("idle_%s_usage" % name, 0) + usage
+            out["idle_%s_us" % name] = out.get("idle_%s_us" % name, 0) + us
+    return out
+
+
+def guest_counters():
+    # the counters snap_line adds in every VM: interrupts, softirqs and idle states
+    kv = []
+    for path, parse in (("/proc/interrupts", parse_interrupts), ("/proc/softirqs", parse_softirqs)):
+        try:
+            with open(path) as f:
+                kv += sorted(parse(f.read()).items())
+        except (OSError, ValueError):
+            pass
+    kv += sorted(cpuidle_counters().items())
+    return kv
+
+
+ETH_SS_STATS, ETHTOOL_GSTATS = 1, 0x1D
+# the device statistics snap keeps: packets, drops and the notifications (virtio-net's kicks)
+ETHSTAT_WORDS = ("kick", "packets", "drop", "notif")
+
+
+def ethstats_raw(ifname):
+    # `ethtool -S <ifname>` through SIOCETHTOOL, which needs no rights: {name: value}
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        info = ctypes.create_string_buffer(struct.pack("IIQI", ETHTOOL_GSSET_INFO, 0, 1 << ETH_SS_STATS, 0))
+        ethtool(s, ifname, info)
+        count = struct.unpack_from("I", info, 16)[0]
+        names = ctypes.create_string_buffer(struct.pack("III", ETHTOOL_GSTRINGS, ETH_SS_STATS, count)
+                                            + bytes(count * ETH_GSTRING_LEN))
+        ethtool(s, ifname, names)
+        stats = ctypes.create_string_buffer(struct.pack("II", ETHTOOL_GSTATS, count) + bytes(8 * count))
+        ethtool(s, ifname, stats)
+    finally:
+        s.close()
+    raw = names.raw[12:]
+    keys = [raw[i * ETH_GSTRING_LEN:(i + 1) * ETH_GSTRING_LEN].split(b"\0")[0].decode(errors="replace")
+            for i in range(count)]
+    vals = struct.unpack_from("%dQ" % count, stats.raw, 8)
+    return dict(zip(keys, vals))
+
+
+def ethstats_keep(stats):
+    return {k.replace("-", "_"): v for k, v in stats.items() if any(w in k for w in ETHSTAT_WORDS)}
+
+
+def read_ethstats(ns, ifname):
+    try:
+        return ethstats_keep(in_netns(ns, lambda: ethstats_raw(ifname)))
+    except OSError:
+        return {}
+
+
+MSR_KVM_POLL_CONTROL = 0x4B564D05
+KVM_CPUID_FEATURES, KVM_FEATURE_POLL_CONTROL = 0x40000001, 12
+
+
+def pollctl(op, base="/dev/cpu"):
+    # in a KVM guest, as root: show, or turn on or off, the host's halt polling for every vCPU of
+    # this VM through MSR_KVM_POLL_CONTROL (bit 0 set: the host may poll; the guest's haltpoll
+    # cpuidle driver clears it). It changes nothing on the host and ends with the VM. Needs the msr
+    # module (modprobe msr) and a CPU model with kvm-poll-control
+    if op not in ("on", "off", "show"):
+        print("usage: pollctl on|off|show", file=sys.stderr)
+        return 2
+    try:
+        cpus = sorted(int(d) for d in os.listdir(base) if d.isdigit())
+    except OSError as e:
+        print("pollctl: %s: %s; load the msr module" % (base, e), file=sys.stderr)
+        return 1
+    if not cpus:
+        print("pollctl: no CPU under %s" % base, file=sys.stderr)
+        return 1
+    try:
+        fd = os.open("%s/%d/cpuid" % (base, cpus[0]), os.O_RDONLY)
+        try:
+            eax = struct.unpack("4I", os.pread(fd, 16, KVM_CPUID_FEATURES))[0]
+        finally:
+            os.close(fd)
+        if not eax >> KVM_FEATURE_POLL_CONTROL & 1:
+            print("pollctl: the VM has no kvm-poll-control feature", file=sys.stderr)
+            return 1
+    except OSError:
+        # no cpuid device: the MSR access below tells instead
+        pass
+    vals = []
+    for c in cpus:
+        path = "%s/%d/msr" % (base, c)
+        try:
+            fd = os.open(path, os.O_RDWR if op != "show" else os.O_RDONLY)
+            try:
+                if op != "show":
+                    os.pwrite(fd, struct.pack("<Q", 1 if op == "on" else 0), MSR_KVM_POLL_CONTROL)
+                vals.append(struct.unpack("<Q", os.pread(fd, 8, MSR_KVM_POLL_CONTROL))[0] & 1)
+            finally:
+                os.close(fd)
+        except OSError as e:
+            print("pollctl: cpu %d: %s" % (c, e), file=sys.stderr)
+            return 1
+    state = "on" if all(vals) else "off" if not any(vals) else "mixed"
+    print("host_halt_poll=%s cpus=%d" % (state, len(cpus)))
+    if op != "show" and state != op:
+        print("pollctl: the host's halt polling stays %s" % state, file=sys.stderr)
+        return 1
+    return 0
+
+
+def guestinfo(*nics):
+    # the guest facts that decide how its idle time and its NICs cost the host, printed once per VM
+    # at setup: the cpuidle driver and governor, the haltpoll parameters, the clock source, the
+    # kernel command line, and per <ifname> the virtio device behind it, its queues and features.
+    # sysfs shows the interfaces of the namespace that mounted it, so run it under `ip netns exec`
+    def cat(path):
+        try:
+            with open(path) as f:
+                return f.read().strip().replace(" ", ",") or "-"
+        except OSError:
+            return "-"
+    out = ["cpuidle_driver=" + cat("/sys/devices/system/cpu/cpuidle/current_driver"),
+           "cpuidle_governor=" + cat("/sys/devices/system/cpu/cpuidle/current_governor_ro"),
+           "guest_halt_poll_ns=" + cat("/sys/module/haltpoll/parameters/guest_halt_poll_ns"),
+           "cpuidle_haltpoll_force=" + cat("/sys/module/cpuidle_haltpoll/parameters/force"),
+           "clocksource=" + cat("/sys/devices/system/clocksource/clocksource0/current_clocksource"),
+           "cmdline=" + cat("/proc/cmdline")]
+    print(" ".join(out))
+    for ifname in nics:
+        link = "/sys/class/net/%s/device" % ifname
+        dev = os.path.realpath(link) if os.path.exists(link) else "-"
+        try:
+            q = len([x for x in os.listdir("/sys/class/net/%s/queues" % ifname) if x.startswith("tx-")])
+        except OSError as e:
+            print("nic=%s error=%s" % (ifname, str(e).replace(" ", "_")))
+            continue
+        print("nic=%s device=%s tx_queues=%d features=%s" % (ifname, os.path.basename(dev), q, cat(dev + "/features")))
+    return 0
+
+
 SNMP_KEYS = {("TcpExt", "TCPOFOQueue"): "tcp_ofoq", ("TcpExt", "TCPOFODrop"): "tcp_ofodrop",
              ("TcpExt", "TCPRcvQDrop"): "tcp_rcvqdrop", ("TcpExt", "TCPBacklogDrop"): "tcp_backlogdrop",
              ("TcpExt", "PruneCalled"): "tcp_prune", ("TcpExt", "TCPDSACKRecv"): "tcp_dsackrecv",
@@ -730,6 +956,7 @@ def snap_line(prefix, pid="", cg="", *specs):
             except OSError:
                 pass
         kv += [("proc_vcs", vcs), ("proc_nvcs", nvcs)]
+    kv += guest_counters()
     out = ["%s_%s=%s" % (prefix, k, v) for k, v in kv]
     by_ns = {}
     for spec in specs:
@@ -743,7 +970,10 @@ def snap_line(prefix, pid="", cg="", *specs):
         if any(kind == "if" for kind, _ in items) and any(l.split(":")[0].strip() == "wgft0" for l in got["dev"].splitlines()):
             items = items + [("if", ns + ":wgft0")]
         for kind, rest in items:
-            if kind == "if":
+            if kind == "eth":
+                ifname = rest.split(":")[1]
+                out += ["eth_%s_%s_%s=%d" % (ns, ifname, k, v) for k, v in sorted(read_ethstats(ns, ifname).items())]
+            elif kind == "if":
                 ifname = rest.split(":")[1]
                 for l in got["dev"].splitlines():
                     name, _, nums = l.partition(":")
@@ -803,6 +1033,21 @@ def snapdiff(nbytes, window_s, direction, before, after):
         if d(p + "_proc_us") is not None:
             put(p + "_proc_cs_per_s", (d(p + "_proc_vcs") + d(p + "_proc_nvcs")) / t, "%.0f")
             put(p + "_proc_nvcs_per_s", d(p + "_proc_nvcs") / t, "%.0f")
+        # interrupts and softirqs per second (the virtio vectors also per GB), and the idle states:
+        # entries per second and the share of the window spent in each, summed over the VM's CPUs
+        for k in sorted(a_ for a_ in a if a_.startswith(p + "_irq_") or a_.startswith(p + "_sirq_")):
+            v = d(k)
+            if v is None or not v:
+                continue
+            put(k + "_per_s", v / t, "%.0f")
+            if "_virtio" in k and gb > 0:
+                put(k + "_per_gb", v / gb, "%.0f")
+        for k in sorted(a_ for a_ in a if a_.startswith(p + "_idle_") and a_.endswith("_usage")):
+            st = k[len(p) + 6:-6]
+            if d(k) is not None:
+                put("%s_idle_%s_per_s" % (p, st), d(k) / t, "%.0f")
+            if d("%s_idle_%s_us" % (p, st)) is not None:
+                put("%s_idle_%s_share" % (p, st), d("%s_idle_%s_us" % (p, st)) / 1e6 / t)
     if "agentvm" in prefixes and "peervm" in prefixes:
         put("vm_cpu_s_per_gb", total / gb if gb > 0 else -1)
         put("vm_cpu_share", total / t)
@@ -826,6 +1071,12 @@ def snapdiff(nbytes, window_s, direction, before, after):
             elif d(k):
                 # error and TcpExt counters: the count in the window, only when not zero
                 put(k[5:], d(k), "%.0f")
+    # device statistics (ethtool -S): per GB, and the notifications also per second
+    for k in sorted(a):
+        if k.startswith("eth_") and d(k) and gb > 0:
+            put(k[4:] + "_per_gb", d(k) / gb, "%.0f")
+            if "kick" in k or "notif" in k:
+                put(k[4:] + "_per_s", d(k) / t, "%.0f")
     # the tunnel at the server's end: on a download the agent sends the data and the vps receives it
     rx, tx = d("if_vps_pub1_rxp"), d("if_vps_pub1_txp")
     if rx is not None and gb > 0:
@@ -949,29 +1200,139 @@ def pcores():
     return out
 
 
+# the per-thread counters hostsample adds up: run and wait from schedstat (ns), utime, stime and
+# guest_time from stat (clock ticks), the voluntary and involuntary context switches from status
+THREAD_KEYS = ("run", "wait", "utime", "stime", "guest", "vcs", "nvcs")
+
+
+def thread_counters(pid, tid):
+    # one thread's cumulative counters, or None when it has gone; also its comm, the CPU it last ran
+    # on and its allowed CPUs
+    base = "/proc/%s/task/%s/" % (pid, tid)
+    try:
+        with open(base + "comm") as g:
+            comm = g.read().strip()
+        with open(base + "schedstat") as g:
+            ss = g.read().split()
+        with open(base + "stat") as g:
+            st = g.read().rsplit(")", 1)[1].split()
+        vcs = nvcs = 0
+        allowed = "-"
+        with open(base + "status") as g:
+            for l in g:
+                if l.startswith("voluntary_ctxt_switches"):
+                    vcs = int(l.split()[1])
+                elif l.startswith("nonvoluntary_ctxt_switches"):
+                    nvcs = int(l.split()[1])
+                elif l.startswith("Cpus_allowed_list"):
+                    allowed = l.split()[1]
+        # stat after the comm: utime is field 14, stime 15, processor 39 and guest_time 43
+        vals = {"run": int(ss[0]), "wait": int(ss[1]), "utime": int(st[11]), "stime": int(st[12]),
+                "guest": int(st[40]), "vcs": vcs, "nvcs": nvcs}
+        return comm, int(st[36]), allowed, vals
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def thread_kind(comm, allowed):
+    # Incus pins each vCPU thread to one CPU and leaves the rest of qemu on every CPU; the vCPU
+    # threads keep qemu's name, so they are told apart by that pinning. vhost_task workers are named
+    # vhost-<qemu pid> and live in qemu's thread group
+    if comm.startswith("vhost-"):
+        return "vhost"
+    if comm.startswith("CPU ") or (comm.startswith("qemu") and allowed.isdigit()):
+        return "vcpu"
+    return "other"
+
+
+class HostSampler:
+    # the state of hostsample between samples. Every class (vcpu, vhost, other) of every VM is the sum
+    # of the increases of its threads since the previous sample, so a thread that exits takes only
+    # its last interval with it instead of its whole history
+    def __init__(self, pcores=None):
+        self.pc = pcores if pcores is not None else set()
+        self.last, self.kind, self.cpus = {}, {}, {}
+        self.tot, self.vhost_p, self.vhost_e = {}, {}, {}
+
+    def vm(self, label, pid, threads, busy=None, irq=None):
+        # threads: {tid: (comm, processor, allowed, counters)}; busy and irq: per host CPU from
+        # proc_stat_cpus. Returns the key=value parts of the VM
+        tot = self.tot.setdefault(label, {(c, k): 0 for c in ("vcpu", "vhost", "other") for k in THREAD_KEYS})
+        self.vhost_p.setdefault(label, 0)
+        self.vhost_e.setdefault(label, 0)
+        cpus = self.cpus.setdefault(label, set())
+        for tid, (comm, proc, allowed, vals) in threads.items():
+            key = (label, tid)
+            if key not in self.kind:
+                self.kind[key] = thread_kind(comm, allowed)
+                if self.kind[key] == "vcpu" and allowed.isdigit():
+                    cpus.add(int(allowed))
+            c = self.kind[key]
+            prev = self.last.get(key)
+            # a thread first seen in the first sample starts the totals with its history; one born
+            # later counts all of it, which it ran since the previous sample
+            for k in THREAD_KEYS:
+                inc = vals[k] - (prev[k] if prev else 0)
+                if inc > 0:
+                    tot[(c, k)] += inc
+            if c == "vhost" and prev is not None:
+                dlt = max(0, vals["run"] - prev["run"])
+                if proc in self.pc:
+                    self.vhost_p[label] += dlt
+                else:
+                    self.vhost_e[label] += dlt
+            self.last[key] = vals
+        parts = ["%s_pid=%s" % (label, pid)]
+        parts += ["%s_%s_ns=%d" % (label, c, tot[(c, "run")]) for c in ("vcpu", "vhost", "other")]
+        parts += ["%s_vhostp_ns=%d" % (label, self.vhost_p[label]), "%s_vhoste_ns=%d" % (label, self.vhost_e[label])]
+        for c in ("vcpu", "vhost", "other"):
+            parts += ["%s_%s_%s=%d" % (label, c, k, tot[(c, k)]) for k in THREAD_KEYS if k != "run"]
+        if busy is not None and irq is not None:
+            # the host CPUs the vCPU threads are pinned to: all their busy time and their irq and
+            # softirq time, which the vCPU threads' run time leaves out
+            parts += ["%s_vcpucpu_busy=%d" % (label, sum(busy.get(n, 0) for n in cpus)),
+                      "%s_vcpucpu_irq=%d" % (label, sum(irq.get(n, 0) for n in cpus)),
+                      "%s_vcpucpu_n=%d" % (label, len(cpus))]
+        return parts
+
+
+def proc_stat_cpus(text):
+    # per host CPU from /proc/stat: busy (user, nice, system, irq, softirq) and irq+softirq, in ticks
+    busy, irq = {}, {}
+    for line in text.splitlines():
+        v = line.split()
+        if v and v[0].startswith("cpu") and v[0] != "cpu":
+            n = int(v[0][3:])
+            busy[n] = sum(int(v[i]) for i in (1, 2, 3, 6, 7))
+            irq[n] = int(v[6]) + int(v[7])
+    return busy, irq
+
+
 def hostsample(out, interval, *specs):
     # on the host, every <interval> seconds until killed: the busy time of every host CPU (ticks)
-    # and, per VM given as <label>=<qemu pid>, the run time (ns, schedstat) of its vCPU threads,
-    # its vhost workers and its other threads, and the vhost run time split by whether the
-    # worker sat on a P-core at the sample. Incus pins only the vCPU threads, so the vhost workers
-    # and the rest of qemu float over the host; these lines show where their time went.
-    pc = pcores()
-    last, vhost_p, vhost_e, kind = {}, {}, {}, {}
+    # and its irq and softirq time, and per VM given as <label>=<qemu pid> the counters of its vCPU
+    # threads, its vhost workers and its other threads: run and runqueue wait (ns, schedstat), user,
+    # system and guest time (ticks), and the voluntary and involuntary context switches; the vhost
+    # run time split by whether the worker sat on a P-core at the sample. Incus pins only the vCPU
+    # threads, so the vhost workers and the rest of qemu float over the host; these lines show where
+    # their time went. In a vCPU thread, guest time is the time in the guest, system time is KVM in
+    # the host kernel (exits, interrupt injection and halt polling) and user time beyond guest time
+    # is qemu's own device code. Reading /proc of qemu, which runs as another user, needs no rights.
+    sampler = HostSampler(pcores())
     step = float(interval)
     with open(out, "a") as f:
         while True:
             t0 = time.time()
             parts = ["t=%.3f" % t0]
             with open("/proc/stat") as st:
-                for line in st:
-                    v = line.split()
-                    if v and v[0].startswith("cpu") and v[0] != "cpu":
-                        parts.append("h%s=%d" % (v[0], sum(int(v[i]) for i in (1, 2, 3, 6, 7))))
+                busy, irq = proc_stat_cpus(st.read())
+            parts += ["hcpu%d=%d" % kv for kv in sorted(busy.items())]
+            parts += ["hirq%d=%d" % kv for kv in sorted(irq.items())]
             for spec in specs:
                 if spec.startswith("tap:"):
                     # tap:<label>=<host interface>: the drops of a VM's tap; tx is towards the guest
                     label, dev = spec[4:].split("=")
-                    for k in ("tx_dropped", "rx_dropped", "tx_packets"):
+                    for k in ("tx_dropped", "rx_dropped", "tx_packets", "rx_packets"):
                         try:
                             with open("/sys/class/net/%s/statistics/%s" % (dev, k)) as g:
                                 parts.append("tap_%s_%s=%s" % (label, k, g.read().strip()))
@@ -979,82 +1340,193 @@ def hostsample(out, interval, *specs):
                             pass
                     continue
                 label, pid = spec.split("=")
-                cat = {"vcpu": 0, "vhost": 0, "other": 0}
-                vhost_p.setdefault(label, 0)
-                vhost_e.setdefault(label, 0)
                 try:
                     tids = os.listdir("/proc/%s/task" % pid)
                 except OSError:
                     tids = []
+                threads = {}
                 for tid in tids:
-                    try:
-                        with open("/proc/%s/task/%s/comm" % (pid, tid)) as g:
-                            comm = g.read().strip()
-                        with open("/proc/%s/task/%s/schedstat" % (pid, tid)) as g:
-                            ns = int(g.read().split()[0])
-                        with open("/proc/%s/task/%s/stat" % (pid, tid)) as g:
-                            proc = int(g.read().rsplit(")", 1)[1].split()[36])
-                    except (OSError, ValueError, IndexError):
-                        continue
-                    if tid not in kind:
-                        # Incus pins each vCPU thread to one CPU and leaves the rest of qemu on every CPU; the
-                        # vCPU threads keep qemu's name, so they are told apart by that pinning
-                        try:
-                            with open("/proc/%s/task/%s/status" % (pid, tid)) as g:
-                                allowed = next(l.split()[1] for l in g if l.startswith("Cpus_allowed_list"))
-                        except (OSError, StopIteration):
-                            allowed = "-"
-                        kind[tid] = ("vhost" if comm.startswith("vhost-") else
-                                     "vcpu" if comm.startswith("CPU ") or (comm.startswith("qemu") and allowed.isdigit())
-                                     else "other")
-                    c = kind[tid]
-                    cat[c] += ns
-                    if c == "vhost":
-                        dlt = ns - last.get(tid, ns)
-                        last[tid] = ns
-                        if proc in pc:
-                            vhost_p[label] += dlt
-                        else:
-                            vhost_e[label] += dlt
-                parts += ["%s_%s_ns=%d" % (label, k, v) for k, v in cat.items()]
-                parts += ["%s_vhostp_ns=%d" % (label, vhost_p[label]), "%s_vhoste_ns=%d" % (label, vhost_e[label])]
+                    got = thread_counters(pid, tid)
+                    if got is not None:
+                        threads[tid] = got
+                parts += sampler.vm(label, pid, threads, busy, irq)
             f.write(" ".join(parts) + "\n")
             f.flush()
             time.sleep(max(0.0, step - (time.time() - t0)))
 
 
-def hostwin(samples, logfile):
-    # adds to every PAIRED line of <logfile> with t_start and t_end (host clock) the host's values
-    # over that window, interpolated between the samples of hostsample: host_busy_s (all host CPUs),
-    # host_pcore_busy_s, and per VM label host_<label>_{vcpu,vhost,other}_s; host_qemu_s_per_gb and
-    # host_qemu_share are all threads of all VMs, the cost of the guests on the host including the
-    # threads Incus does not pin; host_vhost_pcore_frac is the share of vhost time on P-cores.
+def kvmsample(out, interval, root="/sys/kernel/debug/kvm"):
+    # needs root, so the owner starts it next to a measurement: every <interval> seconds until
+    # killed, the per-VM statistics KVM keeps in debugfs (<pid>-<fd>/<stat>, each the sum over the
+    # VM's vCPUs), as kvm_<pid>_<stat>=<value>. hostwin merges them by the qemu pid that hostsample
+    # writes, so the two files need no other link
+    step = float(interval)
+    with open(out, "a") as f:
+        while True:
+            t0 = time.time()
+            parts = ["t=%.3f" % t0]
+            try:
+                vms = sorted(os.listdir(root))
+            except OSError as e:
+                print("kvmsample: %s: %s" % (root, e), file=sys.stderr)
+                return 1
+            for vmdir in vms:
+                pid = vmdir.split("-", 1)[0]
+                if not pid.isdigit():
+                    continue
+                for name in sorted(os.listdir(os.path.join(root, vmdir))):
+                    if name not in KVM_STATS:
+                        continue
+                    try:
+                        with open(os.path.join(root, vmdir, name)) as g:
+                            parts.append("kvm_%s_%s=%s" % (pid, name, g.read().strip()))
+                    except (OSError, ValueError):
+                        pass
+            f.write(" ".join(parts) + "\n")
+            f.flush()
+            if step <= 0:
+                return 0
+            time.sleep(max(0.0, step - (time.time() - t0)))
+
+
+# the KVM statistics kvmsample keeps: halt polling, exits and interrupt injection (Linux x86
+# names; a name the kernel does not have is skipped)
+KVM_STATS = ("exits", "halt_exits", "halt_successful_poll", "halt_attempted_poll", "halt_poll_invalid",
+             "halt_wakeup", "halt_poll_success_ns", "halt_poll_fail_ns", "halt_wait_ns",
+             "irq_exits", "irq_injections", "nmi_injections", "irq_window_exits",
+             "io_exits", "mmio_exits", "signal_exits", "request_irq_exits", "preemption_reported",
+             "preemption_other", "notify_window_exits", "req_event", "host_state_reload", "fpu_reload",
+             "insn_emulation", "blocking", "directed_yield_attempted", "directed_yield_successful",
+             "guest_mode", "l1d_flush")
+
+
+def read_samples(path):
     rows = []
-    with open(samples) as f:
+    with open(path) as f:
         for line in f:
-            kv = dict(x.split("=", 1) for x in line.split() if "=" in x)
+            kv = {}
+            for x in line.split():
+                k, eq, v = x.partition("=")
+                if not eq:
+                    continue
+                try:
+                    kv[k] = float(v)
+                except ValueError:
+                    pass
             if "t" in kv:
-                rows.append({k: float(v) for k, v in kv.items()})
-    if len(rows) < 2:
-        print("hostwin: fewer than two samples in %s" % samples, file=sys.stderr)
-        return 1
-    hz = os.sysconf("SC_CLK_TCK")
-    pc = pcores()
+                rows.append(kv)
+    return rows
 
-    def at(key, t):
-        for i in range(1, len(rows)):
-            if rows[i]["t"] >= t:
-                r0, r1 = rows[i - 1], rows[i]
-                if key not in r0 or key not in r1:
-                    return None
-                w = (t - r0["t"]) / (r1["t"] - r0["t"]) if r1["t"] > r0["t"] else 1.0
-                w = min(max(w, 0.0), 1.0)
-                return r0[key] + w * (r1[key] - r0[key])
-        return rows[-1].get(key)
 
+def interp(rows, key, t):
+    # the value of key at time t, linear between the samples on either side
+    for i in range(1, len(rows)):
+        if rows[i]["t"] >= t:
+            r0, r1 = rows[i - 1], rows[i]
+            if key not in r0 or key not in r1:
+                return None
+            w = (t - r0["t"]) / (r1["t"] - r0["t"]) if r1["t"] > r0["t"] else 1.0
+            w = min(max(w, 0.0), 1.0)
+            return r0[key] + w * (r1[key] - r0[key])
+    return rows[-1].get(key)
+
+
+# the guest's busy share of a VM label in a PAIRED line
+GUEST_SHARE = {"agent": "agentvm_cpu_share", "peer": "peervm_cpu_share"}
+
+
+def hostwin_line(r, rows, hz, pc, kvm=None):
+    # the host's values over the window of one PAIRED line r (a dict), as key=value strings
+    t0, t1 = float(r["t_start"]), float(r["t_end"])
     keys = sorted(rows[-1])
     labels = sorted({k.split("_", 1)[0] for k in keys if k.endswith("_vcpu_ns")})
     drops = [k for k in keys if k.startswith("tap_") and k.endswith("_dropped")]
+    dl = lambda k: (interp(rows, k, t1) or 0.0) - (interp(rows, k, t0) or 0.0)
+    win = t1 - t0
+    gb = float(r.get("bytes", "0") or 0) / 1e9
+    per_gb = lambda v: v / gb if gb > 0 else -1
+    busy = sum(dl(k) for k in keys if k.startswith("hcpu")) / hz
+    pbusy = sum(dl(k) for k in keys if k.startswith("hcpu") and int(k[4:]) in pc) / hz
+    add = ["host_busy_s=%.3f" % busy, "host_pcore_busy_s=%.3f" % pbusy, "host_cpu_share=%.3f" % (busy / win)]
+    if any(k.startswith("hirq") for k in keys):
+        add.append("host_irq_s=%.3f" % (sum(dl(k) for k in keys if k.startswith("hirq")) / hz))
+    if drops:
+        # packets the hosts' taps between the two VMs dropped in the window: the lab, not the agent
+        add.append("host_tap_drops=%d" % round(sum(dl(k) for k in drops)))
+    qemu = vp = ve = 0.0
+    for lb in labels:
+        vm_s = 0.0
+        for c in ("vcpu", "vhost", "other"):
+            v = dl("%s_%s_ns" % (lb, c)) / 1e9
+            qemu += v
+            vm_s += v
+            add.append("host_%s_%s_s=%.3f" % (lb, c, v))
+        vp += dl(lb + "_vhostp_ns")
+        ve += dl(lb + "_vhoste_ns")
+        add += ["host_%s_s=%.3f" % (lb, vm_s), "host_%s_s_per_gb=%.3f" % (lb, per_gb(vm_s))]
+        if lb + "_vcpu_guest" in rows[-1]:
+            # the vCPU threads split by where their time went (ticks, so about 1 %% of a window of
+            # 10 s): in the guest, in KVM in the host kernel, and in qemu's user space beyond the guest
+            guest = dl(lb + "_vcpu_guest") / hz
+            ktime = dl(lb + "_vcpu_stime") / hz
+            qtime = max(0.0, dl(lb + "_vcpu_utime") / hz - guest)
+            add += ["host_%s_vcpu_guest_s=%.3f" % (lb, guest), "host_%s_vcpu_kvm_s=%.3f" % (lb, ktime),
+                    "host_%s_vcpu_qemu_s=%.3f" % (lb, qtime),
+                    "host_%s_vcpu_wait_s=%.3f" % (lb, dl(lb + "_vcpu_wait") / 1e9),
+                    "host_%s_vcpu_blocks_per_s=%.0f" % (lb, dl(lb + "_vcpu_vcs") / win),
+                    "host_%s_vcpu_preempt_per_s=%.0f" % (lb, dl(lb + "_vcpu_nvcs") / win),
+                    "host_%s_vhost_blocks_per_s=%.0f" % (lb, dl(lb + "_vhost_vcs") / win)]
+        if lb + "_vcpucpu_busy" in rows[-1]:
+            # on the CPUs the vCPUs are pinned to: irq and softirq time, and busy time that is not the
+            # vCPU threads' (other tasks and interrupts); the guest runs on none of it
+            other = dl(lb + "_vcpucpu_busy") / hz - dl(lb + "_vcpu_ns") / 1e9
+            add += ["host_%s_vcpucpu_irq_s=%.3f" % (lb, dl(lb + "_vcpucpu_irq") / hz),
+                    "host_%s_vcpucpu_not_vcpu_s=%.3f" % (lb, other)]
+        share = GUEST_SHARE.get(lb)
+        if share and share in r and r.get("window_s"):
+            # the vCPU threads' run time beyond what the guest counts as busy: halt polling, exits,
+            # and the guest's own idle polling if it has any; per GB, the cost the guest cannot see
+            beyond = dl(lb + "_vcpu_ns") / 1e9 - float(r[share]) * float(r["window_s"])
+            add += ["host_%s_vcpu_beyond_guest_s=%.3f" % (lb, beyond),
+                    "host_%s_vcpu_beyond_guest_s_per_gb=%.3f" % (lb, per_gb(beyond))]
+        if kvm is not None and lb + "_pid" in rows[-1]:
+            pid = "%d" % rows[-1][lb + "_pid"]
+            for k in sorted(kvm[-1]):
+                pre = "kvm_%s_" % pid
+                if k.startswith(pre):
+                    v = (interp(kvm, k, t1) or 0.0) - (interp(kvm, k, t0) or 0.0)
+                    name = k[len(pre):]
+                    if name.endswith("_ns"):
+                        add.append("host_%s_kvm_%s_s=%.3f" % (lb, name[:-3], v / 1e9))
+                    else:
+                        add.append("host_%s_kvm_%s_per_s=%.0f" % (lb, name, v / win))
+    add += ["host_qemu_s=%.3f" % qemu, "host_qemu_share=%.3f" % (qemu / win),
+            "host_qemu_s_per_gb=%.3f" % per_gb(qemu),
+            "host_vhost_pcore_frac=%s" % ("%.2f" % (vp / (vp + ve)) if vp + ve > 0 else "-")]
+    return add
+
+
+def hostwin(samples, logfile, kvmfile=""):
+    # adds to every PAIRED line of <logfile> with t_start and t_end (host clock) the host's values
+    # over that window, interpolated between the samples of hostsample: host_busy_s (all host CPUs),
+    # host_pcore_busy_s, host_irq_s, and per VM label host_<label>_{vcpu,vhost,other}_s and their sum
+    # host_<label>_s (and per GB); when the samples have them, the vCPU threads' guest, KVM and qemu
+    # time, runqueue wait, blocking sleeps and preemptions, and their run time beyond the guest's
+    # busy time; with <kvmfile> from kvmsample, the KVM statistics of each VM. host_qemu_s_per_gb and
+    # host_qemu_share are all threads of all VMs, the cost of the guests on the host including the
+    # threads Incus does not pin; host_vhost_pcore_frac is the share of vhost time on P-cores.
+    rows = read_samples(samples)
+    if len(rows) < 2:
+        print("hostwin: fewer than two samples in %s" % samples, file=sys.stderr)
+        return 1
+    kvm = None
+    if kvmfile:
+        kvm = read_samples(kvmfile)
+        if len(kvm) < 2:
+            print("hostwin: fewer than two samples in %s; leaving the KVM statistics out" % kvmfile, file=sys.stderr)
+            kvm = None
+    hz = os.sysconf("SC_CLK_TCK")
+    pc = pcores()
     out = []
     with open(logfile) as f:
         lines = f.read().splitlines()
@@ -1063,31 +1535,10 @@ def hostwin(samples, logfile):
             out.append(line)
             continue
         r = dict(x.split("=", 1) for x in line.split()[1:] if "=" in x)
-        t0, t1 = float(r["t_start"]), float(r["t_end"])
-        if t0 < rows[0]["t"] or t1 > rows[-1]["t"]:
+        if float(r["t_start"]) < rows[0]["t"] or float(r["t_end"]) > rows[-1]["t"]:
             out.append(line)
             continue
-        dl = lambda k: (at(k, t1) or 0.0) - (at(k, t0) or 0.0)
-        win = t1 - t0
-        busy = sum(dl(k) for k in keys if k.startswith("hcpu")) / hz
-        pbusy = sum(dl(k) for k in keys if k.startswith("hcpu") and int(k[4:]) in pc) / hz
-        add = ["host_busy_s=%.3f" % busy, "host_pcore_busy_s=%.3f" % pbusy, "host_cpu_share=%.3f" % (busy / win)]
-        if drops:
-            # packets the hosts' taps between the two VMs dropped in the window: the lab, not the agent
-            add.append("host_tap_drops=%d" % round(sum(dl(k) for k in drops)))
-        qemu = vp = ve = 0.0
-        for lb in labels:
-            for c in ("vcpu", "vhost", "other"):
-                v = dl("%s_%s_ns" % (lb, c)) / 1e9
-                qemu += v
-                add.append("host_%s_%s_s=%.3f" % (lb, c, v))
-            vp += dl(lb + "_vhostp_ns")
-            ve += dl(lb + "_vhoste_ns")
-        gb = float(r.get("bytes", "0") or 0) / 1e9
-        add += ["host_qemu_s=%.3f" % qemu, "host_qemu_share=%.3f" % (qemu / win),
-                "host_qemu_s_per_gb=%.3f" % (qemu / gb if gb > 0 else -1),
-                "host_vhost_pcore_frac=%s" % ("%.2f" % (vp / (vp + ve)) if vp + ve > 0 else "-")]
-        out.append(line + " " + " ".join(add))
+        out.append(line + " " + " ".join(hostwin_line(r, rows, hz, pc, kvm)))
     with open(logfile, "w") as f:
         f.write("\n".join(out) + "\n")
     return 0
@@ -1177,4 +1628,5 @@ if __name__ == "__main__":
     sys.exit({"serve": serve, "fetch": fetch, "push": push, "analyze": analyze, "median": median,
               "cpuratio": cpuratio, "cpupaired": cpupaired, "udpgso": udpgso, "iperf": iperf,
               "uecho": uecho, "uping": uping, "latpaired": latpaired, "snap": snap, "snapdiff": snapdiff,
-              "agentd": agentd, "agentx": agentx, "channels": channels, "hostsample": hostsample, "hostwin": hostwin}[cmd](*args))
+              "agentd": agentd, "agentx": agentx, "channels": channels, "hostsample": hostsample, "hostwin": hostwin,
+              "kvmsample": kvmsample, "pollctl": pollctl, "guestinfo": guestinfo}[cmd](*args))

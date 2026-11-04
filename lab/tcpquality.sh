@@ -587,8 +587,8 @@ for mode in $MODES; do
       if [ -n "$AGENT_AT" ]; then
         # the agent VM first and the peer VM last at the start, and the other way round at the end,
         # so that the agent VM's window holds the peer VM's
-        sa0=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS")
-        sp0=$($Q snap peervm "" "" "${SNAP_SPECS[@]}") nd0=$(netem_drops)
+        sa0=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0")
+        sp0=$($Q snap peervm "" "" "${SNAP_SPECS[@]}" "eth:$ROUTER_NS:lan0") nd0=$(netem_drops)
         t0=$(date +%s.%N) a0=$(field agentvm_proc_us "$sa0") s0=$(cpu_us "$server_pid" "$server_cg") l0=$(lan_us) v0=0
       else
         sa0= sp0=$($Q snap vm "$agent_pid" "$agent_cg" "${SNAP_SPECS[@]}" "if:$HOME_NS:eth0" "snmp:$HOME_NS") nd0=$(netem_drops)
@@ -636,8 +636,8 @@ for mode in $MODES; do
     if [ -n "$CPU" ]; then
       if [ -n "$AGENT_AT" ]; then
         t1=$(date +%s.%N) s1=$(cpu_us "$server_pid" "$server_cg") l1=$(lan_us) v1=0
-        sp1=$($Q snap peervm "" "" "${SNAP_SPECS[@]}") nd1=$(netem_drops)
-        sa1=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS")
+        sp1=$($Q snap peervm "" "" "${SNAP_SPECS[@]}" "eth:$ROUTER_NS:lan0") nd1=$(netem_drops)
+        sa1=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0")
         a1=$(field agentvm_proc_us "$sa1")
       else
         t1=$(date +%s.%N) a1=$(cpu_us "$agent_pid" "$agent_cg") s1=$(cpu_us "$server_pid" "$server_cg") l1=$(cpu_us "$lan_pid" "$lan_cg") v1=$(vm_cpu_us)
