@@ -29,7 +29,7 @@ wgstack との違いと適合の台本は、決定ではなく選ぶ点と案と
 - changelog の FIN_WAIT_2 の 4 つ組の修正(6.1.115-1 から):FIN_WAIT_2 の間の 4 つ組を新しい接続に使い直しません(後述)
 - changelog の閉じる時の RST の判定の修正(6.1.158-1 から):閉じる時に読まれていないデータがあるかの判定から、FIN だけを除きます
 
-VM で確かめるには、`uname -v` で `Debian 6.1.187-1` を読み、`/usr/share/doc/linux-image-$(uname -r)/changelog.gz` で上の変更を探します(件名は changelog に書かれています)。
+VM で確かめるには、`uname -v` で `Debian 6.1.187-1` を読み、`/usr/share/doc/linux-image-$(uname -r)/changelog.gz` で上の版の項を見ます。
 このカーネルの changelog の名前は `changelog.gz` で、`changelog.Debian.gz` はありません。
 上の 4 つの版は、この VM の changelog で確かめた値です。
 
@@ -222,7 +222,7 @@ timestamp を使わない設定では、MSS、NOP、NOP、SACK-permitted、NOP�
 同じ宛先への後の接続の SYN も同じ MSS でした。
 ホストの 7.2 では、同じ ICMP の後も SYN の MSS が 1380 のままでした。
 `v7.2` のタグのソースは 6.1 と同じく、SYN ごとに学んだ path MTU から MSS を求め直します。
-v7.3-rc1 は、学んだ path MTU で示す MSS を下げない変更で、stable にも送られました。
+v7.3-rc1 で入った、学んだ path MTU で示す MSS を下げない変更は、stable にも送られました。
 その後の mainline はこの変更を戻しました。
 戻した理由は、ICMP を捨てる中継の後ろの相手が大きな segment を送り、握手の後に止まったことです(RFC 2923 2.1 の path MTU の black hole)。
 ホストの 7.2 が 1380 を示したのは、Fedora の 7.2.13 がこの stable の変更を含むためと見込みますが、確かめていません。
@@ -232,7 +232,7 @@ v7.3-rc1 は、学んだ path MTU で示す MSS を下げない変更で、stabl
 ### 窓と IP の欄
 
 SYN の窓の欄は scale を掛けない値です(RFC 7323 2.2)。
-値は、最初の受信のバッファ(`tcp_rmem` の 2 つ目の値、128 KiB)を窓に換算した 64 KiB を MSS の倍数に切り下げ、65535 で抑えた値です(`tcp_select_initial_window`)。
+値は、最初の受信のバッファ(`tcp_rmem` の 2 つ目の値、128 KiB)を窓に換算した 64 KiB を MSS の倍数に切り下げ、65535 で抑えた値です。
 MSS 1380 では 64860 で、6.1 とホストの 7.2 の観測もこの値でした。
 TS.Recent を引き継いだ接続(TIME_WAIT の 4 つ組の使い直し)は、MSS から timestamp の 12 byte を引いた値で切り下げます。
 観測では、MSS 960 で 65412、MSS 1380 で 64296 でした。

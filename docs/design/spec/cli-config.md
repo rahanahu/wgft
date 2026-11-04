@@ -288,7 +288,7 @@ WGFT_NAME=<値> differs from the registered name <名前>; keeping <名前>
 ### WGFT_WG_INTERFACE
 
 カーネルモードの WireGuard のインタフェースの名前です。
-判定は Linux のカーネルの `dev_valid_name` に合わせ、名前をバイト列として調べます。
+判定は Linux がインタフェースの名前に課す規則に合わせ、名前をバイト列として調べます。
 
 - 空:`is empty; give the WireGuard interface name, for example wgft0`
 - 15 バイトを超える:`%q is longer than the 15 bytes the kernel allows for an interface name`

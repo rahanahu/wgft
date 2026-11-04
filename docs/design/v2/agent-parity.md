@@ -107,7 +107,7 @@ Go の v1 の agent と仕様の項目ごとに、Rust の agent の扱いを挙
 | dotenv | [cli-config.md の dotenv の構文](../spec/cli-config.md#dotenv-の構文)。読み取りの誤りと権限の文面 | 仕様と fixture のとおり |
 | 有効な設定の行 | [cli-config.md の有効な設定の行](../spec/cli-config.md#有効な設定の行) | fixture と同じ |
 | 入口での検査の順 | [cli-config.md の入口での検査の順](../spec/cli-config.md#入口での検査の順) | 仕様の順 |
-| `WGFT_WG_INTERFACE` の検査 | `dev_valid_name` に合わせた判定と文面 | 仕様のとおり |
+| `WGFT_WG_INTERFACE` の検査 | Linux がインタフェースの名前に課す規則に合わせた判定と文面 | 仕様のとおり |
 | `WGFT_MODE=kernel` | Linux 以外は Linux の前提の拒否。Linux では「このビルドにカーネルモードが無い」拒否 | 仕様のとおり |
 | 整数のフラグ | Go の整数の書き方 (`0x`、先頭の 0 の 8 進、`_`) | 仕様のとおり |
 | 真偽値のフラグ | `--json` と `--json=false` の形だけ | 値の解釈と clap の属性を持つ |
