@@ -839,7 +839,7 @@ paired_sync() {
 }
 
 # lab paired の使い方。lab help と引数の誤りの両方がこの 1 つの文字列を出す
-PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y"
+PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y"
 
 # is_uint <値>:1 以上の整数か
 is_uint() { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
@@ -871,6 +871,8 @@ paired_parse_args() {
       --target) target=${2:?--target lan|local}; shift 2 ;;
       --delay-ms) delayms=${2:?--delay-ms MS}; shift 2 ;;
       --delay-rate-mbit) delayrate=${2:?--delay-rate-mbit N}; shift 2 ;;
+      --x-agent-env) xagentenv+=" ${2:?--x-agent-env WGFT_NAME=VALUE}"; shift 2 ;;
+      --y-agent-env) yagentenv+=" ${2:?--y-agent-env WGFT_NAME=VALUE}"; shift 2 ;;
       --delay-queue-pkts) delayqueue=${2:?--delay-queue-pkts N}; shift 2 ;;
       --out) out=${2:?--out DIR}; shift 2 ;;
       --keep) keep=1; shift ;;
@@ -891,6 +893,8 @@ paired_validate() {
   [[ -z $delayms || $path == delay ]] || die "--delay-ms goes with the delay path"
   [[ -z $delayrate && -z $delayqueue || $path == delay ]] || die "--delay-rate-mbit and --delay-queue-pkts go with the delay path"
   [[ -z $delayrate ]] || require_uint --delay-rate-mbit "$delayrate"
+  local e
+  for e in $xagentenv $yagentenv; do [[ $e =~ ^WGFT_[A-Z0-9_]+=[^[:space:]]*$ ]] || die "--x-agent-env and --y-agent-env want WGFT_NAME=VALUE; got $e"; done
   [[ -z $delayqueue ]] || require_uint --delay-queue-pkts "$delayqueue"
   [[ -z $peervcpus || -n $split ]] || die "--peer-vcpus goes with --split"
   [[ -z $target || ( -n $split && ( $target == lan || $target == local ) ) ]] || die "--target wants lan or local, with --split"
@@ -970,7 +974,7 @@ paired_provision() {
   out=${out:-${XDG_CACHE_HOME:-$HOME/.cache}/wgft-lab/paired-$(date +%Y%m%d-%H%M%S)}
   mkdir -p "$out"
   out=$(cd "$out" && pwd)
-  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${delayrate:+ delay_rate_mbit=$delayrate}${delayqueue:+ delay_queue_pkts=$delayqueue}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}" > "$out/paired.log"
+  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${delayrate:+ delay_rate_mbit=$delayrate}${delayqueue:+ delay_queue_pkts=$delayqueue}${xagentenv:+ x_agent_env=${xagentenv// /,}}${yagentenv:+ y_agent_env=${yagentenv// /,}}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}" > "$out/paired.log"
   SUITE_KEEP=$keep
   SUITE_TEMPLATE=${WGFT_LAB_TEMPLATE:-$VM}
   PAIR_LEAD_S=${PAIR_LEAD_S:-1}
@@ -1096,7 +1100,7 @@ paired_split_setup() {
 
 # paired_run_split_round <r>:--split の round r。2 つの腕を相手の VM で順に流す。奇数の round は x が先
 paired_run_split_round() {
-  local r=$1 k spec mode log off
+  local r=$1 k spec mode log off cur_arm
   local arms=(x y) env=()
   ((r % 2)) || arms=(y x)
   off=$(paired_offset "${names[1]}")
@@ -1105,6 +1109,7 @@ paired_run_split_round() {
     mode=${spec#base:}
     env=(RUNS="$runs" DIRECTION="$direction" AGENT_AT="$SPLIT_AGENT_AT")
     [[ $target != local ]] || env+=(TARGET_LOCAL=1)
+    cur_arm=${arms[k]}
     paired_round_env
     log=$out/round-$r-${arms[k]}.log
     (VM=${names[1]}; suite_timeout "$run_timeout" in_vm env "${env[@]}" bash "$SHARE/lab/tcpquality-cpu.sh" "$path" "$mode") >"$log" 2>&1 || rc=1
@@ -1132,12 +1137,16 @@ paired_round_env() {
   # 遅れのある経路:netem の待ち行列は tcpquality.sh が遅れから決め、カーネルの TCP の端のバッファは 64 MiB まで許す
   [[ $path != delay ]] || env+=(DELAY_MS="$delayms" TCP_BUF_MAX="${PAIRED_TCP_BUF_MAX:-67108864}")
   [[ -z $delayrate ]] || env+=(DELAY_RATE_MBIT="$delayrate")
+  # --x-agent-env / --y-agent-env: extra agent environment for one arm (an experimental opt-in setting)
+  local extra
+  if [[ $cur_arm == x ]]; then extra=$xagentenv; else extra=$yagentenv; fi
+  [[ -z ${extra// /} ]] || env+=(AGENT_EXTRA_ENV="${extra# }")
   [[ -z $delayqueue ]] || env+=(DELAY_QUEUE_PKTS="$delayqueue")
 }
 
 # paired_run_round <r>:round r を 2 台で同時に流し、結果の行を paired.log に足す。rc と fails と prev_offs を更新する
 paired_run_round() {
-  local r=$1 side spec mode
+  local r=$1 side spec mode cur_arm
   local arms=(x y) logs=() pids=() modes=() env=() offs=()
   ((r % 2)) || arms=(y x)
   for side in 0 1; do
@@ -1152,6 +1161,7 @@ paired_run_round() {
     spec=${spec_of[${arms[side]}]}
     mode=${spec#base:}
     env=(SYNC=1 RUNS="$runs" DIRECTION="$direction")
+    cur_arm=${arms[side]}
     paired_round_env
     logs+=("$out/round-$r-${vms[side]}.log")
     modes+=("$mode")
@@ -1194,7 +1204,7 @@ paired_report() {
 
 cmd_paired() {
   local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes="" tool="" streams="" udpping="" bulkmbit="" agentgso="" rmemmax="" rtarget_flag=""
-  local split="" peervcpus="" delayms="" delayrate="" delayqueue="" target="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
+  local split="" peervcpus="" delayms="" delayrate="" delayqueue="" target="" xagentenv="" yagentenv="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
   local rest=() path spec_x spec_y uses_base rust pins=() names=() vms=() t0 run_timeout r
   local rc=0 fails=0 prev_offs=()
   paired_parse_args "$@"

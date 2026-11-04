@@ -369,6 +369,9 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
 既定の `--target lan` は、転送先を相手の VM の `lan` に置き、agent と同じ LAN にある別のホストとして扱います。
 `--target local` は `--tool iperf3` を要します。
 
+`--x-agent-env WGFT_NAME=VALUE` と `--y-agent-env WGFT_NAME=VALUE` は、腕 x と腕 y の agent にだけ環境変数を足します (繰り返せます)。
+既定で無効の実験の設定を、片方の腕だけで有効にして比べるときに使います。
+
 `delay` の経路は、vps と homerouter の間の両方の向きに `--delay-ms` の遅れを netem で入れます。
 netem の待ち行列の長さは `tcpquality.sh` が決め、20 Gbit/s で遅れの間に飛ぶ packet の 2 倍にします。
 待ち行列で packet が落ちた実行は失敗にします。

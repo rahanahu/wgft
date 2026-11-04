@@ -466,6 +466,11 @@ for mode in $MODES; do
     gvisor|wgstack) agent_env=(WGFT_MODE=userspace WGFT_AGENT_NETSTACK="$mode") ;;
     rust) agent_env=(-u WGFT_AGENT_NETSTACK WGFT_MODE=userspace) ;;
   esac
+  # AGENT_EXTRA_ENV: NAME=VALUE words added to the agent's environment, for an experimental
+  # setting that only one arm of `lab/lab paired` turns on (--x-agent-env, --y-agent-env)
+  for e in ${AGENT_EXTRA_ENV:-}; do
+    case "$e" in WGFT_*=*) agent_env+=("$e") ;; *) bad_config "AGENT_EXTRA_ENV wants WGFT_NAME=VALUE words; got $e" ;; esac
+  done
   rmem_field=
   if [ "$mode" = kernel ] && [ -n "$KERNEL_RMEM_MAX" ]; then
     read -r rmem_min rmem_def _ <<<"$rmem_was"
