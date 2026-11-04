@@ -91,6 +91,8 @@ mod sackpeer_tests;
 #[cfg(test)]
 mod scan_tests;
 #[cfg(test)]
+mod send_window_tests;
+#[cfg(test)]
 mod tcp_tests;
 #[cfg(test)]
 mod testnet_tests;
