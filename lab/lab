@@ -469,6 +469,9 @@ suite_make_vm() {
   local name=$1 tmpl=$SUITE_TEMPLATE pin=()
   VM=$name
   [[ -n $SUITE_PIN ]] && pin=(-c "limits.cpu=$SUITE_PIN")
+  # lab paired の PAIRED_HOSTPOLL_*:ゲストが MSR_KVM_POLL_CONTROL を書く。Secure Boot で起動した Debian のカーネルは
+  # lockdown (integrity) で /dev/cpu/*/msr への書き込みを断る (EPERM、2026-11-04 にラボで確認) ので、その時だけ切る
+  [[ -n ${SUITE_NO_SECUREBOOT:-} ]] && pin+=(-c security.secureboot=false)
   if inc snapshot list "$tmpl" -f csv -c n 2>/dev/null | grep -qx "$SNAPSHOT"; then
     inc copy "$tmpl/$SNAPSHOT" "$name" -d "repo,source=$REPO" -c "user.wgft-lab-suite=$$" "${pin[@]}" >/dev/null || return 1
     # lab paired --split:2 台の VM を繋ぐ専用のネットワークの NIC。Incus は device を名前の順に PCI に並べるので、eth0 の後に
@@ -903,6 +906,7 @@ paired_validate() {
     [[ -z $hp || ( -n $split && ( $hp == on || $hp == off ) ) ]] || die "PAIRED_HOSTPOLL_X and PAIRED_HOSTPOLL_Y want on or off, with --split"
   done
   [[ ${PAIRED_HOSTPOLL_VMS:-both} =~ ^(agent|peer|both)$ ]] || die "PAIRED_HOSTPOLL_VMS wants agent, peer or both"
+  [[ -z ${PAIRED_HOSTPOLL_X:-}${PAIRED_HOSTPOLL_Y:-} ]] || SUITE_NO_SECUREBOOT=1
   [[ -z ${PAIRED_KVM_SAMPLES:-} || -n $split ]] || die "PAIRED_KVM_SAMPLES goes with --split"
   [[ $target != local || ( $tool == iperf3 && -z $rmemmax ) ]] || die "--target local wants --tool iperf3 and no --kernel-rmem-max"
   [[ -z $peervcpus ]] || require_uint --peer-vcpus "$peervcpus"

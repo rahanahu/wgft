@@ -376,6 +376,7 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --vcpus 8 --tool iperf3 -
   2 つの値が違えば、同じ腕を 2 つ並べて halt polling だけを比べられます (`rust rust` など)。
   `PAIRED_HOSTPOLL_VMS` (`agent`、`peer`、`both`、既定は `both`) で VM を選びます。
   ゲストの root が `MSR_KVM_POLL_CONTROL` を書くので、ホストの設定は変わらず、VM を消すと元に戻ります。
+  Secure Boot で起動したゲストのカーネルは lockdown でこの書き込みを断るので、どちらかを指定した組の 2 台は Secure Boot を切って起動します。
   CPU のモデルに `kvm-poll-control` が無いと止まります。
   腕の行には `hostpoll=` が付きます
 - KVM の統計:root が `python3 lab/tcpquality.py kvmsample <file> 0.5` を測定の間に動かし、`PAIRED_KVM_SAMPLES=<file>` を渡すと、VM ごとの exit の数と halt polling の時間 (`host_<vm>_kvm_*`) が加わります
