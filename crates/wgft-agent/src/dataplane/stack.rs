@@ -74,6 +74,19 @@ pub(crate) struct StackSettings {
     pub addr: Ipv4Addr,
     /// The table sizes; production uses [`crate::memory::core_limits`] with `WGFT_MAX_TCP_FLOWS`.
     pub limits: Limits,
+    /// The experimental send turn, `WGFT_AGENT_EXPERIMENTAL_SEND_TURN`; off by default.
+    pub send_turn: u8,
+}
+
+impl StackSettings {
+    /// The core's configuration for the tunnel MTU `mtu`.
+    pub(crate) fn config(&self, mtu: usize) -> Config {
+        Config {
+            limits: self.limits,
+            ..Config::new(self.addr, mtu)
+        }
+        .with_send_turn_segments(self.send_turn)
+    }
 }
 
 /// Makes the core over the hook `LanHook<T>` with a fresh table of LAN sockets, on the data plane
@@ -94,10 +107,7 @@ pub(crate) fn make<T: LanSocket + 'static>(
             budget: None,
         })?,
     };
-    let config = Config {
-        limits: settings.limits,
-        ..Config::new(settings.addr, init.mtu)
-    };
+    let config = settings.config(init.mtu);
     let mut seed = [0u8; 64];
     if ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut seed).is_err() {
         return Err(UpperError {

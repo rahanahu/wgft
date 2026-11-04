@@ -216,6 +216,46 @@ pub fn batch_mib(v: &str) -> Result<Option<i64>, Refusal> {
     }
 }
 
+/// 実験の送信の番の環境変数。互換の保証の外の実験の設定で、予告なく変えるか消す。このため設定項目の一覧
+/// (`run_specs`) に入れず、フラグも dotenv の鍵も持たず、有効な設定の行にも出さない。プロセスの環境変数だけを
+/// 読む (wgstack-rs.md の「送信の番」)。
+pub const SEND_TURN_ENV: &str = "WGFT_AGENT_EXPERIMENTAL_SEND_TURN";
+
+/// The segment counts the experimental send turn accepts.
+pub const SEND_TURN_VALUES: [u8; 3] = [2, 4, 8];
+
+/// The length N in segments of the experimental send turn, or 0 for off. Unset, empty and `0` are
+/// off; `2`, `4` and `8` turn it on with that length. Any other value is a configuration error, so
+/// a value that was meant to do something never turns into a silent no-op.
+///
+/// # Errors
+///
+/// Returns a configuration error for a value that is not empty, `0`, `2`, `4` or `8`.
+pub fn send_turn(env: &dyn super::Env) -> Result<u8, Refusal> {
+    let Some(v) = env.var(SEND_TURN_ENV) else {
+        return Ok(0);
+    };
+    match v.to_str() {
+        Some("" | "0") => Ok(0),
+        Some(other) => match other.parse::<u8>() {
+            Ok(n) if SEND_TURN_VALUES.contains(&n) => Ok(n),
+            _ => Err(Refusal::config(
+                SEND_TURN_ENV,
+                format!("must be 2, 4, 8 or 0, not {}", quote(other)),
+            )),
+        },
+        None => Err(Refusal::config(SEND_TURN_ENV, "is not valid UTF-8")),
+    }
+}
+
+/// The warning line for turning the experimental send turn on with length `n`.
+#[must_use]
+pub fn send_turn_warning(n: u8) -> LogLine {
+    LogLine::Stamped(format!(
+        "warning: {SEND_TURN_ENV}={n} turns on the experimental TCP send turn; it is outside the compatibility guarantee and may change or go away without notice"
+    ))
+}
+
 /// Linux がインタフェースの名前に課す規則に合わせ、名前をバイト列として調べる。
 /// 合わせて NUL と `%` も拒む。通すと、宣言した名前と実際に付く名前が食い違う。
 pub fn validate_interface_name(name: &str) -> Result<(), Refusal> {
@@ -342,6 +382,26 @@ mod tests {
 
     use super::*;
     use crate::config::dotenv::Map;
+
+    #[test]
+    fn the_experimental_send_turn_takes_only_0_2_4_and_8() {
+        let env = |v: &str| HashMap::from([(SEND_TURN_ENV.to_owned(), OsString::from(v))]);
+        assert_eq!(send_turn(&HashMap::<String, OsString>::new()).unwrap(), 0);
+        for (v, n) in [("", 0), ("0", 0), ("2", 2), ("4", 4), ("8", 8)] {
+            assert_eq!(send_turn(&env(v)).unwrap(), n, "{v:?}");
+        }
+        for v in ["true", "1", "3", "16", "256", "02", " 4", "on"] {
+            let e = send_turn(&env(v)).unwrap_err().to_string();
+            assert!(
+                e.contains(SEND_TURN_ENV) && e.contains("must be 2, 4, 8 or 0"),
+                "{e}"
+            );
+        }
+        let LogLine::Stamped(w) = send_turn_warning(4) else {
+            panic!("the warning carries a time stamp");
+        };
+        assert!(w.starts_with("warning: ") && !w.contains('('), "{w}");
+    }
 
     fn settings(env: &[(&str, &str)], file: &[(&str, &str)]) -> (Config, Settings) {
         let d = Defaults {

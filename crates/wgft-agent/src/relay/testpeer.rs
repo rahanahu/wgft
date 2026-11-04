@@ -119,6 +119,7 @@ impl Peer {
         let stack = StackSettings {
             addr: AGENT_IP,
             limits: limits(),
+            send_turn: 0,
         };
         let agent = Dataplane::start(agent, settings, Carry::first(Duration::ZERO), move |init| {
             make(stack, init)

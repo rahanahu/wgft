@@ -180,6 +180,10 @@ pub enum BoostPolicy {
     Never,
 }
 
+/// The default send turn length N in segments, used by [`Config::with_send_turn`]. A turn is
+/// N x MTU bytes (wgstack-rs.md, send turn).
+pub const SEND_TURN_SEGMENTS: u8 = 8;
+
 /// The configuration a stack is created with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -193,6 +197,11 @@ pub struct Config {
     pub congestion: Congestion,
     /// When connections ask for a boost slot.
     pub boost: BoostPolicy,
+    /// The send turn length N in segments; 0 is off and the default. When on, the head TCP
+    /// connection keeps being picked for up to N x MTU bytes once the TCP class is picked.
+    /// Experimental; with 0 the output is bit-identical to a core without the feature
+    /// (wgstack-rs.md, send turn).
+    pub send_turn: u8,
 }
 
 impl Config {
@@ -204,7 +213,28 @@ impl Config {
             limits: DEFAULT_LIMITS,
             congestion: Congestion::Cubic,
             boost: BoostPolicy::OnDemand,
+            send_turn: 0,
         }
+    }
+
+    /// The configuration with the send turn on at [`SEND_TURN_SEGMENTS`].
+    #[must_use]
+    pub const fn with_send_turn(self) -> Self {
+        self.with_send_turn_segments(SEND_TURN_SEGMENTS)
+    }
+
+    /// The configuration with a send turn of `segments` segments; 0 turns it off.
+    #[must_use]
+    pub const fn with_send_turn_segments(self, segments: u8) -> Self {
+        Self {
+            send_turn: segments,
+            ..self
+        }
+    }
+
+    /// The send turn length in bytes (N x MTU); 0 is off.
+    pub(crate) fn send_turn_bytes(&self) -> u32 {
+        u32::from(self.send_turn).saturating_mul(u32::try_from(self.mtu).unwrap_or(u32::MAX))
     }
 }
 

@@ -218,6 +218,16 @@ impl TestNet {
         Self::with_config(config, seed)
     }
 
+    /// 送信の番を [`crate::SEND_TURN_SEGMENTS`] の長さで有効にした核です。規則の試験の入口です。
+    pub(crate) fn with_send_turn(limits: Limits) -> Self {
+        let config = Config {
+            limits,
+            ..Config::new(DUT, TEST_MTU)
+        }
+        .with_send_turn();
+        Self::with_config(config, [7; 64])
+    }
+
     /// 設定 `config` の核です (Go の試験の `TestCongestion` と `TestBoost` を選ぶ時に使います)。
     pub(crate) fn with_config(config: Config, seed: [u8; 64]) -> Self {
         Self::with_budget(config, seed, Budget::new(crate::buf::BOOST_SLOTS).unwrap())

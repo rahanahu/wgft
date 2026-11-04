@@ -325,6 +325,8 @@ impl WgstackDut {
                 frame::Boost::AtAccept => BoostPolicy::AtAccept,
                 frame::Boost::Never => BoostPolicy::Never,
             },
+            // 記録の HELLO は送信の番を持たず、凍結した Go の wgstack にも番は無いので、照合は番の無い核で流す。
+            send_turn: 0,
         }
     }
 

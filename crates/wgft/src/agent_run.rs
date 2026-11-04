@@ -97,6 +97,10 @@ pub fn prepare_door(
     }
     let settings = agent::check_door(&cfg, os)?;
     early.extend(agent::join_warning(&settings));
+    let send_turn = agent::send_turn(env)?;
+    if send_turn != 0 {
+        early.push(agent::send_turn_warning(send_turn));
+    }
     let options = Options {
         data_dir: settings.data_dir.clone().into(),
         join: settings.join.clone(),
@@ -105,6 +109,7 @@ pub fn prepare_door(
         allow_targets: settings.allow_targets.clone(),
         limits: settings.flow_caps(),
         batching: settings.batching(),
+        send_turn,
     };
     Ok(Prepared {
         options,
@@ -191,5 +196,15 @@ mod tests {
         assert_eq!(early_lines("WGFT_JOIN=\nWGFT_NAME=x\n", 0o644, &[]), vec![]);
         // 秘密でない項目だけなら警告しない
         assert_eq!(early_lines("WGFT_NAME=x\n", 0o644, &[]), vec![]);
+    }
+
+    /// 実験の送信の番は環境変数だけで有効になり、警告の行を 1 つ書く。dotenv の鍵は読まない。
+    #[test]
+    fn the_experimental_send_turn_comes_only_from_the_environment() {
+        let env = agent::SEND_TURN_ENV;
+        let e = early_lines("", 0o600, &[(env, "4")]);
+        assert_eq!(e, vec![agent::send_turn_warning(4)]);
+        assert_eq!(early_lines("", 0o600, &[(env, "0")]), vec![]);
+        assert_eq!(early_lines(&format!("{env}=4\n"), 0o600, &[]), vec![]);
     }
 }
