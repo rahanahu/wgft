@@ -19,6 +19,26 @@ pub const MTU: usize = 1420;
 /// 1 回の `drain` が引き取る packet の上限です。Go の `testNet.drain` と同じく、超えたら送り続けたとみなします。
 const DRAIN_MAX: usize = 100_000;
 
+/// 入力 `data` を送信の番を有効にした核で流すかを返します (wgstack-rs.md の「送信の番」)。入力の byte の
+/// FNV-1a の hash の最上位の bit で決めるので、同じ入力はいつも同じ答えになり、入力のおよそ半分が番を有効にした
+/// 核を流します。入力の byte の読み方は変えないので、Go の corpus はそのまま種になります。Go の記録の照合
+/// (`tests/replay.rs`) はこの選び方を使わず、番を無効にした核で流します。
+pub fn send_turn_for(data: &[u8]) -> bool {
+    let h = data.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    h >> 63 == 1
+}
+
+/// 設定 `config` に、入力 `data` で選んだ送信の番 ([`send_turn_for`]) を入れます。
+pub fn with_send_turn_for(config: Config, data: &[u8]) -> Config {
+    if send_turn_for(data) {
+        config.with_send_turn()
+    } else {
+        config
+    }
+}
+
 /// Go の `smallLimits` です。上界の試験が表の満ちる所を見るための小さな表です。
 pub fn small_limits() -> Limits {
     Limits {

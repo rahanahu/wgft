@@ -8,6 +8,9 @@
 //! 核の公開の API は書ける量と読めるかを返さないので、書き込みと読み取りをそのまま呼び、`WouldBlock` と
 //! 一部だけの書き込みを受け入れます。Go の wgstack と出力が同じ間は同じ経路をたどり、違えば別の経路を
 //! たどります。どちらでも種としては働きます。
+//!
+//! 入力のおよそ半分は、送信の番を有効にした核で流します ([`super::send_turn_for`])。番を有効にした核は Go と
+//! 違う順で packet を出すので、相手の模型は別の経路をたどります。
 
 use std::collections::BTreeMap;
 use std::net::SocketAddrV4;
@@ -16,7 +19,7 @@ use std::time::Duration;
 use wgft_tcpharness::packet::{ACK, FIN, Options, RST, SYN, Segment, Timestamps};
 use wgft_wgstack::{ConnId, Error, NoHook};
 
-use super::net::{DUT, Net, PEER, fuzz_limits};
+use super::net::{DUT, Net, PEER, fuzz_limits, with_send_turn_for};
 use super::peer::PeerConn;
 
 /// 1 つの入力で進める段の上限です。Go と同じです。
@@ -37,7 +40,8 @@ impl Prog<'_> {
 
 /// `core` の target の 1 回分です。
 pub fn core(prog: &[u8]) {
-    let mut n = Net::new(Net::<NoHook>::config(fuzz_limits()), NoHook);
+    let config = with_send_turn_for(Net::<NoHook>::config(fuzz_limits()), prog);
+    let mut n = Net::new(config, NoHook);
     let now = n.now();
     let l = n
         .stack()
