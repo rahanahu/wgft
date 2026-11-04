@@ -322,6 +322,21 @@ iperf3 は送り手と受け手の byte あたりの CPU が `tcpquality.py` よ
   x が VM a の組の比の中央値と、x が VM b の組の比の中央値の幾何平均を比として出し、組を引き直す bootstrap の 95% の区間を付けます。
   2 台の CPU の差は `vm_a_over_b` に出ます。
   失敗した実行、始まりの同期を待ちきれなかった実行、送り手が 1 つの CPU の 0.7 以上を使った実行を含む組は除き、予定の組の数に対する理由ごとの数を出します。
+  `--split` では、相手の VM のどれかの vCPU が 0.95 以上忙しく、その vCPU に縛られたカーネルの worker (`peervm_cpu<N>_kw`) が 0.9 以上だった実行を含む組も除き、`peer_bound` として数えます。
+  この実行は agent ではなく相手の側の詰まりを測っています。
+  腕ごとの数 (`peer_bound_x`、`peer_bound_y`) も出し、片方の腕の数が 2 以上で他方の 2 倍以上なら警告します。
+  除く理由が腕の違いに左右されているかもしれないからです。
+  worker の値の無い前のラボの記録では、この判定をしません。
+  窓の全体の平均では、窓の一部だけ飽和した実行が漏れます。
+  そのため相手の VM の vCPU を 0.5 秒ごとにも記録し (`tcpquality.py peerseries`)、同じ条件の vCPU がある区間が窓の 10 % 以上ある実行も `peer_bound` にします (`peervm_sat_frac`)。
+  10 % は 10 秒の実行の 2 区間で、1 区間だけの外れでは印を付けません。
+  飽和した区間は速さを約半分にするので、窓の 10 % の飽和は速さを約 5 % 下げ、A/A で見分けたい 2 % の 2 倍にあたります。
+  この 10 % はまだラボの値で確かめていません。
+  0.05 (1 区間) にすると 1 区間だけの外れでも印が付き、0.1 では約 5 % より小さい落ち込みが漏れます。
+  記録を解析し直すときは、`WGFT_LAB_PEER_SAT_FRAC` で閾を替えられます。
+  時系列のある記録では、腕ごとの飽和した区間の割合の平均と区間の数の和を `PEERSERIES` の行に出し、閾より下でも片方の腕の区間の数が 2 以上で他方の 2 倍以上なら警告します。
+  時系列には相手の VM が使っている TCP のメモリも入り、その最大を `peervm_tcpmem_peak_mb` に出します。
+  2 つの規則で印が違う実行があれば、窓の全体の規則だけの比の行を `WHOLEWINDOW` を頭に付けて並べます。
   iperf3 の送り手の値は、stream ごとに 1 つのスレッドを使うので stream の数で割ります。
   どちらかの側で予定の組の半分より少なくしか残らなければ、比を出さずに失敗します。
   round ごとの比の中央値と、組の 2 つの実行が重なった割合も出し、重なりが 0.9 より小さければ警告します。
@@ -332,6 +347,179 @@ iperf3 は送り手と受け手の byte あたりの CPU が `tcpquality.py` よ
 `FAIL` の行があるか組が足りない場合は、終了コードが 0 以外になります。
 VM は終わると消し、`--keep` を付けると残します。
 残った VM は `lab/lab suite-gc` が消します。
+`--split` のホストの標本 (`tcpquality.py hostsample`) は、作った `lab/lab` のプロセスが SIGKILL などで消えると、次の標本の時に自分で止まります。
+`lab/lab suite-gc` も、作った `lab/lab` のプロセスが無い標本を `--lab-pid` の印で選んで止め、使われていない `--split` のネットワークを消します。
+
+### agent を専用の VM に置く (`--split`)
+
+```sh
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --vcpus 2 --tool iperf3 fast rust kernel
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --vcpus 8 --tool iperf3 --delay-ms 10 delay rust kernel
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus 4 --tool iperf3 --base HEAD fast rust base:rust
+```
+
+既定の `lab paired` は 1 台の VM に 5 つの netns を置くので、client、server、ルータの CPU が agent の CPU と混ざります。
+`--split` は agent を専用の VM に置き、agent の CPU と周辺の CPU を分けて測ります。
+
+- 構成:agent の VM は `home` の netns だけを持ち、相手の VM は `client`、`vps`、`homerouter`、`lan` を持ちます。
+  2 台は Incus の専用のブリッジ (IP なし) で繋ぎ、agent の VM の NIC を `home` の `eth0`、相手の VM の NIC を `homerouter` の `lan0` にします (`lab/netns.sh up-split-agent`、`up-split-peer`)
+- VM を分ける理由:カーネルモードの WireGuard は暗号の kworker を VM の全 CPU に配ります。
+  1 台の VM の中で CPU の集合を分けても、カーネルモードの agent と server の暗号が互いの CPU で走ります
+- 固定:`WGFT_LAB_PAIR_CPUS` の 1 つ目の集合の先頭 `--vcpus` 個に agent の VM、2 つ目の集合の先頭 `--peer-vcpus` 個 (既定 8) に相手の VM を固定します。
+  Incus が固定するのは vCPU のスレッドだけで、vhost と qemu のほかのスレッドはホストの全 CPU に浮きます。
+  固定には root の権限が要るので、ラボはこれらを固定しません。
+  代わりに、ホストの `tcpquality.py hostsample` が 0.5 秒ごとにそれらの時間と、vhost が P コアに載った割合を記録します
+- round:2 つの腕を同じ VM の組で順に流します。
+  奇数の round は x が先、偶数の round は y が先です。
+  `paired.log` の `vm=a` は先に流れた腕、`vm=b` は後の腕で、解析は順の差を `vm_a_over_b` として打ち消します。
+  2 つの腕は同時に走らないので、始まりの同期と重なりの値はありません
+- 操作:相手の VM の `tcpquality.sh` が `AGENT_AT` を受け、agent の VM の `tcpquality.py agentd` を通して `lab/tqagent.sh` で agent を起動、停止します。
+  agentd は incusbr0 の上の agent の VM のアドレスで待ち、ホストが 2 台に置いた token を持たない要求を断ります
+- 解析:`VM` の行は 2 台の和です。
+  `AGENTVM` の行は agent の VM だけの byte あたりの CPU で、Rust の agent ではプロセスとその NIC のカーネルの仕事、カーネルモードではカーネルの WireGuard の仕事です。
+  2 つの腕を同じ条件で比べる主な値です。
+  `PEERVM` の行は相手の VM、`HOSTQEMU` の行は 2 台の qemu の全スレッドのホストでの時間です。
+  ホストの値は `paired.log` の `host_*` にあり、`host_pcore_busy_s` は測定の外の P コアの負荷を示します
+- ホストでの時間の内訳:`host_<vm>_s_per_gb` は VM ごとの qemu の全スレッドの時間で、`HOSTAGENT` と `HOSTPEER` の行がその比です。
+  vCPU のスレッドは、ゲストの中の時間 (`host_<vm>_vcpu_guest_s`)、ホストのカーネルの KVM の時間 (`_vcpu_kvm_s`、VM exit の処理、割り込みの注入、halt polling)、qemu のユーザー空間の時間 (`_vcpu_qemu_s`) に分けます。
+  この 3 つは clock tick で数えるので、10 秒の窓で約 1 % の粒度です。
+  `_vcpu_beyond_guest_s_per_gb` は vCPU のスレッドの時間からゲストが忙しいと数えた時間を引いた値で、ゲストから見えないホストの費用です。
+  `_vcpu_blocks_per_s` は vCPU のスレッドが実際に眠った回数、`_vcpu_wait_s` は実行を待った時間、`_vcpucpu_irq_s` は vCPU を固定した CPU の irq と softirq の時間です。
+  ホストの値は root の権限なしに qemu の `/proc` から読みます
+- ゲストの値:両方の VM の割り込み (virtio の vector、`LOC`、`RES`、`CAL` など) と softirq を秒あたりで、data の NIC の `ethtool -S` の packet と kick (ゲストからホストへの通知) を GB あたりで記録します。
+  cpuidle の driver があれば idle の状態ごとの回数と割合も記録します。
+  2 台の cpuidle の driver、clock source、data の NIC の virtio の device と feature は `guestinfo.txt` に残します
+- 置き場所の値:両方の VM の vCPU ごとの忙しさ (`agentvm_cpu<N>_busy`、`peervm_cpu<N>_busy`、1.0 が 1 つの vCPU の全部) と、その softirq、user、system の分 (`_cpu<N>_soft`、`_user`、`_sys`) を記録します。
+  CPU ごとのカーネルの worker (`kworker/<N>`、`ksoftirqd/<N>`) の分 (`_cpu<N>_kw`、`_cpu<N>_ksi`) と、CPU に縛られない worker の和 (`_kwu`) も記録します。
+  data の NIC の割り込みを vCPU ごとに分けた割合 (`_nicirq_cpu<N>_frac`) と、割り込みの実効の affinity (`_nicirq_eff`) も記録します。
+  `--placement apart` の Rust の腕 (`rust`、`base:rust`) だけ、agentd が data plane のスレッド (`wgft-dataplane`) の載った vCPU を 50 ms ごとに読み、vCPU ごとの割合 (`agentvm_thr_dp_cpu<N>_frac`)、移った回数 (`agentvm_thr_dp_mig`)、CPU を待った時間の割合 (`agentvm_thr_dp_wait_share`) を記録します。
+  この標本を取る agentd のスレッドは、ホストで測って 1 つの CPU の約 0.5 % を agent の VM で使います。
+  腕によって有無が変わると agent の VM の CPU に差が出るので、既定では動かしません。
+  `agentvm_thr_dp_on_nicirq_frac` は、スレッドが NIC の割り込みを受ける vCPU に載っていた割合です
+- ホストの halt polling:`PAIRED_HOSTPOLL_X` と `PAIRED_HOSTPOLL_Y` (`on` か `off`) は、その腕の前に VM のホストの halt polling を入れるか切ります。
+  片方だけを指定すると、もう片方の腕は `on` です。
+  2 つの値が違えば、同じ腕を 2 つ並べて halt polling だけを比べられます (`rust rust` など)。
+  `PAIRED_HOSTPOLL_VMS` (`agent`、`peer`、`both`、既定は `both`) で VM を選びます。
+  ゲストの root が `MSR_KVM_POLL_CONTROL` を書くので、ホストの設定は変わらず、VM を消すと元に戻ります。
+  Secure Boot で起動したゲストのカーネルは lockdown でこの書き込みを断るので、どちらかを指定した組の 2 台は Secure Boot を切って起動します。
+  CPU のモデルに `kvm-poll-control` が無いと止まります。
+  腕の行には `hostpoll=` が付きます
+- KVM の統計:root が `python3 lab/tcpquality.py kvmsample <file> 0.5` を測定の間に動かし、`PAIRED_KVM_SAMPLES=<file>` を渡すと、VM ごとの exit の数と halt polling の時間 (`host_<vm>_kvm_*`) が加わります
+
+`--target local` は転送先 (LAN のホストの役) を agent のマシンに置きます。
+LAN のホストのアドレス `192.168.50.3` を agent の VM の `home` の `lo` に付け、iperf3 のサーバと UDP の echo を `home` で動かします。
+agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に入ります。
+既定の `--target lan` は、転送先を相手の VM の `lan` に置き、agent と同じ LAN にある別のホストとして扱います。
+`--target local` は `--tool iperf3` を要します。
+
+`--x-agent-env WGFT_NAME=VALUE` と `--y-agent-env WGFT_NAME=VALUE` は、腕 x と腕 y の agent にだけ環境変数を足します (繰り返せます)。
+既定で無効の実験の設定を、片方の腕だけで有効にして比べるときに使います。
+
+`--placement apart` は、2 台の VM の中で NIC の割り込みと、1 つの flow の仕事を別の vCPU に固定します。
+同じ build の 2 つの腕を比べる (`--base HEAD rust base:rust` など) ときに使います。
+腕は `rust` (`base:rust` を含む) と `kernel` だけで、`gvisor` と `wgstack` の腕を指定すると VM を立てる前に止まります。
+
+- 理由:data の NIC は 1 つの queue なので、その割り込みと受信の softirq は 1 つの vCPU で走ります。
+  Rust の agent の data plane は 1 つのスレッドです。
+  既定ではスケジューラが実行ごとにスレッドの vCPU を決め、スレッドが割り込みの vCPU に載った実行は、速さが低く byte あたりの CPU が多くなります。
+  4 vCPU の受ける向きの 1 stream では、載った実行が 3.8 から 5.3 Gbit/s、載らない実行が 7.7 から 8.0 Gbit/s でした。
+  2 vCPU 以上では、この 2 つの値が同じ build の比べにも混ざります
+- 割り込み:data の NIC の全 vector の割り込みを agent の VM の CPU 0 に固定します (`tcpquality.py nicirq`)。
+  VM の設定なので両方の腕に効きます
+- agent のプロセス:Rust の agent のプロセス全体を `taskset` で CPU 1 だけに置き、起動の後に `Cpus_allowed_list` を確かめます。
+  固定が効いていなければ、その腕を失敗にします。
+  CPU 1 から後の全部に置くと、8 vCPU でスレッドが 2 つの L2 の塊の間を移り、どちらの塊に載るかでも速さが数 % 揺れました。
+  1 vCPU では CPU 0 で、既定と同じ置き方です。
+  カーネルモードの腕の data plane はカーネルの WireGuard で、置くプロセスが無いので固定しません
+- 使える範囲:この置き方は agent を 1 つの CPU に抑えます。
+  比べる 2 つの build の data plane がどちらも 1 スレッドの間だけ有効です。
+  暗号の worker のように data plane のスレッドを足した build には、次の `--placement apart-mt` を使います
+- `--placement apart-mt`:暗号の worker を持つ build 用です。
+  NIC の割り込みと相手の VM の固定は `apart` と同じです。
+  Rust の agent のプロセスを CPU 1 から後に置き、agent が tunnel を張った後と各実行の始めに、data plane のスレッド (`wgft-dataplane`) を CPU 1、暗号の worker (`wgft-crypto`) を CPU 2 と 3 に 1 つずつ、agentd を通して置きます。
+  CPU 0 から 3 は lane の先頭の 1 つの L2 の塊にあるので、8 vCPU でも worker は data plane のスレッドと同じ塊に留まります。
+  置けなければその腕か実行を失敗にし、各実行の終わりにも確かめます。
+  実行の途中で作られた worker は data plane のスレッドの CPU を受け継ぐので、その実行は失敗になります。
+  結果の行には、実行の始めに見つけた worker の数 (`agent_crypto_threads`) が入り、0 なら警告を出します。
+  agent のすべてのスレッドの載った vCPU を、`dp`、`crypto`、`other` の組ごとに 0.1 秒ごとに記録します (`agentvm_thr_<組>_cpu<N>_frac` など)。
+  この標本は、8 スレッドの試しのプロセスに対してホストで測って、1 つの CPU の約 0.65 % を使います。
+  A+ の agent はプロセスの使える CPU が 2 つ以下だと worker を作らないので、`--vcpus 4` 以上を求めます。
+  worker の無い build でも流せ、そのときは data plane のスレッドが CPU 1 に載ります。
+  `apart-mt` の値は `apart` で取った表と混ぜません。
+  ラボではまだ流していません
+- 相手の VM:data の NIC の全 vector の割り込みを CPU 0 に固定し、全 veth の RPS から CPU 0 を外します (`lab/netns.sh split-peer-rps`)。
+  1 つの flow の受信の softirq は RPS が flow ごとに選ぶ 1 つの vCPU で走るので、その vCPU が NIC の割り込みの vCPU と重ならなくなります。
+  相手の VM が 1 vCPU のときは固定しません
+- カーネルモードとの比べ:割り込みと相手の VM の固定は両方の腕に同じです。
+  Rust の腕は agent のスレッドが割り込みの vCPU と同居しない形にそろい、カーネルモードの腕は全 vCPU を使います。
+  既定の値とは同居した実行の分だけ違うので、既定で取った表とは混ぜません
+- 記録:`paired.log` の `PLAN` の行に `placement=apart` が付き、`header.txt` に置き場所を書きます。
+  実行ごとの `agentvm_nicirq_eff` と `agentvm_thr_dp_cpu<N>_frac` で、固定が効いたことを確かめられます
+- 残る揺れ:相手の VM の RPS の vCPU では、CPU ごとのカーネルの worker (`kworker/<N>`) も動きます。
+  この worker は全 vCPU で 0.2 CPU 前後ずつ動き、server のカーネルの WireGuard の暗号の仕事と推定しています。
+  一部の実行では、その vCPU の worker が 1.0 に達し、flow の softirq の仕事もその中で走って、相手の側で詰まり速さが落ちます。
+  CPU の固定ではこの重なりを避けられません。
+  `peervm_maxcpu` と、その vCPU の `peervm_cpu<N>_kw` が 1.0 に近い実行がこれに当たり、解析はその組を `peer_bound` として除きます
+
+`delay` の経路は、vps と homerouter の間の両方の向きに `--delay-ms` の遅れを netem で入れます。
+netem の待ち行列の長さは `tcpquality.sh` が決め、20 Gbit/s で遅れの間に飛ぶ packet の 2 倍にします。
+待ち行列で packet が落ちた実行は失敗にします。
+client と LAN のホストの TCP のバッファの上限は 64 MiB に上げ、カーネルの TCP の端が速さを抑えないようにします。
+このバッファは VM 全体の TCP のメモリの上限 (`net.ipv4.tcp_mem`) に数えられます。
+2 GiB の相手の VM で 4 stream を流すと、client と LAN のホストがこの上限を超え、受け手がメモリの不足で segment を捨て、順序外の待ち行列を刈りました。
+そのため `tcpquality.sh` は、TCP の端を持つ VM (相手の VM と、`--target local` では agent の VM) の `tcp_mem` の pressure と最大を、stream の数 × 2 × バッファの上限 × 1.25 まで上げ、終わると戻します。
+上げる値は VM のメモリの半分までで、足りなければ警告を出し、足りる `WGFT_LAB_MEM` の大きさを示します。
+`--cases` では case の間にも戻します。
+`--split` の無い 1 台の VM の `lab paired` の `delay` の経路も、同じく `tcp_mem` を上げます。
+この変更の前に取ったカーネルモードの `delay` の経路の値は、上げた後の値と混ぜません。
+結果の行には、VM ごとの `tcp_mem` の最大 (`_tcp_mem_max_mb`) と、窓の始めと終わりに使っていた TCP のメモリ (`_tcpmem_start_mb`、`_tcpmem_end_mb`) が入ります。
+namespace ごとのメモリの圧迫の数 (`tcp_prune`、`tcp_rcvpruned`、`tcp_ofopruned`、`tcp_ofodrop`、`tcp_mempressures`、`tcp_abortonmem`) は、動いたときだけ入ります。
+上げた後に崩れが消えるかは未確認です。
+
+`tcpquality.sh` の `CPU=1` の結果の行には、interface ごとの packet の数と平均の大きさ、namespace ごとの TCP の segment と UDP の datagram の数、tunnel を戻る ACK の数 (`tun_ack_pkts_per_gb`)、受け手の GRO の後の segment の大きさ (`recv_seg_avg_b`) も入ります。
+
+### 1 組の VM で複数の case を流す (`--cases`)
+
+```sh
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus 4 --base HEAD --tool iperf3 --cases cases.txt rust base:rust
+```
+
+`--split` の 1 つの case のうち、測るのは約 3 分で、残りの約 2.5 分は VM 2 台の作成、起動、build の導入と削除です。
+`--cases FILE` は 1 組の VM で FILE の case を順に流し、この固定の費用を case の数で割ります。
+
+- FILE:1 行が 1 case で、`<名前> <経路> [case ごとのフラグ...]` と書きます。
+  `#` から後と空行は読みません。
+  名前は英数字、`-`、`_` だけで、`--out` の直下のファイルとぶつからないように点を使えません。
+  例は `up-s1 fast --direction up --streams 1` と `d10-down delay --delay-ms 10 --direction down` です
+- case ごとのフラグ:`--direction`、`--bytes`、`--tool`、`--streams`、`--udp-ping`、`--bulk-mbit`、`--agent-gso`、`--kernel-rmem-max`、`--delay-ms`、`--delay-rate-mbit`、`--delay-queue-pkts`、`--target`、`--rounds`、`--runs` です。
+  コマンド行に書いた値は全 case の既定になり、行の値がそれを上書きします。
+  case の行でコマンド行の値を消すことはできません。
+  case によって有無が変わるフラグ (`--udp-ping` など) は、コマンド行に書かず、要る case の行だけに書きます。
+  VM の形を決めるフラグ (`--vcpus`、`--peer-vcpus`、`--placement`、`--base`、`--x-agent-env` など) と腕はコマンド行だけに書き、全 case に共通です
+- 確かめ:VM を立てる前に全 case を確かめ、誤りがあればその case の名前を出して止まります
+- 出力:case ごとに `--out` の下の `<名前>/` に、今と同じ形の `paired.log`、`header.txt`、`result.txt`、`host-samples.txt`、round ごとのログを置きます。
+  `PLAN` の行に `case_index` と `cases` が付き、`header.txt` に VM の組を使い回したことと、前に流れた case の数を書きます。
+  `--out` の直下には VM の組を立てた記録 (`setup.txt`、`vm-*.log`、`guestinfo.txt`) と、case ごとの結果の一覧 `cases.log` を置きます
+- case の間:両方の VM を `lab/splitcase.sh` で戻します。
+  lab の namespace に残ったプロセスと、時間切れの case が残した `tcpquality` の実行を止めます。
+  netem の qdisc と agent の interface を消し、TCP のバッファの sysctl (`TCP_BUF_MAX` が上げる) と `tcp_mem` を VM を立てた時の値に戻します。
+  `--target` が前の case と違えば転送先のアドレスを移し、agentd と LAN の疎通を確かめます。
+  割り込みと RPS の固定 (`--placement apart`) と NIC の queue は、立てた時のままです
+- 失敗:失敗した case は次の case を止めません。
+  時間切れの arm か、agentd に届かなかった arm の後は、次の round の前に VM の組を確かめ直します。
+  VM の組を戻せないときは、その case を終え、残りの case を流さず、`cases.log` に `status=not_run` と書きます。
+  中断 (INT、TERM、HUP) で終わった case は `status=interrupted` です。
+  どれかの case が失敗すると、終了コードが 0 以外になります
+- 時間の上限:`wgft-heavy` の測定の job は 60 分で切られ、切られると VM を消す後片付けが走りません。
+  `--max-wall S` (環境変数 `PAIRED_MAX_WALL_S`、既定 3300 秒) は build の前からの上限です。
+  各 case の前に、経過した時間と見積もりの和が上限を超えるなら、その case から後を `status=not_run` にして、VM を消して終わります。
+  見積もりは、流し終えた case の実行 1 回あたりの最長の時間に、この case の実行の数と 1.2 を掛けた値です。
+  最初の case は見積もりの元が無いので、上限の残りがあれば流します。
+  流れなかった case は、その行だけを集めた FILE で流し直します。
+  1 つの FILE は、1 case の時間 (4 round × 2 実行の fast の 1 stream で約 3 分) で上限を割った数より少なくします
+- agent の VM の log:case の始めに agentd の log へ `== lab paired case <i> of <n> <名前> starts` の行を書くので、各 case の `agent-vm-logs.txt` を case の境で切れます
+- 未確認:`--cases` はまだラボで流していません。
+  使い回した VM の組の値が、新しく立てた組の値と同じになるかも未確認です
 
 ## 対応する VPS の環境
 

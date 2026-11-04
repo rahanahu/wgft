@@ -116,7 +116,15 @@ has_snapshot() { inc snapshot list "$VM" -f csv -c n | grep -qx "$SNAPSHOT"; }
 wait_agent() { timeout 300 bash -c "$(declare -f inc); $(printf '%q ' inc wait "$VM" agent)" || die "VM の agent が起動しない"; }
 # agent は IP アドレスが付く前に応答するので、起動直後に外と通信するなら別に待つ。
 # 付かなくてもトポロジ(VM 内の netns)には影響しないので、止めずに警告だけ出す
-wait_net() { timeout 120 bash -c "$(declare -f inc); $(printf '%q ' inc wait "$VM" ip --interval 2)" || info "VM に IP アドレスが付かない(外部との通信は失敗する)"; }
+wait_net() {
+  # lab paired --split の VM は IP の無い NIC を持ち、incus wait ip はその NIC も待つので、IPv4 の有無を自分で見る
+  if [[ -n ${SUITE_NIC_NET:-} ]]; then
+    timeout 120 bash -c "$(declare -f inc); until inc list $(printf %q "$VM") -c 4 -f csv | grep -q '[0-9]'; do sleep 1; done" \
+      || info "VM に IP アドレスが付かない(外部との通信は失敗する)"
+    return 0
+  fi
+  timeout 120 bash -c "$(declare -f inc); $(printf '%q ' inc wait "$VM" ip --interval 2)" || info "VM に IP アドレスが付かない(外部との通信は失敗する)"
+}
 # WGFT_LAB_AGENT_NETSTACK はユーザー空間モードのエージェントの netstack(gvisor か wgstack)を選ぶ。
 # 値があれば VM の中のコマンドに WGFT_AGENT_NETSTACK として渡し、ラボの確認が起動するエージェントがそれを継ぐ。
 # 未設定なら何も渡さず、エージェントは既定の gvisor で動く。
@@ -403,6 +411,27 @@ cmd_suite_gc() {
     info "deleting suite VMs whose lab process is gone: ${dead[*]}"
     suite_delete_vms "${dead[@]}"
   fi
+  # lab paired --split のネットワーク wgftsp<PID>:作った lab の PID が無く、どの instance も使っていなければ消す。
+  # SIGKILL、--keep の後に VM を手で消した場合、削除の失敗で残ったもの
+  local net used
+  while IFS=, read -r net used; do
+    [[ $net =~ ^wgftsp([0-9]+)$ ]] || continue
+    suite_alive "${BASH_REMATCH[1]}" && continue
+    [[ $used == 0 ]] || continue
+    info "deleting the split network $net whose lab process is gone"
+    inc network delete "$net" >/dev/null 2>&1 || info "could not delete the network $net"
+  done < <(inc network list -f csv -c n,u 2>/dev/null || true)
+  # lab paired --split のホストの標本 (tcpquality.py hostsample --lab-pid=<PID>):作った lab が無いものを止める。
+  # 標本は lab が消えると次の標本で自分でも止まる。ここでは /proc の引数を 1 つずつ見て、印の付いたものだけを選ぶ
+  local p args lab
+  for p in /proc/[0-9]*; do
+    args=$(tr '\0' '\n' 2>/dev/null <"$p/cmdline") || continue
+    grep -qx hostsample <<<"$args" && grep -q '/tcpquality.py$' <<<"$args" || continue
+    lab=$(sed -n 's/^--lab-pid=\([0-9][0-9]*\)$/\1/p' <<<"$args")
+    [[ -n $lab ]] && ! suite_alive "$lab" || continue
+    info "stopping the host sampler ${p#/proc/} whose lab process $lab is gone"
+    kill "${p#/proc/}" 2>/dev/null || true
+  done
 }
 
 suite_cleanup() {
@@ -451,8 +480,19 @@ suite_make_vm() {
   local name=$1 tmpl=$SUITE_TEMPLATE pin=()
   VM=$name
   [[ -n $SUITE_PIN ]] && pin=(-c "limits.cpu=$SUITE_PIN")
+  # lab paired の PAIRED_HOSTPOLL_*:ゲストが MSR_KVM_POLL_CONTROL を書く。Secure Boot で起動した Debian のカーネルは
+  # lockdown (integrity) で /dev/cpu/*/msr への書き込みを断る (EPERM、2026-11-04 にラボで確認) ので、その時だけ切る
+  [[ -n ${SUITE_NO_SECUREBOOT:-} ]] && pin+=(-c security.secureboot=false)
   if inc snapshot list "$tmpl" -f csv -c n 2>/dev/null | grep -qx "$SNAPSHOT"; then
     inc copy "$tmpl/$SNAPSHOT" "$name" -d "repo,source=$REPO" -c "user.wgft-lab-suite=$$" "${pin[@]}" >/dev/null || return 1
+    # lab paired --split:2 台の VM を繋ぐ専用のネットワークの NIC。Incus は device を名前の順に PCI に並べるので、eth0 の後に
+    # なる名前にし、DHCP の設定が付いた enp5s0 を既定の NIC に残す (中の名前は起動後に MAC で引く)
+    if [[ -n ${SUITE_NIC_NET:-} ]]; then
+      # bridged で付けると tap の送りの待ち行列 (queue.tx.length) を決められる。既定の 1000 では、相手の VM の vhost が
+      # 遅れた時に agent の VM からの packet が tap で落ち、カーネルモードの TCP が再送した (2026-11-04)。
+      # 長すぎると詰まった時の遅れが増えるので 4096 にし、落ちた数は hostsample が数える
+      inc config device add "$name" eth1 nic nictype=bridged parent="$SUITE_NIC_NET" queue.tx.length="${PAIRED_TAP_QLEN:-4096}" >/dev/null || return 1
+    fi
     suite_boot || return 1
     cmd_net up
   else
@@ -685,12 +725,50 @@ cmd_suite() {
 # round ごとに 2 台が同時に lab/tcpquality-cpu.sh <経路> <モード> を SYNC=1 で流し、ホストが実行ごとに
 # 2 台の始まりをそろえる。奇数の round は x が VM a、偶数の round は x が VM b で、2 台の CPU の差を打ち消す。
 # 解析は tcpquality.py cpupaired。設計は docs/design/userspace/wgstack-performance.md の「CPU の比べ方」
+#
+# --split は agent を専用の VM に置く。腕ごとに VM を分けず、agent の VM (home の netns だけ) と相手の VM (client、vps、
+# homerouter、lan) の 1 組を立て、2 つの腕を同じ組で交互に流す。奇数の round は x が先、偶数の round は y が先で、
+# paired.log の vm=a は先に流れた腕、vm=b は後の腕を表す (解析は順の差を vm_a_over_b として打ち消す)。
+# WGFT_LAB_PAIR_CPUS の 1 つ目の集合の先頭 --vcpus 個に agent の VM、2 つ目の集合の先頭 --peer-vcpus 個 (既定 8) に
+# 相手の VM を固定する。2 台は Incus の専用のブリッジ (IP なし) で繋ぎ、agent の VM の NIC が home の eth0、相手の
+# NIC が homerouter の lan0 になる (lab/netns.sh up-split-*)。カーネルモードの WireGuard は暗号の kworker を VM の
+# 全 CPU に配るので、agent の CPU を分けるには VM を分けるしかない。相手の VM の tcpquality.sh は agent の VM の
+# tcpquality.py agentd (incusbr0 の上、token 付き) を通して agent を操作する。Incus は vCPU のスレッドだけを固定し、
+# vhost と qemu のほかのスレッドはホストの全 CPU に浮くので、ホストで tcpquality.py hostsample がそれらの時間と
+# P コアに載った割合を記録し、解析の前に hostwin が実行ごとに足す
 PAIRED_BASE_WT=""
+PAIRED_SPLIT_NET=""
+PAIRED_SAMPLER=""
+PAIRED_AGENT_AT=""
+PAIRED_OUT=""
 paired_cleanup() {
+  [[ -z $PAIRED_SAMPLER ]] || kill "$PAIRED_SAMPLER" 2>/dev/null || true
+  # --cases:中断で終わった case と、まだ流していない case を cases.log に残す
+  if [[ -n ${PAIRED_CASES_LOG:-} ]]; then
+    [[ -z ${PAIRED_CASE_CUR:-} ]] || echo "CASE $PAIRED_CASE_CUR status=interrupted" >>"$PAIRED_CASES_LOG"
+    [[ -z ${PAIRED_CASES_LEFT:-} ]] || sed 's/$/ status=not_run/; s/^/CASE /' <<<"$PAIRED_CASES_LEFT" >>"$PAIRED_CASES_LOG"
+    PAIRED_CASE_CUR="" PAIRED_CASES_LEFT=""
+  fi
+  # --split:VM を消す前に、agent の VM の agent と agentd の log を出力先に写す。agentd の子は incus の agent の
+  # PrivateTmp の /tmp に書くので、incus exec の /tmp からは見えず、agentd に頼んで読む。FAIL の原因を後で追うため
+  if [[ -n $PAIRED_AGENT_AT && -n $PAIRED_OUT && -s $PAIRED_OUT/.agentd-token ]]; then
+    paired_agent_logs "$PAIRED_OUT/agent-vm-logs.txt"
+    rm -f "$PAIRED_OUT/.agentd-token"
+  fi
   suite_cleanup || true
+  if [[ -n $PAIRED_SPLIT_NET && -z ${SUITE_KEEP:-} ]]; then
+    inc network delete "$PAIRED_SPLIT_NET" >/dev/null 2>&1 || info "could not delete the network $PAIRED_SPLIT_NET"
+  fi
   if [[ -n $PAIRED_BASE_WT ]]; then
     git -C "$REPO" worktree remove --force "$PAIRED_BASE_WT" >/dev/null 2>&1 || true
   fi
+}
+
+# paired_agent_logs <file>:agent の VM の agentd と agent の log の末尾を file に写す
+paired_agent_logs() {
+  timeout 20 python3 "$REPO/lab/tcpquality.py" agentx "$PAIRED_AGENT_AT" "$PAIRED_OUT/.agentd-token" -- \
+    sh -c 'for f in /tmp/wgft-agentd.log /tmp/wgft-tq-agent-*.log; do [ -f "$f" ] && { echo "==> $f"; tail -c 262144 "$f"; }; done' \
+    >"$1" 2>&1 || info "could not copy the agent VM's logs"
 }
 
 # paired_build_base <ref> <rust 0|1>:ref の wgft を bin/base/ に、rust が 1 なら Rust の wgft を bin/base/rust/ に作る。
@@ -746,7 +824,7 @@ paired_offset() {
   local i h0 v h1 best="" out=""
   for i in 1 2 3; do
     h0=$(date +%s.%N)
-    v=$(inc exec "$1" -- date +%s.%N) || continue
+    v=$(timeout 30 bash -c "$(declare -f inc); inc exec $(printf %q "$1") -- date +%s.%N") || continue
     h1=$(date +%s.%N)
     out=$(awk -v h0="$h0" -v v="$v" -v h1="$h1" -v best="$best" -v out="$out" \
       'BEGIN { r = h1 - h0; if (best == "" || r < best) printf "%.6f %.4f", r, v - (h0 + h1) / 2; else printf "%s %s", best, out }')
@@ -786,7 +864,7 @@ paired_sync() {
 }
 
 # lab paired の使い方。lab help と引数の誤りの両方がこの 1 つの文字列を出す
-PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--out DIR] [--keep] fast|rate ARM_X ARM_Y"
+PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local] [--placement apart|apart-mt]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y, or with --split: paired --split [options] --cases FILE [--max-wall SECONDS] ARM_X ARM_Y"
 
 # is_uint <値>:1 以上の整数か
 is_uint() { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
@@ -813,6 +891,17 @@ paired_parse_args() {
       --rust-target) WGFT_LAB_RUST_TARGET=${2:?--rust-target TRIPLE}; rtarget_flag=1; shift 2 ;;
       --base-rust-target) PAIRED_BASE_RUST_TARGET=${2:?--base-rust-target TRIPLE}; shift 2 ;;
       --vcpus) vcpus=${2:?--vcpus N}; shift 2 ;;
+      --split) split=1; shift ;;
+      --peer-vcpus) peervcpus=${2:?--peer-vcpus N}; shift 2 ;;
+      --target) target=${2:?--target lan|local}; shift 2 ;;
+      --placement) placement=${2:?--placement apart|apart-mt}; shift 2 ;;
+      --cases) cases=${2:?--cases FILE}; shift 2 ;;
+      --max-wall) maxwall=${2:?--max-wall SECONDS}; shift 2 ;;
+      --delay-ms) delayms=${2:?--delay-ms MS}; shift 2 ;;
+      --delay-rate-mbit) delayrate=${2:?--delay-rate-mbit N}; shift 2 ;;
+      --x-agent-env) xagentenv+=" ${2:?--x-agent-env WGFT_NAME=VALUE}"; shift 2 ;;
+      --y-agent-env) yagentenv+=" ${2:?--y-agent-env WGFT_NAME=VALUE}"; shift 2 ;;
+      --delay-queue-pkts) delayqueue=${2:?--delay-queue-pkts N}; shift 2 ;;
       --out) out=${2:?--out DIR}; shift 2 ;;
       --keep) keep=1; shift ;;
       -*) die "usage: lab $PAIRED_SYNOPSIS" ;;
@@ -827,7 +916,38 @@ paired_validate() {
   (($# == 3)) || die "usage: lab $PAIRED_SYNOPSIS"
   path=$1 spec_x=$2 spec_y=$3
   local s m
-  [[ $path == fast || $path == rate ]] || die "the path is fast or rate; usage: lab $PAIRED_SYNOPSIS"
+  [[ $path == fast || $path == rate || $path == delay ]] || die "the path is fast, rate or delay; usage: lab $PAIRED_SYNOPSIS"
+  [[ $path != delay ]] || { is_uint "$delayms" || die "the delay path wants --delay-ms, a whole number of ms each way"; }
+  [[ -z $delayms || $path == delay ]] || die "--delay-ms goes with the delay path"
+  [[ -z $delayrate && -z $delayqueue || $path == delay ]] || die "--delay-rate-mbit and --delay-queue-pkts go with the delay path"
+  [[ -z $delayrate ]] || require_uint --delay-rate-mbit "$delayrate"
+  local e
+  for e in $xagentenv $yagentenv; do [[ $e =~ ^WGFT_[A-Z0-9_]+=[^[:space:]]*$ ]] || die "--x-agent-env and --y-agent-env want WGFT_NAME=VALUE; got $e"; done
+  [[ -z $delayqueue ]] || require_uint --delay-queue-pkts "$delayqueue"
+  [[ -z $peervcpus || -n $split ]] || die "--peer-vcpus goes with --split"
+  [[ -z $target || ( -n $split && ( $target == lan || $target == local ) ) ]] || die "--target wants lan or local, with --split"
+  [[ -z $placement || ( -n $split && ( $placement == apart || $placement == apart-mt ) ) ]] || die "--placement wants apart or apart-mt, with --split"
+  # apart-mt は data plane のスレッドを CPU 1、暗号の worker を CPU 2 と 3 に 1 つずつ置く。A+ の agent はプロセスの使える
+  # CPU が 2 つ以下だと worker を作らない (taskset 1-2 の 3 vCPU では 0)。4 vCPU で worker が 2 つ、CPU 2 と 3 に載る
+  [[ $placement != apart-mt ]] || ((vcpus >= 4)) || die "--placement apart-mt puts the data-plane thread on CPU 1 and the crypto workers on CPUs 2 and 3, and the agent starts workers only with more than two CPUs to run on, so it wants --vcpus 4 or more"
+  # --placement apart は userspace の agent のプロセス全体を 1 つの CPU に置く。data plane が 1 スレッドの Rust の agent と、
+  # 置くプロセスの無いカーネルモードだけに使える (gVisor の Go の agent や、暗号の worker を足した build には別の置き方が要る)
+  local m
+  for m in "${spec_x#base:}" "${spec_y#base:}"; do
+    [[ -z $placement || $m == rust || $m == kernel ]] || {
+      [[ $placement == apart ]] && die "--placement apart pins the agent process to one CPU, which fits only an agent with one data-plane thread; arm $m is not rust or kernel"
+      die "--placement apart-mt places the Rust agent's data-plane thread and crypto workers by their names; arm $m is not rust or kernel"
+    }
+  done
+  local hp
+  for hp in "${PAIRED_HOSTPOLL_X:-}" "${PAIRED_HOSTPOLL_Y:-}"; do
+    [[ -z $hp || ( -n $split && ( $hp == on || $hp == off ) ) ]] || die "PAIRED_HOSTPOLL_X and PAIRED_HOSTPOLL_Y want on or off, with --split"
+  done
+  [[ ${PAIRED_HOSTPOLL_VMS:-both} =~ ^(agent|peer|both)$ ]] || die "PAIRED_HOSTPOLL_VMS wants agent, peer or both"
+  [[ -z ${PAIRED_HOSTPOLL_X:-}${PAIRED_HOSTPOLL_Y:-} ]] || SUITE_NO_SECUREBOOT=1
+  [[ -z ${PAIRED_KVM_SAMPLES:-} || -n $split ]] || die "PAIRED_KVM_SAMPLES goes with --split"
+  [[ $target != local || ( $tool == iperf3 && -z $rmemmax ) ]] || die "--target local wants --tool iperf3 and no --kernel-rmem-max"
+  [[ -z $peervcpus ]] || require_uint --peer-vcpus "$peervcpus"
   { is_uint "$rounds" && ((rounds % 2 == 0)); } || die "--rounds wants an even number, so that each arm runs as often in each VM"
   require_uint --runs "$runs"
   ((rounds / 2 * runs >= 2)) || die "--rounds $rounds with --runs $runs plans $((rounds / 2 * runs)) pair per side; the ratio needs at least 2 on each side, so raise --rounds or --runs"
@@ -842,7 +962,9 @@ paired_validate() {
   [[ -z $agentgso || $agentgso == off || ( $agentgso == on && $path == fast ) ]] || die "--agent-gso wants off, or on with the fast path"
   [[ -z $rmemmax ]] || { is_uint "$rmemmax" && ((rmemmax >= 4096)); } || die "--kernel-rmem-max wants a whole number of bytes of 4096 or more"
   [[ -z $rmemmax || ${spec_x#base:} == kernel || ${spec_y#base:} == kernel ]] || die "--kernel-rmem-max sets the receiver of a kernel arm; neither arm is kernel"
-  [[ $spec_x != "$spec_y" ]] || die "the two arms are the same: $spec_x"
+  # 同じ腕は、--split でホストの halt polling だけを腕の間で替える比べ (PAIRED_HOSTPOLL_X と _Y が違う) に限る
+  [[ $spec_x != "$spec_y" || ( -n $split && ${PAIRED_HOSTPOLL_X:-on} != "${PAIRED_HOSTPOLL_Y:-on}" ) ]] \
+    || die "the two arms are the same: $spec_x; with --split, the same arm twice needs PAIRED_HOSTPOLL_X and PAIRED_HOSTPOLL_Y that differ"
   uses_base=0 rust=0
   for s in "$spec_x" "$spec_y"; do
     m=${s#base:}
@@ -874,20 +996,30 @@ paired_plan_pins() {
   if [[ -n ${WGFT_LAB_PAIR_CPUS:-} ]]; then
     read -ra sets <<<"$WGFT_LAB_PAIR_CPUS"
     ((${#sets[@]} == 2)) || die "WGFT_LAB_PAIR_CPUS='$WGFT_LAB_PAIR_CPUS' wants two CPU sets, one for each VM, like '16-23 8-15'"
+    local want=("$vcpus" "$vcpus") k=0
+    # --split:1 つ目の集合に agent の VM、2 つ目に相手の VM
+    [[ -z $split ]] || want=("$vcpus" "${peervcpus:-8}")
     for s in "${sets[@]}"; do
       CPUS=$s
       cpus_expand
-      ((${#CPU_LIST[@]} >= vcpus)) || die "the CPU set $s of WGFT_LAB_PAIR_CPUS has ${#CPU_LIST[@]} CPUs, fewer than --vcpus $vcpus"
-      pins+=("$(cpus_join "${CPU_LIST[@]:0:vcpus}")")
-      used+=" ${CPU_LIST[*]:0:vcpus}"
+      ((${#CPU_LIST[@]} >= want[k])) || die "the CPU set $s of WGFT_LAB_PAIR_CPUS has ${#CPU_LIST[@]} CPUs, fewer than the ${want[k]} vCPUs of its VM"
+      pins+=("$(cpus_join "${CPU_LIST[@]:0:want[k]}")")
+      used+=" ${CPU_LIST[*]:0:want[k]}"
+      k=$((k + 1))
     done
     CPUS=""
     dup=$(tr ' ' '\n' <<<"$used" | sed '/^$/d' | sort | uniq -d | head -1)
     [[ -z $dup ]] || die "the two VMs would share CPU $dup; give WGFT_LAB_PAIR_CPUS two sets that do not overlap"
   else
     pins=("$vcpus" "$vcpus")
+    [[ -z $split ]] || pins=("$vcpus" "${peervcpus:-8}")
     info "note: WGFT_LAB_PAIR_CPUS is unset, so the two VMs are not pinned"
   fi
+}
+
+# paired_plan_line [<追加の key=value>]:paired.log の先頭の PLAN の行。--cases では case ごとに case_index と cases が付く
+paired_plan_line() {
+  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${delayrate:+ delay_rate_mbit=$delayrate}${delayqueue:+ delay_queue_pkts=$delayqueue}${xagentenv:+ x_agent_env=${xagentenv// /,}}${yagentenv:+ y_agent_env=${yagentenv// /,}}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}${placement:+ placement=$placement}${1:+ $1}"
 }
 
 # paired_provision:出力先を作り、build して VM を 2 台立て、header.txt を書く。t0 と names、vms を決める
@@ -897,7 +1029,7 @@ paired_provision() {
   out=${out:-${XDG_CACHE_HOME:-$HOME/.cache}/wgft-lab/paired-$(date +%Y%m%d-%H%M%S)}
   mkdir -p "$out"
   out=$(cd "$out" && pwd)
-  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus" > "$out/paired.log"
+  [[ -n $cases ]] || paired_plan_line >"$out/paired.log"
   SUITE_KEEP=$keep
   SUITE_TEMPLATE=${WGFT_LAB_TEMPLATE:-$VM}
   PAIR_LEAD_S=${PAIR_LEAD_S:-1}
@@ -913,6 +1045,27 @@ paired_provision() {
   if [[ -n $base ]]; then paired_build_base "$base" "$rust"; else rm -rf "$REPO/bin/base"; fi
   names=("wgft-paired-$$-a" "wgft-paired-$$-b")
   vms=(a b)
+  if [[ -n $split ]]; then
+    names=("wgft-split-$$-agent" "wgft-split-$$-peer")
+    vms=(agent peer)
+    # 同じ名前のネットワークは、前の実行が残したもの (PID の使い回し) で VM が繋がっていることがあるので使わない。
+    # 名前を PAIRED_SPLIT_NET に入れる前に確かめ、片付けの trap が他人のネットワークを消さないようにする
+    local net=wgftsp$$
+    ! inc network show "$net" >/dev/null 2>&1 || die "the network $net exists already; delete it once no VM uses it"
+    PAIRED_SPLIT_NET=$net
+    # 作成が 60 秒戻らないことが、前の組がネットワークを消した直後に 2 度あった (2026-11-04、手で流すと 0.05 秒)。
+    # 60 秒で切り、その間に作られていればそれを使い、無ければ 10 秒置いて 4 回まで流し直す。
+    # timeout は関数を呼べないので、inc (sg incus-admin の経路を含む) を子の bash に渡す
+    local try
+    for try in 1 2 3 4; do
+      timeout 60 bash -c "$(declare -f inc); inc network create $net ipv4.address=none ipv6.address=none" >/dev/null 2>&1 && break
+      inc network show "$PAIRED_SPLIT_NET" >/dev/null 2>&1 && break
+      ((try < 4)) || die "cannot create the network $PAIRED_SPLIT_NET"
+      info "creating the network $PAIRED_SPLIT_NET did not finish in 60 s, try $try; trying again"
+      sleep 10
+    done
+    SUITE_NIC_NET=$PAIRED_SPLIT_NET
+  fi
   SUITE_VMS=("${names[@]}")
   # 2 台を少しずらして起こす。同時に起こした 2 台の片方が上がらないことがあった
   for i in 0 1; do
@@ -924,18 +1077,223 @@ paired_provision() {
     wait "${mk[i]}" || die "VM ${names[i]} did not come up in two tries; see $out/vm-${vms[i]}.log"
   done
   kern=$(VM=${names[0]}; in_vm uname -r)
+  [[ -z $split ]] || paired_split_setup
   git -C "$REPO" diff --quiet HEAD 2>/dev/null || dirty=-dirty
+  PAIRED_KERN=$kern PAIRED_DIRTY=$dirty PAIRED_READY_S=$((SECONDS - t0))
+  if [[ -n $cases ]]; then
+    echo "lab paired: ${#case_names[@]} cases in one VM pair; VMs ready after $PAIRED_READY_S s" | tee "$out/setup.txt"
+  else
+    paired_header | tee "$out/header.txt"
+  fi
+}
+
+# paired_header:header.txt の行。--cases では case ごとに書き、VM の組を使い回したことを足す
+paired_header() {
+  local kern=$PAIRED_KERN dirty=$PAIRED_DIRTY
   {
     echo "lab paired: path $path, direction $direction, x=$spec_x y=$spec_y, $rounds rounds of $runs runs, tool ${tool:-tcpquality}, ${streams:-1} stream(s)${bulkmbit:+, capped at $bulkmbit Mbit/s per stream}${agentgso:+, agent UDP GSO $agentgso}${rmemmax:+, kernel receiver tcp_rmem max $rmemmax}${udpping:+, UDP round trips}"
     echo "lab paired: head $(git -C "$REPO" rev-parse HEAD)$dirty${base:+, base $(git -C "$REPO" rev-parse "$base^{commit}") ($base)}${WGFT_LAB_RUST_TARGET:+, head Rust target $WGFT_LAB_RUST_TARGET}${PAIRED_BASE_RUST_TARGET:+, base Rust target $PAIRED_BASE_RUST_TARGET}"
-    echo "lab paired: VM a ${names[0]} limits.cpu=${pins[0]}, VM b ${names[1]} limits.cpu=${pins[1]}, kernel $kern, template $SUITE_TEMPLATE"
-    echo "lab paired: VMs ready after $((SECONDS - t0)) s"
-  } | tee "$out/header.txt"
+    if [[ -n $split ]]; then
+      echo "lab paired: split: forwarding target ${target:-lan} (lan: a host on the LAN in the peer VM; local: on the agent's machine, over loopback)"
+      echo "lab paired: split: agent VM ${names[0]} limits.cpu=${pins[0]} qemu $SPLIT_QEMU_AGENT, peer VM ${names[1]} limits.cpu=${pins[1]} qemu $SPLIT_QEMU_PEER, network $PAIRED_SPLIT_NET (taps$SPLIT_TAPS, queue ${PAIRED_TAP_QLEN:-4096}, NIC queues $SPLIT_PEER_Q), agentd $SPLIT_AGENT_AT, kernel $kern, template $SUITE_TEMPLATE"
+      [[ -z ${PAIRED_HOSTPOLL_X:-}${PAIRED_HOSTPOLL_Y:-} ]] || echo "lab paired: split: host halt polling of the ${PAIRED_HOSTPOLL_VMS:-both} VM(s), set by the guests: x ${PAIRED_HOSTPOLL_X:-on}, y ${PAIRED_HOSTPOLL_Y:-on} (hostpoll= in paired.log)"
+      [[ -z ${PAIRED_KVM_SAMPLES:-} ]] || echo "lab paired: split: KVM statistics from $PAIRED_KVM_SAMPLES (tcpquality.py kvmsample, started by root)"
+      [[ -z $placement ]] || echo "lab paired: split: placement $placement: the data NIC's interrupts on CPU 0 of the agent VM, a userspace-mode agent on CPUs $SPLIT_AGENT_CPUS${SPLIT_AGENT_DP_CPUS:+, its data-plane thread on CPU $SPLIT_AGENT_DP_CPUS and its crypto workers one each on CPUs $SPLIT_AGENT_WORKER_CPUS}; the kernel mode has no agent process to place; peer VM: NIC interrupts on CPU 0, RPS on CPUs ${SPLIT_PEER_RPS:-unchanged}"
+      echo "lab paired: split: the arms take turns in the same two VMs; vm=a in paired.log is the arm that ran first in the round. vhost and qemu's other threads are not pinned (host samples in host-samples.txt)"
+    else
+      echo "lab paired: VM a ${names[0]} limits.cpu=${pins[0]}, VM b ${names[1]} limits.cpu=${pins[1]}, kernel $kern, template $SUITE_TEMPLATE"
+    fi
+    echo "lab paired: VMs ready after $PAIRED_READY_S s"
+  }
+}
+
+# paired_split_setup:--split の 2 台の netns を組み、agent の VM に agentd を立て、ホストの標本を始める
+paired_split_setup() {
+  local i mac nic token ip pid
+  token=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  for i in 0 1; do
+    mac=$(inc config get "${names[i]}" volatile.eth1.hwaddr)
+    [[ -n $mac ]] || die "VM ${names[i]} has no data NIC"
+    nic=$(VM=${names[i]}; in_vm sh -c "ip -o link | awk -v m=$mac 'tolower(\$0) ~ m { sub(\":\", \"\", \$2); print \$2; exit }'")
+    [[ -n $nic ]] || die "VM ${names[i]}: no interface with MAC $mac"
+    (VM=${names[i]}; in_vm "$SHARE/lab/netns.sh" "$([[ $i == 0 ]] && echo up-split-agent || echo up-split-peer)" "$nic") >>"$out/vm-${vms[i]}.log" 2>&1 \
+      || die "VM ${names[i]}: lab/netns.sh up-split failed; see $out/vm-${vms[i]}.log"
+    (VM=${names[i]}; in_vm sh -c "umask 077; echo $token > /run/wgft-agentd.token")
+  done
+  # agentd は incusbr0 の上の agent の VM のアドレスで待つ。data の NIC は netns に移したので、root の netns の全体の
+  # IPv4 アドレスは incusbr0 のものだけ
+  ip=$(VM=${names[0]}; in_vm sh -c "ip -4 -o addr show scope global | awk '{ split(\$4, a, \"/\"); print a[1]; exit }'")
+  [[ -n $ip ]] || die "VM ${names[0]} has no IPv4 address for agentd"
+  (VM=${names[0]}; in_vm sh -c "setsid nohup python3 $SHARE/lab/tcpquality.py agentd $ip 7390 /run/wgft-agentd.token > /tmp/wgft-agentd.log 2>&1 < /dev/null &")
+  SPLIT_AGENT_AT=$ip:7390
+  # 後片付けで agent の VM の log を読むため、agentd の宛先と token を全体の変数と出力先 (0600) に残す
+  PAIRED_AGENT_AT=$SPLIT_AGENT_AT PAIRED_OUT=$out
+  (umask 077; echo "$token" > "$out/.agentd-token")
+  local tries
+  for tries in $(seq 1 50); do
+    (VM=${names[1]}; in_vm python3 "$SHARE/lab/tcpquality.py" agentx "$SPLIT_AGENT_AT" /run/wgft-agentd.token -- true) >/dev/null 2>&1 && break
+    sleep 0.2
+  done
+  (VM=${names[1]}; in_vm python3 "$SHARE/lab/tcpquality.py" agentx "$SPLIT_AGENT_AT" /run/wgft-agentd.token -- true) \
+    || die "the peer VM cannot reach agentd at $SPLIT_AGENT_AT"
+  (VM=${names[1]}; in_vm ip netns exec lan ping -c1 -W2 192.168.50.2) >/dev/null || die "the LAN host in the peer VM cannot reach home in the agent VM"
+  # 2 台の NIC の queue を 1 組にする (PAIRED_AGENT_QUEUES、PAIRED_PEER_QUEUES で変えられる)。Incus の既定は vCPU の
+  # 数の queue で、ホストの tap は flow の受信の queue を「ゲストがその flow を最後に送った queue」に振る。1 つの flow の
+  # 受信が vCPU の間を行き来して順が崩れ、カーネルモードの TCP が SACK の reorder で再送した (2026-11-04: agent の
+  # VM 2 vCPU、client の out-of-order 2500 から 2.8 万件/実行)。実機の NIC の RSS は flow を 1 つの queue に保つので、
+  # queue は 1 組にして 1 つの flow が 1 つの queue に入る形で測る
+  local q
+  for i in 0 1; do
+    if ((i)); then q=${PAIRED_PEER_QUEUES:-1}; else q=${PAIRED_AGENT_QUEUES:-1}; fi
+    (VM=${names[i]}; in_vm ip netns exec "$([[ $i == 0 ]] && echo home || echo homerouter)" python3 "$SHARE/lab/tcpquality.py" channels "$([[ $i == 0 ]] && echo eth0 || echo lan0)" "$q") >>"$out/vm-${vms[i]}.log" 2>&1 \
+      || die "cannot set the NIC of ${names[i]} to $q queue(s)"
+  done
+  SPLIT_PEER_Q="agent ${PAIRED_AGENT_QUEUES:-1}, peer ${PAIRED_PEER_QUEUES:-1}"
+  # --placement apart:1 つの queue の割り込みと受信の softirq は 1 つの vCPU で走る。agent の data plane の 1 スレッドが
+  # その vCPU に載るかをスケジューラが実行ごとに決め、載った実行だけが遅く byte あたりの CPU が多かった (2026-11-04、
+  # 4 vCPU の受ける向きの A/A で 16 実行すべて)。data の NIC の全 vector を CPU 0 に固定し、userspace の agent を
+  # CPU 1 だけに置いて、同居しない形にそろえる。CPU 1 から後の全部に置くと、8 vCPU でスレッドが 2 つの L2 の塊の間を
+  # 移り、どちらの塊に載るかでも速さが数 % 揺れた。1 vCPU では agent も CPU 0。NIC の固定は VM の設定なので両方の腕に
+  # 効き、カーネルモードには置くプロセスが無い (tqagent.sh は kernel の腕を固定しない)
+  if [[ -n $placement ]]; then
+    # apart-mt:暗号の worker を持つ build 用。プロセスを CPU 1 から後に置き、agent が上がった後に data plane のスレッドを
+    # CPU 1、worker (wgft-crypto) を CPU 2 と 3 に 1 つずつ置く (tcpquality.sh が agentd を通して行い、効かなければ失敗にする)
+    (VM=${names[0]}; in_vm ip netns exec home python3 "$SHARE/lab/tcpquality.py" nicirq eth0 0) >>"$out/vm-${vms[0]}.log" 2>&1 \
+      || die "cannot put the data NIC's interrupts of ${names[0]} on CPU 0; see $out/vm-${vms[0]}.log"
+    SPLIT_AGENT_CPUS=0
+    ((vcpus == 1)) || SPLIT_AGENT_CPUS=1
+    if [[ $placement == apart-mt ]]; then
+      # worker は 1 つずつ CPU 2、3 に置く。lane の先頭の CPU から固定した vCPU 0 から 3 は 1 つの L2 の塊にあり、
+      # 8 vCPU でも worker が data plane のスレッドと同じ塊に留まる
+      SPLIT_AGENT_CPUS=1-$((vcpus - 1)) SPLIT_AGENT_DP_CPUS=1 SPLIT_AGENT_WORKER_CPUS=2,3
+    fi
+    # 相手の VM:1 つの flow の受信の softirq は RPS が flow ごとに選ぶ 1 つの vCPU で走る。その vCPU が NIC の割り込みの
+    # vCPU と重なった実行が詰まったので、NIC の全 vector を CPU 0 に固定し、全 veth の RPS から CPU 0 を外す
+    local pv=${peervcpus:-8}
+    if ((pv > 1)); then
+      (VM=${names[1]}; in_vm ip netns exec homerouter python3 "$SHARE/lab/tcpquality.py" nicirq lan0 0) >>"$out/vm-${vms[1]}.log" 2>&1 \
+        || die "cannot put the data NIC's interrupts of ${names[1]} on CPU 0; see $out/vm-${vms[1]}.log"
+      (VM=${names[1]}; in_vm "$SHARE/lab/netns.sh" split-peer-rps "$(printf '%x' $(( (1 << pv) - 2 )))") >>"$out/vm-${vms[1]}.log" 2>&1 \
+        || die "cannot narrow RPS in ${names[1]}; see $out/vm-${vms[1]}.log"
+      SPLIT_PEER_RPS="1-$((pv - 1))"
+    fi
+  fi
+  # 2 台の idle の仕方と data の NIC の形を 1 度だけ残す (ホストでの時間の内訳を読むときに要る)
+  for i in 0 1; do
+    { echo "VM ${vms[i]} ${names[i]}"
+      (VM=${names[i]}; in_vm ip netns exec "$([[ $i == 0 ]] && echo home || echo homerouter)" python3 "$SHARE/lab/tcpquality.py" guestinfo "$([[ $i == 0 ]] && echo eth0 || echo lan0)") 2>&1
+    } >>"$out/guestinfo.txt"
+  done
+  if [[ -z $cases && $target == local ]]; then
+    # --target local:転送先を agent のマシンに置く。LAN のホストのアドレスを agent の VM の home の lo に移し、
+    # 相手の VM の lan の netns からは外す。agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に入る
+    (VM=${names[1]}; in_vm ip -n lan addr flush dev eth0) || die "cannot remove the LAN host's address in the peer VM"
+    (VM=${names[0]}; in_vm ip -n home addr add 192.168.50.3/32 dev lo) || die "cannot put the LAN host's address on home's lo"
+  fi
+  for i in 0 1; do
+    pid=$(pgrep -f "qemu-system.*${names[i]}" | head -1)
+    [[ -n $pid ]] || die "no qemu process for ${names[i]}"
+    if ((i)); then SPLIT_QEMU_PEER=$pid; else SPLIT_QEMU_AGENT=$pid; fi
+  done
+  SPLIT_TAPS=""
+  for i in 0 1; do SPLIT_TAPS+=" tap:${vms[i]}=$(inc config get "${names[i]}" volatile.eth1.host_name)"; done
+  if [[ -n $cases ]]; then
+    # --cases:case の間に戻す値 (namespace ごとの TCP のバッファの sysctl と VM の tcp_mem) を記録する。標本は case ごとに始める
+    for i in 0 1; do
+      (VM=${names[i]}; in_vm bash "$SHARE/lab/splitcase.sh" save) >>"$out/vm-${vms[i]}.log" 2>&1 \
+        || die "cannot record the state of ${names[i]} for --cases; see $out/vm-${vms[i]}.log"
+    done
+  else
+    paired_start_sampler
+  fi
+}
+
+# paired_start_sampler:ホストの標本を $out/host-samples.txt に始める
+paired_start_sampler() {
+  # shellcheck disable=SC2086 # the two tap specs are words on purpose
+  # --lab-pid:この lab が SIGKILL で消えても、標本は自分で止まる (suite-gc もこの印で探す)
+  python3 "$REPO/lab/tcpquality.py" hostsample "$out/host-samples.txt" 0.5 "agent=$SPLIT_QEMU_AGENT" "peer=$SPLIT_QEMU_PEER" $SPLIT_TAPS "--lab-pid=$$" &
+  PAIRED_SAMPLER=$!
+}
+
+# paired_run_split_round <r>:--split の round r。2 つの腕を相手の VM で順に流す。奇数の round は x が先
+paired_run_split_round() {
+  local r=$1 k spec mode log off cur_arm
+  local arms=(x y) env=()
+  ((r % 2)) || arms=(y x)
+  off=$(paired_offset "${names[1]}")
+  for k in 0 1; do
+    spec=${spec_of[${arms[k]}]}
+    mode=${spec#base:}
+    paired_hostpoll "${arms[k]}"
+    env=(RUNS="$runs" DIRECTION="$direction" AGENT_AT="$SPLIT_AGENT_AT")
+    [[ $target != local ]] || env+=(TARGET_LOCAL=1)
+    [[ -z $SPLIT_AGENT_CPUS ]] || env+=(AGENT_CPUS="$SPLIT_AGENT_CPUS")
+    [[ -z $SPLIT_AGENT_DP_CPUS ]] || env+=(AGENT_DP_CPUS="$SPLIT_AGENT_DP_CPUS" AGENT_WORKER_CPUS="$SPLIT_AGENT_WORKER_CPUS")
+    cur_arm=${arms[k]}
+    paired_round_env
+    log=$out/round-$r-${arms[k]}.log
+    # 後ろで流して wait で待つ。前で流すと、TERM の trap が arm の終わり (最長 run_timeout) まで待たされる
+    (VM=${names[1]}; suite_timeout "$run_timeout" in_vm env "${env[@]}" bash "$SHARE/lab/tcpquality-cpu.sh" "$path" "$mode") >"$log" 2>&1 &
+    local arm_rc=0
+    wait $! || arm_rc=$?
+    ((arm_rc == 0)) || rc=1
+    # --cases:時間切れ (timeout の 124、-k の 137) か agentd に届かなかった arm の後は、VM の組を確かめ直す
+    if [[ -n $cases ]] && { ((arm_rc == 124 || arm_rc == 137)) || grep -q '^agentx: ' "$log"; }; then
+      PAIRED_CASE_SUSPECT=1
+    fi
+    if grep -q '^FAIL' "$log"; then
+      grep '^FAIL' "$log" | sed "s/^/round $r arm ${arms[k]}: /"
+      fails=1
+    fi
+    { grep '^RESULT ' "$log" || true; } \
+      | sed "s/^RESULT /PAIRED round=$r vm=${vms_order[k]} arm=${arms[k]} name=$spec clock_offset_s=$off${SPLIT_HOSTPOLL:+ hostpoll=$SPLIT_HOSTPOLL} /" \
+      | awk -v o="$off" '{ for (i = 1; i <= NF; i++) if ($i ~ /^t_(start|end)=/) { split($i, kv, "="); $i = sprintf("%s=%.3f", kv[1], kv[2] - o) } print }' >>"$out/paired.log"
+  done
+  echo "lab paired: round $r of $rounds done, ${arms[0]} first, $((SECONDS - t0)) s"
+}
+
+# paired_hostpoll <arm>:PAIRED_HOSTPOLL_X、PAIRED_HOSTPOLL_Y (on か off、片方だけなら他方は on) があれば、その腕の前に
+# PAIRED_HOSTPOLL_VMS (agent、peer、both、既定 both) の VM のホストの halt polling を入れるか切る。ゲストの root が
+# MSR_KVM_POLL_CONTROL を書くので、ホストの設定は変わらず、VM を消せば元に戻る。腕の行に hostpoll= を付ける
+paired_hostpoll() {
+  local want i vm
+  SPLIT_HOSTPOLL=""
+  [[ -n ${PAIRED_HOSTPOLL_X:-}${PAIRED_HOSTPOLL_Y:-} ]] || return 0
+  # 片方だけ指定したときは、もう片方の腕を on に戻す (前の腕の設定を引き継がない)
+  if [[ $1 == x ]]; then want=${PAIRED_HOSTPOLL_X:-on}; else want=${PAIRED_HOSTPOLL_Y:-on}; fi
+  for i in 0 1; do
+    vm=$([[ $i == 0 ]] && echo agent || echo peer)
+    [[ ${PAIRED_HOSTPOLL_VMS:-both} == both || ${PAIRED_HOSTPOLL_VMS:-both} == "$vm" ]] || continue
+    (VM=${names[i]}; suite_timeout 60 in_vm sh -c "modprobe msr && python3 $SHARE/lab/tcpquality.py pollctl $want") >>"$out/vm-${vms[i]}.log" 2>&1 \
+      || die "cannot turn the host's halt polling $want for the $vm VM; see $out/vm-${vms[i]}.log"
+  done
+  SPLIT_HOSTPOLL="$want:${PAIRED_HOSTPOLL_VMS:-both}"
+}
+
+# paired_round_env:spec と mode の腕の tcpquality.sh の環境を env に足す (2 つの round の流し方で共通)
+paired_round_env() {
+  [[ -z $bytes ]] || env+=(BYTES="$bytes")
+  [[ -z $tool ]] || env+=(TOOL="$tool")
+  [[ -z $streams ]] || env+=(STREAMS="$streams")
+  [[ -z $udpping ]] || env+=(UDPPING=1)
+  [[ -z $bulkmbit ]] || env+=(IPERF_MBIT="$bulkmbit")
+  [[ -z $agentgso ]] || env+=(AGENT_GSO="$agentgso")
+  [[ -z $rmemmax || $mode != kernel ]] || env+=(KERNEL_RMEM_MAX="$rmemmax")
+  [[ $spec != base:* ]] || env+=(WGFT_BIN_DIR=/usr/local/lib/wgft-base)
+  # 遅れのある経路:netem の待ち行列は tcpquality.sh が遅れから決め、カーネルの TCP の端のバッファは 64 MiB まで許す
+  [[ $path != delay ]] || env+=(DELAY_MS="$delayms" TCP_BUF_MAX="${PAIRED_TCP_BUF_MAX:-67108864}")
+  [[ -z $delayrate ]] || env+=(DELAY_RATE_MBIT="$delayrate")
+  # --x-agent-env / --y-agent-env: extra agent environment for one arm (an experimental opt-in setting)
+  local extra
+  if [[ $cur_arm == x ]]; then extra=$xagentenv; else extra=$yagentenv; fi
+  [[ -z ${extra// /} ]] || env+=(AGENT_EXTRA_ENV="${extra# }")
+  [[ -z $delayqueue ]] || env+=(DELAY_QUEUE_PKTS="$delayqueue")
 }
 
 # paired_run_round <r>:round r を 2 台で同時に流し、結果の行を paired.log に足す。rc と fails と prev_offs を更新する
 paired_run_round() {
-  local r=$1 side spec mode
+  local r=$1 side spec mode cur_arm
   local arms=(x y) logs=() pids=() modes=() env=() offs=()
   ((r % 2)) || arms=(y x)
   for side in 0 1; do
@@ -950,14 +1308,8 @@ paired_run_round() {
     spec=${spec_of[${arms[side]}]}
     mode=${spec#base:}
     env=(SYNC=1 RUNS="$runs" DIRECTION="$direction")
-    [[ -z $bytes ]] || env+=(BYTES="$bytes")
-    [[ -z $tool ]] || env+=(TOOL="$tool")
-    [[ -z $streams ]] || env+=(STREAMS="$streams")
-    [[ -z $udpping ]] || env+=(UDPPING=1)
-    [[ -z $bulkmbit ]] || env+=(IPERF_MBIT="$bulkmbit")
-    [[ -z $agentgso ]] || env+=(AGENT_GSO="$agentgso")
-    [[ -z $rmemmax || $mode != kernel ]] || env+=(KERNEL_RMEM_MAX="$rmemmax")
-    [[ $spec != base:* ]] || env+=(WGFT_BIN_DIR=/usr/local/lib/wgft-base)
+    cur_arm=${arms[side]}
+    paired_round_env
     logs+=("$out/round-$r-${vms[side]}.log")
     modes+=("$mode")
     (VM=${names[side]}; suite_timeout "$run_timeout" in_vm env "${env[@]}" bash "$SHARE/lab/tcpquality-cpu.sh" "$path" "$mode") >"${logs[side]}" 2>&1 &
@@ -981,32 +1333,240 @@ paired_run_round() {
   echo "lab paired: round $r of $rounds done, x in VM $([[ ${arms[0]} == x ]] && echo a || echo b), $((SECONDS - t0)) s"
 }
 
+# paired_run_timeout:1 つの round の上限 run_timeout。起動と後片付けに 300 秒、実行ごとに転送の時間 (fast は 100 Mbit/s、
+# rate は経路の 20 Mbit/s で見積もる) と 60 秒の余裕。既定の fast は約 740 秒、rate は約 520 秒
+paired_run_timeout() {
+  run_timeout=$(awk -v b="${bytes:-$([[ $path == rate ]] && echo 33554432 || echo 1073741824)}" -v r="$runs" \
+    -v bps="$([[ $path == rate ]] && echo 20000000 || echo 100000000)" 'BEGIN { printf "%d", 300 + r * (b * 8 / bps + 60) }')
+}
+
 # paired_report:paired.log を解析して result.txt を作り、表示する
 paired_report() {
+  if [[ -n $PAIRED_SAMPLER ]]; then
+    kill "$PAIRED_SAMPLER" 2>/dev/null || true
+    PAIRED_SAMPLER=""
+    python3 "$REPO/lab/tcpquality.py" hostwin "$out/host-samples.txt" "$out/paired.log" "${PAIRED_KVM_SAMPLES:-}" || rc=1
+  fi
   python3 "$REPO/lab/tcpquality.py" cpupaired "$out/paired.log" >"$out/result.txt" || rc=1
   if [[ -n $udpping ]]; then
     python3 "$REPO/lab/tcpquality.py" latpaired "$out/paired.log" >>"$out/result.txt" || rc=1
   fi
   cat "$out/result.txt"
   ((!fails)) || rc=1
-  echo "lab paired: wall time $((SECONDS - t0)) s before deleting the VMs; logs in $out"
+  if [[ -n $cases ]]; then
+    echo "lab paired: case wall time $((SECONDS - t_case)) s; logs in $out"
+  else
+    echo "lab paired: wall time $((SECONDS - t0)) s before deleting the VMs; logs in $out"
+  fi
+}
+
+# ---- lab paired --split --cases FILE:1 組の VM で複数の case を順に流す ----
+# split の 1 case のうち測るのは約 3 分で、残りの約 2.5 分は VM 2 台の作成、起動、build の導入と削除だった。--cases は
+# その固定の費用を case の数で割る。FILE の 1 行が 1 case で、`<名前> <経路> [case ごとのフラグ...]` と書く (# から後と
+# 空行は読まない)。case ごとに変えられるのは VM の組を作り直さずに済むもの (PAIRED_CASE_FLAGS) だけで、VM の形を決める
+# もの (--vcpus、--peer-vcpus、--placement、--base、腕、--x-agent-env など) はコマンド行で全 case に共通に与える。
+# コマンド行の case ごとのフラグは全 case の既定になる。case ごとの出力は --out/<名前>/ に今と同じ形 (PLAN の行のある
+# paired.log、header.txt、result.txt、host-samples.txt、round ごとのログ) で置き、PLAN の行に case_index と cases、
+# header.txt に使い回しの行を足す。case の前に両方の VM を splitcase.sh で戻し (残ったプロセス、netem、TCP の
+# バッファの sysctl)、--target の置き場所を合わせ、agentd と LAN の疎通を確かめる。失敗した case は次の case を
+# 止めず、VM の組が戻らないときだけ残りを流さない
+PAIRED_CASE_FLAGS="--direction --bytes --tool --streams --udp-ping --bulk-mbit --agent-gso --kernel-rmem-max --delay-ms --delay-rate-mbit --delay-queue-pkts --target --rounds --runs"
+PAIRED_CASE_VARS="direction bytes tool streams udpping bulkmbit agentgso rmemmax delayms delayrate delayqueue target rounds runs"
+
+# paired_cases_read:FILE を読み、case_names、case_paths、case_flags に入れる
+paired_cases_read() {
+  local line ln=0 words=() n seen=" "
+  [[ -f $cases && -r $cases ]] || die "--cases $cases is not a readable file"
+  while IFS= read -r line || [[ -n $line ]]; do
+    ln=$((ln + 1))
+    line=${line%%#*}
+    read -ra words <<<"$line"
+    ((${#words[@]})) || continue
+    ((${#words[@]} >= 2)) || die "--cases $cases line $ln: want <name> <path> [flags...]"
+    n=${words[0]}
+    # 点を許さないので、--out の直下のファイル (setup.txt、cases.log、vm-*.log、guestinfo.txt) と名前がぶつからない
+    [[ $n =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die "--cases $cases line $ln: the name $n wants letters, digits, dash or underscore only"
+    [[ $seen != *" $n "* ]] || die "--cases $cases line $ln: the name $n is used twice"
+    seen+="$n "
+    case_names+=("$n") case_paths+=("${words[1]}") case_flags+=("${words[*]:2}")
+  done <"$cases"
+  ((${#case_names[@]})) || die "--cases $cases has no case"
+}
+
+# paired_case_load <i>:case i のフラグを、コマンド行の値 (case_defaults) の上に読む
+paired_case_load() {
+  local v f=() where="--cases $cases case ${case_names[$1]}"
+  for v in $PAIRED_CASE_VARS; do printf -v "$v" '%s' "${case_defaults[$v]}"; done
+  read -ra f <<<"${case_flags[$1]}"
+  while ((${#f[@]})); do
+    if [[ ${f[0]} == --udp-ping ]]; then
+      udpping=1 f=("${f[@]:1}")
+      continue
+    fi
+    [[ " $PAIRED_CASE_FLAGS " == *" ${f[0]} "* ]] \
+      || die "$where: ${f[0]} is not a per-case flag; give it on the command line, the same for every case; the per-case flags are $PAIRED_CASE_FLAGS"
+    ((${#f[@]} >= 2)) || die "$where: ${f[0]} wants a value"
+    case ${f[0]} in
+      --direction) direction=${f[1]} ;;
+      --bytes) bytes=${f[1]} ;;
+      --tool) tool=${f[1]} ;;
+      --streams) streams=${f[1]} ;;
+      --bulk-mbit) bulkmbit=${f[1]} ;;
+      --agent-gso) agentgso=${f[1]} ;;
+      --kernel-rmem-max) rmemmax=${f[1]} ;;
+      --delay-ms) delayms=${f[1]} ;;
+      --delay-rate-mbit) delayrate=${f[1]} ;;
+      --delay-queue-pkts) delayqueue=${f[1]} ;;
+      --target) target=${f[1]} ;;
+      --rounds) rounds=${f[1]} ;;
+      --runs) runs=${f[1]} ;;
+    esac
+    f=("${f[@]:2}")
+  done
+}
+
+# paired_case_prepare:case の前に 2 台を戻し、--target を合わせ、使えるかを確かめる。戻らなければ 1
+paired_case_prepare() {
+  local i want=${target:-lan}
+  # 相手の VM を先に戻す。その tcpquality の残りが agent の VM を操作し続けないように
+  for i in 1 0; do
+    (VM=${names[i]}; suite_timeout 120 in_vm bash "$SHARE/lab/splitcase.sh" reset) >>"$top/vm-${vms[i]}.log" 2>&1 &
+    wait $! || { echo "lab paired: cannot reset ${names[i]}; see $top/vm-${vms[i]}.log"; return 1; }
+  done
+  if [[ $want != "$SPLIT_CUR_TARGET" ]]; then
+    for i in 0 1; do
+      (VM=${names[i]}; suite_timeout 60 in_vm bash "$SHARE/lab/splitcase.sh" target "$want") >>"$top/vm-${vms[i]}.log" 2>&1 \
+        || { echo "lab paired: cannot move the forwarding target to $want in ${names[i]}"; return 1; }
+    done
+    SPLIT_CUR_TARGET=$want
+  fi
+  (VM=${names[1]}; suite_timeout 60 in_vm python3 "$SHARE/lab/tcpquality.py" agentx "$SPLIT_AGENT_AT" /run/wgft-agentd.token -- true) >/dev/null 2>&1 \
+    || { echo "lab paired: the peer VM cannot reach agentd at $SPLIT_AGENT_AT"; return 1; }
+  if [[ $want == lan ]]; then
+    (VM=${names[1]}; suite_timeout 60 in_vm ip netns exec lan ping -c1 -W2 192.168.50.2) >/dev/null 2>&1 \
+      || { echo "lab paired: the LAN host in the peer VM cannot reach home in the agent VM"; return 1; }
+  fi
+  return 0
+}
+
+# paired_cases_main:--cases の全体。全 case を VM を立てる前に確かめ、1 組の VM を立て、case を順に流す。
+# wgft-heavy の測定の job は 60 分で切られ、切られると後片付け (paired_cleanup) が走らずに VM が残る。--max-wall
+# (PAIRED_MAX_WALL_S、既定 3300 秒) は t0 (build の前) からの上限で、各 case の前に、経過と見積もり (流し終えた case の
+# 実行 1 回あたりの最長の時間 × この case の実行の数 × 1.2) が上限を超える case から後を流さない。最初の case は
+# 見積もりの元が無いので、上限の残りがあれば流す (run_timeout は詰まりの上限で、実際の時間の 10 倍近い)
+PAIRED_CASE_CUR="" PAIRED_CASES_LOG="" PAIRED_CASES_LEFT=""
+paired_cases_main() {
+  local i n v top all_rc=0 path0 budget est per_run=0 runs_now k
+  [[ -n $split ]] || die "--cases goes with --split"
+  ((${#rest[@]} == 2)) || die "with --cases, give the two arms only: lab paired --split [options] --cases FILE ARM_X ARM_Y"
+  budget=${maxwall:-${PAIRED_MAX_WALL_S:-3300}}
+  is_uint "$budget" || die "--max-wall wants a whole number of seconds"
+  paired_cases_read
+  n=${#case_names[@]}
+  for v in $PAIRED_CASE_VARS; do case_defaults[$v]=${!v}; done
+  # すべての case を VM を立てる前に確かめる。どの case の誤りかを言うため、1 つずつ subshell で確かめる
+  for ((i = 0; i < n; i++)); do
+    (paired_case_load "$i" && paired_validate "${case_paths[i]}" "${rest[@]}") \
+      || die "--cases $cases case ${case_names[i]}: see the message above"
+  done
+  paired_case_load 0
+  path0=${case_paths[0]}
+  paired_validate "$path0" "${rest[@]}"
+  paired_plan_pins
+  paired_provision
+  top=$out
+  PAIRED_CASES_LOG=$top/cases.log
+  : >"$PAIRED_CASES_LOG"
+  for ((i = 0; i < n; i++)); do
+    paired_case_load "$i"
+    paired_validate "${case_paths[i]}" "${rest[@]}"
+    runs_now=$((rounds * runs * 2))
+    est=$(awk -v p="$per_run" -v r="$runs_now" 'BEGIN { printf "%d", p * r * 1.2 }')
+    if ((SECONDS - t0 + est > budget)); then
+      echo "lab paired: case $((i + 1)) of $n ${case_names[i]} would end after the wall budget: $((SECONDS - t0)) s so far, about $est s more, budget $budget s; it and the cases after it are not run"
+      paired_cases_mark "$i" not_run
+      all_rc=1
+      break
+    fi
+    out=$top/${case_names[i]}
+    mkdir -p "$out"
+    rc=0 fails=0 prev_offs=() t_case=$SECONDS
+    PAIRED_CASE_CUR="index=$((i + 1)) name=${case_names[i]}"
+    PAIRED_CASES_LEFT=$(for ((k = i + 1; k < n; k++)); do echo "index=$((k + 1)) name=${case_names[k]}"; done)
+    if ! paired_case_prepare; then
+      echo "lab paired: the VM pair did not come back before case $((i + 1)) of $n ${case_names[i]}; the remaining cases are not run"
+      paired_cases_mark "$i" not_run
+      all_rc=1
+      break
+    fi
+    paired_plan_line "case_index=$((i + 1)) cases=$n" >"$out/paired.log"
+    {
+      paired_header
+      echo "lab paired: case $((i + 1)) of $n ${case_names[i]} of --cases $cases: the VM pair was set up once for all cases and reused; cases run in it before this one: $i"
+    } | tee "$out/header.txt"
+    cp "$top/guestinfo.txt" "$out/guestinfo.txt" 2>/dev/null || true
+    # agentd の log に case の境を書き、agent-vm-logs.txt を case ごとに切れるようにする
+    timeout 20 python3 "$REPO/lab/tcpquality.py" agentx "$PAIRED_AGENT_AT" "$PAIRED_OUT/.agentd-token" -- \
+      sh -c "echo '== lab paired case $((i + 1)) of $n ${case_names[i]} starts' >> /tmp/wgft-agentd.log" >/dev/null 2>&1 || true
+    paired_start_sampler
+    paired_run_timeout
+    local -A spec_of=([x]=$spec_x [y]=$spec_y)
+    local healthy=1
+    for ((r = 1; r <= rounds; r++)); do
+      PAIRED_CASE_SUSPECT=""
+      paired_run_split_round "$r"
+      if [[ -n $PAIRED_CASE_SUSPECT ]] && ! paired_case_prepare; then
+        echo "lab paired: after a timed-out arm or an unreachable agentd in round $r, the VM pair did not come back; case $((i + 1)) ends here and the remaining cases are not run"
+        healthy=0 rc=1
+        break
+      fi
+    done
+    paired_report
+    paired_agent_logs "$out/agent-vm-logs.txt"
+    echo "CASE $PAIRED_CASE_CUR status=$([[ $rc == 0 ]] && echo pass || echo fail) wall_s=$((SECONDS - t_case))" >>"$PAIRED_CASES_LOG"
+    PAIRED_CASE_CUR=""
+    ((rc == 0)) || all_rc=1
+    k=$(awk -v w="$((SECONDS - t_case))" -v r="$runs_now" -v p="$per_run" 'BEGIN { v = w / r; printf "%.3f", (v > p ? v : p) }')
+    per_run=$k
+    if ((!healthy)); then
+      paired_cases_mark "$((i + 1))" not_run
+      break
+    fi
+  done
+  PAIRED_CASES_LEFT=""
+  out=$top
+  echo "lab paired: cases:"
+  cat "$PAIRED_CASES_LOG"
+  echo "lab paired: wall time $((SECONDS - t0)) s for $n cases before deleting the VMs; logs in $top"
+  rc=$all_rc
+}
+
+# paired_cases_mark <i> <status>:case i から後をすべて status として cases.log に書く
+paired_cases_mark() {
+  local k
+  for ((k = $1; k < ${#case_names[@]}; k++)); do echo "CASE index=$((k + 1)) name=${case_names[k]} status=$2" >>"$PAIRED_CASES_LOG"; done
 }
 
 cmd_paired() {
   local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes="" tool="" streams="" udpping="" bulkmbit="" agentgso="" rmemmax="" rtarget_flag=""
+  local split="" peervcpus="" delayms="" delayrate="" delayqueue="" target="" placement="" SPLIT_AGENT_CPUS="" SPLIT_AGENT_DP_CPUS="" SPLIT_AGENT_WORKER_CPUS="" SPLIT_PEER_RPS="" xagentenv="" yagentenv="" SPLIT_HOSTPOLL="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
   local rest=() path spec_x spec_y uses_base rust pins=() names=() vms=() t0 run_timeout r
   local rc=0 fails=0 prev_offs=()
+  local cases="" maxwall="" case_names=() case_paths=() case_flags=() PAIRED_KERN="" PAIRED_DIRTY="" PAIRED_READY_S="" SPLIT_CUR_TARGET=lan
+  local PAIRED_CASE_SUSPECT="" t_case=""
+  local -A case_defaults=()
   paired_parse_args "$@"
+  if [[ -n $cases ]]; then
+    paired_cases_main
+    return $rc
+  fi
   paired_validate "${rest[@]}"
   paired_plan_pins
   paired_provision
-  # 1 つの round の上限:起動と後片付けに 300 秒、実行ごとに転送の時間 (fast は 100 Mbit/s、rate は経路の 20 Mbit/s で
-  # 見積もる) と 60 秒の余裕。既定の fast は約 740 秒、rate は約 520 秒
-  run_timeout=$(awk -v b="${bytes:-$([[ $path == fast ]] && echo 1073741824 || echo 33554432)}" -v r="$runs" \
-    -v bps="$([[ $path == fast ]] && echo 100000000 || echo 20000000)" 'BEGIN { printf "%d", 300 + r * (b * 8 / bps + 60) }')
+  paired_run_timeout
   local -A spec_of=([x]=$spec_x [y]=$spec_y)
   for ((r = 1; r <= rounds; r++)); do
-    paired_run_round "$r"
+    if [[ -n $split ]]; then paired_run_split_round "$r"; else paired_run_round "$r"; fi
   done
   paired_report
   return $rc

@@ -121,6 +121,68 @@
 # agent's side differs. sender_cpu_share and receiver_cpu_share name the process that sent and the
 # one that read, and with TOOL=iperf3 the client's CPU is read from a cgroup of its own.
 #
+# NETEM_LIMIT sets the netem queue in packets on a path with a delay and no RATE_MBIT. Unset, it is
+# twice the packets that NETEM_MAX_MBIT, 20000 by default, keeps in flight over DELAY_MS with
+# 1400-byte packets, and at least 1000: netem's default of 1000 packets holds only 8.4 Gbit/s x
+# 1 ms, so a delay of a few ms dropped packets at the queue and no longer measured the agent. The
+# result line has netem_drops, the packets the two netem queues dropped in the run, and the run
+# fails when a path without loss dropped any.
+#
+# TCP_BUF_MAX, in bytes, raises the largest TCP buffer autotuning may use (the third value of
+# net.ipv4.tcp_rmem and tcp_wmem) in the client and LAN host namespaces, so that the kernel's TCP
+# ends are not what limits a path with a delay; the agent's own netstack keeps its own limits.
+# Those buffers count against net.ipv4.tcp_mem, which is the whole VM's: with 64 MiB buffers and
+# 4 streams the client and the LAN host of a 2 GiB VM went past it, and the receiver dropped
+# segments for lack of protocol memory and pruned its out-of-order queue. So with TCP_BUF_MAX the
+# pressure and maximum of tcp_mem are raised, never lowered, in each VM holding a TCP end (this VM,
+# and the agent VM with TARGET_LOCAL) to STREAMS x 2 x TCP_BUF_MAX x 1.25, at most half of the VM's
+# memory, and put back at exit. When half the memory is not enough the run says so and names a VM
+# size that would do. The result line has, per VM, tcp_mem's maximum and the TCP memory in use at
+# the start and the end of the window (_tcp_mem_max_mb, _tcpmem_start_mb, _tcpmem_end_mb), and the
+# namespaces' memory pressure counters when they move (tcp_prune, tcp_rcvpruned, tcp_ofopruned,
+# tcp_ofodrop, tcp_mempressures, tcp_abortonmem).
+#
+# AGENT_AT=<ip>:<port> runs the agent in another VM, for `lab/lab paired --split`: this VM has the
+# client, vps, router and LAN host namespaces (lab/netns.sh up-split-peer) and the agent VM has
+# home (up-split-agent), with `tcpquality.py agentd` listening there; AGENT_TOKEN names the file
+# with its token, /run/wgft-agentd.token by default. Every step on the agent's side, starting and
+# stopping it, the offload and the CPU readings, goes through lab/tqagent.sh in the agent VM. With
+# CPU=1 the result line then has agentvm_* and peervm_* values from both VMs' /proc/stat, read at
+# the start and the end of the window: the CPU per GB, the busy share and the shares of user,
+# system, softirq, irq and steal time, the busiest CPU (maxcpu, 1.0 is one whole CPU) and the
+# context switches; agentvm is what the agent machine pays, for every mode alike, and
+# vm_cpu_s_per_gb is the two VMs together. agentvm_proc_* are the agent process's context
+# switches. The placement values follow, for both VMs: each vCPU's busy share (agentvm_cpu<N>_busy,
+# peervm_cpu<N>_busy) with its softirq, user and system parts (_cpu<N>_soft, _user, _sys) and the
+# share of the per-CPU kernel workers (_cpu<N>_kw, _cpu<N>_ksi), the data NIC's interrupts per vCPU
+# (_nicirq_cpu<N>_frac, _nicirq_top_cpu) and their effective affinity (_nicirq_eff), and, with
+# AGENT_CPUS and the rust mode only, where the agent's data-plane thread ran, sampled every 50 ms by agentd
+# (agentvm_thr_dp_cpu<N>_frac, agentvm_thr_dp_on_nicirq_frac, the thread's migrations
+# agentvm_thr_dp_mig and its wait for a CPU agentvm_thr_dp_wait_share).
+# AGENT_CPUS, a CPU list, starts a userspace-mode agent under `taskset -c AGENT_CPUS` in the agent
+# VM (`lab/lab paired --placement`) and fails the mode when the agent's Cpus_allowed_list is not
+# that list; the kernel mode has no data-plane process and is not pinned. AGENT_DP_CPUS and
+# AGENT_WORKER_CPUS (`--placement apart-mt`, for builds with crypto workers) then put the Rust
+# agent's thread wgft-dataplane on AGENT_DP_CPUS and its wgft-crypto workers on AGENT_WORKER_CPUS
+# once the tunnel is up and again at the start of every run, fail the mode or run when that does not
+# take, check the threads at the end of every run, failing the run when one left its CPUs (a worker
+# started later inherits the data-plane thread's CPUs), record the number of workers
+# (agent_crypto_threads) and warn when there is none, and sample every thread of the agent
+# (agentvm_thr_dp_*, _crypto_*, _other_*). AGENT_WORKER_CPUS is a comma list, one CPU per worker.
+# The peer VM's vCPUs are also sampled every 0.5 s over the run (tcpquality.py peerseries): the
+# result line gets the window's intervals (peervm_series_intervals), those in which some vCPU was
+# saturated, at least 0.95 busy with its own bound kernel workers at 0.9 or more
+# (peervm_sat_intervals, peervm_sat_frac), and the busiest vCPU's peak (peervm_maxcpu_peak).
+# In every lab, CPU=1 adds the packets per GB and mean size per interface, the TCP
+# segments and UDP datagrams per GB per namespace, tun_data_pkts_per_gb and tun_ack_pkts_per_gb on
+# the tunnel at the vps, and recv_seg_avg_b, the bytes per TCP segment the receiving end got after
+# GRO (the client on a download, the LAN host on an upload).
+#
+# TARGET_LOCAL=1, with AGENT_AT and TOOL=iperf3, puts the LAN host on the agent's machine: its
+# processes (the iperf3 server, the UDP echo, the probe's server) run in the agent VM's home
+# namespace, where `lab/lab paired --split --target local` has put 192.168.50.3 on lo, so the
+# agent reaches the forwarding target over loopback and the target's CPU is the agent VM's.
+#
 # Requires `lab/lab build` and the netns topology (`lab/lab net up`).
 set -u
 MODES=${*:-kernel userspace}
@@ -146,6 +208,15 @@ UDPPING_MS=${UDPPING_MS:-10}
 UDPPING_IDLE_S=${UDPPING_IDLE_S:-5}
 STREAMS=${STREAMS:-1}
 KERNEL_RMEM_MAX=${KERNEL_RMEM_MAX:-}
+NETEM_LIMIT=${NETEM_LIMIT:-}
+NETEM_MAX_MBIT=${NETEM_MAX_MBIT:-20000}
+TCP_BUF_MAX=${TCP_BUF_MAX:-}
+AGENT_AT=${AGENT_AT:-}
+AGENT_TOKEN=${AGENT_TOKEN:-/run/wgft-agentd.token}
+AGENT_CPUS=${AGENT_CPUS:-}
+AGENT_DP_CPUS=${AGENT_DP_CPUS:-}
+AGENT_WORKER_CPUS=${AGENT_WORKER_CPUS:-}
+TARGET_LOCAL=${TARGET_LOCAL:-}
 if [ -n "${WGFT_BIN_DIR:-}" ]; then
   PATH=$WGFT_BIN_DIR:$PATH
   export PATH
@@ -166,6 +237,30 @@ fail=0
 
 vps() { ip netns exec "$VPS_NS" "$@"; }
 router() { ip netns exec "$ROUTER_NS" "$@"; }
+# agentx <tcpquality.py agentx args>: the agent VM's side, under AGENT_AT; agentsh runs lab/tqagent.sh there
+agentx() { $Q agentx "$AGENT_AT" "$AGENT_TOKEN" "$@"; }
+agentsh() { agentx "${AGENT_ENV[@]}" -- bash "$TQAGENT" "$@"; }
+TQAGENT=/wgft/lab/tqagent.sh
+# lan <command...>: run it where the LAN host is: the lan namespace here, or with TARGET_LOCAL the
+# agent's home namespace in the agent VM. lan_bg <log> <command...> starts it in the background
+lan() { if [ -n "$TARGET_LOCAL" ]; then agentx -- ip netns exec "$HOME_NS" "$@"; else ip netns exec "$LAN_NS" "$@"; fi; }
+lan_bg() {
+  local log=$1
+  shift
+  if [ -n "$TARGET_LOCAL" ]; then
+    agentx -- bash -c 'log=$1; shift; ip netns exec "$0" setsid nohup "$@" > "$log" 2>&1 < /dev/null &' "$HOME_NS" "$log" "$@"
+  else
+    ip netns exec "$LAN_NS" setsid nohup "$@" > "$log" 2>&1 < /dev/null &
+    disown
+  fi
+}
+lan_listening() { lan ss -Htln 'sport = :25800' | grep -q .; }
+lan_free() { ! lan_listening; }
+lan_us() { # the LAN host process's CPU time so far, in microseconds
+  if [ -n "$TARGET_LOCAL" ]; then agentsh cpu "$lan_pid" "$lan_cg"; else cpu_us "$lan_pid" "$lan_cg"; fi
+}
+AGENT_ENV=()
+[ -n "${WGFT_BIN_DIR:-}" ] && AGENT_ENV=(--env "WGFT_BIN_DIR=$WGFT_BIN_DIR")
 wait_until() {
   local deadline=$((SECONDS + $1)); shift
   until "$@" >/dev/null 2>&1; do
@@ -200,6 +295,22 @@ RATE_ARGS=()
 if [ -n "$RATE_MBIT" ]; then
   # netem's limit counts the packets the delay holds too: about rate x delay / 1500 bytes of them
   RATE_ARGS=(rate "${RATE_MBIT}mbit" limit $((QUEUE_PKTS + (RATE_MBIT * 1000 * DELAY_MS + 11999) / 12000)))
+elif [ "$DELAY_MS" != 0 ]; then
+  # twice the packets in flight over the delay at NETEM_MAX_MBIT, so that the queue never drops
+  if [ -z "$NETEM_LIMIT" ]; then
+    NETEM_LIMIT=$((2 * (NETEM_MAX_MBIT * 1000 * DELAY_MS + 11199) / 11200))
+    [ "$NETEM_LIMIT" -ge 1000 ] || NETEM_LIMIT=1000
+  fi
+  RATE_ARGS=(limit "$NETEM_LIMIT")
+fi
+netem_drops() { # the packets both netem queues have dropped so far; tc -s prints "(dropped N, overlimits ..."
+  { vps tc -s qdisc show dev pub1; router tc -s qdisc show dev wan0; } 2>/dev/null \
+    | awk '/qdisc netem/ { q = 1 } q && /dropped/ { for (i = 1; i < NF; i++) if ($i == "(dropped") { v = $(i + 1); gsub(",", "", v); n += v } q = 0 } END { print n + 0 }'
+}
+if [ -n "$TCP_BUF_MAX" ]; then
+  ip netns exec "$CLIENT_NS" sysctl -qw net.ipv4.tcp_rmem="4096 131072 $TCP_BUF_MAX" net.ipv4.tcp_wmem="4096 16384 $TCP_BUF_MAX"
+  lan sysctl -qw net.ipv4.tcp_rmem="4096 131072 $TCP_BUF_MAX" net.ipv4.tcp_wmem="4096 16384 $TCP_BUF_MAX"
+  echo "   tcp buffers: up to $TCP_BUF_MAX bytes in $CLIENT_NS and $LAN_NS"
 fi
 # ns_pid <netns> <command-line substring>: the first process in the namespace whose command line has it
 ns_pid() {
@@ -210,6 +321,9 @@ ns_pid() {
   return 1
 }
 CG_ROOT=/sys/fs/cgroup/wgft-tq${SANDBOX:+-$SANDBOX}
+# the counters of this VM's namespaces that CPU=1 reads at both ends of the window
+SNAP_SPECS=("if:$VPS_NS:pub1" "if:$CLIENT_NS:eth0" "if:$LAN_NS:eth0" "if:$ROUTER_NS:wan0" "if:$ROUTER_NS:lan0" "snmp:$CLIENT_NS" "snmp:$LAN_NS" "snmp:$VPS_NS")
+[ -z "$TARGET_LOCAL" ] || SNAP_SPECS=("if:$VPS_NS:pub1" "if:$CLIENT_NS:eth0" "if:$ROUTER_NS:wan0" "if:$ROUTER_NS:lan0" "snmp:$CLIENT_NS" "snmp:$VPS_NS")
 CLK_TCK=$(getconf CLK_TCK)
 cg_own() { # cg_own <name> <pid>: move the process into a cgroup of its own; prints its directory
   [ -n "$2" ] && [ -e /sys/fs/cgroup/cgroup.controllers ] || return 0
@@ -265,8 +379,12 @@ cleanup() {
   vps wgft server teardown --data-dir "$DATA" --purge --yes >/dev/null 2>&1
   vps ip link del wgft0 2>/dev/null
   vps nft delete table inet wgft 2>/dev/null
-  ip netns exec "$HOME_NS" ip link del wgft0 2>/dev/null
-  ip netns exec "$HOME_NS" nft delete table inet wgft_agent 2>/dev/null
+  if [ -n "$AGENT_AT" ]; then
+    agentsh stop "$ADATA" "$CG_ROOT" >/dev/null
+  else
+    ip netns exec "$HOME_NS" ip link del wgft0 2>/dev/null
+    ip netns exec "$HOME_NS" nft delete table inet wgft_agent 2>/dev/null
+  fi
   rm -rf "$DATA" "$ADATA"
 }
 trap cleanup EXIT
@@ -304,6 +422,10 @@ if [ -n "$IPERF_MBIT" ]; then
   [ "$TOOL" = iperf3 ] || bad_config "IPERF_MBIT needs TOOL=iperf3"
 fi
 need_positive STREAMS "$STREAMS" "a whole number of 1 or more"
+if [ -n "$TARGET_LOCAL" ]; then
+  [ -n "$AGENT_AT" ] && [ "$TOOL" = iperf3 ] || bad_config "TARGET_LOCAL needs AGENT_AT and TOOL=iperf3"
+  [ -z "$KERNEL_RMEM_MAX" ] || bad_config "TARGET_LOCAL does not take KERNEL_RMEM_MAX"
+fi
 if [ -n "$KERNEL_RMEM_MAX" ]; then
   is_whole "$KERNEL_RMEM_MAX" || bad_config "KERNEL_RMEM_MAX is a whole number of bytes"
   [ "$KERNEL_RMEM_MAX" -ge 4096 ] || bad_config "KERNEL_RMEM_MAX is at least 4096 bytes"
@@ -328,7 +450,10 @@ esac
 # The trap that restores the starting state is set before the change, so a partial change is undone
 # too; a failed restore makes the run fail. The helper reads the state back and fails loudly if the
 # offload stays on.
-gso_was=$(ip netns exec "$HOME_NS" $Q udpgso eth0 show | grep -o 'requested=[a-z]*' | cut -d= -f2)
+agent_gso() { # agent_gso on|off|show: the offload of the agent's eth0, in this VM or the agent VM
+  if [ -n "$AGENT_AT" ]; then agentsh gso "$1"; else ip netns exec "$HOME_NS" $Q udpgso eth0 "$1"; fi
+}
+gso_was=$(agent_gso show | grep -o 'requested=[a-z]*' | cut -d= -f2)
 if [ "$gso_was" != on ]; then
   echo "WARN  UDP segmentation offload on the agent's eth0 is ${gso_was:-unreadable} at the start; it is not turned back on at exit"
 fi
@@ -343,7 +468,7 @@ restore_or_fail() {
 }
 restore_gso() {
   [ "$gso_was" = on ] || return 0
-  restore_or_fail "turn UDP segmentation offload back on on the agent's eth0" ip netns exec "$HOME_NS" $Q udpgso eth0 on
+  restore_or_fail "turn UDP segmentation offload back on on the agent's eth0" agent_gso on
 }
 # the reader's tcp_rmem for KERNEL_RMEM_MAX: read once, lowered for the kernel mode, put back after it
 rmem_was=$(ip netns exec "$READER_NS" sysctl -n net.ipv4.tcp_rmem | tr -s ' \t' '  ')
@@ -358,15 +483,64 @@ restore_rmem() {
   restore_or_fail "put tcp_rmem back to $rmem_was in the $READER_NS namespace" set_rmem $rmem_was || return 1
   rmem_set=
 }
+# tcp_mem of the VMs holding a TCP end, raised for TCP_BUF_MAX and put back at exit
+tcpmem_sysctl() { # tcpmem_sysctl here|agent <sysctl args...>: sysctl in that VM's root namespace
+  local where=$1
+  shift
+  if [ "$where" = agent ]; then agentx -- sysctl "$@"; else sysctl "$@"; fi
+}
+tcpmem_memkb() { # tcpmem_memkb here|agent: the VM's MemTotal in kB
+  if [ "$1" = agent ]; then agentx -- awk '$1 == "MemTotal:" { print $2 }' /proc/meminfo; else awk '$1 == "MemTotal:" { print $2 }' /proc/meminfo; fi
+}
+tcpmem_was_here= tcpmem_was_agent=
+raise_tcpmem() { # raise_tcpmem here|agent
+  local where=$1 was memkb new vmname
+  was=$(tcpmem_sysctl "$where" -n net.ipv4.tcp_mem | tr -s ' \t' ' ') || return 1
+  memkb=$(tcpmem_memkb "$where") || return 1
+  # the VM's name in messages: the peer or the agent VM with --split, the VM in the single-VM lab
+  vmname="the VM"
+  [ -z "$AGENT_AT" ] || vmname="the ${where/here/peer} VM"
+  new=$(awk -v w="$was" -v kb="$memkb" -v s="$STREAMS" -v b="$TCP_BUF_MAX" -v pg="$(getconf PAGESIZE)" -v vm="$vmname" 'BEGIN {
+    split(w, v, " "); need = s * 2 * b * 1.25 / pg; cap = kb * 1024 / 2 / pg
+    if (need > cap) {
+      # the hint asks for 10% above twice the need, since the VM sees less MemTotal than its RAM
+      printf "WARN  TCP memory: %d streams x 2 x %d bytes x 1.25 need %d MiB, more than half of %s'"'"'s %d MiB; tcp_mem is capped at %d MiB; WGFT_LAB_MEM=%dGiB would hold it\n",
+        s, b, need * pg / 1048576, vm, kb / 1024, cap * pg / 1048576, int(need * pg * 2 * 1.1 / 1073741824) + 1 > "/dev/stderr"
+      need = cap
+    }
+    p = v[2] > need ? v[2] : need; m = v[3] > need ? v[3] : need
+    printf "%d %d %d", v[1], p, m }') || return 1
+  [ "$new" = "$was" ] && { echo "   tcp_mem in $vmname: $was pages, enough"; return 0; }
+  if [ "$where" = agent ]; then tcpmem_was_agent=$was; else tcpmem_was_here=$was; fi
+  tcpmem_sysctl "$where" -qw net.ipv4.tcp_mem="$new" || return 1
+  echo "   tcp_mem in $vmname: $was -> $new pages"
+}
+restore_tcpmem() {
+  local rc=0
+  if [ -n "$tcpmem_was_here" ]; then
+    restore_or_fail "put tcp_mem back to $tcpmem_was_here" tcpmem_sysctl here -qw net.ipv4.tcp_mem="$tcpmem_was_here" || rc=1
+    tcpmem_was_here=
+  fi
+  if [ -n "$tcpmem_was_agent" ]; then
+    restore_or_fail "put tcp_mem back to $tcpmem_was_agent in the agent VM" tcpmem_sysctl agent -qw net.ipv4.tcp_mem="$tcpmem_was_agent" || rc=1
+    tcpmem_was_agent=
+  fi
+  return "$rc"
+}
 on_exit() {
   local rc=$?
   cleanup
   restore_gso || rc=1
   restore_rmem || rc=1
+  restore_tcpmem || rc=1
   exit "$rc"
 }
 trap on_exit EXIT
-gso_now=$(ip netns exec "$HOME_NS" $Q udpgso eth0 "$AGENT_GSO") ||
+if [ -n "$TCP_BUF_MAX" ]; then
+  raise_tcpmem here || { echo "FAIL  cannot raise tcp_mem for TCP_BUF_MAX"; exit 1; }
+  if [ -n "$TARGET_LOCAL" ]; then raise_tcpmem agent || { echo "FAIL  cannot raise tcp_mem in the agent VM for TCP_BUF_MAX"; exit 1; }; fi
+fi
+gso_now=$(agent_gso "$AGENT_GSO") ||
   { echo "FAIL  cannot turn $AGENT_GSO UDP segmentation offload on the agent's eth0: $gso_now"; exit 1; }
 echo "   agent eth0: $gso_now"
 for mode in $MODES; do
@@ -375,6 +549,11 @@ for mode in $MODES; do
     gvisor|wgstack) agent_env=(WGFT_MODE=userspace WGFT_AGENT_NETSTACK="$mode") ;;
     rust) agent_env=(-u WGFT_AGENT_NETSTACK WGFT_MODE=userspace) ;;
   esac
+  # AGENT_EXTRA_ENV: NAME=VALUE words added to the agent's environment, for an experimental
+  # setting that only one arm of `lab/lab paired` turns on (--x-agent-env, --y-agent-env)
+  for e in ${AGENT_EXTRA_ENV:-}; do
+    case "$e" in WGFT_*=*) agent_env+=("$e") ;; *) bad_config "AGENT_EXTRA_ENV wants WGFT_NAME=VALUE words; got $e" ;; esac
+  done
   rmem_field=
   if [ "$mode" = kernel ] && [ -n "$KERNEL_RMEM_MAX" ]; then
     read -r rmem_min rmem_def _ <<<"$rmem_was"
@@ -401,41 +580,76 @@ for mode in $MODES; do
   disown
   wait_until 30 vps wgft agent ls --admin "$ADMIN" || { echo "FAIL  the server did not come up"; fail=1; continue; }
   join=$(vps wgft agent join-string --name home --admin "$ADMIN" 2>/dev/null | head -1)
-  if [ "$mode" = rust ]; then
+  if [ -n "$AGENT_AT" ]; then
+    # the agent VM: the same environment, given to tqagent.sh through agentd
+    xenv=()
+    for e in "${agent_env[@]}"; do
+      case "$e" in -u) ;; *=*) xenv+=(--env "$e") ;; *) xenv+=(--unset "$e") ;; esac
+    done
+    agentx "${AGENT_ENV[@]}" "${xenv[@]}" ${AGENT_CPUS:+--env "AGENT_CPUS=$AGENT_CPUS"} --env "WGFT_JOIN=$join" --env "WGFT_AGENT_ALLOW_TARGETS=$ALLOW" \
+      -- bash "$TQAGENT" start "$mode" "$ADATA" "$W/wgft-tq-agent-$mode.log" || { echo "FAIL  the agent VM did not start the agent"; fail=1; continue; }
+  elif [ "$mode" = rust ]; then
     env "${agent_env[@]}" WGFT_JOIN="$join" "WGFT_AGENT_ALLOW_TARGETS=$ALLOW" \
       ip netns exec "$HOME_NS" setsid nohup "$RUST_AGENT" agent run --data-dir "$ADATA" > "$W/wgft-tq-agent-$mode.log" 2>&1 < /dev/null &
   else
     env "${agent_env[@]}" WGFT_JOIN="$join" "WGFT_AGENT_ALLOW_TARGETS=$ALLOW" \
       ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$ADATA" > "$W/wgft-tq-agent-$mode.log" 2>&1 < /dev/null &  # lab: go agent
   fi
-  disown
+  disown 2>/dev/null
   wait_until 30 handshaken || { echo "FAIL  the agent did not register"; fail=1; continue; }
   : > "$W/wgft-tq-serve-$mode.log"
-  ip netns exec "$LAN_NS" setsid nohup $Q serve 192.168.50.3 25800 "$BYTES" 7 > "$W/wgft-tq-serve-$mode.log" 2>&1 < /dev/null &
-  disown
+  lan_bg "$W/wgft-tq-serve-$mode.log" $Q serve 192.168.50.3 25800 "$BYTES" 7
   vps wgft rule add --agent home --tcp 41800 --to "$TARGET" --admin "$ADMIN" >/dev/null
   wait_until 30 rule_ok || { echo "FAIL  the rule does not forward"; fail=1; continue; }
   if [ "$TOOL" = iperf3 ]; then
     # the probe above needs tcpquality.py's server; iperf3's takes the target port from here on
     sandbox_kill_cmdline '/tcpquality.py '
-    wait_until 10 sh -c "! ip netns exec $LAN_NS ss -Htln 'sport = :25800' | grep -q ."
-    ip netns exec "$LAN_NS" setsid nohup iperf3 -s -B 192.168.50.3 -p 25800 > "$W/wgft-tq-serve-$mode.log" 2>&1 < /dev/null &
-    disown
-    wait_until 10 sh -c "ip netns exec $LAN_NS ss -Htln 'sport = :25800' | grep -q ." || { echo "FAIL  iperf3 did not listen"; fail=1; continue; }
+    [ -z "$TARGET_LOCAL" ] || agentsh killlan
+    wait_until 10 lan_free
+    lan_bg "$W/wgft-tq-serve-$mode.log" iperf3 -s -B 192.168.50.3 -p 25800
+    wait_until 10 lan_listening || { echo "FAIL  iperf3 did not listen"; fail=1; continue; }
   fi
   if [ -n "$UDPPING" ]; then
-    ip netns exec "$LAN_NS" setsid nohup $Q uecho 192.168.50.3 25801 > "$W/wgft-tq-uecho-$mode.log" 2>&1 < /dev/null &
-    disown
+    lan_bg "$W/wgft-tq-uecho-$mode.log" $Q uecho 192.168.50.3 25801
     vps wgft rule add --agent home --udp 41801 --to "$UDP_TARGET" --admin "$ADMIN" >/dev/null
     # the rule is up once a datagram comes back
     wait_until 30 sh -c "ip netns exec $CLIENT_NS $Q uping 198.51.100.1 41801 0.2 10 probe | grep -q 'probe_p50_ms='" \
       || { echo "FAIL  the UDP rule does not echo"; fail=1; continue; }
   fi
   if [ -n "$CPU" ]; then
-    agent_pid=$(ns_pid "$HOME_NS" "agent run --data-dir $ADATA")
     server_pid=$(ns_pid "$VPS_NS" "server run --mode kernel --data-dir $DATA")
-    if [ "$TOOL" = iperf3 ]; then lan_pid=$(ns_pid "$LAN_NS" "iperf3 -s"); else lan_pid=$(ns_pid "$LAN_NS" "tcpquality.py serve"); fi
-    agent_cg=$(cg_own agent "$agent_pid") server_cg=$(cg_own server "$server_pid") lan_cg=$(cg_own lan "$lan_pid")
+    if [ -n "$TARGET_LOCAL" ]; then
+      own=$(agentsh own-lan "iperf3 -s" "$CG_ROOT")
+      lan_pid=$(field pid "$own") lan_cg=$(field cg "$own")
+    elif [ "$TOOL" = iperf3 ]; then lan_pid=$(ns_pid "$LAN_NS" "iperf3 -s"); else lan_pid=$(ns_pid "$LAN_NS" "tcpquality.py serve"); fi
+    DP_SAMPLE=
+    if [ -n "$AGENT_AT" ]; then
+      own=$(agentsh own "$ADATA" "$CG_ROOT")
+      agent_pid=$(field pid "$own") agent_cg=$(field cg "$own")
+      if [ -n "$AGENT_CPUS" ] && [ "$mode" != kernel ] && [ -n "$agent_pid" ]; then
+        # --placement apart: the pin must have taken, and only then is the data-plane thread sampled
+        pinned=$(agentsh cpus "$agent_pid")
+        if [ "$pinned" != "$AGENT_CPUS" ]; then
+          echo "FAIL  agent $mode: the agent process runs on CPUs ${pinned:-unknown}, not $AGENT_CPUS"; fail=1; continue
+        fi
+        [ "$mode" != rust ] || DP_SAMPLE=thread:dp:wgft-dataplane
+        if [ -n "$AGENT_DP_CPUS" ] && [ "$mode" = rust ]; then
+          if ! threads_now=$(agentsh pin-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" 2>&1); then
+            echo "FAIL  agent $mode: cannot place its threads: $threads_now"; fail=1; continue
+          fi
+          echo "   agent $threads_now"
+          case $threads_now in
+            crypto_threads=0\ *) echo "WARN  agent $mode: no wgft-crypto thread; this build has no crypto workers, so apart-mt places only its data-plane thread" ;;
+          esac
+          DP_SAMPLE=threads:all
+        fi
+      fi
+    else
+      agent_pid=$(ns_pid "$HOME_NS" "agent run --data-dir $ADATA")
+      agent_cg=$(cg_own agent "$agent_pid")
+    fi
+    server_cg=$(cg_own server "$server_pid")
+    [ -n "$TARGET_LOCAL" ] || lan_cg=$(cg_own lan "$lan_pid")
     if [ -z "$agent_pid" ]; then
       echo "FAIL  agent $mode: no agent process found, so its CPU time is not measured"; fail=1
     elif [ -n "$agent_cg" ]; then
@@ -472,7 +686,33 @@ for mode in $MODES; do
       udp_idle=$(udp_or_lost udp_idle "$UDPPING_IDLE_S" "$udp_idle")
     fi
     if [ -n "$CPU" ]; then
-      t0=$(date +%s.%N) a0=$(cpu_us "$agent_pid" "$agent_cg") s0=$(cpu_us "$server_pid" "$server_cg") l0=$(cpu_us "$lan_pid" "$lan_cg") v0=$(vm_cpu_us)
+      if [ -n "$AGENT_AT" ]; then
+        # apart-mt: place the threads again at the start of every run, so that workers a new tunnel
+        # generation started since the last run are put on their CPUs too; the result line gets the
+        # number of workers
+        crypto_field=
+        if [ -n "$AGENT_DP_CPUS" ] && [ "$mode" = rust ]; then
+          if threads_now=$(agentsh pin-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" 2>&1); then
+            crypto_field=" agent_crypto_threads=$(echo "$threads_now" | sed -n 's/^crypto_threads=\([0-9]*\).*/\1/p' | head -1)"
+          else
+            echo "FAIL  agent $mode run $run: cannot place its threads: $threads_now"; fail=1 run_pass=0
+          fi
+        fi
+        # the peer VM's vCPUs every 0.5 s over the run (peerseries); the window's share of saturated
+        # intervals goes into the result line
+        series=$W/wgft-tq-series-$mode
+        : > "$series"
+        $Q peerseries "$series" 0.5 900 &
+        series_pid=$!
+        # the agent VM first and the peer VM last at the start, and the other way round at the end,
+        # so that the agent VM's window holds the peer VM's
+        sa0=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0" "nicirq:$HOME_NS:eth0" kthreads ${DP_SAMPLE:+"$DP_SAMPLE"})
+        sp0=$($Q snap peervm "" "" "${SNAP_SPECS[@]}" "eth:$ROUTER_NS:lan0" "nicirq:$ROUTER_NS:lan0" kthreads) nd0=$(netem_drops)
+        t0=$(date +%s.%N) a0=$(field agentvm_proc_us "$sa0") s0=$(cpu_us "$server_pid" "$server_cg") l0=$(lan_us) v0=0
+      else
+        sa0= sp0=$($Q snap vm "$agent_pid" "$agent_cg" "${SNAP_SPECS[@]}" "if:$HOME_NS:eth0" "snmp:$HOME_NS") nd0=$(netem_drops)
+        t0=$(date +%s.%N) a0=$(cpu_us "$agent_pid" "$agent_cg") s0=$(cpu_us "$server_pid" "$server_cg") l0=$(cpu_us "$lan_pid" "$lan_cg") v0=$(vm_cpu_us)
+      fi
     fi
     if [ "$TOOL" = iperf3 ]; then
       # the client runs in a cgroup of its own from its first instruction, so its CPU time is read like the others'
@@ -513,7 +753,20 @@ for mode in $MODES; do
     # the CPU window closes when the transfer ends; the pinger's last second of waiting for late
     # echoes is not part of it
     if [ -n "$CPU" ]; then
-      t1=$(date +%s.%N) a1=$(cpu_us "$agent_pid" "$agent_cg") s1=$(cpu_us "$server_pid" "$server_cg") l1=$(cpu_us "$lan_pid" "$lan_cg") v1=$(vm_cpu_us)
+      if [ -n "$AGENT_AT" ]; then
+        t1=$(date +%s.%N) s1=$(cpu_us "$server_pid" "$server_cg") l1=$(lan_us) v1=0
+        sp1=$($Q snap peervm "" "" "${SNAP_SPECS[@]}" "eth:$ROUTER_NS:lan0" "nicirq:$ROUTER_NS:lan0" kthreads) nd1=$(netem_drops)
+        kill "$series_pid" 2>/dev/null
+        wait "$series_pid" 2>/dev/null
+        sa1=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0" "nicirq:$HOME_NS:eth0" kthreads ${DP_SAMPLE:+"$DP_SAMPLE"})
+        a1=$(field agentvm_proc_us "$sa1")
+        if [ -n "$AGENT_DP_CPUS" ] && [ "$mode" = rust ] && ! threads_now=$(agentsh check-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" 2>&1); then
+          echo "FAIL  agent $mode run $run: the agent's threads left their CPUs: $threads_now"; fail=1 run_pass=0
+        fi
+      else
+        t1=$(date +%s.%N) a1=$(cpu_us "$agent_pid" "$agent_cg") s1=$(cpu_us "$server_pid" "$server_cg") l1=$(cpu_us "$lan_pid" "$lan_cg") v1=$(vm_cpu_us)
+        sa1= sp1=$($Q snap vm "$agent_pid" "$agent_cg" "${SNAP_SPECS[@]}" "if:$HOME_NS:eth0" "snmp:$HOME_NS") nd1=$(netem_drops)
+      fi
     fi
     if [ -n "$UDPPING" ]; then
       wait "$pinger"
@@ -525,7 +778,7 @@ for mode in $MODES; do
       # one line with received=, sent=, the receiver's duration and rate, and the sender's retransmits
       got=$($Q iperf "$W/wgft-tq-iperf-$mode.json")
       sent=$got
-      stats="undetermined=0 streams=$STREAMS duration_s=$(field duration_s "$got") overall_mbit=$(field mbit "$got") retransmits=$(field retransmits "$got")"
+      stats="undetermined=0 streams=$STREAMS duration_s=$(field duration_s "$got") overall_mbit=$(field mbit "$got") retransmits=$(field retransmits "$got")$(echo "$got" | grep -oE ' stream_(jain|min_over_max)=[^ ]*' | tr -d '\n')"
       c_us=; [ -n "$client_cg" ] && c_us=$(awk '$1 == "usage_usec" { print $2 }' "$client_cg/cpu.stat" 2>/dev/null)
       rmdir "$client_cg" 2>/dev/null
     else
@@ -540,17 +793,26 @@ for mode in $MODES; do
       echo "FAIL  agent $mode run $run: the agent's CPU time could not be read over the whole transfer"; fail=1 run_pass=0
     elif [ -n "$CPU" ] && [ -n "$agent_pid" ]; then
       stats="$stats $(awk -v t0="$t0" -v t1="$t1" -v n="$(field received "$got")" -v c="$c_us" -v dir="$DIRECTION" -v tool="$TOOL" \
-        -v a="$((${a1:-0} - ${a0:-0}))" -v s="$((${s1:-0} - ${s0:-0}))" -v l="$((${l1:-0} - ${l0:-0}))" -v v="$((${v1:-0} - ${v0:-0}))" 'BEGIN {
+        -v a="$((${a1:-0} - ${a0:-0}))" -v s="$((${s1:-0} - ${s0:-0}))" -v l="$((${l1:-0} - ${l0:-0}))" -v v="$((${v1:-0} - ${v0:-0}))" -v splitvm="$AGENT_AT" 'BEGIN {
           t = t1 - t0
           printf "t_start=%.3f t_end=%.3f window_s=%.3f agent_cpu_s=%.3f agent_cpu_s_per_gb=%.3f agent_cpu_share=%.3f server_cpu_s=%.3f lan_cpu_share=%.3f",
             t0, t1, t, a / 1e6, (n > 0 ? a / 1e6 / (n / 1e9) : -1), a / 1e6 / t, s / 1e6, l / 1e6 / t
-          printf " vm_cpu_s_per_gb=%.3f vm_cpu_share=%.3f", (n > 0 ? v / 1e6 / (n / 1e9) : -1), v / 1e6 / t
+          if (splitvm == "") printf " vm_cpu_s_per_gb=%.3f vm_cpu_share=%.3f", (n > 0 ? v / 1e6 / (n / 1e9) : -1), v / 1e6 / t
           # tcpquality.py reports the client CPU only for an upload, where the client sends; the analysis
           # reads client_cpu_share as the sender, so with iperf3 the client is named by its role only
           if (c != "" && (tool != "iperf3" || dir == "up")) printf " client_cpu_share=%.3f", c / 1e6 / t
           if (dir == "up") { snd = c; rcv = l * 1 } else { snd = l; rcv = c }
           if (snd != "") printf " sender_cpu_share=%.3f", snd / 1e6 / t
           if (rcv != "" && (tool == "iperf3" || dir == "up")) printf " receiver_cpu_share=%.3f", rcv / 1e6 / t }')"
+      stats="$stats $($Q snapdiff "$(field received "$got")" "$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.3f", b - a }')" "$DIRECTION" "$sa0 $sp0" "$sa1 $sp1")"
+      stats="$stats netem_drops=$((nd1 - nd0))${crypto_field:-}"
+      if [ -n "$AGENT_AT" ]; then
+        series_vals=$($Q peerseries_sum "$series" "$t0" "$t1" 2>/dev/null)
+        [ -z "$series_vals" ] || stats="$stats $series_vals"
+      fi
+      if [ "$((nd1 - nd0))" -gt 0 ] && [ "$LOSS_PCT" = 0 ] && [ -z "$RATE_MBIT" ]; then
+        echo "FAIL  agent $mode run $run: netem dropped $((nd1 - nd0)) packets on a path without loss; raise NETEM_LIMIT"; fail=1 run_pass=0
+      fi
     fi
     echo "   run $run sent:     $sent"
     echo "   run $run received: $got"
