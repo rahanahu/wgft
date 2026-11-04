@@ -148,6 +148,8 @@
 # Rust agent where its data-plane thread ran, sampled every 50 ms by agentd
 # (agentvm_thr_dp_cpu<N>_frac, agentvm_thr_dp_on_nicirq_frac, the thread's migrations
 # agentvm_thr_dp_mig and its wait for a CPU agentvm_thr_dp_wait_share).
+# AGENT_CPUS, a CPU list, starts a userspace-mode agent under `taskset -c AGENT_CPUS` in the agent
+# VM (`lab/lab paired --placement`); the kernel mode has no data-plane process and is not pinned.
 # In every lab, CPU=1 adds the packets per GB and mean size per interface, the TCP
 # segments and UDP datagrams per GB per namespace, tun_data_pkts_per_gb and tun_ack_pkts_per_gb on
 # the tunnel at the vps, and recv_seg_avg_b, the bytes per TCP segment the receiving end got after
@@ -188,6 +190,7 @@ NETEM_MAX_MBIT=${NETEM_MAX_MBIT:-20000}
 TCP_BUF_MAX=${TCP_BUF_MAX:-}
 AGENT_AT=${AGENT_AT:-}
 AGENT_TOKEN=${AGENT_TOKEN:-/run/wgft-agentd.token}
+AGENT_CPUS=${AGENT_CPUS:-}
 TARGET_LOCAL=${TARGET_LOCAL:-}
 if [ -n "${WGFT_BIN_DIR:-}" ]; then
   PATH=$WGFT_BIN_DIR:$PATH
@@ -509,7 +512,7 @@ for mode in $MODES; do
     for e in "${agent_env[@]}"; do
       case "$e" in -u) ;; *=*) xenv+=(--env "$e") ;; *) xenv+=(--unset "$e") ;; esac
     done
-    agentx "${AGENT_ENV[@]}" "${xenv[@]}" --env "WGFT_JOIN=$join" --env "WGFT_AGENT_ALLOW_TARGETS=$ALLOW" \
+    agentx "${AGENT_ENV[@]}" "${xenv[@]}" ${AGENT_CPUS:+--env "AGENT_CPUS=$AGENT_CPUS"} --env "WGFT_JOIN=$join" --env "WGFT_AGENT_ALLOW_TARGETS=$ALLOW" \
       -- bash "$TQAGENT" start "$mode" "$ADATA" "$W/wgft-tq-agent-$mode.log" || { echo "FAIL  the agent VM did not start the agent"; fail=1; continue; }
   elif [ "$mode" = rust ]; then
     env "${agent_env[@]}" WGFT_JOIN="$join" "WGFT_AGENT_ALLOW_TARGETS=$ALLOW" \

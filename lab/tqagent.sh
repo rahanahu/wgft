@@ -7,7 +7,8 @@
 #   tqagent.sh start <mode> <adata> <log> start the agent of <mode> (kernel, rust, gvisor, wgstack) in
 #                                         home; WGFT_JOIN, WGFT_AGENT_ALLOW_TARGETS, WGFT_MODE and
 #                                         WGFT_AGENT_NETSTACK come in the environment, WGFT_BIN_DIR
-#                                         selects another build as in tcpquality.sh
+#                                         selects another build as in tcpquality.sh, and AGENT_CPUS,
+#                                         a CPU list, runs a userspace-mode agent under taskset
 #   tqagent.sh own <adata> <cgroup root>  the agent's PID and its own cgroup: "pid=<pid> cg=<dir>"
 #   tqagent.sh stop <adata> <cgroup root> stop the agent and every other process in home, and remove
 #                                         what the agent left there
@@ -49,11 +50,17 @@ case "${1:-}" in
   start)
     mode=${2:?start <mode> <adata> <log>} adata=${3:?} log=${4:?}
     mkdir -p "$(dirname "$log")"
+    # AGENT_CPUS (lab/lab paired --placement): a userspace-mode agent runs on those CPUs only; the
+    # kernel mode's data plane is kernel WireGuard, which has no process to place
+    pin=()
+    if [ -n "${AGENT_CPUS:-}" ] && [ "$mode" != kernel ]; then
+      pin=(taskset -c "$AGENT_CPUS")
+    fi
     if [ "$mode" = rust ]; then
       [ -x "$RUST_AGENT" ] || { echo "tqagent.sh: no Rust agent at $RUST_AGENT" >&2; exit 2; }
-      ip netns exec "$HOME_NS" setsid nohup "$RUST_AGENT" agent run --data-dir "$adata" > "$log" 2>&1 < /dev/null &
+      ip netns exec "$HOME_NS" setsid nohup "${pin[@]}" "$RUST_AGENT" agent run --data-dir "$adata" > "$log" 2>&1 < /dev/null &
     else
-      ip netns exec "$HOME_NS" setsid nohup wgft agent run --data-dir "$adata" > "$log" 2>&1 < /dev/null &  # lab: go agent
+      ip netns exec "$HOME_NS" setsid nohup "${pin[@]}" wgft agent run --data-dir "$adata" > "$log" 2>&1 < /dev/null &  # lab: go agent
     fi
     disown
     ;;

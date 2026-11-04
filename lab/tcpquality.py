@@ -844,6 +844,33 @@ def irq_affinity(irqs, cpus="", base="/proc/irq"):
     return "+".join(eff) or "-"
 
 
+def nicirq(ifname, cpus=""):
+    # shows, or sets to the CPU list cpus, the interrupt affinity of every vector of <ifname>'s virtio
+    # device, as root, in the caller's namespace (run it under `ip netns exec`)
+    dev = nic_device("", ifname)
+    with open("/proc/interrupts") as f:
+        _, irqs = parse_irq_cpus(f.read(), dev)
+    if not irqs:
+        print("nicirq: %s: no virtio interrupt vectors found" % ifname, file=sys.stderr)
+        return 1
+    try:
+        eff = irq_affinity(irqs, cpus)
+    except OSError as e:
+        print("nicirq: %s: %s" % (ifname, e), file=sys.stderr)
+        return 1
+    # the effective affinity of a vector changes only when it next fires, so the vectors of unused
+    # queues keep the old one; the affinity asked for is what is checked
+    asked = []
+    for n in irqs:
+        with open("/proc/irq/%d/smp_affinity_list" % n) as f:
+            asked.append(f.read().strip())
+    print("nic=%s device=%s irqs=%s affinity=%s effective=%s" % (ifname, dev, ",".join(map(str, irqs)), "+".join(asked), eff))
+    if cpus and any(a != cpus for a in asked):
+        print("nicirq: %s: the affinity stays %s, not %s" % (ifname, "+".join(asked), cpus), file=sys.stderr)
+        return 1
+    return 0
+
+
 def nicirq_counters(ns, ifname):
     # snap_line's nicirq:<ns>:<ifname>: nicirq_cpu<N>, the interrupts of the NIC's device taken by
     # CPU N so far, and nicirq_eff, the vectors' effective affinity now
@@ -1908,4 +1935,4 @@ if __name__ == "__main__":
               "cpuratio": cpuratio, "cpupaired": cpupaired, "udpgso": udpgso, "iperf": iperf,
               "uecho": uecho, "uping": uping, "latpaired": latpaired, "snap": snap, "snapdiff": snapdiff,
               "agentd": agentd, "agentx": agentx, "channels": channels, "hostsample": hostsample, "hostwin": hostwin,
-              "kvmsample": kvmsample, "pollctl": pollctl, "guestinfo": guestinfo}[cmd](*args))
+              "kvmsample": kvmsample, "pollctl": pollctl, "guestinfo": guestinfo, "nicirq": nicirq}[cmd](*args))

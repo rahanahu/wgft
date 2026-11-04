@@ -338,6 +338,7 @@ VM は終わると消し、`--keep` を付けると残します。
 ```sh
 WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --vcpus 2 --tool iperf3 fast rust kernel
 WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --vcpus 8 --tool iperf3 --delay-ms 10 delay rust kernel
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus 4 --tool iperf3 --base HEAD fast rust base:rust
 ```
 
 既定の `lab paired` は 1 台の VM に 5 つの netns を置くので、client、server、ルータの CPU が agent の CPU と混ざります。
@@ -392,6 +393,30 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
 
 `--x-agent-env WGFT_NAME=VALUE` と `--y-agent-env WGFT_NAME=VALUE` は、腕 x と腕 y の agent にだけ環境変数を足します (繰り返せます)。
 既定で無効の実験の設定を、片方の腕だけで有効にして比べるときに使います。
+
+`--placement apart` は、agent の VM の中で NIC の割り込みと agent のプロセスを別の vCPU に固定します。
+同じ build の 2 つの腕を比べる (`--base HEAD rust base:rust` など) ときに使います。
+
+- 理由:data の NIC は 1 つの queue なので、その割り込みと受信の softirq は 1 つの vCPU で走ります。
+  Rust の agent の data plane は 1 つのスレッドです。
+  既定ではスケジューラが実行ごとにスレッドの vCPU を決め、スレッドが割り込みの vCPU に載った実行は、速さが低く byte あたりの CPU が多くなります。
+  4 vCPU の受ける向きの 1 stream では、載った実行が 3.8 から 5.3 Gbit/s、載らない実行が 7.7 から 8.0 Gbit/s でした。
+  2 vCPU 以上では、この 2 つの値が同じ build の比べにも混ざります
+- 割り込み:data の NIC の全 vector の割り込みを agent の VM の CPU 0 に固定します (`tcpquality.py nicirq`)。
+  VM の設定なので両方の腕に効きます
+- agent のプロセス:userspace の腕 (`rust`、`gvisor`、`wgstack`) の agent を `taskset` で CPU 1 だけに置きます。
+  CPU 1 から後の全部に置くと、8 vCPU でスレッドが 2 つの L2 の塊の間を移り、どちらの塊に載るかでも速さが数 % 揺れました。
+  1 vCPU では CPU 0 で、既定と同じ置き方です。
+  カーネルモードの腕の data plane はカーネルの WireGuard で、置くプロセスが無いので固定しません
+- カーネルモードとの比べ:割り込みの固定は両方の腕に同じです。
+  Rust の腕は agent のスレッドが割り込みの vCPU と同居しない形にそろい、カーネルモードの腕は全 vCPU を使います。
+  既定の値とは同居した実行の分だけ違うので、既定で取った表とは混ぜません
+- 記録:`paired.log` の `PLAN` の行に `placement=apart` が付き、`header.txt` に置き場所を書きます。
+  実行ごとの `agentvm_nicirq_eff` と `agentvm_thr_dp_cpu<N>_frac` で、固定が効いたことを確かめられます
+- 残る揺れ:相手の VM でも、1 つの flow の受信の softirq は RPS が flow ごとに選ぶ 1 つの vCPU で走ります。
+  その vCPU は接続ごとに替わり、ほかの仕事と重なって 1.0 に達した実行は、相手の側で詰まって速さが落ちます。
+  `--placement apart` はこの側を固定しません。
+  `peervm_maxcpu` が 1.0 に近い実行は相手の側の詰まりで、`peervm_cpu<N>_busy` と `peervm_cpu<N>_soft` でその vCPU が分かります
 
 `delay` の経路は、vps と homerouter の間の両方の向きに `--delay-ms` の遅れを netem で入れます。
 netem の待ち行列の長さは `tcpquality.sh` が決め、20 Gbit/s で遅れの間に飛ぶ packet の 2 倍にします。
