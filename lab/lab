@@ -864,7 +864,7 @@ paired_sync() {
 }
 
 # lab paired の使い方。lab help と引数の誤りの両方がこの 1 つの文字列を出す
-PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local] [--placement apart]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y, or with --split: paired --split [options] --cases FILE [--max-wall SECONDS] ARM_X ARM_Y"
+PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local] [--placement apart|apart-mt]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y, or with --split: paired --split [options] --cases FILE [--max-wall SECONDS] ARM_X ARM_Y"
 
 # is_uint <値>:1 以上の整数か
 is_uint() { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
@@ -894,7 +894,7 @@ paired_parse_args() {
       --split) split=1; shift ;;
       --peer-vcpus) peervcpus=${2:?--peer-vcpus N}; shift 2 ;;
       --target) target=${2:?--target lan|local}; shift 2 ;;
-      --placement) placement=${2:?--placement apart}; shift 2 ;;
+      --placement) placement=${2:?--placement apart|apart-mt}; shift 2 ;;
       --cases) cases=${2:?--cases FILE}; shift 2 ;;
       --max-wall) maxwall=${2:?--max-wall SECONDS}; shift 2 ;;
       --delay-ms) delayms=${2:?--delay-ms MS}; shift 2 ;;
@@ -926,13 +926,17 @@ paired_validate() {
   [[ -z $delayqueue ]] || require_uint --delay-queue-pkts "$delayqueue"
   [[ -z $peervcpus || -n $split ]] || die "--peer-vcpus goes with --split"
   [[ -z $target || ( -n $split && ( $target == lan || $target == local ) ) ]] || die "--target wants lan or local, with --split"
-  [[ -z $placement || ( -n $split && $placement == apart ) ]] || die "--placement wants apart, with --split"
+  [[ -z $placement || ( -n $split && ( $placement == apart || $placement == apart-mt ) ) ]] || die "--placement wants apart or apart-mt, with --split"
+  # apart-mt は data plane のスレッドを CPU 1、暗号の worker を CPU 2 から後に置く。worker の置き場所に CPU が 1 つは要る
+  [[ $placement != apart-mt ]] || ((vcpus >= 3)) || die "--placement apart-mt puts the data-plane thread on CPU 1 and the workers on CPU 2 and up, so it wants --vcpus 3 or more"
   # --placement apart は userspace の agent のプロセス全体を 1 つの CPU に置く。data plane が 1 スレッドの Rust の agent と、
   # 置くプロセスの無いカーネルモードだけに使える (gVisor の Go の agent や、暗号の worker を足した build には別の置き方が要る)
   local m
   for m in "${spec_x#base:}" "${spec_y#base:}"; do
-    [[ -z $placement || $m == rust || $m == kernel ]] \
-      || die "--placement apart pins the agent process to one CPU, which fits only an agent with one data-plane thread; arm $m is not rust or kernel"
+    [[ -z $placement || $m == rust || $m == kernel ]] || {
+      [[ $placement == apart ]] && die "--placement apart pins the agent process to one CPU, which fits only an agent with one data-plane thread; arm $m is not rust or kernel"
+      die "--placement apart-mt places the Rust agent's data-plane thread and crypto workers by their names; arm $m is not rust or kernel"
+    }
   done
   local hp
   for hp in "${PAIRED_HOSTPOLL_X:-}" "${PAIRED_HOSTPOLL_Y:-}"; do
@@ -1093,7 +1097,7 @@ paired_header() {
       echo "lab paired: split: agent VM ${names[0]} limits.cpu=${pins[0]} qemu $SPLIT_QEMU_AGENT, peer VM ${names[1]} limits.cpu=${pins[1]} qemu $SPLIT_QEMU_PEER, network $PAIRED_SPLIT_NET (taps$SPLIT_TAPS, queue ${PAIRED_TAP_QLEN:-4096}, NIC queues $SPLIT_PEER_Q), agentd $SPLIT_AGENT_AT, kernel $kern, template $SUITE_TEMPLATE"
       [[ -z ${PAIRED_HOSTPOLL_X:-}${PAIRED_HOSTPOLL_Y:-} ]] || echo "lab paired: split: host halt polling of the ${PAIRED_HOSTPOLL_VMS:-both} VM(s), set by the guests: x ${PAIRED_HOSTPOLL_X:-on}, y ${PAIRED_HOSTPOLL_Y:-on} (hostpoll= in paired.log)"
       [[ -z ${PAIRED_KVM_SAMPLES:-} ]] || echo "lab paired: split: KVM statistics from $PAIRED_KVM_SAMPLES (tcpquality.py kvmsample, started by root)"
-      [[ -z $placement ]] || echo "lab paired: split: placement $placement: the data NIC's interrupts on CPU 0 of the agent VM, a userspace-mode agent on CPUs $SPLIT_AGENT_CPUS; the kernel mode has no agent process to place; peer VM: NIC interrupts on CPU 0, RPS on CPUs ${SPLIT_PEER_RPS:-unchanged}"
+      [[ -z $placement ]] || echo "lab paired: split: placement $placement: the data NIC's interrupts on CPU 0 of the agent VM, a userspace-mode agent on CPUs $SPLIT_AGENT_CPUS${SPLIT_AGENT_DP_CPUS:+, its data-plane thread on CPU $SPLIT_AGENT_DP_CPUS and its crypto workers on CPUs $SPLIT_AGENT_WORKER_CPUS}; the kernel mode has no agent process to place; peer VM: NIC interrupts on CPU 0, RPS on CPUs ${SPLIT_PEER_RPS:-unchanged}"
       echo "lab paired: split: the arms take turns in the same two VMs; vm=a in paired.log is the arm that ran first in the round. vhost and qemu's other threads are not pinned (host samples in host-samples.txt)"
     else
       echo "lab paired: VM a ${names[0]} limits.cpu=${pins[0]}, VM b ${names[1]} limits.cpu=${pins[1]}, kernel $kern, template $SUITE_TEMPLATE"
@@ -1151,10 +1155,16 @@ paired_split_setup() {
   # 移り、どちらの塊に載るかでも速さが数 % 揺れた。1 vCPU では agent も CPU 0。NIC の固定は VM の設定なので両方の腕に
   # 効き、カーネルモードには置くプロセスが無い (tqagent.sh は kernel の腕を固定しない)
   if [[ -n $placement ]]; then
+    # apart-mt:暗号の worker を持つ build 用。プロセスを CPU 1 から後に置き、agent が上がった後に data plane のスレッドを
+    # CPU 1、worker (wgft-crypto) を CPU 2 から後に置く (tcpquality.sh が agentd を通して行い、効かなければ失敗にする)
     (VM=${names[0]}; in_vm ip netns exec home python3 "$SHARE/lab/tcpquality.py" nicirq eth0 0) >>"$out/vm-${vms[0]}.log" 2>&1 \
       || die "cannot put the data NIC's interrupts of ${names[0]} on CPU 0; see $out/vm-${vms[0]}.log"
     SPLIT_AGENT_CPUS=0
     ((vcpus == 1)) || SPLIT_AGENT_CPUS=1
+    if [[ $placement == apart-mt ]]; then
+      SPLIT_AGENT_CPUS=1-$((vcpus - 1)) SPLIT_AGENT_DP_CPUS=1 SPLIT_AGENT_WORKER_CPUS=2
+      ((vcpus == 3)) || SPLIT_AGENT_WORKER_CPUS=2-$((vcpus - 1))
+    fi
     # 相手の VM:1 つの flow の受信の softirq は RPS が flow ごとに選ぶ 1 つの vCPU で走る。その vCPU が NIC の割り込みの
     # vCPU と重なった実行が詰まったので、NIC の全 vector を CPU 0 に固定し、全 veth の RPS から CPU 0 を外す
     local pv=${peervcpus:-8}
@@ -1217,6 +1227,7 @@ paired_run_split_round() {
     env=(RUNS="$runs" DIRECTION="$direction" AGENT_AT="$SPLIT_AGENT_AT")
     [[ $target != local ]] || env+=(TARGET_LOCAL=1)
     [[ -z $SPLIT_AGENT_CPUS ]] || env+=(AGENT_CPUS="$SPLIT_AGENT_CPUS")
+    [[ -z $SPLIT_AGENT_DP_CPUS ]] || env+=(AGENT_DP_CPUS="$SPLIT_AGENT_DP_CPUS" AGENT_WORKER_CPUS="$SPLIT_AGENT_WORKER_CPUS")
     cur_arm=${arms[k]}
     paired_round_env
     log=$out/round-$r-${arms[k]}.log
@@ -1536,7 +1547,7 @@ paired_cases_mark() {
 
 cmd_paired() {
   local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes="" tool="" streams="" udpping="" bulkmbit="" agentgso="" rmemmax="" rtarget_flag=""
-  local split="" peervcpus="" delayms="" delayrate="" delayqueue="" target="" placement="" SPLIT_AGENT_CPUS="" SPLIT_PEER_RPS="" xagentenv="" yagentenv="" SPLIT_HOSTPOLL="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
+  local split="" peervcpus="" delayms="" delayrate="" delayqueue="" target="" placement="" SPLIT_AGENT_CPUS="" SPLIT_AGENT_DP_CPUS="" SPLIT_AGENT_WORKER_CPUS="" SPLIT_PEER_RPS="" xagentenv="" yagentenv="" SPLIT_HOSTPOLL="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
   local rest=() path spec_x spec_y uses_base rust pins=() names=() vms=() t0 run_timeout r
   local rc=0 fails=0 prev_offs=()
   local cases="" maxwall="" case_names=() case_paths=() case_flags=() PAIRED_KERN="" PAIRED_DIRTY="" PAIRED_READY_S="" SPLIT_CUR_TARGET=lan

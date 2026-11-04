@@ -174,6 +174,17 @@ class CpuPaired(unittest.TestCase):
             rc, err = self.lab_paired(args, cases)
             self.assertEqual(rc, 1, err)
             self.assertIn(want, err)
+        # --placement apart-mt: 3 vCPUs at least, and rust or kernel arms only
+        for args, want in ((["--split", "--placement", "apart-mt", "--vcpus", "2", "--tool", "iperf3", "fast", "rust", "kernel"],
+                            "wants --vcpus 3 or more"),
+                           (["--split", "--placement", "apart-mt", "--vcpus", "4", "--tool", "iperf3", "fast", "gvisor", "rust"],
+                            "--placement apart-mt places the Rust agent's data-plane thread and crypto workers"),
+                           (["--split", "--placement", "apart-st", "fast", "rust", "kernel"], "--placement wants apart or apart-mt")):
+            rc, err = self.lab_paired(args)
+            self.assertEqual(rc, 1, err)
+            self.assertIn(want, err)
+        rc, err = self.lab_paired(["--split", "--placement", "apart-mt", "--vcpus", "4", "--tool", "iperf3", "fast", "rust", "kernel"])
+        self.assertIn("/proc/wgft-no-such-dir", err)
         # the case that is wrong is named
         rc, err = self.lab_paired(base + ["rust", "kernel"], "a fast --tool iperf3\nb fast --target local\n")
         self.assertIn("case b: see the message above", err)
@@ -472,6 +483,40 @@ class Placement(unittest.TestCase):
             shutil.rmtree(os.path.join(d, "812"))
             s.sample()
             self.assertFalse(s.alive)
+
+    def test_threads_sampler_groups_every_thread(self):
+        import shutil
+        with tempfile.TemporaryDirectory() as d:
+            def task(tid, comm, state, cpu, run, wait, mig):
+                td = os.path.join(d, "812", "task", str(tid))
+                os.makedirs(td, exist_ok=True)
+                fields = [state] + ["0"] * 35 + [str(cpu)] + ["0"] * 10
+                for name, body in (("comm", comm), ("stat", "%d (%s) %s" % (tid, comm, " ".join(fields))),
+                                   ("schedstat", "%d %d 1" % (run * 1000, wait * 1000)), ("sched", "se.nr_migrations : %d" % mig)):
+                    with open(os.path.join(td, name), "w") as f:
+                        f.write(body + "\n")
+            task(812, "wgft", "S", 0, 10, 0, 0)
+            task(813, "wgft-dataplane", "R", 1, 100, 5, 1)
+            task(814, "wgft-crypto", "R", 2, 50, 1, 0)
+            task(815, "wgft-crypto", "S", 3, 40, 2, 0)
+            s = tq.ThreadsSampler(812, 4, proc=d)
+            first = dict(s.counters())
+            s.sample()
+            s.sample()
+            # a worker goes, another one comes
+            shutil.rmtree(os.path.join(d, "812", "task", "815"))
+            task(816, "wgft-crypto", "R", 2, 7, 0, 3)
+            task(813, "wgft-dataplane", "R", 1, 160, 9, 1)
+            s.sample()
+            got = dict(s.counters())
+        self.assertEqual([got["thr_dp_oncpu%d" % i] for i in range(4)], [0, 3, 0, 0])
+        self.assertEqual([got["thr_crypto_oncpu%d" % i] for i in range(4)], [0, 0, 4, 2])
+        self.assertEqual((got["thr_crypto_samples"], got["thr_crypto_running"]), (6, 4))
+        self.assertEqual((got["thr_other_samples"], got["thr_other_oncpu0"]), (3, 3))
+        # the run time grows by the increments only; the worker that went keeps what it had
+        self.assertEqual(got["thr_dp_run_us"] - first["thr_dp_run_us"], 60)
+        self.assertEqual(got["thr_crypto_run_us"] - first["thr_crypto_run_us"], 7)
+        self.assertEqual(got["thr_crypto_mig"] - first["thr_crypto_mig"], 3)
 
     def test_kthreads_per_cpu(self):
         self.assertEqual(tq.parse_kthread("kworker/3:1-events"), ("kw", 3))

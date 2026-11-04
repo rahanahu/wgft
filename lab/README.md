@@ -423,7 +423,16 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
   カーネルモードの腕の data plane はカーネルの WireGuard で、置くプロセスが無いので固定しません
 - 使える範囲:この置き方は agent を 1 つの CPU に抑えます。
   比べる 2 つの build の data plane がどちらも 1 スレッドの間だけ有効です。
-  暗号の worker のように data plane のスレッドを足した build には、別の置き方が要ります
+  暗号の worker のように data plane のスレッドを足した build には、次の `--placement apart-mt` を使います
+- `--placement apart-mt`:暗号の worker を持つ build 用です。
+  NIC の割り込みと相手の VM の固定は `apart` と同じです。
+  Rust の agent のプロセスを CPU 1 から後に置き、agent が tunnel を張った後に、data plane のスレッド (`wgft-dataplane`) を CPU 1、暗号の worker (`wgft-crypto`) を CPU 2 から後に agentd を通して置きます。
+  置けなければその腕を失敗にし、各実行の後にも確かめます。
+  後から作られた worker は data plane のスレッドの CPU を受け継ぐので、その実行は失敗になります。
+  agent のすべてのスレッドの載った vCPU を、`dp`、`crypto`、`other` の組ごとに記録します (`agentvm_thr_<組>_cpu<N>_frac` など)。
+  worker の置き場所に CPU が要るので `--vcpus 3` 以上を求め、worker 2 つが別の vCPU に載る 4 vCPU が意味のある最小の大きさです。
+  worker の無い build でも流せ、そのときは data plane のスレッドが CPU 1 に載ります。
+  ラボではまだ流していません
 - 相手の VM:data の NIC の全 vector の割り込みを CPU 0 に固定し、全 veth の RPS から CPU 0 を外します (`lab/netns.sh split-peer-rps`)。
   1 つの flow の受信の softirq は RPS が flow ごとに選ぶ 1 つの vCPU で走るので、その vCPU が NIC の割り込みの vCPU と重ならなくなります。
   相手の VM が 1 vCPU のときは固定しません
