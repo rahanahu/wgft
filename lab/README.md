@@ -450,7 +450,13 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
 - `--agent-load CPU:DUTY`:`--split` で、agent の VM の CPU `CPU` に固定した負荷 (`lab/agentload.py`) を、各腕の実行の前から後まで動かします。
   負荷は 10 ms ごとに `DUTY` % の間だけ CPU を使い切り、残りは眠ります。VM の root の netns で走り、agent のスレッドと CPU を取り合います。
   `--placement apart-mt` と合わせると、`CPU` に 1 を置けば data plane のスレッドと、2 か 3 を置けば暗号の worker と競合します。
-  負荷が実際に使った割合は `paired.log` の `AGENTLOAD` の行 (`share`、round と腕つき) に残り、`DUTY` より低ければ agent に CPU を取られています。
+  負荷が実際に使った割合は `paired.log` の `AGENTLOAD` の行に残ります (`share` は 0 から 1 の割合で、`DUTY` は百分率です。round と腕つき)。
+  負荷が眠りから戻る遅れと、ホストの steal でも `share` は `DUTY / 100` より低くなり (ホストでの試しは `DUTY` 50 で 0.48)、agent に CPU を取られた分だけではありません。
+  agent に取られた量は、腕の間か、agent を動かさない基準の値と `share` を比べて読みます。
+  注意:agent の VM 全体の CPU の値には負荷が入ります (`agentvm_cpu_s_per_gb` と `AGENTVM`、`vm_cpu_s_per_gb` と `VMRATIO`、負荷の載った CPU の `agentvm_cpu<N>_busy`、LAT の `vm_busy`、`hostwin` の `host_agent_*`)。
+  遅い腕ほど 1 GB あたりに負荷の CPU を多く積むので、腕の間に偏りが出ます。
+  agent のプロセスの cgroup の比と遅れ (UDP の p50、p99、jitter) は負荷に影響されません。
+  カーネルモードの腕は VM 全体の値でしか比べられないので、`--agent-load` と一緒には使えません (拒否します)。
   `PLAN` の行に `agent_load=CPU:DUTY` が付きます。腕の実行ごと (起動と後片付けを含む) に動かすので、転送 1 回ごとの値ではありません。
   VM の形を決める値と同じく、コマンド行だけに書き、`--cases` の全 case に共通です。
   ラボではまだ流していません

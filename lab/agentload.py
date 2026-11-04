@@ -3,6 +3,7 @@
 
   agentload.py start CPU DUTY_PERCENT STATEFILE   pin to CPU, busy DUTY percent of every 10 ms
   agentload.py stop STATEFILE                     stop it and print its share of the CPU
+  agentload.py kill STATEFILE                     SIGKILL it and remove the state files; never fails
 
 `start` returns once the hog runs. `stop` prints one line:
   AGENTLOAD cpu=N duty=D wall_s=W cpu_s=C share=S
@@ -38,6 +39,27 @@ def hog(cpu, duty, state):
         f.write(f"AGENTLOAD cpu={cpu} duty={duty} wall_s={wall:.3f} cpu_s={cpu_s:.3f} share={cpu_s / wall if wall else 0:.3f}\n")
 
 
+def alive(state):
+    try:
+        os.kill(int(open(state).read()), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def kill(state):
+    """SIGKILL the hog if it runs and remove the state files. Never raises."""
+    try:
+        os.kill(int(open(state).read()), signal.SIGKILL)
+    except (OSError, ValueError):
+        pass
+    for p in (state, state + ".result"):
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+
+
 def main():
     if len(sys.argv) == 5 and sys.argv[1] == "start":
         cpu, duty, state = int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
@@ -46,15 +68,16 @@ def main():
         if cpu not in os.sched_getaffinity(0):
             sys.exit(f"agentload: CPU {cpu} is not available here")
         if os.path.exists(state):
-            sys.exit(f"agentload: {state} exists; a hog is already running")
+            if alive(state):
+                sys.exit(f"agentload: {state} exists and its hog is running")
+            kill(state)  # a stale state of a hog that is gone
         pid = os.fork()
         if pid:
             with open(state, "w") as f:
                 f.write(f"{pid}\n")
             time.sleep(0.2)
-            try:
-                os.kill(pid, 0)
-            except OSError:
+            if os.waitpid(pid, os.WNOHANG) != (0, 0):
+                kill(state)
                 sys.exit("agentload: the hog did not start")
             return
         os.setsid()
@@ -67,17 +90,25 @@ def main():
         os._exit(0)
     elif len(sys.argv) == 3 and sys.argv[1] == "stop":
         state = sys.argv[2]
-        pid = int(open(state).read())
-        os.kill(pid, signal.SIGTERM)
-        for _ in range(100):
-            if os.path.exists(state + ".result"):
-                break
-            time.sleep(0.05)
-        else:
-            sys.exit("agentload: the hog left no result")
-        sys.stdout.write(open(state + ".result").read())
-        os.unlink(state)
-        os.unlink(state + ".result")
+        try:
+            pid = int(open(state).read())
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            for _ in range(100):
+                if os.path.exists(state + ".result"):
+                    break
+                time.sleep(0.05)
+            else:
+                sys.exit("agentload: the hog left no result")
+            sys.stdout.write(open(state + ".result").read())
+        except (OSError, ValueError) as e:
+            sys.exit(f"agentload: cannot stop the hog: {e}")
+        finally:
+            kill(state)
+    elif len(sys.argv) == 3 and sys.argv[1] == "kill":
+        kill(sys.argv[2])
     else:
         sys.exit(__doc__)
 

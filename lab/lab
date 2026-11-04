@@ -755,6 +755,7 @@ paired_cleanup() {
     paired_agent_logs "$PAIRED_OUT/agent-vm-logs.txt"
     rm -f "$PAIRED_OUT/.agentd-token"
   fi
+  paired_agentload_kill
   suite_cleanup || true
   if [[ -n $PAIRED_SPLIT_NET && -z ${SUITE_KEEP:-} ]]; then
     inc network delete "$PAIRED_SPLIT_NET" >/dev/null 2>&1 || info "could not delete the network $PAIRED_SPLIT_NET"
@@ -930,12 +931,6 @@ paired_validate() {
   [[ -z $placement || ( -n $split && ( $placement == apart || $placement == apart-mt ) ) ]] || die "--placement wants apart or apart-mt, with --split"
   # apart-mt は data plane のスレッドを CPU 1、暗号の worker を CPU 2 と 3 に 1 つずつ置く。A+ の agent はプロセスの使える
   # CPU が 2 つ以下だと worker を作らない (taskset 1-2 の 3 vCPU では 0)。4 vCPU で worker が 2 つ、CPU 2 と 3 に載る
-  if [[ -n $agentload ]]; then
-    [[ -n $split ]] || die "--agent-load goes with --split"
-    [[ $agentload =~ ^([0-9]+):([0-9]+)$ ]] || die "--agent-load wants CPU:DUTY, the agent VM's CPU and the percent of every 10 ms the hog is busy; got $agentload"
-    ((BASH_REMATCH[1] < vcpus)) || die "--agent-load CPU ${BASH_REMATCH[1]} is not a CPU of the agent VM, which has --vcpus $vcpus"
-    ((BASH_REMATCH[2] <= 100)) || die "--agent-load DUTY wants 0 to 100"
-  fi
   [[ $placement != apart-mt ]] || ((vcpus >= 4)) || die "--placement apart-mt puts the data-plane thread on CPU 1 and the crypto workers on CPUs 2 and 3, and the agent starts workers only with more than two CPUs to run on, so it wants --vcpus 4 or more"
   # --placement apart は userspace の agent のプロセス全体を 1 つの CPU に置く。data plane が 1 スレッドの Rust の agent と、
   # 置くプロセスの無いカーネルモードだけに使える (gVisor の Go の agent や、暗号の worker を足した build には別の置き方が要る)
@@ -969,6 +964,17 @@ paired_validate() {
   [[ -z $agentgso || $agentgso == off || ( $agentgso == on && $path == fast ) ]] || die "--agent-gso wants off, or on with the fast path"
   [[ -z $rmemmax ]] || { is_uint "$rmemmax" && ((rmemmax >= 4096)); } || die "--kernel-rmem-max wants a whole number of bytes of 4096 or more"
   [[ -z $rmemmax || ${spec_x#base:} == kernel || ${spec_y#base:} == kernel ]] || die "--kernel-rmem-max sets the receiver of a kernel arm; neither arm is kernel"
+  if [[ -n $agentload ]]; then
+    [[ -n $split ]] || die "--agent-load goes with --split"
+    [[ $agentload =~ ^([0-9]+):([0-9]+)$ ]] || die "--agent-load wants CPU:DUTY, the agent VM's CPU and the percent of every 10 ms the hog is busy; got $agentload"
+    # 先頭の 0 は bash で 8 進になるので、10 進に読む。値は正規化して以後に渡す
+    local al_cpu=$((10#${BASH_REMATCH[1]})) al_duty=$((10#${BASH_REMATCH[2]}))
+    ((al_cpu < vcpus)) || die "--agent-load CPU $al_cpu is not a CPU of the agent VM, which has --vcpus $vcpus"
+    ((al_duty <= 100)) || die "--agent-load DUTY wants 0 to 100"
+    agentload=$al_cpu:$al_duty
+    # カーネルモードの腕は VM 全体の CPU でしか比べられず、負荷がそこに入るので使えない
+    [[ ${spec_x#base:} != kernel && ${spec_y#base:} != kernel ]] || die "--agent-load cannot be used with a kernel arm: kernel arms are compared by VM-wide CPU, which the load would fill"
+  fi
   # 同じ腕は、--split でホストの halt polling だけを腕の間で替える比べ (PAIRED_HOSTPOLL_X と _Y が違う) に限る
   [[ $spec_x != "$spec_y" || ( -n $split && ${PAIRED_HOSTPOLL_X:-on} != "${PAIRED_HOSTPOLL_Y:-on}" ) ]] \
     || die "the two arms are the same: $spec_x; with --split, the same arm twice needs PAIRED_HOSTPOLL_X and PAIRED_HOSTPOLL_Y that differ"
@@ -1269,14 +1275,30 @@ paired_run_split_round() {
 # 転送 1 回ごとではない
 paired_agentload_start() {
   [[ -n $agentload ]] || return 0
-  (VM=${names[0]}; in_vm python3 "$SHARE/lab/agentload.py" start "${agentload%%:*}" "${agentload##*:}" /run/wgft-agentload) >>"$out/vm-${vms[0]}.log" 2>&1 \
+  (VM=${names[0]}; suite_timeout 60 in_vm python3 "$SHARE/lab/agentload.py" start "${agentload%%:*}" "${agentload##*:}" /run/wgft-agentload) >>"$out/vm-${vms[0]}.log" 2>&1 \
     || die "cannot start the load on ${names[0]}; see $out/vm-${vms[0]}.log"
 }
+# stop は後ろで流して wait で待つ (TERM の trap が効くように)。失敗したら残りを kill して状態を消し、次の腕の start が
+# 古い状態で落ちて残りの case が失われないようにする
 paired_agentload_stop() {
   [[ -n $agentload ]] || return 0
-  local line
-  line=$(VM=${names[0]}; in_vm python3 "$SHARE/lab/agentload.py" stop /run/wgft-agentload 2>>"$out/vm-${vms[0]}.log") || { info "could not stop the load on ${names[0]}"; fails=1; return 0; }
-  echo "$line round=$1 arm=$2" >>"$out/paired.log"
+  local res=$out/.agentload-stop stop_rc=0
+  (VM=${names[0]}; suite_timeout 60 in_vm python3 "$SHARE/lab/agentload.py" stop /run/wgft-agentload) >"$res" 2>>"$out/vm-${vms[0]}.log" &
+  wait $! || stop_rc=$?
+  if ((stop_rc != 0)) || ! grep -q '^AGENTLOAD ' "$res"; then
+    info "could not stop the load on ${names[0]} (rc=$stop_rc); killing it"
+    paired_agentload_kill
+    fails=1
+    PAIRED_CASE_SUSPECT=1
+  else
+    echo "$(grep '^AGENTLOAD ' "$res") round=$1 arm=$2" >>"$out/paired.log"
+  fi
+  rm -f "$res"
+}
+# paired_agentload_kill:負荷を SIGKILL し、状態のファイルを消す (できる範囲で。失敗しても続ける)
+paired_agentload_kill() {
+  [[ -n $agentload && -n ${names[0]:-} ]] || return 0
+  (VM=${names[0]}; suite_timeout 60 in_vm python3 "$SHARE/lab/agentload.py" kill /run/wgft-agentload) >>"$out/vm-${vms[0]}.log" 2>&1 || true
 }
 
 # paired_hostpoll <arm>:PAIRED_HOSTPOLL_X、PAIRED_HOSTPOLL_Y (on か off、片方だけなら他方は on) があれば、その腕の前に
