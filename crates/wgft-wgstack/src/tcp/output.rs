@@ -338,7 +338,8 @@ impl Conn<'_> {
         if fin {
             n += 1;
         }
-        // 窓の外から始まる記録は送りません。先頭の記録は窓の probe を兼ねて送ります (Linux と同じ)。窓の probe を張っている間は送りません。
+        // 窓の外から始まる記録は送りません。先頭の記録は窓の probe を兼ねて送ります (Linux と同じ)。
+        // 窓の probe を張っている間は送りません。
         let seq = self.b.recs.at(i).seq.wrapping_add(off);
         let t = &*self.t;
         if t.persist || (seq != t.snd_una && !seq::lt(seq, t.snd_una.wrapping_add(t.snd_wnd))) {

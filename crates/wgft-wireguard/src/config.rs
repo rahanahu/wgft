@@ -230,7 +230,7 @@ impl Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            // wireguard-go と Linux と同じ数
+            // wireguard-go と Linux の WireGuard と同じ数
             staged_packets: 128,
             transmit_packets: 256,
             transmit_bytes: 512 * 1024,

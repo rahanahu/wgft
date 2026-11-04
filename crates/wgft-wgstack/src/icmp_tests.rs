@@ -513,8 +513,8 @@ fn pmtu_drop_resends_large_records_in_pieces() {
     assert_eq!(n.s.stats().retrans[usize::from(RTX_PMTU)], sent);
 }
 
-/// PMTU の引き下げで、新しい大きさに入る記録は送り直しません (入る記録は届いているかもしれません。Linux と
-/// 同じです。Go の `TestPMTUDropKeepsRecordsThatFit`)。
+/// PMTU の引き下げで、新しい大きさに入る記録は送り直しません (入る記録は届いているかもしれません。Linux と同じです。
+/// Go の `TestPMTUDropKeepsRecordsThatFit`)。
 #[test]
 fn pmtu_drop_keeps_records_that_fit() {
     let (mut n, c, _, outs) = sack_conn(2);

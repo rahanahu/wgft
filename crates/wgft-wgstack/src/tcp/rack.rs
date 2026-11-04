@@ -183,7 +183,7 @@ impl Conn<'_> {
             }
         } else {
             if seq::le(end, t.recover) {
-                // RTO の前に送り、再送していないデータ
+                // RTO の前に送り、再送していないデータへの確認
                 t.orig_delivered = true;
             }
             if t.rack_fack_ok && seq::lt(end, t.rack_fack) {

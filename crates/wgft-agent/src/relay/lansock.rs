@@ -113,7 +113,7 @@ mod sys {
     /// floor の実効の値。Linux は SO_RCVBUF の要求の 2 倍を置く。
     const FLOOR_BYTES: usize = 2 * RECV_FLOOR;
 
-    /// Linux の TCP の状態の値で CLOSE。
+    /// `tcp_info` の `tcpi_state` で CLOSE を表す値。
     const TCP_CLOSE: u8 = 7;
 
     fn set_int(fd: RawFd, level: libc::c_int, option: libc::c_int, value: usize) -> bool {

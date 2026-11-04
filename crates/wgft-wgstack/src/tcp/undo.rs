@@ -1,9 +1,8 @@
 //! 不要な再送の取り消し (Go の `undo.go`)。
 //!
 //! 回復に入る時と回復の外の最初の RTO の時に輻輳の窓と ssthresh を覚え、再送が不要だったと分かれば戻します
-//! (Linux と同じ)。不要と分かる条件は、すべての
-//! 再送が D-SACK で知らされたこと (RFC 3708) か、確認の TSecr が最初の再送の時刻より前であること (RFC 3522 の
-//! Eifel) です。
+//! (Linux と同じ)。不要と分かる条件は、すべての再送が D-SACK で知らされたこと (RFC 3708) か、
+//! 確認の TSecr が最初の再送の時刻より前であること (RFC 3522 の Eifel) です。
 
 use super::ctx::Conn;
 use super::{RTX_RTO, ts_clock};
@@ -39,8 +38,8 @@ impl Conn<'_> {
     }
 
     /// 先頭の block が D-SACK の ACK で、重複した segment の数を返します (Linux と同じ)。範囲が相手の窓の
-    /// 最大より広い block と、D-SACK の累計が再送の累計を超えた block は疑わしいので 0 を返します。2 つ目の値は block
-    /// が TLP の probe の再送の D-SACK であることです。
+    /// 最大より広い block と、D-SACK の累計が再送の累計を超えた block は疑わしいので 0 を返します。2 つ目の値は、block が
+    /// TLP の probe の再送の D-SACK かどうかです。
     pub(crate) fn dsack_seen(&mut self, b: SackBlock) -> (u32, bool) {
         let l = b.right.wrapping_sub(b.left);
         if l == 0 || l > self.t.max_snd_wnd {
@@ -112,8 +111,7 @@ impl Conn<'_> {
         self.k.undo_marker && (self.k.undo_retrans == 0 || self.packet_delayed(seg))
     }
 
-    /// 覚えた輻輳の窓と ssthresh に戻し、並べ替えを見たことにします (Linux と同じ、RFC 4015 の
-    /// 応答)。
+    /// 覚えた輻輳の窓と ssthresh に戻し、並べ替えを見たことにします (RFC 4015 の応答。Linux と同じ)。
     pub(crate) fn undo(&mut self) {
         let t = &mut *self.t;
         t.cwnd = t.cwnd.max(self.k.undo_cwnd);
@@ -124,7 +122,8 @@ impl Conn<'_> {
         self.s.stats.spurious_undos += 1;
     }
 
-    /// RTO の後の回復が終わった ACK で、再送が不要だったと分かれば窓を戻し、F-RTO と取り消しの印を終えます (Linux と同じ)。
+    /// RTO の後の回復が終わった ACK で、再送が不要だったと分かれば窓を戻し、F-RTO と取り消しの印を
+    /// 終えます (Linux と同じ)。
     pub(crate) fn rto_recovered(&mut self, seg: &Segment<'_>) {
         if self.may_undo(seg) {
             self.undo();

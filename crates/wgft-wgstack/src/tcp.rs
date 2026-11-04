@@ -62,7 +62,7 @@ pub(crate) const SEC: i64 = 1_000 * MS;
 
 /// SYN の MSS の下限で、MSS の option が無いときの値です (RFC 1122)。
 pub(crate) const MIN_MSS: u32 = 536;
-/// Fragmentation Needed の next-hop MTU の下限です (Linux と同じ)。
+/// Fragmentation Needed の next-hop MTU の下限です (Linux の既定の `net.ipv4.route.min_pmtu` と同じ)。
 pub(crate) const MIN_PMTU: u32 = 552;
 /// IPv4 と TCP の header の和です。
 pub(crate) const IP_TCP_HEADERS: u32 = 40;
@@ -74,7 +74,7 @@ pub(crate) const RCV_WINDOW_SHIFT: u8 = 7;
 pub(crate) const RTO_INIT: i64 = SEC;
 pub(crate) const RTO_MIN: i64 = 200 * MS;
 pub(crate) const RTO_MAX: i64 = 120 * SEC;
-/// 遅延 ACK の時間で、Linux と同じ 40 ms です。
+/// 遅延 ACK の時間です。Linux の遅延 ACK の時間の最初の値と下限 (40 ms) と同じです。
 pub(crate) const DELACK_TIMEOUT: i64 = 40 * MS;
 /// TIME_WAIT の長さ (Linux と同じ) です。
 pub(crate) const TW_TIMEOUT: i64 = 60 * SEC;
