@@ -88,6 +88,11 @@ case "${1:-}" in
     # the CPUs a process may run on (Cpus_allowed_list), to check a pin
     awk '$1 == "Cpus_allowed_list:" { print $2 }' "/proc/${2:?cpus <pid>}/status"
     ;;
+  cpus-of)
+    # the CPUs the first process in home whose command line has <cmdline substring> may run on
+    pid=$(home_pid "${2:?cpus-of <cmdline substring>}") || exit 1
+    awk '$1 == "Cpus_allowed_list:" { print $2 }' "/proc/$pid/status"
+    ;;
   pin-threads | check-threads)
     # <worker cpus> is a comma list; the k-th wgft-crypto thread, by thread id, goes on its k-th CPU
     # (round robin), so that each worker has a CPU of its own

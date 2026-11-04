@@ -467,8 +467,8 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
 - カーネルモードとの比べ:割り込みと相手の VM の固定は両方の腕に同じです。
   Rust の腕は agent のスレッドが割り込みの vCPU と同居しない形にそろい、カーネルモードの腕は全 vCPU を使います。
   既定の値とは同居した実行の分だけ違うので、既定で取った表とは混ぜません
-- `--target local` と組む時:転送先 (agent の VM の `home` で動く iperf3 のサーバ、UDP の echo) も agent と割り込みの CPU から外して固定します。
-  固定しないと転送先が agent の CPU に載る実行が出て、Rust の腕の値が下がりました。
+- `--target local` と組む時:転送先 (agent の VM の `home` で動く iperf3 のサーバ、UDP の echo) も data plane と暗号の worker と割り込みの CPU から外して固定します。
+  固定しないと転送先が agent の CPU に載り、Rust の腕の値が下がったと推定しています (未確認で、観測してはいません)。
   置き場所は VM の vCPU 数で決まり、2 つの腕に同じに掛かります (カーネルモードの腕にも掛かります)。
 
   | `--placement` | vCPU | 転送先の CPU |
@@ -476,15 +476,18 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
   | `apart` | 1 | 固定しない (全部が CPU 0) |
   | `apart` | 2 | CPU 0 (割り込みと同居。agent の CPU 1 とは分ける) |
   | `apart` | 3 以上 | CPU 2 から後ろ |
-  | `apart-mt` | 4 以下 | CPU 0 (割り込みと同居。data plane と暗号の worker の CPU 1 から 3 とは分ける) |
+  | `apart-mt` | 4 | CPU 0 (割り込みと同居。data plane と暗号の worker の CPU 1 から 3 とは分ける) |
   | `apart-mt` | 5 以上 | CPU 4 から後ろ |
 
   2 vCPU の `apart` と 4 vCPU の `apart-mt` では、転送先が割り込みと受信の softirq の CPU と同居します。
-  空きの CPU が無いための決めで、agent のスレッドとの同居を避けることを優先しました。
+  空きの CPU が無いための決めで、data plane と暗号の worker との同居を避けることを優先しました。
+  CPU 0 の同居で転送先が詰まる恐れがあり、未確認です。
+  `apart-mt` で固定するのは data plane のスレッドと暗号の worker だけなので、agent の他のスレッド (主、制御など) は転送先の CPU に載りえます。
   `PLAN` の行に `local_cpus=` が付き、固定しない時は `unpinned` です。
-  結果の行の `local_cpus=` にも同じ値が入ります。
-  固定が効いていなければ、その腕を失敗にします。
-  `--placement` を付けない実行と、`--target local` を付けない実行は前と同じです
+  結果の行の `local_cpus=` にも、固定した時だけ同じ値が入ります。
+  固定が効いていなければ (転送先の process が見つからない場合と、UDP の echo の固定を含む)、その腕を失敗にします。
+  ラボではまだ流していません
+  `--placement` を付けない実行と、`--target local` を付けない実行は前と同じです (結果の行も変わりません)
 - 記録:`paired.log` の `PLAN` の行に `placement=apart` が付き、`header.txt` に置き場所を書きます。
   実行ごとの `agentvm_nicirq_eff` と `agentvm_thr_dp_cpu<N>_frac` で、固定が効いたことを確かめられます
 - 残る揺れ:相手の VM の RPS の vCPU では、CPU ごとのカーネルの worker (`kworker/<N>`) も動きます。
