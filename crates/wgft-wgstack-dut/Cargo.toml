@@ -16,6 +16,7 @@ path = "src/main.rs"
 flate2.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "time", "io-util", "sync", "macros"] }
 wgft-netstack = { workspace = true, features = ["harness"] }
 wgft-tcpharness.workspace = true
