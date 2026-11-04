@@ -525,7 +525,6 @@ impl Table {
     }
 
     /// これまでに追い出した項目の数です。
-    #[cfg(test)]
     pub(crate) fn evicted(&self) -> u64 {
         self.evicted
     }

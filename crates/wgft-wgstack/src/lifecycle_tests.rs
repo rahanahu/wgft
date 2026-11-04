@@ -202,6 +202,10 @@ struct Peer {
 }
 
 fn stress(seed: u64, steps: usize) {
+    stress_with(seed, steps, None);
+}
+
+fn stress_with(seed: u64, steps: usize, quiesce: Option<bool>) {
     let chaos: u64 = env_or("STRESS_CHAOS", 15u64);
     let auto_drain = std::env::var("STRESS_DRAIN").is_ok();
     let mut r = Rng(seed | 1);
@@ -443,10 +447,89 @@ fn stress(seed: u64, steps: usize) {
             n.s.stats()
         );
     }
-    let held_before = n.s.held();
-    let _ = held_before;
+    if let Some(cooperative) = quiesce {
+        quiesce_to_zero(&mut n, &handles, seed, cooperative);
+    }
     let closed = n.s.close(n.now);
     assert!(closed.held.is_zero());
+}
+
+/// 待ち受けを閉じ、アプリケーションが持つ handle をすべて閉じた後、相手が黙ったまま時刻だけを進めると、核は
+/// 接続の枠、握手の途中の行、TIME_WAIT の行、accept の待ち行列、制御の輪をすべて自分で返します。返さない資源は、
+/// 外からの入力で積み上がる漏れです (枠を持ち続ける接続には期限のタイマーが要ります)。
+fn quiesce_to_zero(n: &mut TestNet, handles: &[ConnId], seed: u64, cooperative: bool) {
+    for port in [80u16, 81] {
+        let l = listener(n, port);
+        n.s.close_listener(n.now, l);
+    }
+    for &h in handles {
+        n.s.close_conn(n.now, h);
+    }
+    n.check();
+    // 再送の打ち切り (約 924 秒) と窓の probe の打ち切り (後退の上限 120 秒で 15 回) を越える時間です。
+    let mut ts = 1u32 << 30;
+    for _ in 0..(3 * 3600 / 10) {
+        let outs = n.drain();
+        if cooperative {
+            // 応える相手:核が送った segment の終わりまでを ACK し、FIN には自分の FIN を返します。
+            for o in outs.iter().filter(|o| !o.has(FLAG_RST) && !o.has(FLAG_SYN)) {
+                let end = o
+                    .seq
+                    .wrapping_add(o.payload.len() as u32)
+                    .wrapping_add(u32::from(o.has(FLAG_FIN)));
+                ts = ts.wrapping_add(7);
+                n.inject(&TSeg {
+                    sport: o.rport,
+                    dport: o.lport,
+                    seq: o.ack,
+                    ack: end,
+                    flags: FLAG_ACK | if o.has(FLAG_FIN) { FLAG_FIN } else { 0 },
+                    wnd: 65535,
+                    ts: o.ts.map(|(v, _)| (ts, v)),
+                    ..TSeg::default()
+                });
+            }
+        }
+        n.advance(Duration::from_secs(10));
+        while n.s.poll_event().is_some() {}
+    }
+    n.drain();
+    let h = n.s.held();
+    let stuck: Vec<String> =
+        n.s.conns
+            .iter_bufs()
+            .filter(|(_, t, _)| t.state != State::Free)
+            .map(|(i, t, _)| {
+                format!(
+                    "slot {i} {:?} app_closed={} accepted={}",
+                    t.state, t.app_closed, t.accepted
+                )
+            })
+            .collect();
+    assert!(
+        h.conns == 0
+            && h.syn_rows == 0
+            && h.tw_rows == 0
+            && h.accept_queued == 0
+            && h.ctl_queued == 0,
+        "seed {seed}: the core kept {h:?} after everything was closed and the peer went silent: {stuck:?}"
+    );
+}
+
+#[test]
+fn quiesce_many_seeds() {
+    let seeds: u64 = env_or("QUIESCE_SEEDS", 2);
+    let steps: usize = env_or("STRESS_STEPS", 3000);
+    for s in 1..=seeds {
+        let res = std::panic::catch_unwind(|| {
+            stress_with(
+                s.wrapping_mul(0x9e37_79b9_7f4a_7c15),
+                steps,
+                Some(s % 2 == 0),
+            );
+        });
+        assert!(res.is_ok(), "seed {s} failed");
+    }
 }
 
 #[test]
