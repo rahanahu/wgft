@@ -445,6 +445,49 @@ client と LAN のホストの TCP のバッファの上限は 64 MiB に上げ�
 
 `tcpquality.sh` の `CPU=1` の結果の行には、interface ごとの packet の数と平均の大きさ、namespace ごとの TCP の segment と UDP の datagram の数、tunnel を戻る ACK の数 (`tun_ack_pkts_per_gb`)、受け手の GRO の後の segment の大きさ (`recv_seg_avg_b`) も入ります。
 
+### 1 組の VM で複数の case を流す (`--cases`)
+
+```sh
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus 4 --base HEAD --tool iperf3 --cases cases.txt rust base:rust
+```
+
+`--split` の 1 つの case のうち、測るのは約 3 分で、残りの約 2.5 分は VM 2 台の作成、起動、build の導入と削除です。
+`--cases FILE` は 1 組の VM で FILE の case を順に流し、この固定の費用を case の数で割ります。
+
+- FILE:1 行が 1 case で、`<名前> <経路> [case ごとのフラグ...]` と書きます。
+  `#` から後と空行は読みません。
+  名前は英数字、`-`、`_` だけで、`--out` の直下のファイルとぶつからないように点を使えません。
+  例は `up-s1 fast --direction up --streams 1` と `d10-down delay --delay-ms 10 --direction down` です
+- case ごとのフラグ:`--direction`、`--bytes`、`--tool`、`--streams`、`--udp-ping`、`--bulk-mbit`、`--agent-gso`、`--kernel-rmem-max`、`--delay-ms`、`--delay-rate-mbit`、`--delay-queue-pkts`、`--target`、`--rounds`、`--runs` です。
+  コマンド行に書いた値は全 case の既定になり、行の値がそれを上書きします。
+  case の行でコマンド行の値を消すことはできません。
+  case によって有無が変わるフラグ (`--udp-ping` など) は、コマンド行に書かず、要る case の行だけに書きます。
+  VM の形を決めるフラグ (`--vcpus`、`--peer-vcpus`、`--placement`、`--base`、`--x-agent-env` など) と腕はコマンド行だけに書き、全 case に共通です
+- 確かめ:VM を立てる前に全 case を確かめ、誤りがあればその case の名前を出して止まります
+- 出力:case ごとに `--out` の下の `<名前>/` に、今と同じ形の `paired.log`、`header.txt`、`result.txt`、`host-samples.txt`、round ごとのログを置きます。
+  `PLAN` の行に `case_index` と `cases` が付き、`header.txt` に VM の組を使い回したことと、前に流れた case の数を書きます。
+  `--out` の直下には VM の組を立てた記録 (`setup.txt`、`vm-*.log`、`guestinfo.txt`) と、case ごとの結果の一覧 `cases.log` を置きます
+- case の間:両方の VM を `lab/splitcase.sh` で戻します。
+  lab の namespace に残ったプロセスと、時間切れの case が残した `tcpquality` の実行を止めます。
+  netem の qdisc と agent の interface を消し、TCP のバッファの sysctl (`TCP_BUF_MAX` が上げる) を VM を立てた時の値に戻します。
+  `--target` が前の case と違えば転送先のアドレスを移し、agentd と LAN の疎通を確かめます。
+  割り込みと RPS の固定 (`--placement apart`) と NIC の queue は、立てた時のままです
+- 失敗:失敗した case は次の case を止めません。
+  時間切れの arm か、agentd に届かなかった arm の後は、次の round の前に VM の組を確かめ直します。
+  VM の組を戻せないときは、その case を終え、残りの case を流さず、`cases.log` に `status=not_run` と書きます。
+  中断 (INT、TERM、HUP) で終わった case は `status=interrupted` です。
+  どれかの case が失敗すると、終了コードが 0 以外になります
+- 時間の上限:`wgft-heavy` の測定の job は 60 分で切られ、切られると VM を消す後片付けが走りません。
+  `--max-wall S` (環境変数 `PAIRED_MAX_WALL_S`、既定 3300 秒) は build の前からの上限です。
+  各 case の前に、経過した時間と見積もりの和が上限を超えるなら、その case から後を `status=not_run` にして、VM を消して終わります。
+  見積もりは、流し終えた case の実行 1 回あたりの最長の時間に、この case の実行の数と 1.2 を掛けた値です。
+  最初の case は見積もりの元が無いので、上限の残りがあれば流します。
+  流れなかった case は、その行だけを集めた FILE で流し直します。
+  1 つの FILE は、1 case の時間 (4 round × 2 実行の fast の 1 stream で約 3 分) で上限を割った数より少なくします
+- agent の VM の log:case の始めに agentd の log へ `== lab paired case <i> of <n> <名前> starts` の行を書くので、各 case の `agent-vm-logs.txt` を case の境で切れます
+- 未確認:`--cases` はまだラボで流していません。
+  使い回した VM の組の値が、新しく立てた組の値と同じになるかも未確認です
+
 ## 対応する VPS の環境
 
 カーネルと nftables の対応範囲は[セットアップの前提](../docs/manual/setup.md)に従います。

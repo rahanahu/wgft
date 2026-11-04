@@ -743,12 +743,16 @@ PAIRED_AGENT_AT=""
 PAIRED_OUT=""
 paired_cleanup() {
   [[ -z $PAIRED_SAMPLER ]] || kill "$PAIRED_SAMPLER" 2>/dev/null || true
+  # --cases:中断で終わった case と、まだ流していない case を cases.log に残す
+  if [[ -n ${PAIRED_CASES_LOG:-} ]]; then
+    [[ -z ${PAIRED_CASE_CUR:-} ]] || echo "CASE $PAIRED_CASE_CUR status=interrupted" >>"$PAIRED_CASES_LOG"
+    [[ -z ${PAIRED_CASES_LEFT:-} ]] || sed 's/$/ status=not_run/; s/^/CASE /' <<<"$PAIRED_CASES_LEFT" >>"$PAIRED_CASES_LOG"
+    PAIRED_CASE_CUR="" PAIRED_CASES_LEFT=""
+  fi
   # --split:VM を消す前に、agent の VM の agent と agentd の log を出力先に写す。agentd の子は incus の agent の
   # PrivateTmp の /tmp に書くので、incus exec の /tmp からは見えず、agentd に頼んで読む。FAIL の原因を後で追うため
   if [[ -n $PAIRED_AGENT_AT && -n $PAIRED_OUT && -s $PAIRED_OUT/.agentd-token ]]; then
-    timeout 20 python3 "$REPO/lab/tcpquality.py" agentx "$PAIRED_AGENT_AT" "$PAIRED_OUT/.agentd-token" -- \
-      sh -c 'for f in /tmp/wgft-agentd.log /tmp/wgft-tq-agent-*.log; do [ -f "$f" ] && { echo "==> $f"; tail -c 262144 "$f"; }; done' \
-      >"$PAIRED_OUT/agent-vm-logs.txt" 2>&1 || info "could not copy the agent VM's logs"
+    paired_agent_logs "$PAIRED_OUT/agent-vm-logs.txt"
     rm -f "$PAIRED_OUT/.agentd-token"
   fi
   suite_cleanup || true
@@ -758,6 +762,13 @@ paired_cleanup() {
   if [[ -n $PAIRED_BASE_WT ]]; then
     git -C "$REPO" worktree remove --force "$PAIRED_BASE_WT" >/dev/null 2>&1 || true
   fi
+}
+
+# paired_agent_logs <file>:agent の VM の agentd と agent の log の末尾を file に写す
+paired_agent_logs() {
+  timeout 20 python3 "$REPO/lab/tcpquality.py" agentx "$PAIRED_AGENT_AT" "$PAIRED_OUT/.agentd-token" -- \
+    sh -c 'for f in /tmp/wgft-agentd.log /tmp/wgft-tq-agent-*.log; do [ -f "$f" ] && { echo "==> $f"; tail -c 262144 "$f"; }; done' \
+    >"$1" 2>&1 || info "could not copy the agent VM's logs"
 }
 
 # paired_build_base <ref> <rust 0|1>:ref の wgft を bin/base/ に、rust が 1 なら Rust の wgft を bin/base/rust/ に作る。
@@ -813,7 +824,7 @@ paired_offset() {
   local i h0 v h1 best="" out=""
   for i in 1 2 3; do
     h0=$(date +%s.%N)
-    v=$(inc exec "$1" -- date +%s.%N) || continue
+    v=$(timeout 30 bash -c "$(declare -f inc); inc exec $(printf %q "$1") -- date +%s.%N") || continue
     h1=$(date +%s.%N)
     out=$(awk -v h0="$h0" -v v="$v" -v h1="$h1" -v best="$best" -v out="$out" \
       'BEGIN { r = h1 - h0; if (best == "" || r < best) printf "%.6f %.4f", r, v - (h0 + h1) / 2; else printf "%s %s", best, out }')
@@ -853,7 +864,7 @@ paired_sync() {
 }
 
 # lab paired の使い方。lab help と引数の誤りの両方がこの 1 つの文字列を出す
-PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local] [--placement apart]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y"
+PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local] [--placement apart]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y, or with --split: paired --split [options] --cases FILE [--max-wall SECONDS] ARM_X ARM_Y"
 
 # is_uint <値>:1 以上の整数か
 is_uint() { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
@@ -884,6 +895,8 @@ paired_parse_args() {
       --peer-vcpus) peervcpus=${2:?--peer-vcpus N}; shift 2 ;;
       --target) target=${2:?--target lan|local}; shift 2 ;;
       --placement) placement=${2:?--placement apart}; shift 2 ;;
+      --cases) cases=${2:?--cases FILE}; shift 2 ;;
+      --max-wall) maxwall=${2:?--max-wall SECONDS}; shift 2 ;;
       --delay-ms) delayms=${2:?--delay-ms MS}; shift 2 ;;
       --delay-rate-mbit) delayrate=${2:?--delay-rate-mbit N}; shift 2 ;;
       --x-agent-env) xagentenv+=" ${2:?--x-agent-env WGFT_NAME=VALUE}"; shift 2 ;;
@@ -999,6 +1012,11 @@ paired_plan_pins() {
   fi
 }
 
+# paired_plan_line [<追加の key=value>]:paired.log の先頭の PLAN の行。--cases では case ごとに case_index と cases が付く
+paired_plan_line() {
+  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${delayrate:+ delay_rate_mbit=$delayrate}${delayqueue:+ delay_queue_pkts=$delayqueue}${xagentenv:+ x_agent_env=${xagentenv// /,}}${yagentenv:+ y_agent_env=${yagentenv// /,}}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}${placement:+ placement=$placement}${1:+ $1}"
+}
+
 # paired_provision:出力先を作り、build して VM を 2 台立て、header.txt を書く。t0 と names、vms を決める
 paired_provision() {
   local mk=() i kern dirty=""
@@ -1006,7 +1024,7 @@ paired_provision() {
   out=${out:-${XDG_CACHE_HOME:-$HOME/.cache}/wgft-lab/paired-$(date +%Y%m%d-%H%M%S)}
   mkdir -p "$out"
   out=$(cd "$out" && pwd)
-  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${delayrate:+ delay_rate_mbit=$delayrate}${delayqueue:+ delay_queue_pkts=$delayqueue}${xagentenv:+ x_agent_env=${xagentenv// /,}}${yagentenv:+ y_agent_env=${yagentenv// /,}}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}${placement:+ placement=$placement}" > "$out/paired.log"
+  [[ -n $cases ]] || paired_plan_line >"$out/paired.log"
   SUITE_KEEP=$keep
   SUITE_TEMPLATE=${WGFT_LAB_TEMPLATE:-$VM}
   PAIR_LEAD_S=${PAIR_LEAD_S:-1}
@@ -1056,6 +1074,17 @@ paired_provision() {
   kern=$(VM=${names[0]}; in_vm uname -r)
   [[ -z $split ]] || paired_split_setup
   git -C "$REPO" diff --quiet HEAD 2>/dev/null || dirty=-dirty
+  PAIRED_KERN=$kern PAIRED_DIRTY=$dirty PAIRED_READY_S=$((SECONDS - t0))
+  if [[ -n $cases ]]; then
+    echo "lab paired: ${#case_names[@]} cases in one VM pair; VMs ready after $PAIRED_READY_S s" | tee "$out/setup.txt"
+  else
+    paired_header | tee "$out/header.txt"
+  fi
+}
+
+# paired_header:header.txt の行。--cases では case ごとに書き、VM の組を使い回したことを足す
+paired_header() {
+  local kern=$PAIRED_KERN dirty=$PAIRED_DIRTY
   {
     echo "lab paired: path $path, direction $direction, x=$spec_x y=$spec_y, $rounds rounds of $runs runs, tool ${tool:-tcpquality}, ${streams:-1} stream(s)${bulkmbit:+, capped at $bulkmbit Mbit/s per stream}${agentgso:+, agent UDP GSO $agentgso}${rmemmax:+, kernel receiver tcp_rmem max $rmemmax}${udpping:+, UDP round trips}"
     echo "lab paired: head $(git -C "$REPO" rev-parse HEAD)$dirty${base:+, base $(git -C "$REPO" rev-parse "$base^{commit}") ($base)}${WGFT_LAB_RUST_TARGET:+, head Rust target $WGFT_LAB_RUST_TARGET}${PAIRED_BASE_RUST_TARGET:+, base Rust target $PAIRED_BASE_RUST_TARGET}"
@@ -1069,8 +1098,8 @@ paired_provision() {
     else
       echo "lab paired: VM a ${names[0]} limits.cpu=${pins[0]}, VM b ${names[1]} limits.cpu=${pins[1]}, kernel $kern, template $SUITE_TEMPLATE"
     fi
-    echo "lab paired: VMs ready after $((SECONDS - t0)) s"
-  } | tee "$out/header.txt"
+    echo "lab paired: VMs ready after $PAIRED_READY_S s"
+  }
 }
 
 # paired_split_setup:--split の 2 台の netns を組み、agent の VM に agentd を立て、ホストの標本を始める
@@ -1143,7 +1172,7 @@ paired_split_setup() {
       (VM=${names[i]}; in_vm ip netns exec "$([[ $i == 0 ]] && echo home || echo homerouter)" python3 "$SHARE/lab/tcpquality.py" guestinfo "$([[ $i == 0 ]] && echo eth0 || echo lan0)") 2>&1
     } >>"$out/guestinfo.txt"
   done
-  if [[ $target == local ]]; then
+  if [[ -z $cases && $target == local ]]; then
     # --target local:転送先を agent のマシンに置く。LAN のホストのアドレスを agent の VM の home の lo に移し、
     # 相手の VM の lan の netns からは外す。agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に入る
     (VM=${names[1]}; in_vm ip -n lan addr flush dev eth0) || die "cannot remove the LAN host's address in the peer VM"
@@ -1156,6 +1185,19 @@ paired_split_setup() {
   done
   SPLIT_TAPS=""
   for i in 0 1; do SPLIT_TAPS+=" tap:${vms[i]}=$(inc config get "${names[i]}" volatile.eth1.host_name)"; done
+  if [[ -n $cases ]]; then
+    # --cases:case の間に戻す値 (namespace ごとの TCP のバッファの sysctl) を記録する。標本は case ごとに始める
+    for i in 0 1; do
+      (VM=${names[i]}; in_vm bash "$SHARE/lab/splitcase.sh" save) >>"$out/vm-${vms[i]}.log" 2>&1 \
+        || die "cannot record the state of ${names[i]} for --cases; see $out/vm-${vms[i]}.log"
+    done
+  else
+    paired_start_sampler
+  fi
+}
+
+# paired_start_sampler:ホストの標本を $out/host-samples.txt に始める
+paired_start_sampler() {
   # shellcheck disable=SC2086 # the two tap specs are words on purpose
   # --lab-pid:この lab が SIGKILL で消えても、標本は自分で止まる (suite-gc もこの印で探す)
   python3 "$REPO/lab/tcpquality.py" hostsample "$out/host-samples.txt" 0.5 "agent=$SPLIT_QEMU_AGENT" "peer=$SPLIT_QEMU_PEER" $SPLIT_TAPS "--lab-pid=$$" &
@@ -1178,7 +1220,15 @@ paired_run_split_round() {
     cur_arm=${arms[k]}
     paired_round_env
     log=$out/round-$r-${arms[k]}.log
-    (VM=${names[1]}; suite_timeout "$run_timeout" in_vm env "${env[@]}" bash "$SHARE/lab/tcpquality-cpu.sh" "$path" "$mode") >"$log" 2>&1 || rc=1
+    # 後ろで流して wait で待つ。前で流すと、TERM の trap が arm の終わり (最長 run_timeout) まで待たされる
+    (VM=${names[1]}; suite_timeout "$run_timeout" in_vm env "${env[@]}" bash "$SHARE/lab/tcpquality-cpu.sh" "$path" "$mode") >"$log" 2>&1 &
+    local arm_rc=0
+    wait $! || arm_rc=$?
+    ((arm_rc == 0)) || rc=1
+    # --cases:時間切れ (timeout の 124、-k の 137) か agentd に届かなかった arm の後は、VM の組を確かめ直す
+    if [[ -n $cases ]] && { ((arm_rc == 124 || arm_rc == 137)) || grep -q '^agentx: ' "$log"; }; then
+      PAIRED_CASE_SUSPECT=1
+    fi
     if grep -q '^FAIL' "$log"; then
       grep '^FAIL' "$log" | sed "s/^/round $r arm ${arms[k]}: /"
       fails=1
@@ -1202,7 +1252,7 @@ paired_hostpoll() {
   for i in 0 1; do
     vm=$([[ $i == 0 ]] && echo agent || echo peer)
     [[ ${PAIRED_HOSTPOLL_VMS:-both} == both || ${PAIRED_HOSTPOLL_VMS:-both} == "$vm" ]] || continue
-    (VM=${names[i]}; in_vm sh -c "modprobe msr && python3 $SHARE/lab/tcpquality.py pollctl $want") >>"$out/vm-${vms[i]}.log" 2>&1 \
+    (VM=${names[i]}; suite_timeout 60 in_vm sh -c "modprobe msr && python3 $SHARE/lab/tcpquality.py pollctl $want") >>"$out/vm-${vms[i]}.log" 2>&1 \
       || die "cannot turn the host's halt polling $want for the $vm VM; see $out/vm-${vms[i]}.log"
   done
   SPLIT_HOSTPOLL="$want:${PAIRED_HOSTPOLL_VMS:-both}"
@@ -1270,6 +1320,13 @@ paired_run_round() {
   echo "lab paired: round $r of $rounds done, x in VM $([[ ${arms[0]} == x ]] && echo a || echo b), $((SECONDS - t0)) s"
 }
 
+# paired_run_timeout:1 つの round の上限 run_timeout。起動と後片付けに 300 秒、実行ごとに転送の時間 (fast は 100 Mbit/s、
+# rate は経路の 20 Mbit/s で見積もる) と 60 秒の余裕。既定の fast は約 740 秒、rate は約 520 秒
+paired_run_timeout() {
+  run_timeout=$(awk -v b="${bytes:-$([[ $path == rate ]] && echo 33554432 || echo 1073741824)}" -v r="$runs" \
+    -v bps="$([[ $path == rate ]] && echo 20000000 || echo 100000000)" 'BEGIN { printf "%d", 300 + r * (b * 8 / bps + 60) }')
+}
+
 # paired_report:paired.log を解析して result.txt を作り、表示する
 paired_report() {
   if [[ -n $PAIRED_SAMPLER ]]; then
@@ -1283,7 +1340,198 @@ paired_report() {
   fi
   cat "$out/result.txt"
   ((!fails)) || rc=1
-  echo "lab paired: wall time $((SECONDS - t0)) s before deleting the VMs; logs in $out"
+  if [[ -n $cases ]]; then
+    echo "lab paired: case wall time $((SECONDS - t_case)) s; logs in $out"
+  else
+    echo "lab paired: wall time $((SECONDS - t0)) s before deleting the VMs; logs in $out"
+  fi
+}
+
+# ---- lab paired --split --cases FILE:1 組の VM で複数の case を順に流す ----
+# split の 1 case のうち測るのは約 3 分で、残りの約 2.5 分は VM 2 台の作成、起動、build の導入と削除だった。--cases は
+# その固定の費用を case の数で割る。FILE の 1 行が 1 case で、`<名前> <経路> [case ごとのフラグ...]` と書く (# から後と
+# 空行は読まない)。case ごとに変えられるのは VM の組を作り直さずに済むもの (PAIRED_CASE_FLAGS) だけで、VM の形を決める
+# もの (--vcpus、--peer-vcpus、--placement、--base、腕、--x-agent-env など) はコマンド行で全 case に共通に与える。
+# コマンド行の case ごとのフラグは全 case の既定になる。case ごとの出力は --out/<名前>/ に今と同じ形 (PLAN の行のある
+# paired.log、header.txt、result.txt、host-samples.txt、round ごとのログ) で置き、PLAN の行に case_index と cases、
+# header.txt に使い回しの行を足す。case の前に両方の VM を splitcase.sh で戻し (残ったプロセス、netem、TCP の
+# バッファの sysctl)、--target の置き場所を合わせ、agentd と LAN の疎通を確かめる。失敗した case は次の case を
+# 止めず、VM の組が戻らないときだけ残りを流さない
+PAIRED_CASE_FLAGS="--direction --bytes --tool --streams --udp-ping --bulk-mbit --agent-gso --kernel-rmem-max --delay-ms --delay-rate-mbit --delay-queue-pkts --target --rounds --runs"
+PAIRED_CASE_VARS="direction bytes tool streams udpping bulkmbit agentgso rmemmax delayms delayrate delayqueue target rounds runs"
+
+# paired_cases_read:FILE を読み、case_names、case_paths、case_flags に入れる
+paired_cases_read() {
+  local line ln=0 words=() n seen=" "
+  [[ -f $cases && -r $cases ]] || die "--cases $cases is not a readable file"
+  while IFS= read -r line || [[ -n $line ]]; do
+    ln=$((ln + 1))
+    line=${line%%#*}
+    read -ra words <<<"$line"
+    ((${#words[@]})) || continue
+    ((${#words[@]} >= 2)) || die "--cases $cases line $ln: want <name> <path> [flags...]"
+    n=${words[0]}
+    # 点を許さないので、--out の直下のファイル (setup.txt、cases.log、vm-*.log、guestinfo.txt) と名前がぶつからない
+    [[ $n =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || die "--cases $cases line $ln: the name $n wants letters, digits, dash or underscore only"
+    [[ $seen != *" $n "* ]] || die "--cases $cases line $ln: the name $n is used twice"
+    seen+="$n "
+    case_names+=("$n") case_paths+=("${words[1]}") case_flags+=("${words[*]:2}")
+  done <"$cases"
+  ((${#case_names[@]})) || die "--cases $cases has no case"
+}
+
+# paired_case_load <i>:case i のフラグを、コマンド行の値 (case_defaults) の上に読む
+paired_case_load() {
+  local v f=() where="--cases $cases case ${case_names[$1]}"
+  for v in $PAIRED_CASE_VARS; do printf -v "$v" '%s' "${case_defaults[$v]}"; done
+  read -ra f <<<"${case_flags[$1]}"
+  while ((${#f[@]})); do
+    if [[ ${f[0]} == --udp-ping ]]; then
+      udpping=1 f=("${f[@]:1}")
+      continue
+    fi
+    [[ " $PAIRED_CASE_FLAGS " == *" ${f[0]} "* ]] \
+      || die "$where: ${f[0]} is not a per-case flag; give it on the command line, the same for every case; the per-case flags are $PAIRED_CASE_FLAGS"
+    ((${#f[@]} >= 2)) || die "$where: ${f[0]} wants a value"
+    case ${f[0]} in
+      --direction) direction=${f[1]} ;;
+      --bytes) bytes=${f[1]} ;;
+      --tool) tool=${f[1]} ;;
+      --streams) streams=${f[1]} ;;
+      --bulk-mbit) bulkmbit=${f[1]} ;;
+      --agent-gso) agentgso=${f[1]} ;;
+      --kernel-rmem-max) rmemmax=${f[1]} ;;
+      --delay-ms) delayms=${f[1]} ;;
+      --delay-rate-mbit) delayrate=${f[1]} ;;
+      --delay-queue-pkts) delayqueue=${f[1]} ;;
+      --target) target=${f[1]} ;;
+      --rounds) rounds=${f[1]} ;;
+      --runs) runs=${f[1]} ;;
+    esac
+    f=("${f[@]:2}")
+  done
+}
+
+# paired_case_prepare:case の前に 2 台を戻し、--target を合わせ、使えるかを確かめる。戻らなければ 1
+paired_case_prepare() {
+  local i want=${target:-lan}
+  # 相手の VM を先に戻す。その tcpquality の残りが agent の VM を操作し続けないように
+  for i in 1 0; do
+    (VM=${names[i]}; suite_timeout 120 in_vm bash "$SHARE/lab/splitcase.sh" reset) >>"$top/vm-${vms[i]}.log" 2>&1 &
+    wait $! || { echo "lab paired: cannot reset ${names[i]}; see $top/vm-${vms[i]}.log"; return 1; }
+  done
+  if [[ $want != "$SPLIT_CUR_TARGET" ]]; then
+    for i in 0 1; do
+      (VM=${names[i]}; suite_timeout 60 in_vm bash "$SHARE/lab/splitcase.sh" target "$want") >>"$top/vm-${vms[i]}.log" 2>&1 \
+        || { echo "lab paired: cannot move the forwarding target to $want in ${names[i]}"; return 1; }
+    done
+    SPLIT_CUR_TARGET=$want
+  fi
+  (VM=${names[1]}; suite_timeout 60 in_vm python3 "$SHARE/lab/tcpquality.py" agentx "$SPLIT_AGENT_AT" /run/wgft-agentd.token -- true) >/dev/null 2>&1 \
+    || { echo "lab paired: the peer VM cannot reach agentd at $SPLIT_AGENT_AT"; return 1; }
+  if [[ $want == lan ]]; then
+    (VM=${names[1]}; suite_timeout 60 in_vm ip netns exec lan ping -c1 -W2 192.168.50.2) >/dev/null 2>&1 \
+      || { echo "lab paired: the LAN host in the peer VM cannot reach home in the agent VM"; return 1; }
+  fi
+  return 0
+}
+
+# paired_cases_main:--cases の全体。全 case を VM を立てる前に確かめ、1 組の VM を立て、case を順に流す。
+# wgft-heavy の測定の job は 60 分で切られ、切られると後片付け (paired_cleanup) が走らずに VM が残る。--max-wall
+# (PAIRED_MAX_WALL_S、既定 3300 秒) は t0 (build の前) からの上限で、各 case の前に、経過と見積もり (流し終えた case の
+# 実行 1 回あたりの最長の時間 × この case の実行の数 × 1.2) が上限を超える case から後を流さない。最初の case は
+# 見積もりの元が無いので、上限の残りがあれば流す (run_timeout は詰まりの上限で、実際の時間の 10 倍近い)
+PAIRED_CASE_CUR="" PAIRED_CASES_LOG="" PAIRED_CASES_LEFT=""
+paired_cases_main() {
+  local i n v top all_rc=0 path0 budget est per_run=0 runs_now k
+  [[ -n $split ]] || die "--cases goes with --split"
+  ((${#rest[@]} == 2)) || die "with --cases, give the two arms only: lab paired --split [options] --cases FILE ARM_X ARM_Y"
+  budget=${maxwall:-${PAIRED_MAX_WALL_S:-3300}}
+  is_uint "$budget" || die "--max-wall wants a whole number of seconds"
+  paired_cases_read
+  n=${#case_names[@]}
+  for v in $PAIRED_CASE_VARS; do case_defaults[$v]=${!v}; done
+  # すべての case を VM を立てる前に確かめる。どの case の誤りかを言うため、1 つずつ subshell で確かめる
+  for ((i = 0; i < n; i++)); do
+    (paired_case_load "$i" && paired_validate "${case_paths[i]}" "${rest[@]}") \
+      || die "--cases $cases case ${case_names[i]}: see the message above"
+  done
+  paired_case_load 0
+  path0=${case_paths[0]}
+  paired_validate "$path0" "${rest[@]}"
+  paired_plan_pins
+  paired_provision
+  top=$out
+  PAIRED_CASES_LOG=$top/cases.log
+  : >"$PAIRED_CASES_LOG"
+  for ((i = 0; i < n; i++)); do
+    paired_case_load "$i"
+    paired_validate "${case_paths[i]}" "${rest[@]}"
+    runs_now=$((rounds * runs * 2))
+    est=$(awk -v p="$per_run" -v r="$runs_now" 'BEGIN { printf "%d", p * r * 1.2 }')
+    if ((SECONDS - t0 + est > budget)); then
+      echo "lab paired: case $((i + 1)) of $n ${case_names[i]} would end after the wall budget: $((SECONDS - t0)) s so far, about $est s more, budget $budget s; it and the cases after it are not run"
+      paired_cases_mark "$i" not_run
+      all_rc=1
+      break
+    fi
+    out=$top/${case_names[i]}
+    mkdir -p "$out"
+    rc=0 fails=0 prev_offs=() t_case=$SECONDS
+    PAIRED_CASE_CUR="index=$((i + 1)) name=${case_names[i]}"
+    PAIRED_CASES_LEFT=$(for ((k = i + 1; k < n; k++)); do echo "index=$((k + 1)) name=${case_names[k]}"; done)
+    if ! paired_case_prepare; then
+      echo "lab paired: the VM pair did not come back before case $((i + 1)) of $n ${case_names[i]}; the remaining cases are not run"
+      paired_cases_mark "$i" not_run
+      all_rc=1
+      break
+    fi
+    paired_plan_line "case_index=$((i + 1)) cases=$n" >"$out/paired.log"
+    {
+      paired_header
+      echo "lab paired: case $((i + 1)) of $n ${case_names[i]} of --cases $cases: the VM pair was set up once for all cases and reused; cases run in it before this one: $i"
+    } | tee "$out/header.txt"
+    cp "$top/guestinfo.txt" "$out/guestinfo.txt" 2>/dev/null || true
+    # agentd の log に case の境を書き、agent-vm-logs.txt を case ごとに切れるようにする
+    timeout 20 python3 "$REPO/lab/tcpquality.py" agentx "$PAIRED_AGENT_AT" "$PAIRED_OUT/.agentd-token" -- \
+      sh -c "echo '== lab paired case $((i + 1)) of $n ${case_names[i]} starts' >> /tmp/wgft-agentd.log" >/dev/null 2>&1 || true
+    paired_start_sampler
+    paired_run_timeout
+    local -A spec_of=([x]=$spec_x [y]=$spec_y)
+    local healthy=1
+    for ((r = 1; r <= rounds; r++)); do
+      PAIRED_CASE_SUSPECT=""
+      paired_run_split_round "$r"
+      if [[ -n $PAIRED_CASE_SUSPECT ]] && ! paired_case_prepare; then
+        echo "lab paired: after a timed-out arm or an unreachable agentd in round $r, the VM pair did not come back; case $((i + 1)) ends here and the remaining cases are not run"
+        healthy=0 rc=1
+        break
+      fi
+    done
+    paired_report
+    paired_agent_logs "$out/agent-vm-logs.txt"
+    echo "CASE $PAIRED_CASE_CUR status=$([[ $rc == 0 ]] && echo pass || echo fail) wall_s=$((SECONDS - t_case))" >>"$PAIRED_CASES_LOG"
+    PAIRED_CASE_CUR=""
+    ((rc == 0)) || all_rc=1
+    k=$(awk -v w="$((SECONDS - t_case))" -v r="$runs_now" -v p="$per_run" 'BEGIN { v = w / r; printf "%.3f", (v > p ? v : p) }')
+    per_run=$k
+    if ((!healthy)); then
+      paired_cases_mark "$((i + 1))" not_run
+      break
+    fi
+  done
+  PAIRED_CASES_LEFT=""
+  out=$top
+  echo "lab paired: cases:"
+  cat "$PAIRED_CASES_LOG"
+  echo "lab paired: wall time $((SECONDS - t0)) s for $n cases before deleting the VMs; logs in $top"
+  rc=$all_rc
+}
+
+# paired_cases_mark <i> <status>:case i から後をすべて status として cases.log に書く
+paired_cases_mark() {
+  local k
+  for ((k = $1; k < ${#case_names[@]}; k++)); do echo "CASE index=$((k + 1)) name=${case_names[k]} status=$2" >>"$PAIRED_CASES_LOG"; done
 }
 
 cmd_paired() {
@@ -1291,14 +1539,18 @@ cmd_paired() {
   local split="" peervcpus="" delayms="" delayrate="" delayqueue="" target="" placement="" SPLIT_AGENT_CPUS="" SPLIT_PEER_RPS="" xagentenv="" yagentenv="" SPLIT_HOSTPOLL="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
   local rest=() path spec_x spec_y uses_base rust pins=() names=() vms=() t0 run_timeout r
   local rc=0 fails=0 prev_offs=()
+  local cases="" maxwall="" case_names=() case_paths=() case_flags=() PAIRED_KERN="" PAIRED_DIRTY="" PAIRED_READY_S="" SPLIT_CUR_TARGET=lan
+  local PAIRED_CASE_SUSPECT="" t_case=""
+  local -A case_defaults=()
   paired_parse_args "$@"
+  if [[ -n $cases ]]; then
+    paired_cases_main
+    return $rc
+  fi
   paired_validate "${rest[@]}"
   paired_plan_pins
   paired_provision
-  # 1 つの round の上限:起動と後片付けに 300 秒、実行ごとに転送の時間 (fast は 100 Mbit/s、rate は経路の 20 Mbit/s で
-  # 見積もる) と 60 秒の余裕。既定の fast は約 740 秒、rate は約 520 秒
-  run_timeout=$(awk -v b="${bytes:-$([[ $path == rate ]] && echo 33554432 || echo 1073741824)}" -v r="$runs" \
-    -v bps="$([[ $path == rate ]] && echo 20000000 || echo 100000000)" 'BEGIN { printf "%d", 300 + r * (b * 8 / bps + 60) }')
+  paired_run_timeout
   local -A spec_of=([x]=$spec_x [y]=$spec_y)
   for ((r = 1; r <= rounds; r++)); do
     if [[ -n $split ]]; then paired_run_split_round "$r"; else paired_run_round "$r"; fi
