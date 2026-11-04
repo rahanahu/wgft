@@ -481,22 +481,26 @@ tcpmem_memkb() { # tcpmem_memkb here|agent: the VM's MemTotal in kB
 }
 tcpmem_was_here= tcpmem_was_agent=
 raise_tcpmem() { # raise_tcpmem here|agent
-  local where=$1 was memkb new
+  local where=$1 was memkb new vmname
   was=$(tcpmem_sysctl "$where" -n net.ipv4.tcp_mem | tr -s ' \t' ' ') || return 1
   memkb=$(tcpmem_memkb "$where") || return 1
-  new=$(awk -v w="$was" -v kb="$memkb" -v s="$STREAMS" -v b="$TCP_BUF_MAX" -v pg="$(getconf PAGESIZE)" -v vm="$where" 'BEGIN {
+  # the VM's name in messages: the peer or the agent VM with --split, the VM in the single-VM lab
+  vmname="the VM"
+  [ -z "$AGENT_AT" ] || vmname="the ${where/here/peer} VM"
+  new=$(awk -v w="$was" -v kb="$memkb" -v s="$STREAMS" -v b="$TCP_BUF_MAX" -v pg="$(getconf PAGESIZE)" -v vm="$vmname" 'BEGIN {
     split(w, v, " "); need = s * 2 * b * 1.25 / pg; cap = kb * 1024 / 2 / pg
     if (need > cap) {
-      printf "WARN  TCP memory: %d streams x 2 x %d bytes x 1.25 need %d MiB, more than half of the %s VM'"'"'s %d MiB; tcp_mem is capped at %d MiB; WGFT_LAB_MEM=%dGiB would hold it\n",
-        s, b, need * pg / 1048576, vm == "here" ? "peer" : "agent", kb / 1024, cap * pg / 1048576, int(need * pg * 2 / 1073741824) + 1 > "/dev/stderr"
+      # the hint asks for 10% above twice the need, since the VM sees less MemTotal than its RAM
+      printf "WARN  TCP memory: %d streams x 2 x %d bytes x 1.25 need %d MiB, more than half of %s'"'"'s %d MiB; tcp_mem is capped at %d MiB; WGFT_LAB_MEM=%dGiB would hold it\n",
+        s, b, need * pg / 1048576, vm, kb / 1024, cap * pg / 1048576, int(need * pg * 2 * 1.1 / 1073741824) + 1 > "/dev/stderr"
       need = cap
     }
     p = v[2] > need ? v[2] : need; m = v[3] > need ? v[3] : need
     printf "%d %d %d", v[1], p, m }') || return 1
-  [ "$new" = "$was" ] && { echo "   tcp_mem in the ${where/here/peer} VM: $was pages, enough"; return 0; }
+  [ "$new" = "$was" ] && { echo "   tcp_mem in $vmname: $was pages, enough"; return 0; }
   if [ "$where" = agent ]; then tcpmem_was_agent=$was; else tcpmem_was_here=$was; fi
   tcpmem_sysctl "$where" -qw net.ipv4.tcp_mem="$new" || return 1
-  echo "   tcp_mem in the ${where/here/peer} VM: $was -> $new pages"
+  echo "   tcp_mem in $vmname: $was -> $new pages"
 }
 restore_tcpmem() {
   local rc=0
