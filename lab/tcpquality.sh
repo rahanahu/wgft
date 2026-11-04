@@ -167,6 +167,10 @@
 # once the tunnel is up, fail the mode when that does not take, check the threads again after
 # every run, failing the run when one left its CPUs (a worker started later inherits the data-plane
 # thread's CPUs), and sample every thread of the agent (agentvm_thr_dp_*, _crypto_*, _other_*).
+# The peer VM's vCPUs are also sampled every 0.5 s over the run (tcpquality.py peerseries): the
+# result line gets the window's intervals (peervm_series_intervals), those in which some vCPU was
+# saturated, at least 0.95 busy with its own bound kernel workers at 0.9 or more
+# (peervm_sat_intervals, peervm_sat_frac), and the busiest vCPU's peak (peervm_maxcpu_peak).
 # In every lab, CPU=1 adds the packets per GB and mean size per interface, the TCP
 # segments and UDP datagrams per GB per namespace, tun_data_pkts_per_gb and tun_ack_pkts_per_gb on
 # the tunnel at the vps, and recv_seg_avg_b, the bytes per TCP segment the receiving end got after
@@ -674,6 +678,12 @@ for mode in $MODES; do
     fi
     if [ -n "$CPU" ]; then
       if [ -n "$AGENT_AT" ]; then
+        # the peer VM's vCPUs every 0.5 s over the run (peerseries); the window's share of saturated
+        # intervals goes into the result line
+        series=$W/wgft-tq-series-$mode
+        : > "$series"
+        $Q peerseries "$series" 0.5 900 &
+        series_pid=$!
         # the agent VM first and the peer VM last at the start, and the other way round at the end,
         # so that the agent VM's window holds the peer VM's
         sa0=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0" "nicirq:$HOME_NS:eth0" kthreads ${DP_SAMPLE:+"$DP_SAMPLE"})
@@ -726,6 +736,8 @@ for mode in $MODES; do
       if [ -n "$AGENT_AT" ]; then
         t1=$(date +%s.%N) s1=$(cpu_us "$server_pid" "$server_cg") l1=$(lan_us) v1=0
         sp1=$($Q snap peervm "" "" "${SNAP_SPECS[@]}" "eth:$ROUTER_NS:lan0" "nicirq:$ROUTER_NS:lan0" kthreads) nd1=$(netem_drops)
+        kill "$series_pid" 2>/dev/null
+        wait "$series_pid" 2>/dev/null
         sa1=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0" "nicirq:$HOME_NS:eth0" kthreads ${DP_SAMPLE:+"$DP_SAMPLE"})
         a1=$(field agentvm_proc_us "$sa1")
         if [ -n "$AGENT_DP_CPUS" ] && [ "$mode" = rust ] && ! threads_now=$(agentsh check-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" 2>&1); then
@@ -774,6 +786,10 @@ for mode in $MODES; do
           if (rcv != "" && (tool == "iperf3" || dir == "up")) printf " receiver_cpu_share=%.3f", rcv / 1e6 / t }')"
       stats="$stats $($Q snapdiff "$(field received "$got")" "$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.3f", b - a }')" "$DIRECTION" "$sa0 $sp0" "$sa1 $sp1")"
       stats="$stats netem_drops=$((nd1 - nd0))"
+      if [ -n "$AGENT_AT" ]; then
+        series_vals=$($Q peerseries_sum "$series" "$t0" "$t1" 2>/dev/null)
+        [ -z "$series_vals" ] || stats="$stats $series_vals"
+      fi
       if [ "$((nd1 - nd0))" -gt 0 ] && [ "$LOSS_PCT" = 0 ] && [ -z "$RATE_MBIT" ]; then
         echo "FAIL  agent $mode run $run: netem dropped $((nd1 - nd0)) packets on a path without loss; raise NETEM_LIMIT"; fail=1 run_pass=0
       fi

@@ -196,6 +196,23 @@ class CpuPaired(unittest.TestCase):
         self.assertNotEqual(rc, 0, err)
         self.assertIn("/proc/wgft-no-such-dir", err)
 
+    def test_peer_series_marks_runs_saturated_for_part_of_the_window(self):
+        # vCPU 1 saturated, with its workers, in 3 of 20 intervals of (2, 2, y): whole-window averages
+        # stay low, the series rule marks it; (3, 1, x) is saturated in 1 interval only and kept
+        def peer(rnd, run, arm):
+            frac = {(2, 2, "y"): 0.15, (3, 1, "x"): 0.05}.get((rnd, run, arm), 0.0)
+            return self.peer_fields([(0.30, 0.10), (0.80, 0.25)]) + " peervm_sat_frac=%.2f" % frac
+        rc, out = analyse(self.split_log(peer))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("LEFT_OUT planned=8 used=7 missing=0 failed=0 sync_timeout=0 sender_bound=0 peer_bound=1 "
+                      "peer_bound_x=0 peer_bound_y=1\n", out)
+        # the whole-window rule alone, for comparison
+        self.assertIn("\nWHOLEWINDOW LEFT_OUT planned=8 used=8 ", out)
+        self.assertIn("\nWHOLEWINDOW MBITRATIO key=overall_mbit ", out)
+        # no difference between the rules: no comparison lines
+        rc, out = analyse(self.split_log(lambda rnd, run, arm: self.peer_fields([(0.80, 0.25)]) + " peervm_sat_frac=0.00"))
+        self.assertNotIn("WHOLEWINDOW", out)
+
     def test_peer_value_does_not_change_a_single_vm_log(self):
         lines = [l + " peervm_maxcpu=0.99" if l.startswith("PAIRED") else l for l in synthetic_log()]
         self.assertEqual(analyse(lines), (0, EXPECTED_PLAIN))
@@ -297,6 +314,45 @@ class GuestCounters(unittest.TestCase):
         self.assertEqual(got["peervm_idle_C1_share"], "0.400")
         self.assertEqual(got["homerouter_lan0_tx_queue_0_kicks_per_gb"], "1500")
         self.assertEqual(got["homerouter_lan0_tx_queue_0_kicks_per_s"], "300")
+
+
+class PeerSeries(unittest.TestCase):
+    def test_sum_counts_saturated_intervals_in_the_window(self):
+        rows, busy, kw = [], [0, 0], [0, 0]
+        for i in range(12):
+            # vCPU 1: busy 1.0 with workers 0.95 in intervals 3 and 4, busy 1.0 without workers in 6
+            db = [0.3, 1.0 if i in (3, 4, 6) else 0.5]
+            dk = [0.0, 0.95 if i in (3, 4) else 0.1]
+            rows.append(tq.peerseries_row({0: busy[0], 1: busy[1]}, {0: kw[0], 1: kw[1]}, 100 + 0.5 * i))
+            busy = [b + int(d * 500000) for b, d in zip(busy, db)]
+            kw = [k + int(d * 500000) for k, d in zip(kw, dk)]
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "series")
+            with open(path, "w") as f:
+                f.write("\n".join(rows) + "\n")
+            got = dict(kv.split("=") for kv in tq.peerseries_sum(path, "100", "105.5").split())
+            self.assertEqual((got["peervm_series_intervals"], got["peervm_sat_intervals"], got["peervm_sat_frac"]), ("11", "2", "0.18"))
+            self.assertEqual(got["peervm_maxcpu_peak"], "1.00")
+            # a window holding only intervals 0 to 2
+            got = dict(kv.split("=") for kv in tq.peerseries_sum(path, "100", "101.5").split())
+            self.assertEqual((got["peervm_sat_intervals"], got["peervm_sat_frac"]), ("0", "0.00"))
+            self.assertEqual(tq.peerseries_sum(path, "200", "201"), "")
+
+    def test_peerseries_runs_and_stops(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "series")
+            self.assertEqual(tq.peerseries(path, "0.1", "0.45"), 0)
+            with open(path) as f:
+                rows = [dict(kv.split("=") for kv in l.split()) for l in f]
+        self.assertGreaterEqual(len(rows), 3)
+        self.assertIn("cpu0", rows[0])
+        self.assertIn("kw0", rows[0])
+        # the bound workers' time is counted from the first sample on, so it does not jump
+        for a, b in zip(rows, rows[1:]):
+            dt = (float(b["t"]) - float(a["t"])) * 1e6
+            for k in a:
+                if k.startswith("kw"):
+                    self.assertLessEqual(int(b[k]) - int(a[k]), dt * 1.5 + 20000)
 
 
 class TcpMemory(unittest.TestCase):

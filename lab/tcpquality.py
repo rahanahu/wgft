@@ -323,6 +323,15 @@ def iperf(jsonfile):
 
 def cpupaired(logfile):
     data = load_paired(logfile)
+    rc = cpupaired_ratios(data, logfile)
+    for w in dict.fromkeys(PEER_WARNS):
+        print(w)
+    peer_window_lines(data, logfile)
+    return rc
+
+
+def cpupaired_ratios(data, logfile):
+    # cpupaired's lines for every key: the agent process, the VMs and the host, then MBITRATIO
     rc = 0
     for arm in ("x", "y"):
         if kernel_arm(data[1].get(arm, arm)):
@@ -351,9 +360,30 @@ def cpupaired(logfile):
             if " %s=" % key in text:
                 rc = cpupaired_key(data, key, vm=vcpus is not None, pre=pre, share_key=share, vcpus=vcpus) or rc
     rc = paired_ratio(data, "overall_mbit", "MBITRATIO", sender_check=True) or rc
-    for w in dict.fromkeys(PEER_WARNS):
-        print(w)
     return rc
+
+
+def peer_window_lines(data, logfile):
+    # when the series rule marks runs the whole-window rule does not, the ratio lines again with the
+    # whole-window rule alone, prefixed WHOLEWINDOW, for comparison; nothing otherwise
+    global PEER_RULE
+    plan, _, runs = data
+    if not peer_check_of(plan, runs) or not any(peer_bound(r) != peer_bound_window(r) for r in runs.values()):
+        return
+    import contextlib
+    import io
+    buf = io.StringIO()
+    saved = list(PEER_WARNS)
+    PEER_RULE = "window"
+    try:
+        with contextlib.redirect_stdout(buf):
+            cpupaired_ratios(data, logfile)
+    finally:
+        PEER_RULE = "both"
+        PEER_WARNS[:] = saved
+    for l in buf.getvalue().splitlines():
+        if "RATIO " in l or "LEFT_OUT " in l or " TOO FEW " in l:
+            print("WHOLEWINDOW " + l)
 
 
 def load_paired(logfile):
@@ -389,10 +419,28 @@ def has_peer_kworker(r):
     return any(k.startswith("peervm_cpu") and k.endswith("_kw") for k in r)
 
 
+# which peer-bound rule cpupaired applies: "both" (the whole-window rule or the series rule) or
+# "window" (the whole-window rule alone), which cpupaired also prints for comparison
+PEER_RULE = "both"
+
+
 def peer_bound(r):
-    # whether a run of `lab/lab paired --split` measured the peer: some peer vCPU at PEER_BOUND or
-    # more busy whose own bound kernel workers took PEER_KWORKER or more. A run without the per-vCPU
-    # worker time is never peer bound
+    # whether a run of `lab/lab paired --split` measured the peer: by the whole window
+    # (peer_bound_window) or, when the run has the peer VM's series, by saturated intervals: a share
+    # of PEER_SAT_FRAC or more of the window (peerseries_sum)
+    if peer_bound_window(r):
+        return True
+    if PEER_RULE == "window":
+        return False
+    try:
+        return float(r.get("peervm_sat_frac", "0")) >= PEER_SAT_FRAC
+    except ValueError:
+        return False
+
+
+def peer_bound_window(r):
+    # the whole-window rule: some peer vCPU at PEER_BOUND or more busy whose own bound kernel workers
+    # took PEER_KWORKER or more. A run without the per-vCPU worker time is never peer bound
     for k in r:
         if k.startswith("peervm_cpu") and k.endswith("_busy") and k[10:-5].isdigit():
             try:
@@ -1887,6 +1935,119 @@ def proc_stat_cpus(text):
     return busy, irq
 
 
+# The peer VM's vCPUs over the run, every 0.5 s: the whole-window averages of the peer-bound rule miss
+# a run whose peer vCPU saturated for part of the window only. peerseries samples, peerseries_sum
+# reduces the samples of one window to the share of intervals in which some vCPU was saturated:
+# at least PEER_BOUND busy with its own bound kernel workers at PEER_KWORKER or more of the interval.
+# A run is peer bound by the series when that share reaches PEER_SAT_FRAC. 0.1 is two intervals of a
+# 10-second run, so one odd interval does not mark a run. A saturated interval roughly halves the rate
+# (the whole-window saturated runs ran at 4.1 to 4.6 against 7.7 to 8.0 Gbit/s), so 10% of the
+# window saturated costs a run about 5%, twice the 2% that the A/A comparisons have to resolve.
+
+PEER_SAT_FRAC = 0.1
+
+
+def kworker_pids(proc="/proc"):
+    # {pid: cpu} of the kernel workers bound to one CPU
+    out = {}
+    for d in os.listdir(proc):
+        if not d.isdigit():
+            continue
+        try:
+            with open("%s/%s/comm" % (proc, d)) as f:
+                k = parse_kthread(f.read().strip())
+        except OSError:
+            continue
+        if k and k[0] == "kw":
+            out[d] = k[1]
+    return out
+
+
+def peerseries_row(busy, kw, t):
+    # one sample line: the time, and per CPU the busy and the bound kernel workers' time so far (us)
+    return " ".join(["t=%.3f" % t] + ["cpu%d=%d" % kv for kv in sorted(busy.items())]
+                    + ["kw%d=%d" % kv for kv in sorted(kw.items())])
+
+
+def peerseries(out, interval="0.5", seconds="900", proc="/proc"):
+    # in the peer VM during a run, every <interval> s for at most <seconds> s, or until killed: one
+    # peerseries_row per sample. The kernel workers are listed again every tenth sample, since
+    # workers come and go; between listings only their stat files are read. The kw columns are
+    # cumulative from the first sample, for differences only
+    hz = os.sysconf("SC_CLK_TCK")
+    us = lambda ticks: ticks * 1000000 // hz
+    step, end = float(interval), time.time() + float(seconds)
+    pids, last, done, n = {}, {}, {}, 0
+    with open(out, "a") as f:
+        while time.time() < end:
+            t0 = time.time()
+            fresh = set()
+            if n % 10 == 0:
+                found = kworker_pids(proc)
+                fresh = {p for p in found if p not in pids}
+                pids.update(found)
+            n += 1
+            with open("%s/stat" % proc) as st:
+                busy, _ = proc_stat_cpus(st.read())
+            for pid, cpu in list(pids.items()):
+                try:
+                    with open("%s/%s/stat" % (proc, pid)) as g:
+                        v = g.read().rsplit(")", 1)[1].split()
+                    last[pid] = us(int(v[11]) + int(v[12]))
+                    if pid in fresh:
+                        # a worker counts from when it is first seen, so that the time it ran before
+                        # does not land in one interval
+                        done[cpu] = done.get(cpu, 0) - last[pid]
+                except (OSError, ValueError, IndexError):
+                    # a worker that went keeps what it had, so that the sums do not go back
+                    done[cpu] = done.get(cpu, 0) + last.pop(pid, 0)
+                    del pids[pid]
+            kw = {c: done.get(c, 0) for c in busy}
+            for pid, cpu in pids.items():
+                kw[cpu] = kw.get(cpu, 0) + last.get(pid, 0)
+            f.write(peerseries_row({c: us(b) for c, b in busy.items()}, kw, t0) + "\n")
+            f.flush()
+            time.sleep(max(0.0, step - (time.time() - t0)))
+    return 0
+
+
+def peerseries_sum(samples, t_start, t_end):
+    # the window's values from peerseries's file: peervm_series_intervals, peervm_sat_intervals and
+    # peervm_sat_frac (intervals with some vCPU saturated), and the peak of the busiest vCPU over the
+    # intervals, peervm_maxcpu_peak
+    rows = []
+    with open(samples) as f:
+        for l in f:
+            r = dict(kv.split("=", 1) for kv in l.split() if "=" in kv)
+            if "t" in r and float(t_start) <= float(r["t"]) <= float(t_end):
+                rows.append(r)
+    n = sat = 0
+    peak = 0.0
+    for a, b in zip(rows, rows[1:]):
+        dt = (float(b["t"]) - float(a["t"])) * 1e6
+        if dt <= 0:
+            continue
+        n += 1
+        hot = False
+        for k in b:
+            if not (k.startswith("cpu") and k[3:].isdigit()) or k not in a:
+                continue
+            c = k[3:]
+            busy = (int(b[k]) - int(a[k])) / dt
+            kw = (int(b.get("kw" + c, 0)) - int(a.get("kw" + c, 0))) / dt
+            peak = max(peak, busy)
+            hot = hot or (busy >= PEER_BOUND and kw >= PEER_KWORKER)
+        sat += hot
+    if n == 0:
+        return ""
+    return "peervm_series_intervals=%d peervm_sat_intervals=%d peervm_sat_frac=%.2f peervm_maxcpu_peak=%.2f" % (n, sat, sat / n, peak)
+
+
+def peerseries_line(samples, t_start, t_end):
+    print(peerseries_sum(samples, t_start, t_end))
+    return 0
+
+
 def lab_alive(pid, proc="/proc"):
     # whether the process pid (the `lab/lab` that started a sampler) still exists
     return os.path.isdir("%s/%s" % (proc, pid))
@@ -2218,4 +2379,5 @@ if __name__ == "__main__":
               "cpuratio": cpuratio, "cpupaired": cpupaired, "udpgso": udpgso, "iperf": iperf,
               "uecho": uecho, "uping": uping, "latpaired": latpaired, "snap": snap, "snapdiff": snapdiff,
               "agentd": agentd, "agentx": agentx, "channels": channels, "hostsample": hostsample, "hostwin": hostwin,
-              "kvmsample": kvmsample, "pollctl": pollctl, "guestinfo": guestinfo, "nicirq": nicirq}[cmd](*args))
+              "kvmsample": kvmsample, "pollctl": pollctl, "guestinfo": guestinfo, "nicirq": nicirq,
+              "peerseries": peerseries, "peerseries_sum": peerseries_line}[cmd](*args))
