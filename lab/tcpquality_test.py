@@ -81,29 +81,49 @@ class CpuPaired(unittest.TestCase):
                                  + " agentvm_cpu_s_per_gb=%.3f " % cpu + peer(rnd, run, arm))
         return lines
 
-    def test_peer_bound_needs_the_busy_vcpu_and_its_kernel_worker(self):
-        def peer(rnd, run, arm):
-            # vCPU 1 is the busiest: 0.96 with little worker time in (2, 2, y), saturated in (3, 1, x)
-            busy, kw = {(2, 2, "y"): (0.96, 0.30), (3, 1, "x"): (0.99, 0.99)}.get((rnd, run, arm), (0.80, 0.20))
-            return "peervm_maxcpu=%.2f peervm_cpu0_busy=0.30 peervm_cpu0_kw=0.95 peervm_cpu1_busy=%.2f peervm_cpu1_kw=%.2f" % (busy, busy, kw)
-        rc, out = analyse(self.split_log(peer))
-        self.assertEqual(rc, 0, out)
-        self.assertNotIn("peer_bound_rule", out)
-        self.assertIn("RATIO x_over_y=0.800 ci95_low=0.800 ci95_high=0.800 pairs=7 left_out=1 ", out)
-        self.assertIn("LEFT_OUT planned=8 used=7 missing=0 failed=0 sync_timeout=0 sender_bound=0 peer_bound=1\n", out)
-        self.assertIn("AGENTVMLEFT_OUT planned=8 used=7 missing=0 failed=0 sync_timeout=0 sender_bound=0 peer_bound=1\n", out)
-        self.assertRegex(out, r"MBITRATIO key=overall_mbit .* pairs=7 planned=8 missing=0 failed=0 sync_timeout=0 sender_bound=0 peer_bound=1 ")
+    @staticmethod
+    def peer_fields(cpus):
+        # peer VM fields from [(busy, kw), ...] per vCPU
+        return "peervm_maxcpu=%.2f " % max(b for b, _ in cpus) + " ".join(
+            "peervm_cpu%d_busy=%.2f peervm_cpu%d_kw=%.2f" % (i, b, i, k) for i, (b, k) in enumerate(cpus))
 
-    def test_peer_bound_falls_back_to_maxcpu(self):
-        # runs from lab heads without the kernel worker time: peervm_maxcpu alone, noted once
-        lines = self.split_log(lambda rnd, run, arm: "peervm_maxcpu=%.2f" % (0.96 if (rnd, run, arm) == (2, 2, "y") else 0.80))
+    def test_peer_bound_needs_a_busy_vcpu_and_its_own_kernel_worker(self):
+        special = {
+            # 0.96 busy with little worker time: kept
+            (2, 2, "y"): [(0.30, 0.95), (0.96, 0.30)],
+            # saturated: left out
+            (3, 1, "x"): [(0.30, 0.20), (0.99, 0.99)],
+            # two vCPUs tie at 0.99 and only the second has its worker at 0.95: left out
+            (4, 2, "y"): [(0.99, 0.20), (0.99, 0.95)],
+        }
+        lines = self.split_log(lambda rnd, run, arm: self.peer_fields(special.get((rnd, run, arm), [(0.30, 0.95), (0.80, 0.20)])))
         rc, out = analyse(lines)
         self.assertEqual(rc, 0, out)
-        self.assertEqual(out.count("NOTE peer_bound_rule=maxcpu"), 1)
-        self.assertIn("LEFT_OUT planned=8 used=7 missing=0 failed=0 sync_timeout=0 sender_bound=0 peer_bound=1\n", out)
-        # the same runs without --split keep every pair and print no peer_bound
-        rc, out = analyse([lines[0].replace(" split=1", "")] + lines[1:])
+        self.assertIn("RATIO x_over_y=0.800 ci95_low=0.800 ci95_high=0.800 pairs=6 left_out=2 ", out)
+        self.assertIn("LEFT_OUT planned=8 used=6 missing=0 failed=0 sync_timeout=0 sender_bound=0 peer_bound=2 "
+                      "peer_bound_x=1 peer_bound_y=1\n", out)
+        self.assertIn("AGENTVMLEFT_OUT planned=8 used=6 missing=0 failed=0 sync_timeout=0 sender_bound=0 peer_bound=2 "
+                      "peer_bound_x=1 peer_bound_y=1\n", out)
+        self.assertRegex(out, r"MBITRATIO key=overall_mbit .* pairs=6 planned=8 missing=0 failed=0 sync_timeout=0 "
+                              r"sender_bound=0 peer_bound=2 peer_bound_x=1 peer_bound_y=1 ")
+        self.assertNotIn("WARN peer_bound", out)
+
+    def test_peer_bound_warns_when_one_arm_has_most(self):
+        bound = {(1, 1, "x"), (2, 1, "x")}
+        lines = self.split_log(lambda rnd, run, arm: self.peer_fields(
+            [(0.99, 0.99)] if (rnd, run, arm) in bound else [(0.80, 0.20)]))
+        rc, out = analyse(lines)
         self.assertEqual(rc, 0, out)
+        self.assertIn("peer_bound=2 peer_bound_x=2 peer_bound_y=0\n", out)
+        self.assertEqual(out.count("WARN peer_bound"), 1, out)
+        self.assertIn("\nWARN peer_bound x=2 y=0: ", out)
+
+    def test_split_log_without_kernel_worker_time_is_unchanged(self):
+        # logs of older lab heads: no peer-bound check, whatever peervm_maxcpu says
+        busy = self.split_log(lambda rnd, run, arm: "peervm_maxcpu=%.2f" % (0.99 if (rnd, run) == (2, 2) else 0.80))
+        calm = self.split_log(lambda rnd, run, arm: "peervm_maxcpu=0.80")
+        rc, out = analyse(busy)
+        self.assertEqual((rc, out), analyse(calm))
         self.assertNotIn("peer_bound", out)
         self.assertIn("LEFT_OUT planned=8 used=8 ", out)
 
