@@ -194,6 +194,18 @@ NFT
   echo "lab split topology (peer) is up; home is in the agent VM; RPS on every veth over CPUs $all; netdev_max_backlog 10000"
 }
 
+# split_peer_rps <16 進の mask>:相手の VM の全 veth の RPS を mask の CPU に絞る (lab/lab paired --placement apart が
+# CPU 0 を外し、1 つの flow の受信の softirq が NIC の割り込みの vCPU に載らないようにする)
+split_peer_rps() {
+  local ns dev
+  for ns in "$CLIENT_NS" "$VPS_NS" "$ROUTER_NS" "$LAN_NS"; do
+    for dev in $(ip -n "$ns" -o link show type veth | awk -F': ' '{ sub(/@.*/, "", $2); print $2 }'); do
+      ip netns exec "$ns" sh -c "echo $1 > /sys/class/net/$dev/queues/rx-0/rps_cpus" || die "cannot set RPS on $dev in $ns"
+    done
+  done
+  echo "RPS on every veth of the peer VM over the CPU mask $1"
+}
+
 up_split_agent() {
   local nic=$1
   down
@@ -224,5 +236,6 @@ case "${1:-}" in
   status) status ;;
   up-split-peer) up_split_peer "${2:?up-split-peer <IF>}" ;;
   up-split-agent) up_split_agent "${2:?up-split-agent <IF>}" ;;
-  *) echo "usage: $0 up|down|status|up-split-peer <IF>|up-split-agent <IF>" >&2; exit 2 ;;
+  split-peer-rps) split_peer_rps "${2:?split-peer-rps <HEXMASK>}" ;;
+  *) echo "usage: $0 up|down|status|up-split-peer <IF>|up-split-agent <IF>|split-peer-rps <HEXMASK>" >&2; exit 2 ;;
 esac

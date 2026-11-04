@@ -45,8 +45,11 @@
 #       difference between the two VMs' CPUs; that difference is printed as vm_a_over_b. The 95%
 #       interval resamples the pairs of each side on their own 10,000 times. A pair is left out
 #       when a run is missing, failed (pass=0, no CPU time, undetermined), started without the
-#       start barrier (sync=timeout) or measured its sender; the counts are printed against the
-#       PLAN's rounds times runs. With fewer than half the planned pairs on either side it prints
+#       start barrier (sync=timeout) or measured its sender; with --split (split=1 on the PLAN
+#       line) and runs that carry the per-vCPU kernel worker time, also when the run measured the
+#       peer (peer_bound): a peer vCPU at PEER_BOUND or more busy with its own bound kernel workers
+#       at PEER_KWORKER or more, counted per arm too, with a warning when one arm has at least
+#       twice the other's; the counts are printed against the PLAN's rounds times runs. With fewer than half the planned pairs on either side it prints
 #       no RATIO line and fails. It also prints the median share of the longer run's window that
 #       the two runs overlapped, and warns below OVERLAP_WARN and for runs that started late.
 #       MBITRATIO gives the ratio of the arms' rates in the same way, for throughput targets.
@@ -90,6 +93,7 @@ import hashlib
 import math
 import os
 import random
+import re
 import socket
 import statistics
 import struct
@@ -97,6 +101,13 @@ import sys
 import time
 
 SENDER_BOUND = 0.7
+# `lab/lab paired --split`: a run whose peer VM had a vCPU at least PEER_BOUND busy, with the kernel
+# workers bound to that same vCPU taking at least PEER_KWORKER of it, measured the peer: the flow's
+# softirq ran inside a saturated per-CPU worker and the agent waited for data. The saturated runs had
+# 0.99 to 1.00 of both; unsaturated runs reached 0.97 busy with 0.15 to 0.53 of worker time. Logs
+# without the per-vCPU worker time (older lab heads) get no peer-bound check
+PEER_BOUND = 0.95
+PEER_KWORKER = 0.9
 
 
 def serve(ip, port, nbytes, seed):
@@ -340,6 +351,8 @@ def cpupaired(logfile):
             if " %s=" % key in text:
                 rc = cpupaired_key(data, key, vm=vcpus is not None, pre=pre, share_key=share, vcpus=vcpus) or rc
     rc = paired_ratio(data, "overall_mbit", "MBITRATIO", sender_check=True) or rc
+    for w in dict.fromkeys(PEER_WARNS):
+        print(w)
     return rc
 
 
@@ -372,8 +385,53 @@ def side_of(rnd):
     return "a" if rnd % 2 == 1 else "b"
 
 
-def classify_pair(x, y, key, sender_check):
-    # why a pair is left out ("failed", "sync_timeout" or "sender_bound"), or None when it is used
+def has_peer_kworker(r):
+    return any(k.startswith("peervm_cpu") and k.endswith("_kw") for k in r)
+
+
+def peer_bound(r):
+    # whether a run of `lab/lab paired --split` measured the peer: some peer vCPU at PEER_BOUND or
+    # more busy whose own bound kernel workers took PEER_KWORKER or more. A run without the per-vCPU
+    # worker time is never peer bound
+    for k in r:
+        if k.startswith("peervm_cpu") and k.endswith("_busy") and k[10:-5].isdigit():
+            try:
+                if float(r[k]) >= PEER_BOUND and float(r.get("peervm_cpu%s_kw" % k[10:-5], "0")) >= PEER_KWORKER:
+                    return True
+            except ValueError:
+                pass
+    return False
+
+
+def peer_check_of(plan, runs):
+    # the peer-bound check applies to --split logs whose runs carry the per-vCPU kernel worker time
+    return plan.get("split") == "1" and any(has_peer_kworker(r) for r in runs.values())
+
+
+def peer_arm_counts(x, y):
+    # per arm, whether its run of a peer-bound pair was itself peer bound
+    return {"x": int(peer_bound(x)), "y": int(peer_bound(y))}
+
+
+# the peer-bound warnings of one cpupaired output; the pairs are the same for every key, so cpupaired
+# prints each distinct warning once at the end
+PEER_WARNS = []
+
+
+def peer_arm_text(arms):
+    # the per-arm peer-bound counts, and a warning when one arm has at least twice the other's and 2
+    # or more: the exclusion then rests on something the arms differ in
+    hi, lo = max(arms.values()), min(arms.values())
+    warn = None
+    if hi >= 2 and hi >= 2 * lo:
+        warn = ("WARN peer_bound x=%d y=%d: one arm's runs are peer bound at least twice as often as the other's, so "
+                "the pairs left out depend on the arm" % (arms["x"], arms["y"]))
+    return " peer_bound_x=%d peer_bound_y=%d" % (arms["x"], arms["y"]), warn
+
+
+def classify_pair(x, y, key, sender_check, peer_check=False):
+    # why a pair is left out ("failed", "sync_timeout", "sender_bound" or, with peer_check,
+    # "peer_bound"), or None when it is used
     why = None
     for r in (x, y):
         try:
@@ -386,6 +444,8 @@ def classify_pair(x, y, key, sender_check):
             why = why or "sync_timeout"
         elif sender_check and sender_share(r) >= SENDER_BOUND:
             why = why or "sender_bound"
+        elif peer_check and peer_bound(r):
+            why = why or "peer_bound"
     return why
 
 
@@ -409,8 +469,12 @@ def paired_ratio(data, key, label, sender_check=False):
     expected = {"a": 0, "b": 0}
     pairs = {"a": [], "b": []}
     counts = {"missing": 0, "failed": 0, "sync_timeout": 0}
+    peer_check = sender_check and peer_check_of(plan, runs)
+    peer_arms = {"x": 0, "y": 0}
     if sender_check:
         counts["sender_bound"] = 0
+    if peer_check:
+        counts["peer_bound"] = 0
     for rnd, run in keys:
         side = side_of(rnd)
         expected[side] += 1
@@ -418,12 +482,20 @@ def paired_ratio(data, key, label, sender_check=False):
         if x is None or y is None:
             counts["missing"] += 1
             continue
-        why = classify_pair(x, y, key, sender_check)
+        why = classify_pair(x, y, key, sender_check, peer_check)
         if why:
             counts[why] += 1
+            if why == "peer_bound":
+                for arm, n in peer_arm_counts(x, y).items():
+                    peer_arms[arm] += n
             continue
         pairs[side].append(float(x[key]) / float(y[key]))
     left = " ".join("%s=%d" % kv for kv in counts.items())
+    if peer_check:
+        arm_text, warn = peer_arm_text(peer_arms)
+        left += arm_text
+        if warn:
+            PEER_WARNS.append(warn)
     for side in ("a", "b"):
         if len(pairs[side]) < 2 or 2 * len(pairs[side]) < expected[side]:
             print("%s key=%s TOO FEW x_in_vm=%s pairs=%d of %d planned; no ratio %s"
@@ -449,6 +521,10 @@ def cpupaired_key(data, key, vm, pre=None, share_key="vm_cpu_share", vcpus=None)
     by_round = {}
     arm_vals = {"x": [], "y": []}
     counts = {"missing": 0, "failed": 0, "sync_timeout": 0, "sender_bound": 0}
+    peer_check = peer_check_of(plan, runs)
+    peer_arms = {"x": 0, "y": 0}
+    if peer_check:
+        counts["peer_bound"] = 0
     late = 0
     overlaps = []
     for rnd, run in keys:
@@ -459,9 +535,12 @@ def cpupaired_key(data, key, vm, pre=None, share_key="vm_cpu_share", vcpus=None)
             counts["missing"] += 1
             continue
         late += sum(r.get("sync") == "late" for r in (x, y))
-        why = classify_pair(x, y, key, True)
+        why = classify_pair(x, y, key, True, peer_check)
         if why:
             counts[why] += 1
+            if why == "peer_bound":
+                for arm, n in peer_arm_counts(x, y).items():
+                    peer_arms[arm] += n
             continue
         vals = [(float(r[key]), float(r["overall_mbit"]), float(r.get("agent_cpu_share", "nan")), sender_share(r),
                  float(r.get(share_key, "nan"))) for r in (x, y)]
@@ -489,8 +568,11 @@ def cpupaired_key(data, key, vm, pre=None, share_key="vm_cpu_share", vcpus=None)
     for rnd in sorted(by_round):
         print(pre + "ROUND round=%d x_in_vm=%s pairs=%d ratio_median=%.3f" % (rnd, side_of(rnd), len(by_round[rnd]),
                                                                          statistics.median(by_round[rnd])))
-    print(pre + "LEFT_OUT planned=%d used=%d %s" % (len(keys), len(pairs["a"]) + len(pairs["b"]),
-                                              " ".join("%s=%d" % kv for kv in counts.items())))
+    arm_text, warn = peer_arm_text(peer_arms) if peer_check else ("", None)
+    print(pre + "LEFT_OUT planned=%d used=%d %s%s" % (len(keys), len(pairs["a"]) + len(pairs["b"]),
+                                                " ".join("%s=%d" % kv for kv in counts.items()), arm_text))
+    if warn:
+        PEER_WARNS.append(warn)
     if late:
         print(pre + "WARN %d runs started after the planned start time (SYNC go with a negative wait); the pairs are kept" % late)
     for side in ("a", "b"):
@@ -772,6 +854,279 @@ def guest_counters():
     return kv
 
 
+# Placement in the agent VM of `lab/lab paired --split`: which vCPUs took the data NIC's interrupts
+# and on which vCPU the agent's data-plane thread ran. With one NIC queue a single vCPU takes every
+# interrupt of the NIC and runs its receive softirq; whether the agent's one data-plane thread shares
+# that vCPU changes how much work each wake-up finds, and so the throughput and the CPU per byte.
+
+ETHTOOL_GDRVINFO = 0x03
+NIC_DEVICES = {}
+
+
+def nic_device(ns, ifname):
+    # the virtio device behind <ifname> in the namespace ns, such as virtio12: the PCI address that
+    # `ethtool -i` reports (bus_info of struct ethtool_drvinfo, at byte 100), and the virtio<N> entry
+    # under that PCI device in sysfs, which is the same in every namespace; "" when there is none
+    if (ns, ifname) in NIC_DEVICES:
+        return NIC_DEVICES[(ns, ifname)]
+
+    def bus():
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            buf = ctypes.create_string_buffer(struct.pack("I", ETHTOOL_GDRVINFO) + bytes(192))
+            ethtool(s, ifname, buf)
+        finally:
+            s.close()
+        return buf.raw[100:132].split(b"\0")[0].decode(errors="replace")
+    dev = ""
+    try:
+        entries = os.listdir("/sys/bus/pci/devices/%s" % in_netns(ns, bus))
+        dev = next((e for e in sorted(entries) if e.startswith("virtio") and e[6:].isdigit()), "")
+    except OSError:
+        pass
+    NIC_DEVICES[(ns, ifname)] = dev
+    return dev
+
+
+def parse_irq_cpus(text, dev):
+    # /proc/interrupts: the counts per CPU of every vector of the virtio device dev (virtio12-input.0,
+    # virtio12-output.0, virtio12-config), summed over the vectors, and the IRQ numbers of the
+    # vectors, the input ones first
+    lines = text.splitlines()
+    if not lines or not dev:
+        return [], []
+    ncpu = len(lines[0].split())
+    per, irqs = [0] * ncpu, []
+    for l in lines[1:]:
+        v = l.split()
+        if not v or not v[0].rstrip(":").isdigit() or not v[-1].startswith(dev + "-"):
+            continue
+        for i, x in enumerate(v[1:1 + ncpu]):
+            if not x.isdigit():
+                break
+            per[i] += int(x)
+        irqs.append((0 if "-input" in v[-1] else 1, int(v[0].rstrip(":"))))
+    return per, [n for _, n in sorted(irqs)]
+
+
+def irq_affinity(irqs, cpus="", base="/proc/irq"):
+    # sets the affinity of every IRQ in irqs to the CPU list cpus when given, and returns the effective
+    # affinity of each, joined by "+" (the input vector first)
+    eff = []
+    for n in irqs:
+        if cpus:
+            with open("%s/%d/smp_affinity_list" % (base, n), "w") as f:
+                f.write(cpus)
+        try:
+            with open("%s/%d/effective_affinity_list" % (base, n)) as f:
+                eff.append(f.read().strip())
+        except OSError:
+            with open("%s/%d/smp_affinity_list" % (base, n)) as f:
+                eff.append(f.read().strip())
+    return "+".join(eff) or "-"
+
+
+def nicirq(ifname, cpus=""):
+    # shows, or sets to the CPU list cpus, the interrupt affinity of every vector of <ifname>'s virtio
+    # device, as root, in the caller's namespace (run it under `ip netns exec`)
+    dev = nic_device("", ifname)
+    with open("/proc/interrupts") as f:
+        _, irqs = parse_irq_cpus(f.read(), dev)
+    if not irqs:
+        print("nicirq: %s: no virtio interrupt vectors found" % ifname, file=sys.stderr)
+        return 1
+    try:
+        eff = irq_affinity(irqs, cpus)
+    except OSError as e:
+        print("nicirq: %s: %s" % (ifname, e), file=sys.stderr)
+        return 1
+    # the effective affinity of a vector changes only when it next fires, so the vectors of unused
+    # queues keep the old one; the affinity asked for is what is checked
+    asked = []
+    for n in irqs:
+        with open("/proc/irq/%d/smp_affinity_list" % n) as f:
+            asked.append(f.read().strip())
+    print("nic=%s device=%s irqs=%s affinity=%s effective=%s" % (ifname, dev, ",".join(map(str, irqs)), "+".join(asked), eff))
+    if cpus and any(a != cpus for a in asked):
+        print("nicirq: %s: the affinity stays %s, not %s" % (ifname, "+".join(asked), cpus), file=sys.stderr)
+        return 1
+    return 0
+
+
+def nicirq_counters(ns, ifname):
+    # snap_line's nicirq:<ns>:<ifname>: nicirq_cpu<N>, the interrupts of the NIC's device taken by
+    # CPU N so far, and nicirq_eff, the vectors' effective affinity now
+    dev = nic_device(ns, ifname)
+    try:
+        with open("/proc/interrupts") as f:
+            per, irqs = parse_irq_cpus(f.read(), dev)
+        eff = irq_affinity(irqs) if irqs else "-"
+    except OSError:
+        return []
+    return [("nicirq_cpu%d" % i, c) for i, c in enumerate(per)] + [("nicirq_eff", eff)]
+
+
+def parse_thread_sched(text):
+    # se.nr_migrations of /proc/<pid>/task/<tid>/sched (kernels with the scheduler debug file), or None
+    for l in text.splitlines():
+        k, _, v = l.partition(":")
+        if k.strip() == "se.nr_migrations":
+            try:
+                return int(v.split()[0])
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def find_thread(pid, comm, proc="/proc"):
+    # the first thread of pid named comm, or None
+    try:
+        tids = sorted(os.listdir("%s/%s/task" % (proc, pid)), key=int)
+    except (OSError, ValueError):
+        return None
+    for tid in tids:
+        try:
+            with open("%s/%s/task/%s/comm" % (proc, pid, tid)) as f:
+                if f.read().strip() == comm:
+                    return tid
+        except OSError:
+            pass
+    return None
+
+
+def thread_state(pid, tid, proc="/proc"):
+    # (state, processor) of a thread from its stat (fields 3 and 39), or None when it has gone
+    try:
+        with open("%s/%s/task/%s/stat" % (proc, pid, tid)) as f:
+            st = f.read().rsplit(")", 1)[1].split()
+        return st[0], int(st[36])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+class ThreadSampler:
+    # samples every interval seconds on which CPU one thread of a process is: samples, running (state
+    # R: on a CPU or waiting for one) and per CPU the samples there, all cumulative from the first
+    # snapshot, so that snapdiff takes the window's part. It lives in agentd, which outlives the
+    # snapshots; the thread stops when the process has gone
+    def __init__(self, pid, comm, ncpu, interval=0.05, proc="/proc"):
+        self.pid, self.comm, self.proc, self.interval = str(pid), comm, proc, interval
+        self.samples = self.running = 0
+        self.oncpu = [0] * ncpu
+        self.tid = None
+        self.alive = True
+
+    def sample(self):
+        if self.tid is None:
+            self.tid = find_thread(self.pid, self.comm, self.proc)
+            if self.tid is None:
+                self.alive = os.path.exists("%s/%s" % (self.proc, self.pid))
+                return
+        s = thread_state(self.pid, self.tid, self.proc)
+        if s is None:
+            self.tid = None
+            self.alive = os.path.exists("%s/%s" % (self.proc, self.pid))
+            return
+        state, cpu = s
+        self.samples += 1
+        self.running += state == "R"
+        if 0 <= cpu < len(self.oncpu):
+            self.oncpu[cpu] += 1
+
+    def start(self):
+        import threading
+
+        def loop():
+            while self.alive:
+                self.sample()
+                time.sleep(self.interval)
+        threading.Thread(target=loop, daemon=True).start()
+        return self
+
+    def counters(self, label):
+        # the cumulative counts, and from the thread's own files the scheduler's run and wait time
+        # (schedstat, ns), its migrations and the CPU it is on now; nothing before the thread is found
+        tid = self.tid or find_thread(self.pid, self.comm, self.proc)
+        if tid is None:
+            return []
+        p = "thr_%s_" % label
+        kv = [(p + "samples", self.samples), (p + "running", self.running)]
+        kv += [(p + "oncpu%d" % i, c) for i, c in enumerate(self.oncpu)]
+        base = "%s/%s/task/%s/" % (self.proc, self.pid, tid)
+        try:
+            with open(base + "schedstat") as f:
+                ss = f.read().split()
+            kv += [(p + "run_us", int(ss[0]) // 1000), (p + "wait_us", int(ss[1]) // 1000)]
+        except (OSError, ValueError, IndexError):
+            pass
+        try:
+            with open(base + "sched") as f:
+                mig = parse_thread_sched(f.read())
+            if mig is not None:
+                kv.append((p + "mig", mig))
+        except OSError:
+            pass
+        s = thread_state(self.pid, tid, self.proc)
+        if s is not None:
+            kv.append((p + "now", s[1]))
+        return kv
+
+
+THREAD_SAMPLERS = {}
+
+# the kernel threads bound to one CPU: workqueue workers (kworker/<N>:<id>, which run, among other
+# work, kernel WireGuard's per-CPU crypto) and the softirq threads (ksoftirqd/<N>)
+KTHREAD_KINDS = (("kw", re.compile(r"kworker/(\d+):")), ("ksi", re.compile(r"ksoftirqd/(\d+)$")))
+
+
+def parse_kthread(comm):
+    # (kind, cpu) of a per-CPU kernel thread's comm, ("kwu", -1) for an unbound worker, or None
+    for kind, rx in KTHREAD_KINDS:
+        m = rx.match(comm)
+        if m:
+            return kind, int(m.group(1))
+    if comm.startswith("kworker/u"):
+        return "kwu", -1
+    return None
+
+
+def kthread_counters(proc="/proc", ncpu=None):
+    # snap_line's kthreads: the CPU time so far (utime and stime, us) of the per-CPU kernel workers,
+    # summed per CPU (kw_cpu<N>_us, ksi_cpu<N>_us), and of the unbound workers (kwu_us). Kernel
+    # threads are processes of their own, so one pass over /proc reads each comm and stat once
+    hz = os.sysconf("SC_CLK_TCK")
+    ncpu = ncpu or os.cpu_count() or 1
+    tot = {("kw", c): 0 for c in range(ncpu)}
+    tot.update({("ksi", c): 0 for c in range(ncpu)})
+    tot[("kwu", -1)] = 0
+    for d in os.listdir(proc):
+        if not d.isdigit():
+            continue
+        try:
+            with open("%s/%s/comm" % (proc, d)) as f:
+                k = parse_kthread(f.read().strip())
+            if k is None:
+                continue
+            with open("%s/%s/stat" % (proc, d)) as f:
+                st = f.read().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if k in tot:
+            tot[k] += (int(st[11]) + int(st[12])) * 1000000 // hz
+    return [("kwu_us" if kind == "kwu" else "%s_cpu%d_us" % (kind, c), v) for (kind, c), v in sorted(tot.items())]
+
+
+def thread_counters_of(pid, label, comm):
+    # snap_line's thread:<label>:<comm>: the sampler of that thread of pid, started on the first call
+    key = (str(pid), comm)
+    s = THREAD_SAMPLERS.get(key)
+    if s is None or not s.alive:
+        for k in [k for k, v in THREAD_SAMPLERS.items() if not v.alive]:
+            del THREAD_SAMPLERS[k]
+        s = THREAD_SAMPLERS[key] = ThreadSampler(pid, comm, os.cpu_count() or 1).start()
+    return s.counters(label)
+
+
 ETH_SS_STATS, ETHTOOL_GSTATS = 1, 0x1D
 # the device statistics snap keeps: packets, drops and the notifications (virtio-net's kicks)
 ETHSTAT_WORDS = ("kick", "packets", "drop", "notif")
@@ -907,12 +1262,17 @@ SNMP_KEYS = {("TcpExt", "TCPOFOQueue"): "tcp_ofoq", ("TcpExt", "TCPOFODrop"): "t
 
 def snap_line(prefix, pid="", cg="", *specs):
     # one line of cumulative counters, each key starting with <prefix>_:
-    #   busy_us, user_us, sys_us, soft_us, irq_us, steal_us and cpu<N>_us (busy per CPU) from
+    #   busy_us, user_us, sys_us, soft_us, irq_us, steal_us, cpu<N>_us (busy per CPU) and
+    #   cpu<N>_{soft,user,sys}_us (softirq, user and system time per CPU) from
     #   /proc/stat, busy being user, nice, system, irq and softirq as in tcpquality.sh; ctxt;
     #   with a pid, proc_us (from the cgroup's cpu.stat when cg is given) and proc_vcs and
     #   proc_nvcs, the voluntary and involuntary context switches summed over its threads.
     # specs: if:<ns>:<ifname> adds if_<ns>_<ifname>_{rxp,rxb,txp,txb} from /proc/net/dev and
-    # snmp:<ns> adds snmp_<ns>_<counter> from /proc/net/snmp, read in that namespace.
+    # snmp:<ns> adds snmp_<ns>_<counter> from /proc/net/snmp, read in that namespace;
+    # nicirq:<ns>:<ifname> adds nicirq_cpu<N> and nicirq_eff (nicirq_counters) and, with a pid,
+    # thread:<label>:<comm> adds thr_<label>_* (ThreadSampler, which keeps sampling between calls in
+    # a long-lived process such as agentd); kthreads adds the per-CPU kernel workers' time
+    # (kthread_counters).
     hz = os.sysconf("SC_CLK_TCK")
     us = lambda ticks: int(ticks) * 1000000 // hz
     kv = [("t", "%.6f" % time.time())]
@@ -926,6 +1286,7 @@ def snap_line(prefix, pid="", cg="", *specs):
                        ("sys_us", us(v[3])), ("irq_us", us(v[6])), ("soft_us", us(v[7])), ("steal_us", us(v[8]))]
             elif v[0].startswith("cpu"):
                 kv.append((v[0] + "_us", us(sum(int(v[i]) for i in (1, 2, 3, 6, 7)))))
+                kv += [(v[0] + "_soft_us", us(v[7])), (v[0] + "_user_us", us(int(v[1]) + int(v[2]))), (v[0] + "_sys_us", us(v[3]))]
             elif v[0] == "ctxt":
                 kv.append(("ctxt", v[1]))
     # the per-CPU input backlog: packets dropped because netdev_max_backlog was full, and rounds of
@@ -957,10 +1318,21 @@ def snap_line(prefix, pid="", cg="", *specs):
                 pass
         kv += [("proc_vcs", vcs), ("proc_nvcs", nvcs)]
     kv += guest_counters()
+    # nicirq:<ns>:<ifname> and thread:<label>:<comm> (with a pid): the placement counters above
+    for spec in specs:
+        kind, _, rest = spec.partition(":")
+        if kind == "nicirq":
+            kv += nicirq_counters(*rest.split(":", 1))
+        elif kind == "thread" and pid:
+            kv += thread_counters_of(pid, *rest.split(":", 1))
+        elif kind == "kthreads":
+            kv += kthread_counters()
     out = ["%s_%s=%s" % (prefix, k, v) for k, v in kv]
     by_ns = {}
     for spec in specs:
         kind, _, rest = spec.partition(":")
+        if kind in ("nicirq", "thread", "kthreads"):
+            continue
         ns = rest.split(":")[0]
         by_ns.setdefault(ns, []).append((kind, rest))
     for ns, items in by_ns.items():
@@ -995,6 +1367,73 @@ def snap_line(prefix, pid="", cg="", *specs):
 def snap(prefix, pid="", cg="", *specs):
     print(snap_line(prefix, pid, cg, *specs))
     return 0
+
+
+def placement_parts(p, d, a, t):
+    # snapdiff's placement values of the VM prefix p (d: the window's increase of a key, a: the
+    # after snapshot, t: the window in seconds). For the agent and the peer VM, the busy share of each vCPU
+    # (<p>_cpu<N>_busy, 1.0 is the whole vCPU), its softirq, user and system parts (<p>_cpu<N>_soft,
+    # _user, _sys) and, with the kthreads snapshots, the per-CPU kernel workers' share
+    # (<p>_cpu<N>_kw, _ksi) and the unbound workers' (<p>_kwu); when the snapshots have them, the data NIC's
+    # interrupts per vCPU as fractions (<p>_nicirq_cpu<N>_frac), the vCPU that took most
+    # (<p>_nicirq_top_cpu) and the vectors' effective affinity (<p>_nicirq_eff); and per sampled
+    # thread label L the fraction of samples on each vCPU (<p>_thr_L_cpu<N>_frac), the share of
+    # samples in state R, its migrations, its wait for a CPU as a share of the window, and
+    # <p>_thr_L_on_nicirq_frac, the chance that the thread was on the vCPU taking the NIC's
+    # interrupts (the sum over vCPUs of the two fractions' products)
+    out = []
+    put = lambda k, v, fmt="%.3f": out.append(("%s=" + fmt) % (k, v))
+    pre = p + "_"
+
+    def per_cpu(head, tail):
+        # {N: increase} of the keys <p>_<head><N><tail>
+        got = {}
+        for k in a:
+            if k.startswith(pre + head) and k.endswith(tail):
+                n = k[len(pre + head):len(k) - len(tail)]
+                if n.isdigit() and d(k) is not None:
+                    got[int(n)] = d(k)
+        return got
+    if p in ("agentvm", "peervm"):
+        for n, v in sorted(per_cpu("cpu", "_us").items()):
+            put("%s_cpu%d_busy" % (p, n), v / 1e6 / t, "%.2f")
+        for part in ("soft", "user", "sys"):
+            for n, v in sorted(per_cpu("cpu", "_%s_us" % part).items()):
+                put("%s_cpu%d_%s" % (p, n, part), v / 1e6 / t, "%.2f")
+        for kind in ("kw", "ksi"):
+            for n, v in sorted(per_cpu(kind + "_cpu", "_us").items()):
+                put("%s_cpu%d_%s" % (p, n, kind), v / 1e6 / t, "%.2f")
+        if d(pre + "kwu_us") is not None:
+            put(p + "_kwu", d(pre + "kwu_us") / 1e6 / t, "%.2f")
+    nic = per_cpu("nicirq_cpu", "")
+    nic_frac = {}
+    if nic and sum(nic.values()) > 0:
+        tot = sum(nic.values())
+        nic_frac = {n: v / tot for n, v in nic.items()}
+        for n, f in sorted(nic_frac.items()):
+            put("%s_nicirq_cpu%d_frac" % (p, n), f, "%.2f")
+        put(p + "_nicirq_top_cpu", max(nic, key=lambda n: (nic[n], -n)), "%d")
+    if pre + "nicirq_eff" in a:
+        out.append("%s_nicirq_eff=%s" % (p, a[pre + "nicirq_eff"]))
+    labels = sorted({k[len(pre + "thr_"):-len("_samples")] for k in a
+                     if k.startswith(pre + "thr_") and k.endswith("_samples")})
+    for lb in labels:
+        q = "%sthr_%s_" % (pre, lb)
+        n = d(q + "samples")
+        if not n:
+            continue
+        on = per_cpu("thr_%s_oncpu" % lb, "")
+        for c, v in sorted(on.items()):
+            put("%s_thr_%s_cpu%d_frac" % (p, lb, c), v / n, "%.2f")
+        if d(q + "running") is not None:
+            put("%s_thr_%s_running_frac" % (p, lb), d(q + "running") / n, "%.2f")
+        if d(q + "mig") is not None:
+            put("%s_thr_%s_mig" % (p, lb), d(q + "mig"), "%.0f")
+        if d(q + "wait_us") is not None:
+            put("%s_thr_%s_wait_share" % (p, lb), d(q + "wait_us") / 1e6 / t)
+        if nic_frac:
+            put("%s_thr_%s_on_nicirq_frac" % (p, lb), sum(v / n * nic_frac.get(c, 0) for c, v in on.items()), "%.2f")
+    return out
 
 
 def snapdiff(nbytes, window_s, direction, before, after):
@@ -1048,6 +1487,7 @@ def snapdiff(nbytes, window_s, direction, before, after):
                 put("%s_idle_%s_per_s" % (p, st), d(k) / t, "%.0f")
             if d("%s_idle_%s_us" % (p, st)) is not None:
                 put("%s_idle_%s_share" % (p, st), d("%s_idle_%s_us" % (p, st)) / 1e6 / t)
+        out.extend(placement_parts(p, d, a, t))
     if "agentvm" in prefixes and "peervm" in prefixes:
         put("vm_cpu_s_per_gb", total / gb if gb > 0 else -1)
         put("vm_cpu_share", total / t)
@@ -1308,8 +1748,15 @@ def proc_stat_cpus(text):
     return busy, irq
 
 
+def lab_alive(pid, proc="/proc"):
+    # whether the process pid (the `lab/lab` that started a sampler) still exists
+    return os.path.isdir("%s/%s" % (proc, pid))
+
+
 def hostsample(out, interval, *specs):
-    # on the host, every <interval> seconds until killed: the busy time of every host CPU (ticks)
+    # on the host, every <interval> seconds until killed, or with --lab-pid=<pid> until that process
+    # (the `lab/lab` that started it) is gone, so that a SIGKILLed lab leaves no sampler behind; the
+    # marker also lets `lab/lab suite-gc` find a sampler whose lab is gone: the busy time of every host CPU (ticks)
     # and its irq and softirq time, and per VM given as <label>=<qemu pid> the counters of its vCPU
     # threads, its vhost workers and its other threads: run and runqueue wait (ns, schedstat), user,
     # system and guest time (ticks), and the voluntary and involuntary context switches; the vhost
@@ -1318,10 +1765,12 @@ def hostsample(out, interval, *specs):
     # their time went. In a vCPU thread, guest time is the time in the guest, system time is KVM in
     # the host kernel (exits, interrupt injection and halt polling) and user time beyond guest time
     # is qemu's own device code. Reading /proc of qemu, which runs as another user, needs no rights.
+    lab = next((sp.split("=", 1)[1] for sp in specs if sp.startswith("--lab-pid=")), None)
+    specs = [sp for sp in specs if not sp.startswith("--lab-pid=")]
     sampler = HostSampler(pcores())
     step = float(interval)
     with open(out, "a") as f:
-        while True:
+        while lab is None or lab_alive(lab):
             t0 = time.time()
             parts = ["t=%.3f" % t0]
             with open("/proc/stat") as st:
@@ -1353,6 +1802,7 @@ def hostsample(out, interval, *specs):
             f.write(" ".join(parts) + "\n")
             f.flush()
             time.sleep(max(0.0, step - (time.time() - t0)))
+    return 0
 
 
 def kvmsample(out, interval, root="/sys/kernel/debug/kvm"):
@@ -1629,4 +2079,4 @@ if __name__ == "__main__":
               "cpuratio": cpuratio, "cpupaired": cpupaired, "udpgso": udpgso, "iperf": iperf,
               "uecho": uecho, "uping": uping, "latpaired": latpaired, "snap": snap, "snapdiff": snapdiff,
               "agentd": agentd, "agentx": agentx, "channels": channels, "hostsample": hostsample, "hostwin": hostwin,
-              "kvmsample": kvmsample, "pollctl": pollctl, "guestinfo": guestinfo}[cmd](*args))
+              "kvmsample": kvmsample, "pollctl": pollctl, "guestinfo": guestinfo, "nicirq": nicirq}[cmd](*args))

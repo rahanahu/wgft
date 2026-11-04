@@ -421,6 +421,17 @@ cmd_suite_gc() {
     info "deleting the split network $net whose lab process is gone"
     inc network delete "$net" >/dev/null 2>&1 || info "could not delete the network $net"
   done < <(inc network list -f csv -c n,u 2>/dev/null || true)
+  # lab paired --split のホストの標本 (tcpquality.py hostsample --lab-pid=<PID>):作った lab が無いものを止める。
+  # 標本は lab が消えると次の標本で自分でも止まる。ここでは /proc の引数を 1 つずつ見て、印の付いたものだけを選ぶ
+  local p args lab
+  for p in /proc/[0-9]*; do
+    args=$(tr '\0' '\n' 2>/dev/null <"$p/cmdline") || continue
+    grep -qx hostsample <<<"$args" && grep -q '/tcpquality.py$' <<<"$args" || continue
+    lab=$(sed -n 's/^--lab-pid=\([0-9][0-9]*\)$/\1/p' <<<"$args")
+    [[ -n $lab ]] && ! suite_alive "$lab" || continue
+    info "stopping the host sampler ${p#/proc/} whose lab process $lab is gone"
+    kill "${p#/proc/}" 2>/dev/null || true
+  done
 }
 
 suite_cleanup() {
@@ -842,7 +853,7 @@ paired_sync() {
 }
 
 # lab paired の使い方。lab help と引数の誤りの両方がこの 1 つの文字列を出す
-PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y"
+PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local] [--placement apart]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y"
 
 # is_uint <値>:1 以上の整数か
 is_uint() { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
@@ -872,6 +883,7 @@ paired_parse_args() {
       --split) split=1; shift ;;
       --peer-vcpus) peervcpus=${2:?--peer-vcpus N}; shift 2 ;;
       --target) target=${2:?--target lan|local}; shift 2 ;;
+      --placement) placement=${2:?--placement apart}; shift 2 ;;
       --delay-ms) delayms=${2:?--delay-ms MS}; shift 2 ;;
       --delay-rate-mbit) delayrate=${2:?--delay-rate-mbit N}; shift 2 ;;
       --x-agent-env) xagentenv+=" ${2:?--x-agent-env WGFT_NAME=VALUE}"; shift 2 ;;
@@ -901,6 +913,14 @@ paired_validate() {
   [[ -z $delayqueue ]] || require_uint --delay-queue-pkts "$delayqueue"
   [[ -z $peervcpus || -n $split ]] || die "--peer-vcpus goes with --split"
   [[ -z $target || ( -n $split && ( $target == lan || $target == local ) ) ]] || die "--target wants lan or local, with --split"
+  [[ -z $placement || ( -n $split && $placement == apart ) ]] || die "--placement wants apart, with --split"
+  # --placement apart は userspace の agent のプロセス全体を 1 つの CPU に置く。data plane が 1 スレッドの Rust の agent と、
+  # 置くプロセスの無いカーネルモードだけに使える (gVisor の Go の agent や、暗号の worker を足した build には別の置き方が要る)
+  local m
+  for m in "${spec_x#base:}" "${spec_y#base:}"; do
+    [[ -z $placement || $m == rust || $m == kernel ]] \
+      || die "--placement apart pins the agent process to one CPU, which fits only an agent with one data-plane thread; arm $m is not rust or kernel"
+  done
   local hp
   for hp in "${PAIRED_HOSTPOLL_X:-}" "${PAIRED_HOSTPOLL_Y:-}"; do
     [[ -z $hp || ( -n $split && ( $hp == on || $hp == off ) ) ]] || die "PAIRED_HOSTPOLL_X and PAIRED_HOSTPOLL_Y want on or off, with --split"
@@ -986,7 +1006,7 @@ paired_provision() {
   out=${out:-${XDG_CACHE_HOME:-$HOME/.cache}/wgft-lab/paired-$(date +%Y%m%d-%H%M%S)}
   mkdir -p "$out"
   out=$(cd "$out" && pwd)
-  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${delayrate:+ delay_rate_mbit=$delayrate}${delayqueue:+ delay_queue_pkts=$delayqueue}${xagentenv:+ x_agent_env=${xagentenv// /,}}${yagentenv:+ y_agent_env=${yagentenv// /,}}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}" > "$out/paired.log"
+  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${delayrate:+ delay_rate_mbit=$delayrate}${delayqueue:+ delay_queue_pkts=$delayqueue}${xagentenv:+ x_agent_env=${xagentenv// /,}}${yagentenv:+ y_agent_env=${yagentenv// /,}}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}${placement:+ placement=$placement}" > "$out/paired.log"
   SUITE_KEEP=$keep
   SUITE_TEMPLATE=${WGFT_LAB_TEMPLATE:-$VM}
   PAIR_LEAD_S=${PAIR_LEAD_S:-1}
@@ -1044,6 +1064,7 @@ paired_provision() {
       echo "lab paired: split: agent VM ${names[0]} limits.cpu=${pins[0]} qemu $SPLIT_QEMU_AGENT, peer VM ${names[1]} limits.cpu=${pins[1]} qemu $SPLIT_QEMU_PEER, network $PAIRED_SPLIT_NET (taps$SPLIT_TAPS, queue ${PAIRED_TAP_QLEN:-4096}, NIC queues $SPLIT_PEER_Q), agentd $SPLIT_AGENT_AT, kernel $kern, template $SUITE_TEMPLATE"
       [[ -z ${PAIRED_HOSTPOLL_X:-}${PAIRED_HOSTPOLL_Y:-} ]] || echo "lab paired: split: host halt polling of the ${PAIRED_HOSTPOLL_VMS:-both} VM(s), set by the guests: x ${PAIRED_HOSTPOLL_X:-on}, y ${PAIRED_HOSTPOLL_Y:-on} (hostpoll= in paired.log)"
       [[ -z ${PAIRED_KVM_SAMPLES:-} ]] || echo "lab paired: split: KVM statistics from $PAIRED_KVM_SAMPLES (tcpquality.py kvmsample, started by root)"
+      [[ -z $placement ]] || echo "lab paired: split: placement $placement: the data NIC's interrupts on CPU 0 of the agent VM, a userspace-mode agent on CPUs $SPLIT_AGENT_CPUS; the kernel mode has no agent process to place; peer VM: NIC interrupts on CPU 0, RPS on CPUs ${SPLIT_PEER_RPS:-unchanged}"
       echo "lab paired: split: the arms take turns in the same two VMs; vm=a in paired.log is the arm that ran first in the round. vhost and qemu's other threads are not pinned (host samples in host-samples.txt)"
     else
       echo "lab paired: VM a ${names[0]} limits.cpu=${pins[0]}, VM b ${names[1]} limits.cpu=${pins[1]}, kernel $kern, template $SUITE_TEMPLATE"
@@ -1094,6 +1115,28 @@ paired_split_setup() {
       || die "cannot set the NIC of ${names[i]} to $q queue(s)"
   done
   SPLIT_PEER_Q="agent ${PAIRED_AGENT_QUEUES:-1}, peer ${PAIRED_PEER_QUEUES:-1}"
+  # --placement apart:1 つの queue の割り込みと受信の softirq は 1 つの vCPU で走る。agent の data plane の 1 スレッドが
+  # その vCPU に載るかをスケジューラが実行ごとに決め、載った実行だけが遅く byte あたりの CPU が多かった (2026-11-04、
+  # 4 vCPU の受ける向きの A/A で 16 実行すべて)。data の NIC の全 vector を CPU 0 に固定し、userspace の agent を
+  # CPU 1 だけに置いて、同居しない形にそろえる。CPU 1 から後の全部に置くと、8 vCPU でスレッドが 2 つの L2 の塊の間を
+  # 移り、どちらの塊に載るかでも速さが数 % 揺れた。1 vCPU では agent も CPU 0。NIC の固定は VM の設定なので両方の腕に
+  # 効き、カーネルモードには置くプロセスが無い (tqagent.sh は kernel の腕を固定しない)
+  if [[ -n $placement ]]; then
+    (VM=${names[0]}; in_vm ip netns exec home python3 "$SHARE/lab/tcpquality.py" nicirq eth0 0) >>"$out/vm-${vms[0]}.log" 2>&1 \
+      || die "cannot put the data NIC's interrupts of ${names[0]} on CPU 0; see $out/vm-${vms[0]}.log"
+    SPLIT_AGENT_CPUS=0
+    ((vcpus == 1)) || SPLIT_AGENT_CPUS=1
+    # 相手の VM:1 つの flow の受信の softirq は RPS が flow ごとに選ぶ 1 つの vCPU で走る。その vCPU が NIC の割り込みの
+    # vCPU と重なった実行が詰まったので、NIC の全 vector を CPU 0 に固定し、全 veth の RPS から CPU 0 を外す
+    local pv=${peervcpus:-8}
+    if ((pv > 1)); then
+      (VM=${names[1]}; in_vm ip netns exec homerouter python3 "$SHARE/lab/tcpquality.py" nicirq lan0 0) >>"$out/vm-${vms[1]}.log" 2>&1 \
+        || die "cannot put the data NIC's interrupts of ${names[1]} on CPU 0; see $out/vm-${vms[1]}.log"
+      (VM=${names[1]}; in_vm "$SHARE/lab/netns.sh" split-peer-rps "$(printf '%x' $(( (1 << pv) - 2 )))") >>"$out/vm-${vms[1]}.log" 2>&1 \
+        || die "cannot narrow RPS in ${names[1]}; see $out/vm-${vms[1]}.log"
+      SPLIT_PEER_RPS="1-$((pv - 1))"
+    fi
+  fi
   # 2 台の idle の仕方と data の NIC の形を 1 度だけ残す (ホストでの時間の内訳を読むときに要る)
   for i in 0 1; do
     { echo "VM ${vms[i]} ${names[i]}"
@@ -1114,7 +1157,8 @@ paired_split_setup() {
   SPLIT_TAPS=""
   for i in 0 1; do SPLIT_TAPS+=" tap:${vms[i]}=$(inc config get "${names[i]}" volatile.eth1.host_name)"; done
   # shellcheck disable=SC2086 # the two tap specs are words on purpose
-  python3 "$REPO/lab/tcpquality.py" hostsample "$out/host-samples.txt" 0.5 "agent=$SPLIT_QEMU_AGENT" "peer=$SPLIT_QEMU_PEER" $SPLIT_TAPS &
+  # --lab-pid:この lab が SIGKILL で消えても、標本は自分で止まる (suite-gc もこの印で探す)
+  python3 "$REPO/lab/tcpquality.py" hostsample "$out/host-samples.txt" 0.5 "agent=$SPLIT_QEMU_AGENT" "peer=$SPLIT_QEMU_PEER" $SPLIT_TAPS "--lab-pid=$$" &
   PAIRED_SAMPLER=$!
 }
 
@@ -1130,6 +1174,7 @@ paired_run_split_round() {
     paired_hostpoll "${arms[k]}"
     env=(RUNS="$runs" DIRECTION="$direction" AGENT_AT="$SPLIT_AGENT_AT")
     [[ $target != local ]] || env+=(TARGET_LOCAL=1)
+    [[ -z $SPLIT_AGENT_CPUS ]] || env+=(AGENT_CPUS="$SPLIT_AGENT_CPUS")
     cur_arm=${arms[k]}
     paired_round_env
     log=$out/round-$r-${arms[k]}.log
@@ -1243,7 +1288,7 @@ paired_report() {
 
 cmd_paired() {
   local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes="" tool="" streams="" udpping="" bulkmbit="" agentgso="" rmemmax="" rtarget_flag=""
-  local split="" peervcpus="" delayms="" delayrate="" delayqueue="" target="" xagentenv="" yagentenv="" SPLIT_HOSTPOLL="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
+  local split="" peervcpus="" delayms="" delayrate="" delayqueue="" target="" placement="" SPLIT_AGENT_CPUS="" SPLIT_PEER_RPS="" xagentenv="" yagentenv="" SPLIT_HOSTPOLL="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
   local rest=() path spec_x spec_y uses_base rust pins=() names=() vms=() t0 run_timeout r
   local rc=0 fails=0 prev_offs=()
   paired_parse_args "$@"
