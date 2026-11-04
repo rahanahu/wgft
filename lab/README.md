@@ -446,7 +446,6 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
   A+ の agent はプロセスの使える CPU が 2 つ以下だと worker を作らないので、`--vcpus 4` 以上を求めます。
   worker の無い build でも流せ、そのときは data plane のスレッドが CPU 1 に載ります。
   `apart-mt` の値は `apart` で取った表と混ぜません。
-  `--agent-load` の CPU が転送先の CPU と重なっても止めず、警告します。負荷が転送先と CPU を取り合うので、その値は重ならない組と混ぜません。
   ラボではまだ流していません
 - `--agent-load CPU:DUTY`:`--split` で、agent の VM の CPU `CPU` に固定した負荷 (`lab/agentload.py`) を、各腕の実行の前から後まで動かします。
   負荷は 10 ms ごとに `DUTY` % の間だけ CPU を使い切り、残りは眠ります。VM の root の netns で走り、agent のスレッドと CPU を取り合います。
@@ -486,6 +485,7 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
   `PLAN` の行に `local_cpus=` が付き、固定しない時は `unpinned` です。
   結果の行の `local_cpus=` にも、固定した時だけ同じ値が入ります。
   固定が効いていなければ (転送先の process が見つからない場合と、UDP の echo の固定を含む)、その腕を失敗にします。
+  `--agent-load` の CPU が転送先の CPU と重なっても止めず、警告します。負荷が転送先と CPU を取り合うので、その値は重ならない組と混ぜません。
   ラボではまだ流していません
   `--placement` を付けない実行と、`--target local` を付けない実行は前と同じです (結果の行も変わりません)
 - 記録:`paired.log` の `PLAN` の行に `placement=apart` が付き、`header.txt` に置き場所を書きます。
