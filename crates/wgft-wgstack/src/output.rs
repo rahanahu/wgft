@@ -127,6 +127,24 @@ impl Dlist {
             && self.next.iter().chain(self.prev.iter()).all(|&x| x == NIL)
     }
 
+    /// list にある節 `i` を先頭に移します。list に無ければ何もしません。
+    pub(crate) fn move_to_front(&mut self, i: u32) {
+        if !self.in_list.get(i) || self.head == i {
+            return;
+        }
+        self.remove(i);
+        self.in_list.set(i);
+        self.prev[i as usize] = NIL;
+        self.next[i as usize] = self.head;
+        if self.head == NIL {
+            self.tail = i;
+        } else {
+            self.prev[self.head as usize] = i;
+        }
+        self.head = i;
+        self.n += 1;
+    }
+
     pub(crate) fn pop_front(&mut self) -> Option<u32> {
         let i = self.front()?;
         self.remove(i);
@@ -260,6 +278,33 @@ mod tests {
         l.next[1] = 42;
         l.tail = 42;
         assert_eq!(l.check(), Err("a list link is out of range"));
+    }
+
+    #[test]
+    fn dlist_moves_a_node_to_the_front() {
+        let mut l = Dlist::new(4).unwrap();
+        l.move_to_front(2);
+        assert!(l.is_empty(), "a node not in the list stays out");
+        l.push_back(0);
+        l.move_to_front(0);
+        l.check().unwrap();
+        l.push_back(1);
+        l.push_back(2);
+        l.move_to_front(2);
+        l.check().unwrap();
+        let order = |l: &Dlist| {
+            let (mut out, mut k) = ([NIL; 4], 0);
+            l.for_each(|i| {
+                out[k] = i;
+                k += 1;
+            });
+            out
+        };
+        assert_eq!(order(&l), [2, 0, 1, NIL]);
+        l.move_to_front(1);
+        l.check().unwrap();
+        assert_eq!(order(&l), [1, 2, 0, NIL]);
+        assert_eq!(l.len(), 3);
     }
 
     #[test]

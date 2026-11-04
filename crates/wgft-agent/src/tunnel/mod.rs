@@ -26,6 +26,15 @@ use wgft_proto::WgConfig;
 use wgft_wgstack::Limits;
 use wgft_wireguard::{DeviceConfig, PrivateKey, PublicKey};
 
+/// 核の設定のうち、トンネルのアドレスと MTU のほかに agent が決めるもの。起動の時に 1 回だけ決める。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoreOptions {
+    /// 核の表の大きさ。`WGFT_MAX_TCP_FLOWS` から導く。
+    pub limits: Limits,
+    /// 実験の送信の番 (`WGFT_AGENT_EXPERIMENTAL_SEND_TURN`)。互換の保証の外で、既定は無効。
+    pub send_turn: bool,
+}
+
 /// keepalive の既定 (秒の値が範囲の外のとき)。
 pub const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(25);
 
@@ -222,7 +231,7 @@ impl Tunnel {
         private_key: &str,
         cfg: Config,
         generations: &mut Generations,
-        limits: Limits,
+        core: CoreOptions,
         batching: Batching,
         clock: Option<&Path>,
         dead: Arc<tokio::sync::Notify>,
@@ -248,17 +257,17 @@ impl Tunnel {
             cfg.keepalive,
         );
         dc.mtu = cfg.mtu;
+        let limits = core.limits;
         let stack = StackSettings {
             addr: cfg.address,
             limits,
+            send_turn: core.send_turn,
         };
         // 核の設定はここで確かめる。データプレーンのスレッドの上の作成で失敗しうるのは確保だけにする
-        wgft_wgstack::Config {
-            limits,
-            ..wgft_wgstack::Config::new(cfg.address, usize::from(cfg.mtu))
-        }
-        .validate()
-        .map_err(|e| format!("TCP/IP settings: {e}"))?;
+        stack
+            .config(usize::from(cfg.mtu))
+            .validate()
+            .map_err(|e| format!("TCP/IP settings: {e}"))?;
         generations
             .start(
                 dc,

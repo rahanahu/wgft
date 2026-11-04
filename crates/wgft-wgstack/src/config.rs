@@ -98,6 +98,10 @@ pub enum BoostPolicy {
     Never,
 }
 
+/// 送信の番を有効にした時の長さ N (segment) です。番の長さは N × MTU byte で、agent の実験の設定はこの値だけを
+/// 使います (wgstack-rs.md の「送信の番」)。
+pub const SEND_TURN_SEGMENTS: u8 = 8;
+
 /// 作成の時の設定です。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -111,6 +115,10 @@ pub struct Config {
     pub congestion: Congestion,
     /// boost の与え方です。
     pub boost: BoostPolicy,
+    /// 送信の番の長さ N (segment) です。0 は無効で、既定です。有効なら、TCP の接続の組が選ばれた時に先頭の接続が
+    /// N × MTU byte まで続けて選ばれます。実験の機能で、無効の時の出力は今までと bit の単位で同じです
+    /// (wgstack-rs.md の「送信の番」)。
+    pub send_turn: u8,
 }
 
 impl Config {
@@ -122,7 +130,22 @@ impl Config {
             limits: Limits::with_max_flows(0),
             congestion: Congestion::Cubic,
             boost: BoostPolicy::OnDemand,
+            send_turn: 0,
         }
+    }
+
+    /// 送信の番を [`SEND_TURN_SEGMENTS`] の長さで有効にした設定です。
+    #[must_use]
+    pub const fn with_send_turn(self) -> Self {
+        Self {
+            send_turn: SEND_TURN_SEGMENTS,
+            ..self
+        }
+    }
+
+    /// 送信の番の長さの byte (N × MTU) です。0 は無効です。
+    pub(crate) fn send_turn_bytes(&self) -> u32 {
+        u32::from(self.send_turn).saturating_mul(u32::try_from(self.mtu).unwrap_or(u32::MAX))
     }
 }
 

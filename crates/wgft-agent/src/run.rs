@@ -54,6 +54,8 @@ pub struct Options {
     pub limits: Limits,
     /// トンネルのバッチ (`WGFT_AGENT_BATCH_MIB`)。起動の時に 1 回だけ決める。
     pub batching: Batching,
+    /// 実験の送信の番 (`WGFT_AGENT_EXPERIMENTAL_SEND_TURN`)。互換の保証の外で、既定は無効。
+    pub send_turn: bool,
 }
 
 // 接続文字列は秘密なので Debug に出さない
@@ -74,6 +76,7 @@ impl std::fmt::Debug for Options {
             .field("allow_targets", &self.allow_targets)
             .field("limits", &self.limits)
             .field("batching", &self.batching)
+            .field("send_turn", &self.send_turn)
             .finish()
     }
 }
@@ -163,7 +166,10 @@ impl Agent {
                 &self.private_key,
                 cfg,
                 &mut self.dataplane,
-                wgft_wgstack::Limits::with_max_flows(self.opts.limits.tcp),
+                tunnel::CoreOptions {
+                    limits: wgft_wgstack::Limits::with_max_flows(self.opts.limits.tcp),
+                    send_turn: self.opts.send_turn,
+                },
                 self.opts.batching,
                 Some(&clock),
                 Arc::clone(&self.tunnel_dead),

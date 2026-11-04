@@ -216,6 +216,40 @@ pub fn batch_mib(v: &str) -> Result<Option<i64>, Refusal> {
     }
 }
 
+/// 実験の送信の番の環境変数。互換の保証の外の実験の設定で、予告なく変えるか消す。このため設定項目の一覧
+/// (`run_specs`) に入れず、フラグも dotenv の鍵も持たず、有効な設定の行にも出さない。プロセスの環境変数だけを
+/// 読む (wgstack-rs.md の「送信の番」)。
+pub const SEND_TURN_ENV: &str = "WGFT_AGENT_EXPERIMENTAL_SEND_TURN";
+
+/// 実験の送信の番を有効にするか。無いか空か `0` は無効、`1` は有効で、ほかの値は設定の誤りにする。値を推測せず、
+/// 書いたつもりの値が黙って無効になることを避けるためである。
+///
+/// # Errors
+///
+/// 値が `0`、`1`、空のどれでもなければ設定の誤りを返す。
+pub fn send_turn(env: &dyn super::Env) -> Result<bool, Refusal> {
+    let Some(v) = env.var(SEND_TURN_ENV) else {
+        return Ok(false);
+    };
+    match v.to_str() {
+        Some("" | "0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(other) => Err(Refusal::config(
+            SEND_TURN_ENV,
+            format!("must be 1 or 0, not {}", quote(other)),
+        )),
+        None => Err(Refusal::config(SEND_TURN_ENV, "is not valid UTF-8")),
+    }
+}
+
+/// 実験の送信の番を有効にした時の警告の行。
+#[must_use]
+pub fn send_turn_warning() -> LogLine {
+    LogLine::Stamped(format!(
+        "warning: {SEND_TURN_ENV}=1 turns on the experimental TCP send turn; it is outside the compatibility guarantee and may change or go away without notice"
+    ))
+}
+
 /// Linux のカーネルの `dev_valid_name` に合わせ、名前をバイト列として調べる。
 /// 合わせて NUL と `%` も拒む。通すと、宣言した名前と実際に付く名前が食い違う。
 pub fn validate_interface_name(name: &str) -> Result<(), Refusal> {
@@ -342,6 +376,26 @@ mod tests {
 
     use super::*;
     use crate::config::dotenv::Map;
+
+    #[test]
+    fn the_experimental_send_turn_takes_only_0_and_1() {
+        let env = |v: &str| HashMap::from([(SEND_TURN_ENV.to_owned(), OsString::from(v))]);
+        assert!(!send_turn(&HashMap::<String, OsString>::new()).unwrap());
+        for (v, on) in [("", false), ("0", false), ("1", true)] {
+            assert_eq!(send_turn(&env(v)).unwrap(), on, "{v:?}");
+        }
+        for v in ["true", "8", " 1", "on"] {
+            let e = send_turn(&env(v)).unwrap_err().to_string();
+            assert!(
+                e.contains(SEND_TURN_ENV) && e.contains("must be 1 or 0"),
+                "{e}"
+            );
+        }
+        let LogLine::Stamped(w) = send_turn_warning() else {
+            panic!("the warning carries a time stamp");
+        };
+        assert!(w.starts_with("warning: ") && !w.contains('('), "{w}");
+    }
 
     fn settings(env: &[(&str, &str)], file: &[(&str, &str)]) -> (Config, Settings) {
         let d = Defaults {

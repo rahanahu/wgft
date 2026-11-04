@@ -39,7 +39,9 @@ mod wire;
 
 pub use bound::{Bound, Held};
 pub use budget::{Budget, BudgetError};
-pub use config::{BoostPolicy, Config, ConfigError, Congestion, Limits, MAX_MTU, MIN_MTU};
+pub use config::{
+    BoostPolicy, Config, ConfigError, Congestion, Limits, MAX_MTU, MIN_MTU, SEND_TURN_SEGMENTS,
+};
 pub use icmp::PingId;
 pub use stack::{
     Closed, Error, Event, Hook, InvariantError, ListenerId, LogKind, LogLine, NewError,
@@ -90,6 +92,8 @@ mod sack_tests;
 mod sackpeer_tests;
 #[cfg(test)]
 mod scan_tests;
+#[cfg(test)]
+mod send_turn_tests;
 #[cfg(test)]
 mod tcp_tests;
 #[cfg(test)]

@@ -13,7 +13,7 @@ use crate::fixed_vec::FixedVec;
 use crate::frag;
 use crate::icmp::Pings;
 use crate::index::Index;
-use crate::output::{CtlRing, Dlist};
+use crate::output::{CtlRing, Dlist, NIL};
 use crate::rng::ChaCha8;
 use crate::seq;
 use crate::siphash::SipKey;
@@ -57,6 +57,13 @@ pub(crate) struct Output {
     pub(crate) udp_queued: usize,
     pub(crate) cur: usize,
     pub(crate) deficit: [i64; NUM_CLASSES],
+    /// 送信の番を持つ接続の枠です。番が無ければ [`NIL`] です。番を持つ接続は、いつも `conns` の先頭にあります
+    /// (wgstack-rs.md の「送信の番」)。
+    pub(crate) turn: u32,
+    /// 番を持つ接続がこの番で作った packet の byte の和です。
+    pub(crate) turn_bytes: u32,
+    /// 番の長さの byte (N × MTU) です。0 は送信の番を使わないことを表し、`turn` はいつも [`NIL`] です。
+    pub(crate) turn_limit: u32,
 }
 
 impl Output {
@@ -85,6 +92,56 @@ impl Output {
             return Some(c);
         }
         None
+    }
+
+    /// 接続の組の先頭から取り出した枠 `id` が `n` byte の packet を作った後に、送信の番を進めます。番を使わない
+    /// 時は何もしないので、出力は番の無い時と同じです。`id` が番を持っていなければ、ここで新しい番を始めます。
+    /// 番の byte が長さに届かず、接続がまだ送るものを持って list に入れ直した時は、末尾から先頭に戻して番を
+    /// 続けます。何も作らなかった時、送るものが無くなった時、長さに届いた時は番を終え、接続は末尾に残ります。
+    pub(crate) fn turn_after(&mut self, id: u32, n: usize) {
+        if self.turn_limit == 0 {
+            return;
+        }
+        if self.turn != id {
+            self.turn = id;
+            self.turn_bytes = 0;
+        }
+        self.turn_bytes = self
+            .turn_bytes
+            .saturating_add(u32::try_from(n).unwrap_or(u32::MAX));
+        if n > 0 && self.turn_bytes < self.turn_limit && self.conns.contains(id) {
+            self.conns.move_to_front(id);
+        } else {
+            self.end_turn();
+        }
+    }
+
+    /// 送信の番を終えます。
+    pub(crate) fn end_turn(&mut self) {
+        self.turn = NIL;
+        self.turn_bytes = 0;
+    }
+
+    /// 送信の番の状態が list と合うことを確かめます。番を持つ接続は list の先頭にあり、番の byte は長さより
+    /// 小さく、番を使わない時は番がありません。
+    pub(crate) fn check_turn(&self) -> Result<(), &'static str> {
+        if self.turn == NIL {
+            return if self.turn_bytes == 0 {
+                Ok(())
+            } else {
+                Err("send turn bytes are left without a turn")
+            };
+        }
+        if self.turn_limit == 0 {
+            return Err("a send turn is held while send turns are off");
+        }
+        if self.conns.front() != Some(self.turn) {
+            return Err("the send turn holder is not at the head of the connection list");
+        }
+        if self.turn_bytes == 0 || self.turn_bytes >= self.turn_limit {
+            return Err("the send turn bytes are out of range");
+        }
+        Ok(())
     }
 
     /// 組 `cls` が `n` byte の packet を作った後の deficit を進めます。
@@ -436,8 +493,12 @@ impl Shared {
         self.out.conns.push_back(id);
     }
 
+    /// 接続を組の list から外します。番を持つ接続なら番も終えます。外れた枠を番が指したまま残さないためです。
     pub(crate) fn unqueue_conn(&mut self, id: u32) {
         self.out.conns.remove(id);
+        if self.out.turn == id {
+            self.out.end_turn();
+        }
     }
 
     pub(crate) fn queue_row(&mut self, id: u32) {
@@ -534,6 +595,9 @@ mod tests {
             udp_queued: 0,
             cur: 0,
             deficit: [0; NUM_CLASSES],
+            turn: NIL,
+            turn_bytes: 0,
+            turn_limit: 0,
         };
         assert_eq!(o.pick(100), None);
         o.conns.push_back(0);
