@@ -974,6 +974,16 @@ paired_validate() {
     ((al_cpu < vcpus)) || die "--agent-load CPU $al_cpu is not a CPU of the agent VM, which has --vcpus $vcpus"
     ((al_duty <= 100)) || die "--agent-load DUTY wants 0 to 100"
     agentload=$al_cpu:$al_duty
+    # --target local と --placement の転送先の固定 (paired_local_cpus) と負荷の CPU が重なっても止めない。
+    # 負荷が転送先と CPU を取り合う形になるので、警告して結果の PLAN の agent_load と local_cpus で読めるようにする
+    if [[ $target == local && -n $placement ]]; then
+      local al_lc lo hi
+      al_lc=$(paired_local_cpus)
+      if [[ -n $al_lc ]]; then
+        lo=${al_lc%-*} hi=${al_lc#*-}
+        ((al_cpu >= lo && al_cpu <= hi)) && info "warning: --agent-load CPU $al_cpu is one of the local forwarding target's CPUs ($al_lc); the load competes with the target there"
+      fi
+    fi
     # カーネルモードの腕は VM 全体の CPU でしか比べられず、負荷がそこに入るので使えない
     [[ ${spec_x#base:} != kernel && ${spec_y#base:} != kernel ]] || die "--agent-load cannot be used with a kernel arm: kernel arms are compared by VM-wide CPU, which the load would fill"
   fi
@@ -1032,9 +1042,34 @@ paired_plan_pins() {
   fi
 }
 
+# paired_local_cpus:--target local に --placement を付けた時の、転送先 (agent の VM の home の iperf3 のサーバなど) を置く
+# CPU。agent と NIC の割り込みの CPU から外す。割り込みは CPU 0、apart の agent は CPU 1 (1 vCPU では CPU 0)、
+# apart-mt は data plane が CPU 1 で暗号の worker が CPU 2 と 3。
+# - apart:3 vCPU 以上は CPU 2 から後ろ。2 vCPU は空きが無いので、agent の CPU 1 でなく割り込みの CPU 0。
+#   1 vCPU は固定しない (全部が CPU 0)
+# - apart-mt:5 vCPU 以上は CPU 4 から後ろ。4 vCPU は空きが無く、2 vCPU と同じく CPU 0 (割り込みと同居)
+# 値はカーネルの Cpus_allowed_list の書き方 (1 つなら "2")。空なら固定しない。腕によらず同じ値を使う (カーネルモードの腕にも掛かり、2 つの腕の転送先の置き方がそろう)
+paired_local_cpus() {
+  [[ $target == local && -n $placement ]] || return 0
+  if [[ $placement == apart-mt ]]; then
+    if ((vcpus == 5)); then echo 4; elif ((vcpus > 5)); then echo "4-$((vcpus - 1))"; else echo 0; fi
+  elif ((vcpus == 3)); then echo 2
+  elif ((vcpus > 3)); then echo "2-$((vcpus - 1))"
+  elif ((vcpus == 2)); then echo 0
+  fi
+}
+
+# paired_local_plan:PLAN の行に足す local_cpus=。対象の組み合わせでなければ何も出さない。固定しない時は unpinned
+paired_local_plan() {
+  [[ $target == local && -n $placement ]] || return 0
+  local c
+  c=$(paired_local_cpus)
+  echo " local_cpus=${c:-unpinned}"
+}
+
 # paired_plan_line [<追加の key=value>]:paired.log の先頭の PLAN の行。--cases では case ごとに case_index と cases が付く
 paired_plan_line() {
-  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${delayrate:+ delay_rate_mbit=$delayrate}${delayqueue:+ delay_queue_pkts=$delayqueue}${xagentenv:+ x_agent_env=${xagentenv// /,}}${yagentenv:+ y_agent_env=${yagentenv// /,}}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}${placement:+ placement=$placement}${agentload:+ agent_load=$agentload}${1:+ $1}"
+  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${delayrate:+ delay_rate_mbit=$delayrate}${delayqueue:+ delay_queue_pkts=$delayqueue}${xagentenv:+ x_agent_env=${xagentenv// /,}}${yagentenv:+ y_agent_env=${yagentenv// /,}}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}${placement:+ placement=$placement}$(paired_local_plan)${agentload:+ agent_load=$agentload}${1:+ $1}"
 }
 
 # paired_provision:出力先を作り、build して VM を 2 台立て、header.txt を書く。t0 と names、vms を決める
@@ -1115,6 +1150,7 @@ paired_header() {
       [[ -z ${PAIRED_KVM_SAMPLES:-} ]] || echo "lab paired: split: KVM statistics from $PAIRED_KVM_SAMPLES (tcpquality.py kvmsample, started by root)"
       [[ -z $agentload ]] || echo "lab paired: split: agent load: CPU ${agentload%%:*} of the agent VM busy ${agentload##*:}% of every 10 ms during each arm"
       [[ -z $placement ]] || echo "lab paired: split: placement $placement: the data NIC's interrupts on CPU 0 of the agent VM, a userspace-mode agent on CPUs $SPLIT_AGENT_CPUS${SPLIT_AGENT_DP_CPUS:+, its data-plane thread on CPU $SPLIT_AGENT_DP_CPUS and its crypto workers one each on CPUs $SPLIT_AGENT_WORKER_CPUS}; the kernel mode has no agent process to place; peer VM: NIC interrupts on CPU 0, RPS on CPUs ${SPLIT_PEER_RPS:-unchanged}"
+      [[ $target != local || -z $placement ]] || echo "lab paired: split: placement $placement, target local: the forwarding target's processes on CPUs $(paired_local_cpus | sed 's/^$/none, not pinned/') of the agent VM; they stay off the agent's and the interrupts' CPUs unless the VM has too few"
       echo "lab paired: split: the arms take turns in the same two VMs; vm=a in paired.log is the arm that ran first in the round. vhost and qemu's other threads are not pinned (host samples in host-samples.txt)"
     else
       echo "lab paired: VM a ${names[0]} limits.cpu=${pins[0]}, VM b ${names[1]} limits.cpu=${pins[1]}, kernel $kern, template $SUITE_TEMPLATE"
@@ -1244,6 +1280,7 @@ paired_run_split_round() {
     paired_hostpoll "${arms[k]}"
     env=(RUNS="$runs" DIRECTION="$direction" AGENT_AT="$SPLIT_AGENT_AT")
     [[ $target != local ]] || env+=(TARGET_LOCAL=1)
+    [[ $target != local || -z $placement ]] || env+=(LOCAL_CPUS="$(paired_local_cpus)")
     [[ -z $SPLIT_AGENT_CPUS ]] || env+=(AGENT_CPUS="$SPLIT_AGENT_CPUS")
     [[ -z $SPLIT_AGENT_DP_CPUS ]] || env+=(AGENT_DP_CPUS="$SPLIT_AGENT_DP_CPUS" AGENT_WORKER_CPUS="$SPLIT_AGENT_WORKER_CPUS")
     cur_arm=${arms[k]}

@@ -183,6 +183,12 @@
 # namespace, where `lab/lab paired --split --target local` has put 192.168.50.3 on lo, so the
 # agent reaches the forwarding target over loopback and the target's CPU is the agent VM's.
 #
+# LOCAL_CPUS, a CPU list, with TARGET_LOCAL starts those processes under `taskset -c LOCAL_CPUS`
+# (`lab/lab paired --target local --placement`, which keeps the endpoint off the agent's and the
+# interrupts' CPUs) and fails the mode when the iperf3 server's Cpus_allowed_list is not that list.
+# With TARGET_LOCAL the result line has local_cpus=, the list the endpoint was confined to, or
+# unpinned.
+#
 # Requires `lab/lab build` and the netns topology (`lab/lab net up`).
 set -u
 MODES=${*:-kernel userspace}
@@ -217,6 +223,7 @@ AGENT_CPUS=${AGENT_CPUS:-}
 AGENT_DP_CPUS=${AGENT_DP_CPUS:-}
 AGENT_WORKER_CPUS=${AGENT_WORKER_CPUS:-}
 TARGET_LOCAL=${TARGET_LOCAL:-}
+LOCAL_CPUS=${LOCAL_CPUS:-}
 if [ -n "${WGFT_BIN_DIR:-}" ]; then
   PATH=$WGFT_BIN_DIR:$PATH
   export PATH
@@ -248,6 +255,8 @@ lan_bg() {
   local log=$1
   shift
   if [ -n "$TARGET_LOCAL" ]; then
+    # LOCAL_CPUS (lab/lab paired --target local with --placement): the endpoint runs on those CPUs only
+    [ -z "$LOCAL_CPUS" ] || set -- taskset -c "$LOCAL_CPUS" "$@"
     agentx -- bash -c 'log=$1; shift; ip netns exec "$0" setsid nohup "$@" > "$log" 2>&1 < /dev/null &' "$HOME_NS" "$log" "$@"
   else
     ip netns exec "$LAN_NS" setsid nohup "$@" > "$log" 2>&1 < /dev/null &
@@ -621,6 +630,12 @@ for mode in $MODES; do
     if [ -n "$TARGET_LOCAL" ]; then
       own=$(agentsh own-lan "iperf3 -s" "$CG_ROOT")
       lan_pid=$(field pid "$own") lan_cg=$(field cg "$own")
+      if [ -n "$LOCAL_CPUS" ] && [ -n "$lan_pid" ]; then
+        pinned=$(agentsh cpus "$lan_pid")
+        if [ "$pinned" != "$LOCAL_CPUS" ]; then
+          echo "FAIL  agent $mode: the local endpoint runs on CPUs ${pinned:-unknown}, not $LOCAL_CPUS"; fail=1; continue
+        fi
+      fi
     elif [ "$TOOL" = iperf3 ]; then lan_pid=$(ns_pid "$LAN_NS" "iperf3 -s"); else lan_pid=$(ns_pid "$LAN_NS" "tcpquality.py serve"); fi
     DP_SAMPLE=
     if [ -n "$AGENT_AT" ]; then
@@ -805,7 +820,7 @@ for mode in $MODES; do
           if (snd != "") printf " sender_cpu_share=%.3f", snd / 1e6 / t
           if (rcv != "" && (tool == "iperf3" || dir == "up")) printf " receiver_cpu_share=%.3f", rcv / 1e6 / t }')"
       stats="$stats $($Q snapdiff "$(field received "$got")" "$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.3f", b - a }')" "$DIRECTION" "$sa0 $sp0" "$sa1 $sp1")"
-      stats="$stats netem_drops=$((nd1 - nd0))${crypto_field:-}"
+      stats="$stats netem_drops=$((nd1 - nd0))${crypto_field:-}${TARGET_LOCAL:+ local_cpus=${LOCAL_CPUS:-unpinned}}"
       if [ -n "$AGENT_AT" ]; then
         series_vals=$($Q peerseries_sum "$series" "$t0" "$t1" 2>/dev/null)
         [ -z "$series_vals" ] || stats="$stats $series_vals"

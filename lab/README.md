@@ -446,6 +446,7 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
   A+ の agent はプロセスの使える CPU が 2 つ以下だと worker を作らないので、`--vcpus 4` 以上を求めます。
   worker の無い build でも流せ、そのときは data plane のスレッドが CPU 1 に載ります。
   `apart-mt` の値は `apart` で取った表と混ぜません。
+  `--agent-load` の CPU が転送先の CPU と重なっても止めず、警告します。負荷が転送先と CPU を取り合うので、その値は重ならない組と混ぜません。
   ラボではまだ流していません
 - `--agent-load CPU:DUTY`:`--split` で、agent の VM の CPU `CPU` に固定した負荷 (`lab/agentload.py`) を、各腕の実行の前から後まで動かします。
   負荷は 10 ms ごとに `DUTY` % の間だけ CPU を使い切り、残りは眠ります。VM の root の netns で走り、agent のスレッドと CPU を取り合います。
@@ -466,6 +467,24 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
 - カーネルモードとの比べ:割り込みと相手の VM の固定は両方の腕に同じです。
   Rust の腕は agent のスレッドが割り込みの vCPU と同居しない形にそろい、カーネルモードの腕は全 vCPU を使います。
   既定の値とは同居した実行の分だけ違うので、既定で取った表とは混ぜません
+- `--target local` と組む時:転送先 (agent の VM の `home` で動く iperf3 のサーバ、UDP の echo) も agent と割り込みの CPU から外して固定します。
+  固定しないと転送先が agent の CPU に載る実行が出て、Rust の腕の値が下がりました。
+  置き場所は VM の vCPU 数で決まり、2 つの腕に同じに掛かります (カーネルモードの腕にも掛かります)。
+
+  | `--placement` | vCPU | 転送先の CPU |
+  |---|---|---|
+  | `apart` | 1 | 固定しない (全部が CPU 0) |
+  | `apart` | 2 | CPU 0 (割り込みと同居。agent の CPU 1 とは分ける) |
+  | `apart` | 3 以上 | CPU 2 から後ろ |
+  | `apart-mt` | 4 以下 | CPU 0 (割り込みと同居。data plane と暗号の worker の CPU 1 から 3 とは分ける) |
+  | `apart-mt` | 5 以上 | CPU 4 から後ろ |
+
+  2 vCPU の `apart` と 4 vCPU の `apart-mt` では、転送先が割り込みと受信の softirq の CPU と同居します。
+  空きの CPU が無いための決めで、agent のスレッドとの同居を避けることを優先しました。
+  `PLAN` の行に `local_cpus=` が付き、固定しない時は `unpinned` です。
+  結果の行の `local_cpus=` にも同じ値が入ります。
+  固定が効いていなければ、その腕を失敗にします。
+  `--placement` を付けない実行と、`--target local` を付けない実行は前と同じです
 - 記録:`paired.log` の `PLAN` の行に `placement=apart` が付き、`header.txt` に置き場所を書きます。
   実行ごとの `agentvm_nicirq_eff` と `agentvm_thr_dp_cpu<N>_frac` で、固定が効いたことを確かめられます
 - 残る揺れ:相手の VM の RPS の vCPU では、CPU ごとのカーネルの worker (`kworker/<N>`) も動きます。
