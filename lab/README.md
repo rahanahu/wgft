@@ -396,7 +396,7 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
 `--x-agent-env WGFT_NAME=VALUE` と `--y-agent-env WGFT_NAME=VALUE` は、腕 x と腕 y の agent にだけ環境変数を足します (繰り返せます)。
 既定で無効の実験の設定を、片方の腕だけで有効にして比べるときに使います。
 
-`--placement apart` は、agent の VM の中で NIC の割り込みと agent のプロセスを別の vCPU に固定します。
+`--placement apart` は、2 台の VM の中で NIC の割り込みと、1 つの flow の仕事を別の vCPU に固定します。
 同じ build の 2 つの腕を比べる (`--base HEAD rust base:rust` など) ときに使います。
 
 - 理由:data の NIC は 1 つの queue なので、その割り込みと受信の softirq は 1 つの vCPU で走ります。
@@ -410,15 +410,19 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
   CPU 1 から後の全部に置くと、8 vCPU でスレッドが 2 つの L2 の塊の間を移り、どちらの塊に載るかでも速さが数 % 揺れました。
   1 vCPU では CPU 0 で、既定と同じ置き方です。
   カーネルモードの腕の data plane はカーネルの WireGuard で、置くプロセスが無いので固定しません
-- カーネルモードとの比べ:割り込みの固定は両方の腕に同じです。
+- 相手の VM:data の NIC の全 vector の割り込みを CPU 0 に固定し、全 veth の RPS から CPU 0 を外します (`lab/netns.sh split-peer-rps`)。
+  1 つの flow の受信の softirq は RPS が flow ごとに選ぶ 1 つの vCPU で走るので、その vCPU が NIC の割り込みの vCPU と重ならなくなります。
+  相手の VM が 1 vCPU のときは固定しません
+- カーネルモードとの比べ:割り込みと相手の VM の固定は両方の腕に同じです。
   Rust の腕は agent のスレッドが割り込みの vCPU と同居しない形にそろい、カーネルモードの腕は全 vCPU を使います。
   既定の値とは同居した実行の分だけ違うので、既定で取った表とは混ぜません
 - 記録:`paired.log` の `PLAN` の行に `placement=apart` が付き、`header.txt` に置き場所を書きます。
   実行ごとの `agentvm_nicirq_eff` と `agentvm_thr_dp_cpu<N>_frac` で、固定が効いたことを確かめられます
-- 残る揺れ:相手の VM でも、1 つの flow の受信の softirq は RPS が flow ごとに選ぶ 1 つの vCPU で走ります。
-  その vCPU は接続ごとに替わり、ほかの仕事と重なって 1.0 に達した実行は、相手の側で詰まって速さが落ちます。
-  `--placement apart` はこの側を固定しません。
-  `peervm_maxcpu` が 1.0 に近い実行は相手の側の詰まりで、`peervm_cpu<N>_busy` と `peervm_cpu<N>_soft` でその vCPU が分かります
+- 残る揺れ:相手の VM の RPS の vCPU では、CPU ごとのカーネルの worker (`kworker/<N>`) も動きます。
+  この worker は全 vCPU で 0.2 CPU 前後ずつ動き、server のカーネルの WireGuard の暗号の仕事と推定しています。
+  一部の実行では、その vCPU の worker が 1.0 に達し、flow の softirq の仕事もその中で走って、相手の側で詰まり速さが落ちます。
+  CPU の固定ではこの重なりを避けられません。
+  `peervm_maxcpu` と、その vCPU の `peervm_cpu<N>_kw` が 1.0 に近い実行がこれに当たります
 
 `delay` の経路は、vps と homerouter の間の両方の向きに `--delay-ms` の遅れを netem で入れます。
 netem の待ち行列の長さは `tcpquality.sh` が決め、20 Gbit/s で遅れの間に飛ぶ packet の 2 倍にします。
