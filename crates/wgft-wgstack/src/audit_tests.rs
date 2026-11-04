@@ -47,7 +47,7 @@ fn advertised_edges(n: &mut TestNet, c: crate::ConnId, p: &mut PeerConn) -> (u32
 
 /// 窓の欄は右端までの byte を scale で割って切り下げるので、相手から見える右端は前に見えた右端より最大
 /// 2^scale - 1 byte 手前になります (wgstack.md の RFC 7323 の項が受け入れた性質。RFC 9293 の SHLD-14 と、切り上げる
-/// Linux の tcp_select_window とは違います)。戻りがこの幅に収まり、核が前に広告した最も先の右端までのデータを
+/// Linux の挙動とは違います)。戻りがこの幅に収まり、核が前に広告した最も先の右端までのデータを
 /// 受け入れることを確かめます。
 #[test]
 fn receded_edge_is_bounded_and_earlier_edge_data_is_accepted() {
@@ -75,8 +75,8 @@ fn receded_edge_is_bounded_and_earlier_edge_data_is_accepted() {
 }
 
 /// 送ったデータが飛んでいる間に相手が窓を 0 に縮め、その後は再送のたびに窓が 0 の ACK を返し続けます。相手は
-/// 応えているので、接続を打ち切りません (RFC 9293 3.8.6.1 の MUST-36。Linux の tcp_retransmit_timer も、窓が 0
-/// の相手が RTO_MAX の内に応える間は打ち切りません)。
+/// 応えているので、接続を打ち切りません (RFC 9293 3.8.6.1 の MUST-36。Linux も、窓が 0 の相手が再送の
+/// 時間の上限の内に応える間は打ち切りません)。
 #[test]
 fn shrunk_zero_window_with_data_in_flight_is_not_aborted_while_the_peer_answers() {
     let mut n = TestNet::new(small_limits());
