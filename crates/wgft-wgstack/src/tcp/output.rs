@@ -295,7 +295,7 @@ impl Conn<'_> {
             self.k.prr_out = self.k.prr_out.wrapping_add(length);
         }
         if n > 0 && t.rcvd_data && now - t.last_data_rcvd < DELACK_TIMEOUT {
-            t.pingpong = true; // 受けた直後に応える対話の流れ (Linux の tcp_event_data_sent)
+            t.pingpong = true; // 受けた直後に応える対話の流れ (Linux と同じ)
         }
         if t.frto == 2 && t.frto_new > 0 {
             t.frto_new -= 1;
@@ -338,8 +338,8 @@ impl Conn<'_> {
         if fin {
             n += 1;
         }
-        // 窓の外から始まる記録は送りません。先頭の記録は窓の probe を兼ねて送ります (Linux の
-        // tcp_retransmit_skb)。窓の probe を張っている間は送りません。
+        // 窓の外から始まる記録は送りません。先頭の記録は窓の probe を兼ねて送ります (Linux と同じ)。
+        // 窓の probe を張っている間は送りません。
         let seq = self.b.recs.at(i).seq.wrapping_add(off);
         let t = &*self.t;
         if t.persist || (seq != t.snd_una && !seq::lt(seq, t.snd_una.wrapping_add(t.snd_wnd))) {
@@ -438,7 +438,7 @@ impl Conn<'_> {
         self.note_retransmit(now);
         self.s.stats.retrans[usize::from(cause)] += 1;
         if (self.t.rto_at == 0 || i == 0) && !self.t.persist {
-            // 先頭の記録を送り直したら RTO を張り直します (Linux の tcp_xmit_retransmit_queue)。
+            // 先頭の記録を送り直したら RTO を張り直します (Linux と同じ)。
             let at = now + self.cur_rto();
             self.set_rto(at);
         }
@@ -474,7 +474,7 @@ impl Conn<'_> {
             t.tlp_sampled = false;
             t.tlp_at = 0;
             self.s.stats.tlp_probes += 1;
-            // probe の後は RTO を今から張り直します (RFC 8985 7.3、Linux の tcp_send_loss_probe)。前の累積の確認から
+            // probe の後は RTO を今から張り直します (RFC 8985 7.3、Linux と同じ)。前の累積の確認から
             // 数えた期限のままだと、SRTT が RTO の 3 分の 1 を超える経路では probe の確認が届く前に RTO が起きます。
             let at = now + self.cur_rto();
             self.set_rto(at);

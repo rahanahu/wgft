@@ -489,7 +489,7 @@ fn dsack_widens_the_reorder_window() {
         }]; // 確認済みの範囲
         n.inject(&s);
     };
-    dsack(&mut n, &mut q); // 再送していないデータの D-SACK は疑わしいので使わない (Linux の tcp_dsack_seen)
+    dsack(&mut n, &mut q); // 再送していないデータの D-SACK は疑わしいので使わない (Linux と同じ)
     {
         let mult = cs(&mut n, c).t.reo_wnd_mult;
         assert!(

@@ -974,7 +974,7 @@ fn recv_window_held_out_of_order() {
 }
 
 /// 歩みの上限が上限より小さい間は、SACK の接続の順序外の segment が歩みの上限を広げ、重複した ACK の窓の欄が大きく
-/// なることを確かめます (Go の `TestRecvWindowOutOfOrderGrowsBelowClamp`、Linux の tcp_data_queue_ofo)。
+/// なることを確かめます (Go の `TestRecvWindowOutOfOrderGrowsBelowClamp`、Linux と同じ)。
 #[test]
 fn recv_window_out_of_order_grows_below_clamp() {
     let (mut n, c, mut p) = rw_boosted(true);

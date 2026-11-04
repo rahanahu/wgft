@@ -2,9 +2,9 @@
 //!
 //! 広告する窓は 2 つの値で決めます。
 //!
-//! - 窓の上限 (`rcv_clamp`):受け手の往復ごとに読んだ量の測定 (Linux の tcp_rcv_space_adjust) が上げ、測定では
+//! - 窓の上限 (`rcv_clamp`):受け手の往復ごとに読んだ量の測定 (Linux と同じ) が上げ、測定では
 //!   下げません。予約の内側に収めます
-//! - 歩みの上限 (`rcv_ssthresh`):届いた segment ごとに有界の量だけ広げます (Linux の tcp_grow_window)
+//! - 歩みの上限 (`rcv_ssthresh`):届いた segment ごとに有界の量だけ広げます (Linux と同じ)
 //!
 //! 広告する窓は、上限から保持するデータ (未読と順序外) を引いた空きと、歩みの上限の小さい方で、RCV.NXT から
 //! 測ります。右端は後ろへ戻しません。
@@ -14,7 +14,7 @@ use super::{MS, ts_clock};
 use crate::buf::{BOOST_SIZE, RECV_FLOOR};
 use crate::wire::Segment;
 
-/// 歩みの上限を広げる順序どおりの segment の中身の最小 (Linux の tcp_event_data_recv の 128) です。
+/// 歩みの上限を広げる順序どおりの segment の中身の最小 (Linux と同じ 128) です。
 pub(crate) const RCV_GROW_MIN: usize = 128;
 
 impl Conn<'_> {
@@ -58,7 +58,7 @@ impl Conn<'_> {
         self.t.rcv_ssthresh += (room - self.t.rcv_ssthresh).min(incr);
     }
 
-    /// 窓による受け手の RTT の標本を取ります (Linux の tcp_rcv_rtt_measure)。標本は、始めの RCV.NXT にその時の窓を
+    /// 窓による受け手の RTT の標本を取ります (Linux と同じ)。標本は、始めの RCV.NXT にその時の窓を
     /// 足した offset を RCV.NXT が越えるまでの時間で、今の推定より小さいときだけ推定を下げます。
     pub(crate) fn rcv_rtt_window(&mut self, now: i64) {
         let nxt = self.b.rcv.nxt_off;
@@ -76,7 +76,7 @@ impl Conn<'_> {
         (self.t.rtt_win_seq, self.t.rtt_win_time) = (nxt + wnd, now);
     }
 
-    /// timestamp による受け手の RTT の標本を取ります (Linux の tcp_rcv_rtt_measure_ts)。
+    /// timestamp による受け手の RTT の標本を取ります (Linux と同じ)。
     pub(crate) fn rcv_rtt_stamp(&mut self, seg: &Segment<'_>, n: usize, now: i64) {
         let t = &mut *self.t;
         let Some((_, ecr)) = seg.opt.ts else {
@@ -106,7 +106,7 @@ impl Conn<'_> {
         }
     }
 
-    /// 読み取りの後に、受け手の RTT の 1 回の間に読んだ量で窓の上限を上げます (Linux の tcp_rcv_space_adjust)。
+    /// 読み取りの後に、受け手の RTT の 1 回の間に読んだ量で窓の上限を上げます (Linux と同じ)。
     pub(crate) fn rcv_space_adjust(&mut self, now: i64) {
         let read_off = self.b.rcv.read_off;
         let mss = u64::from(self.rcv_mss());
@@ -156,8 +156,8 @@ impl Conn<'_> {
         u16::try_from(((t.adv_right - nxt) >> t.rcv_wscale).min(65535)).unwrap_or(u16::MAX)
     }
 
-    /// 読み取りで空いた受信のバッファが広告する窓を大きく広げるときに ACK を送ります。Linux の tcp_cleanup_rbuf と
-    /// 同じく、今の窓が窓の上限の半分以下で、広げた後の窓が今の窓の 2 倍以上になるときです。
+    /// 読み取りで空いた受信のバッファが広告する窓を大きく広げるときに ACK を送ります。Linux と同じく、
+    /// 今の窓が窓の上限の半分以下で、広げた後の窓が今の窓の 2 倍以上になるときです。
     pub(crate) fn window_update(&mut self) {
         let cur = u64::from(self.rcv_window());
         if 2 * cur > self.rcv_clamp() {

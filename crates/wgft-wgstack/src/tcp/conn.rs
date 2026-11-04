@@ -254,7 +254,7 @@ pub(crate) struct ConnCold {
     pub(crate) undo_retrans: i32,
     pub(crate) retrans_ts: u32,
     pub(crate) total_retrans: u32,
-    /// D-SACK で知らされた重複の累計 (Linux の dsack_dups) です。
+    /// D-SACK で知らされた重複の累計です。
     pub(crate) dsack_dups: u32,
     // PRR (RFC 6937)。SACK による回復の間だけ触ります。
     pub(crate) prr_delivered: u32,
