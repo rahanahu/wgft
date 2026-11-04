@@ -9,17 +9,19 @@
 //! 位置で同じ応答に食い違った記録は、既知の違いとして通します。
 //!
 //! 環境変数 `WGFT_WGSTACK_REPLAY_DIR` で、git の集まりの代わりに手元の cache の集まりを照らせます。Go の
-//! `TestRecordingsReplay` と同じ変数です。`WGFT_WGSTACK_REPLAY_SHARD=i/n` (0 ≤ i < n) は、名前の順の記録の
+//! `TestRecordingsReplay` と同じ変数です。この時は完全な集まりの意図した違いの一覧
+//! (`testdata/wgstack-rec/divergences-full.json`) も読みます。名前で指す行の記録はその directory に無ければ
+//! 落とし、frame の列の SHA-256 で指す行 (Go の fuzz の cache の記録) は、その記録が無ければ照らしません。`WGFT_WGSTACK_REPLAY_SHARD=i/n` (0 ≤ i < n) は、名前の順の記録の
 //! うち番号を n で割った余りが i のものだけを照らします。大きな集まりを関門の段に分けるためです。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use std::{env, fs};
 
 use libtest_mimic::{Arguments, Failed, Trial};
-use wgft_wgstack_dut::rec::{self, Divergence, Stages, TagFilter};
+use wgft_wgstack_dut::rec::{self, Divergence, FullDivergences, Stages, TagFilter};
 
 /// 手元の cache の集まりの directory の環境変数です。Go の `TestRecordingsReplay` と同じです。
 const DIR_ENV: &str = "WGFT_WGSTACK_REPLAY_DIR";
@@ -64,12 +66,19 @@ fn recordings(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn one(path: &Path, divs: &[Divergence]) -> Result<(), Failed> {
+fn one(path: &Path, divs: &[Divergence], full: &FullDivergences) -> Result<(), Failed> {
     let r = rec::read_file(path)?;
     let start = Instant::now();
     let out = rec::replay(&r)?;
     let took = start.elapsed();
-    let verdict = rec::judge(&r, &out, divs)?;
+    // git の一覧の行が先です。無ければ完全な集まりの一覧の行を使います。
+    let id = r.id();
+    let row = divs
+        .iter()
+        .find(|d| d.record == id)
+        .cloned()
+        .or_else(|| full.for_recording(&r));
+    let verdict = rec::judge(&r, &out, row.as_slice())?;
     println!("{verdict} in {took:.1?}");
     Ok(())
 }
@@ -77,7 +86,10 @@ fn one(path: &Path, divs: &[Divergence]) -> Result<(), Failed> {
 fn main() {
     let args = Arguments::from_args();
     let root = repo();
-    let dir = env::var_os(DIR_ENV).map_or_else(|| root.join("testdata/wgstack-rec"), PathBuf::from);
+    let cache_dir = env::var_os(DIR_ENV).map(PathBuf::from);
+    let dir = cache_dir
+        .clone()
+        .unwrap_or_else(|| root.join("testdata/wgstack-rec"));
     let stages_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("stages.json");
     let stages = Stages::parse(&fs::read(&stages_path).expect("read stages.json"))
         .unwrap_or_else(|e| panic!("{}: {e}", stages_path.display()));
@@ -89,6 +101,41 @@ fn main() {
         )
         .expect("divergences.json"),
     );
+    // 完全な集まりの一覧は、手元の cache の集まりを照らす時だけ読みます。
+    let full = Arc::new(if cache_dir.is_some() {
+        let full_path = root.join("testdata/wgstack-rec/divergences-full.json");
+        let full =
+            FullDivergences::parse(&fs::read(&full_path).expect("read divergences-full.json"))
+                .unwrap_or_else(|e| panic!("{}: {e}", full_path.display()));
+        for r in full.named() {
+            let p = dir.join(format!("{r}.rec.gz"));
+            assert!(
+                p.is_file(),
+                "divergences-full.json names {r}, but {} has no such recording",
+                dir.display()
+            );
+        }
+        // hash で引く行のうち記録が手元に無い行の数を出します。cache の集まりは育つので、古い行が黙って溜まらない
+        // ようにするためです。すべての shard で同じ数になるよう、shard に分ける前のすべての記録を数えます。
+        let present: BTreeSet<String> = recordings(&dir)
+            .iter()
+            .filter(|p| {
+                p.strip_prefix(&dir)
+                    .is_ok_and(|r| r.to_string_lossy().starts_with(rec::FUZZ_CACHE_PREFIX))
+            })
+            .map(|p| rec::frames_sha256(&rec::read_file(p).unwrap_or_else(|e| panic!("{e}"))))
+            .collect();
+        let hashed = full.hashes().count();
+        let absent = full.hashes().filter(|h| !present.contains(*h)).count();
+        eprintln!(
+            "replay: {} rows in divergences-full.json; {absent} of the {hashed} rows found by frames hash have no recording in {}",
+            full.len(),
+            dir.display()
+        );
+        full
+    } else {
+        FullDivergences::default()
+    });
 
     let mut skipped: BTreeMap<String, usize> = BTreeMap::new();
     let mut trials = Vec::new();
@@ -121,9 +168,10 @@ fn main() {
             *skipped.entry(missing.join(",")).or_default() += 1;
         }
         let divs = divs.clone();
+        let full = full.clone();
         trials.push(
             Trial::test(format!("{}/{}", meta.source, meta.name), move || {
-                one(&p, &divs)
+                one(&p, &divs, &full)
             })
             .with_ignored_flag(!missing.is_empty()),
         );

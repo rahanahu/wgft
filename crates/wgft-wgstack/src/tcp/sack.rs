@@ -611,8 +611,8 @@ fn gen_flag(t: &Tcb, r: &Record, f: u8) -> bool {
 }
 
 /// 使っている接続の送り手の状態を確かめます (`check_invariants`)。Go の敵対的な送り手の試験 (`runAudit`) が
-/// 各段の後に確かめることと `checkScoreboard` を写します。SND.UNA ≤ SND.NXT ≤ SND.MAX と輻輳の窓が 0 でない
-/// ことを確かめ、[`check_scoreboard`] で scoreboard と pipe を数え直し、分けて送っている記録の中の位置
+/// 各段の後に確かめることと `checkScoreboard` を写します。SND.UNA ≤ SND.NXT ≤ SND.MAX、SND.WL2 = SND.UNA、
+/// 輻輳の窓が 0 でないことを確かめ、[`check_scoreboard`] で scoreboard と pipe を数え直し、分けて送っている記録の中の位置
 /// (`q_off`、`rxt_off`) がその記録の長さより小さいことを確かめます。Go の「pipe は送り残しの 2 倍と 1 以下」は
 /// 別に確かめません。定義どおりの pipe は 2 つの和を足した値です。1 つは損失の境目から先の SACK 済みでなく
 /// 失われてもいない記録の長さの和、もう 1 つは SACK 済みでなく今の世代の再送の印を持つ記録の長さの和で、どちらも
@@ -620,6 +620,11 @@ fn gen_flag(t: &Tcb, r: &Record, f: u8) -> bool {
 pub(crate) fn check_sender(t: &Tcb, recs: &RecordRing) -> Result<(), &'static str> {
     if seq::gt(t.snd_una, t.snd_nxt) || seq::gt(t.snd_nxt, t.snd_max) {
         return Err("the send sequence numbers are out of order");
+    }
+    // SND.UNA を進める ACK はかならず窓を更新するので、SND.WND は SND.UNA を確認した ACK の窓です
+    // (wgstack-rs.md の「相手の窓の更新」)。
+    if t.snd_wl2 != t.snd_una {
+        return Err("the send window is not the one of the ACK at SND.UNA");
     }
     if t.cwnd == 0 {
         return Err("the congestion window is zero");
@@ -851,7 +856,7 @@ mod tests {
     #[test]
     fn each_broken_scoreboard_is_caught() {
         type Break = fn(&mut Conn<'_>);
-        let cases: [(Break, &str); 18] = [
+        let cases: [(Break, &str); 19] = [
             (
                 |c| c.t.snd_nxt = c.t.snd_max.wrapping_add(1),
                 "the send sequence numbers are out of order",
@@ -859,6 +864,11 @@ mod tests {
             (
                 |c| c.t.snd_una = c.t.snd_nxt.wrapping_add(1),
                 "the send sequence numbers are out of order",
+            ),
+            // SND.UNA を進めた ACK の窓を使わなかった形です。
+            (
+                |c| c.t.snd_wl2 = c.t.snd_una.wrapping_sub(1),
+                "the send window is not the one of the ACK at SND.UNA",
             ),
             (|c| c.t.cwnd = 0, "the congestion window is zero"),
             // drop_head や clear_rtx が rtx_bytes を減らし忘れた形です。

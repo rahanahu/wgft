@@ -653,6 +653,8 @@ CLOSED の枠は 4 つ組の hash の表から外れ、送信の輪を返しま�
 規格が値を幅で定めるところは Linux の既定の値に合わせ、合わせない点は[期待した差](wgstack-verification.md#期待した差の一覧)に記録します。
 
 - RFC 9293:受動の open からの状態の遷移、同時の close、segment の受け入れの判定、窓の更新の規則、送り手と受け手の SWS の回避、RST の処理、ハーフクローズ(`CloseWrite` で FIN を送った後も読み続けます)を持ちます。
+  窓の更新の規則は、Rust 版だけが Linux と同じく SND.UNA を進める ACK の窓を SEG.SEQ によらず使い、SEG.ACK が SND.UNA より前の ACK の窓を使いません。
+  凍結した Go の wgstack には足しません ([wgstack の Rust 版の相手の窓の更新](../v2/wgstack-rs.md#相手の窓の更新))。
   未読のデータを持ったまま閉じた接続は Linux と同じく RST で終えます。
   緊急のデータは、通常のデータとして扱い、知らせません
 - RFC 6298:SRTT と RTTVAR から RTO を求め、再送ごとに倍にします。

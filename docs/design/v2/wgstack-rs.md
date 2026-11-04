@@ -1066,6 +1066,81 @@ TIME_WAIT の 4 つ組への組も、TIME_WAIT を外さずに、使い直せな
 閉じたポートへの組には、今までどおり RST を返します。
 今の記録の集まりにこの組を待ち受けに送る記録は無く、どの記録も Go と一致します。
 
+## 相手の窓の更新
+
+決定:Rust の wgstack は、SND.UNA を進める ACK の窓を、SEG.SEQ が SND.WL1 より前でも使います (2026-11-04)。
+TCP の正しさを Go の記録との bit の一致より優先するという所有者の決定で、凍結した Go の wgstack と意図して違う所です。
+
+### 規則
+
+相手の窓 (SND.WND) は、SND.UNA =< SEG.ACK の segment のうち、次のどれかを満たすもので更新します。
+
+- SND.UNA を進める:SND.UNA < SEG.ACK
+- 番号が新しい:SND.WL1 < SEG.SEQ
+- 番号が同じ:SND.WL1 = SEG.SEQ かつ SND.WL2 =< SEG.ACK
+
+更新したときは、SND.WL1 と SND.WL2 をその segment の SEG.SEQ と SEG.ACK にします。
+このため SND.WL1 は前の番号に戻ることがあります。
+SND.UNA を進める ACK はかならず窓を更新するので、SND.WL2 はいつも SND.UNA に等しくなります。
+このため核が SND.UNA から測る右端は、窓を最後に更新した segment で相手が広告した右端と同じです。
+SEG.ACK が SND.UNA より前の segment (古い ACK) の窓は使いません。
+SEG.ACK が SND.MAX より先の segment は、その前の ACK の受け入れの範囲の確かめ (RFC 5961 5.2) が捨てます。
+この核は SND.NXT を前に戻さないので、SND.NXT は SND.MAX と同じ値です。
+
+凍結した Go の wgstack は、後の 2 つの項だけで窓を更新し、古い ACK も断りません。
+
+### 理由
+
+相手が自分のデータの再送 (SEG.SEQ < SND.WL1) に新しい確認を載せると、Go の規則はその segment の窓を使いません。
+SND.UNA だけが進むので、前の窓を新しい SND.UNA から測ることになり、核は相手が広告した右端の先へ新しいデータを送ります。
+相手はそのデータを捨て、核はそれを損失とみなして再送し、輻輳の窓も不要に下げます。
+双方向の転送で相手の側にも損失があると起こります。
+決定的な試験では、右端を 1,736 byte 越えて送りました。
+データの破損や接続の停止にはなりません。
+
+1 つ目の項は RFC 9293 3.10.7.4 の文言より広い規則です。
+3.10.7.4 は SND.UNA =< SEG.ACK =< SND.NXT の segment の窓を、後の 2 つの項を満たす時だけ使います。
+SND.WL1 と SND.WL2 は、古い segment が窓を更新しないための確かめです (RFC 9293 3.10.7.4)。
+相手が送る ACK の番号は、送った順に減りません。
+窓を取った segment の SEG.ACK は SND.WL2 で、SND.WL2 は SND.UNA に等しいので、SND.UNA を進める segment は、窓を取ったどの segment より後に送られています。
+その窓を使っても、古い segment が窓を更新することにはならず、確かめの目的は保たれます。
+SEG.SEQ は再送で前に戻るので、SEG.SEQ だけでは segment の新しさを決められません。
+SND.UNA を進めない segment には、3.10.7.4 の SND.WL1 と SND.WL2 の規則をそのまま使い、並べ替えで遅れた古い segment の窓を使いません。
+
+古い ACK を断るのは、3.10.7.4 が SND.UNA =< SEG.ACK の時だけ窓を更新するためです。
+SND.WL1 を戻した後には、戻した値より先の番号と古い確認を持つ segment が遅れて届くことがあります。
+その窓を新しい SND.UNA から測ると、同じく右端の先へ送ります。
+
+3 つ目の項は RFC 9293 と Go のままで、番号が同じ segment の窓を、縮める値も使います。
+古い ACK を断った後は SND.WL2 =< SND.UNA =< SEG.ACK なので、この項は SEG.SEQ = SND.WL1 だけで決まります。
+縮めた窓を使っても送るのが遅れるだけで、右端の先へは送りません。
+この項は右端の先へ送る不具合に関わらず、変えると Go の記録との違いが増えるので、Go のままにします。
+
+Linux も、SND.UNA を進める ACK の窓を SEG.SEQ によらず使い、古い ACK の窓を使いません。
+番号が同じ segment からは、Linux は窓を広げる値か 0 だけを使うので、3 つ目の項は Linux と違います。
+
+### 試験
+
+`crates/wgft-wgstack/src/send_window_tests.rs` が規則を確かめます。
+
+- 再送の segment に載った確認の窓を使い、右端の先へ送らないこと。窓の scale の無い相手、scale 0 と 14 の相手、相手と核の番号が 2^32 をまたぐ所、核の RTO の後、相手の FIN の後で確かめます
+- 再送の segment が窓を 0 にしたときは、送らずに窓の probe に移り、窓が開いてから送ること
+- 並べ替えで遅れた古い ACK が、中身の有無によらず窓を変えないこと
+- SND.WL1 が前の番号に戻り、その後の窓の更新が戻った SND.WL1 から先の番号で効くこと
+- SND.UNA を進めない segment には SND.WL1 の規則が効き、番号が同じ segment が窓を縮めるか 0 にすること
+
+`check_invariants` も SND.WL2 = SND.UNA を確かめるので ([送り手の不変条件](#送り手の不変条件))、記録の照合、fuzz、敵対的な送り手の試験もこの規則を確かめます。
+
+### 凍結した Go の記録との違い
+
+git の記録はすべて Go と一致し、git の意図した違いの一覧に行はありません。
+手元の cache の大きな記録の集まりでは、敵対的な送り手と `FuzzCore` の記録の一部が Go と違います。
+どれも、相手が古い確認の ACK を並べ替えて送るか、再送の segment に新しい確認を載せる記録です。
+変えたのはこの規則だけなので、違いはどれも、古い ACK の窓を使わない所か、SND.WL1 より前の segment に載った SND.UNA を進める ACK の窓を使う所から始まります。
+これらの記録は、完全な集まりの意図した違いの一覧 (`testdata/wgstack-rec/divergences-full.json`) に、最初に食い違う要求と Rust の応答と共に載せました ([試験の道具の設計の記録の照らし方](test-tooling.md#照らし方))。
+一覧に無い違いは、今までどおり照合で落ちます。
+集まりが育って違いが増えた時の一覧の作り直しと分類の手順は、[試験の道具の設計](test-tooling.md#一覧の作り直しと分類)に従います。
+
 ## 置き換えの判定
 
 仮の決定 (所有者の確認を待ちます):Rust の agent が Go の agent を置き換えられると判定する条件は、次の 2 つです。
@@ -1079,7 +1154,7 @@ Linux の `sendmmsg` と UDP の GSO のような system call のまとめは、
 
 qbench の条件は関門の表で確かめました ([qbench での測定](#qbench-での測定))。
 
-Go の wgstack の記録がすべて一致することは、ラボの一式で置き換えを判定する前の条件です ([Go の wgstack の記録との bit の一致](#go-の-wgstack-の記録との-bit-の一致))。
+Go の wgstack の記録がすべて一致するか、意図した違いの一覧に載ることは、ラボの一式で置き換えを判定する前の条件です ([Go の wgstack の記録との bit の一致](#go-の-wgstack-の記録との-bit-の一致))。
 
 ## 検証
 
@@ -1138,7 +1213,7 @@ Go の試験の道具を変えるときは、製品の Go のコードを変え�
   5 の段は SACK、timestamp、CUBIC、boost の印の記録を、6 の段は UDP と ICMP と断片と ping の印の記録を加えます
 - 段の表:核に入った段は `crates/wgft-wgstack-dut/stages.json` の `landed` が持ち、今はすべての段が入っています。
   段を足すときは `landed` にその段を足し、その段の印の記録が一致することと、その段の台本が通ることを同じ変更で確かめます
-- 前の条件:すべての記録が一致することを、agent の置き換えをラボの一式で判定することの前の条件にします
+- 前の条件:すべての記録が一致するか、意図した違いの一覧に載ることを、agent の置き換えをラボの一式で判定することの前の条件にします
 
 #### bit の一致の条件
 
@@ -1510,6 +1585,9 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
 `check_invariants` は使っている接続ごとに `check_sender` を呼び、Go の敵対的な送り手の試験 (`runAudit`) が各段の後に確かめることと `checkScoreboard` を写します。
 
 - SND.UNA ≤ SND.NXT ≤ SND.MAX と、輻輳の窓が 0 でないこと
+- SND.WL2 = SND.UNA であること。
+  SND.UNA を進める ACK はかならず窓を更新するので、SND.WND は SND.UNA を確認した ACK の窓です ([相手の窓の更新](#相手の窓の更新))。
+  Go の規則では成り立たないので、Go の確かめを写したものではありません
 - scoreboard の数え直し (`check_scoreboard`):記録が SND.UNA から SND.MAX まで隙間なく並ぶこと、SACK 済みの byte と数、境目から先の byte と数、再送の byte (`rtx_bytes`)、境目から先の RACK の損失の byte、位置の欄 (`loss_idx`、`rxt_idx`) の範囲、2 つの list (`t_list`、`lost_q`) の節と印と数と順
 - pipe:増減で保つ欄から求めた値が、RFC 6675 の定義どおりに記録から求めた値と一致すること (Go の `checkScoreboard` と同じ)
 - 分けて送っている記録の中の位置:`q_mid` の間は損失の待ち行列が空でなく `q_off` がその先頭の記録の長さより小さいこと、`rxt_mid` の間は `rxt_off` が `rxt_idx` の記録の長さより小さいこと

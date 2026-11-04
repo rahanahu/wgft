@@ -13,7 +13,7 @@ use std::io::Read;
 use std::path::Path;
 
 use flate2::read::GzDecoder;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use wgft_tcpharness::dut::{ClockedDut, answer_frame};
 use wgft_tcpharness::frame::{Kind, Msg, VERSION};
 
@@ -260,18 +260,10 @@ pub fn parse_divergences(b: &[u8]) -> Result<Vec<Divergence>, String> {
     let v: Vec<Divergence> = serde_json::from_slice(b).map_err(|e| format!("divergences: {e}"))?;
     let mut seen = BTreeSet::new();
     for d in &v {
-        if d.reason.trim().is_empty() {
-            return Err(format!("divergences: {} has no reason", d.record));
-        }
-        if d.request == 0 {
+        check_row("divergences", &d.record, d.request, &d.response, &d.reason)?;
+        if d.response.starts_with(SHA256_PREFIX) {
             return Err(format!(
-                "divergences: {} names request 0; a HELLO that fails is no intended divergence",
-                d.record
-            ));
-        }
-        if d.response.is_empty() {
-            return Err(format!(
-                "divergences: {} has an empty response; a DUT that broke is no intended divergence",
+                "divergences: {} gives a hash; the git list holds the response frame in hex",
                 d.record
             ));
         }
@@ -280,6 +272,215 @@ pub fn parse_divergences(b: &[u8]) -> Result<Vec<Divergence>, String> {
         }
     }
     Ok(v)
+}
+
+/// 一覧の 1 行の共通の規則です。理由を持ち、`HELLO` (要求 0) でない要求と空でない応答を指します。
+fn check_row(
+    list: &str,
+    record: &str,
+    request: usize,
+    response: &str,
+    reason: &str,
+) -> Result<(), String> {
+    if reason.trim().is_empty() {
+        return Err(format!("{list}: {record} has no reason"));
+    }
+    if request == 0 {
+        return Err(format!(
+            "{list}: {record} names request 0; a HELLO that fails is no intended divergence"
+        ));
+    }
+    if response.is_empty() {
+        return Err(format!(
+            "{list}: {record} has an empty response; a DUT that broke is no intended divergence"
+        ));
+    }
+    Ok(())
+}
+
+/// Go の fuzz の cache から作った記録の名前の頭です。名前は手元の cache の中身で決まるので、完全な集まりの
+/// 一覧はこの記録を内容の hash で指します。
+pub const FUZZ_CACHE_PREFIX: &str = "fuzzcore/cache-";
+
+/// 完全な集まりの意図した違いの一覧の 1 行です (`testdata/wgstack-rec/divergences-full.json`)。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FullDivergence {
+    /// `<元>/<名前>`。`sha256` を持つ行では一覧を作った時の名前で、照らす時には使いません
+    pub record: String,
+    /// Go の fuzz の cache の記録 (`fuzzcore/cache-*`) だけが持つ、frame の列 ([`Recording::frames`]) の
+    /// SHA-256 の小文字の 16 進
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// 最初に食い違う応答の要求の番号。0 は `HELLO`
+    pub request: usize,
+    /// Rust の応答の frame の SHA-256 の小文字の 16 進。応答の frame は大きく、git の記録の上限に入れるため
+    /// hash で持ちます
+    pub response_sha256: String,
+    /// 理由
+    pub reason: String,
+}
+
+/// 完全な集まりの意図した違いの一覧です。種で名前が決まる記録は名前で、Go の fuzz の cache の記録は frame の列の
+/// SHA-256 で引きます。
+#[derive(Debug, Clone, Default)]
+pub struct FullDivergences {
+    by_record: BTreeMap<String, FullDivergence>,
+    by_sha256: BTreeMap<String, FullDivergence>,
+}
+
+impl FullDivergences {
+    /// 一覧を読みます。行の形は [`parse_divergences`] と同じ規則で確かめ、加えて `fuzzcore/cache-*` の行だけが
+    /// `sha256` (64 桁の小文字の 16 進) を持ち、同じ名前と同じ hash の行が 1 つだけであることを確かめます。
+    pub fn parse(b: &[u8]) -> Result<Self, String> {
+        let v: Vec<FullDivergence> =
+            serde_json::from_slice(b).map_err(|e| format!("full divergences: {e}"))?;
+        let mut out = Self::default();
+        for d in v {
+            check_row(
+                "full divergences",
+                &d.record,
+                d.request,
+                &d.response_sha256,
+                &d.reason,
+            )?;
+            if !is_sha256_hex(&d.response_sha256) {
+                return Err(format!(
+                    "full divergences: {}: response_sha256 {:?} is not 64 lowercase hex digits",
+                    d.record, d.response_sha256
+                ));
+            }
+            let cache = d.record.starts_with(FUZZ_CACHE_PREFIX);
+            match &d.sha256 {
+                Some(h) if cache => {
+                    if !is_sha256_hex(h) {
+                        return Err(format!(
+                            "full divergences: {}: sha256 {h:?} is not 64 lowercase hex digits",
+                            d.record
+                        ));
+                    }
+                    if out.by_sha256.contains_key(h) {
+                        return Err(format!(
+                            "full divergences: sha256 {h} has more than one row"
+                        ));
+                    }
+                    out.by_sha256.insert(h.clone(), d);
+                }
+                None if !cache => {
+                    if out.by_record.contains_key(&d.record) {
+                        return Err(format!(
+                            "full divergences: {} has more than one row",
+                            d.record
+                        ));
+                    }
+                    out.by_record.insert(d.record.clone(), d);
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "full divergences: {} is named by its seed; name it without sha256",
+                        d.record
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "full divergences: {} comes from the Go fuzz cache; name it by sha256",
+                        d.record
+                    ));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// 名前で引く行の記録の名前です。
+    pub fn named(&self) -> impl Iterator<Item = &str> {
+        self.by_record.keys().map(String::as_str)
+    }
+
+    /// frame の列の SHA-256 で引く行の hash です。
+    pub fn hashes(&self) -> impl Iterator<Item = &str> {
+        self.by_sha256.keys().map(String::as_str)
+    }
+
+    /// すべての行です。名前で引く行、hash で引く行の順です。
+    pub fn rows(&self) -> impl Iterator<Item = &FullDivergence> {
+        self.by_record.values().chain(self.by_sha256.values())
+    }
+
+    /// 記録 `rec` の行です。`fuzzcore/cache-*` の記録は frame の列の SHA-256 で、ほかは名前で引きます。
+    pub fn row(&self, rec: &Recording) -> Option<&FullDivergence> {
+        let id = rec.id();
+        if id.starts_with(FUZZ_CACHE_PREFIX) {
+            self.by_sha256.get(&frames_sha256(rec))
+        } else {
+            self.by_record.get(&id)
+        }
+    }
+
+    /// 行の数です。
+    pub fn len(&self) -> usize {
+        self.by_record.len() + self.by_sha256.len()
+    }
+
+    /// 行が無いかです。
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// 記録 `rec` の行を、[`judge`] が読む形 (`record` を今の記録の名前にした行) で返します。
+    /// `fuzzcore/cache-*` の記録は frame の列の SHA-256 で、ほかは名前で引きます。
+    pub fn for_recording(&self, rec: &Recording) -> Option<Divergence> {
+        let d = self.row(rec)?;
+        Some(Divergence {
+            record: rec.id(),
+            request: d.request,
+            response: format!("{SHA256_PREFIX}{}", d.response_sha256),
+            reason: d.reason.clone(),
+        })
+    }
+}
+
+/// [`Divergence::response`] が応答の frame の 16 進でなく SHA-256 を持つ時の頭です。完全な集まりの一覧の行を
+/// [`judge`] に渡す時だけ付きます。git の一覧 (`divergences.json`) の行は持てません。
+const SHA256_PREFIX: &str = "sha256:";
+
+fn is_sha256_hex(h: &str) -> bool {
+    h.len() == 64 && h.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// 行の応答 `want` (16 進か `sha256:` の頭を付けた hash) が応答の frame `got` と同じかです。
+fn response_is(want: &str, got: &[u8]) -> bool {
+    match want.strip_prefix(SHA256_PREFIX) {
+        Some(h) => {
+            use sha2::{Digest, Sha256};
+            hex(&Sha256::digest(got)) == h
+        }
+        None => want == hex(got),
+    }
+}
+
+/// 完全な集まりの一覧の行を、ファイルの形 (JSON の配列で 1 行に 1 つ、`record` と `sha256` の順) に書きます。
+pub fn write_full_divergences(rows: &[FullDivergence]) -> String {
+    let mut rows: Vec<&FullDivergence> = rows.iter().collect();
+    rows.sort_by(|a, b| (&a.record, &a.sha256).cmp(&(&b.record, &b.sha256)));
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|r| format!("  {}", serde_json::to_string(r).expect("a row serializes")))
+        .collect();
+    format!("[\n{}\n]\n", lines.join(",\n"))
+}
+
+/// 応答の frame の SHA-256 の小文字の 16 進です (完全な集まりの一覧の `response_sha256`)。
+pub fn response_sha256(frame: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex(&Sha256::digest(frame))
+}
+
+/// 記録の frame の列 (要求と応答) の SHA-256 の小文字の 16 進です。meta と圧縮を含まないので、同じ要求と応答の
+/// 記録は、作った機械と Go の版によらず同じ値になります。
+pub fn frames_sha256(rec: &Recording) -> String {
+    use sha2::{Digest, Sha256};
+    hex(&Sha256::digest(&rec.frames))
 }
 
 /// `testNet` の記録の `WRITE` が、Go の答えた byte 数と同じ長さの bytes を渡していることを確かめます。
@@ -317,6 +518,8 @@ pub struct Mismatch {
     pub request: usize,
     /// Rust の応答の frame の bytes。DUT が壊れた時は空です
     pub got: Vec<u8>,
+    /// この要求の後に破れた核の不変条件。破れていれば、意図した違いの一覧の行があっても照合は落ちます
+    pub invariant: Option<String>,
     /// 人が読む説明。要求、期待した応答、得た応答と、その前の要求と応答です
     pub detail: String,
 }
@@ -377,6 +580,7 @@ pub fn replay(rec: &Recording) -> Result<Outcome, String> {
             return Ok(Outcome::Diverged(Mismatch {
                 request: 0,
                 got: Vec::new(),
+                invariant: None,
                 detail: format!(
                     "request 0: {}\n  Go    {}\n  Rust  HELLO failed: {e}",
                     show(hreq.kind, hreq.body),
@@ -414,13 +618,18 @@ pub fn replay(rec: &Recording) -> Result<Outcome, String> {
             }
             Err(e) => (Vec::new(), format!("the DUT broke: {e}")),
         };
-        let broken = if each || n == rest.len() {
+        let mut broken = if each || n == rest.len() {
             dut.check_invariants().err()
         } else {
             None
         };
         if same(kind, want, &got) && broken.is_none() {
             continue;
+        }
+        // 照合はここで止まるので、要求ごとに確かめない記録も、食い違った所の不変条件を確かめます。
+        // 意図した違いの一覧の行が、その先の破れを隠さないためです。
+        if broken.is_none() && !(each || n == rest.len()) {
+            broken = dut.check_invariants().err();
         }
         let mut detail = String::new();
         let now = dut.now().map_or(0, |d| d.as_nanos());
@@ -441,7 +650,7 @@ pub fn replay(rec: &Recording) -> Result<Outcome, String> {
         let _ = writeln!(detail, "  request {n}: {msg}");
         let _ = writeln!(detail, "    Go    {}", show(want.kind, want.body));
         let _ = writeln!(detail, "    Rust  {got_text}");
-        if let Some(e) = broken {
+        if let Some(e) = &broken {
             let _ = writeln!(detail, "    invariant: {e}");
         }
         let _ = writeln!(detail, "    Rust frame {}", hex(&got));
@@ -449,6 +658,7 @@ pub fn replay(rec: &Recording) -> Result<Outcome, String> {
             request: n,
             got,
             detail,
+            invariant: broken,
         }));
     }
     Ok(Outcome::Match {
@@ -459,7 +669,8 @@ pub fn replay(rec: &Recording) -> Result<Outcome, String> {
 /// 照合の結果を意図した違いの一覧と照らします。通るなら 1 行の説明を、落ちるなら理由を返します。
 ///
 /// 一覧に行の無い記録は、すべての応答が一致すれば通ります。行を持つ記録は、行と同じ要求で同じ応答の frame に
-/// 食い違えば既知の違いとして通り、位置か応答が違うか、最後まで一致すれば落ちます。
+/// 食い違えば既知の違いとして通り、位置か応答が違うか、最後まで一致すれば落ちます。核の不変条件が破れた記録は、
+/// 行と同じ位置と応答でも落ちます。
 pub fn judge(rec: &Recording, out: &Outcome, divs: &[Divergence]) -> Result<String, String> {
     let id = rec.id();
     let row = divs.iter().find(|d| d.record == id);
@@ -472,7 +683,7 @@ pub fn judge(rec: &Recording, out: &Outcome, divs: &[Divergence]) -> Result<Stri
                 pairs.len()
             ));
         };
-        if d.response == hex(want.bytes) {
+        if response_is(&d.response, want.bytes) {
             return Err(format!(
                 "{id}: the intended-divergence row at request {} names Go's own answer; it is no divergence",
                 d.request
@@ -485,7 +696,11 @@ pub fn judge(rec: &Recording, out: &Outcome, divs: &[Divergence]) -> Result<Stri
             "{id}: the intended-divergence list expects a difference at request {}, but all {requests} requests match; remove the row",
             d.request
         )),
-        (Outcome::Diverged(m), Some(d)) if d.request == m.request && d.response == hex(&m.got) => {
+        (Outcome::Diverged(m), Some(d))
+            if d.request == m.request
+                && response_is(&d.response, &m.got)
+                && m.invariant.is_none() =>
+        {
             Ok(format!(
                 "{id}: intended divergence at request {}: {}",
                 d.request, d.reason

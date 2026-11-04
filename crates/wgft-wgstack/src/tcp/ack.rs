@@ -115,11 +115,25 @@ impl Conn<'_> {
         }
     }
 
-    /// segment が SND.WL1 と SND.WL2 より新しければ相手の窓を更新します (RFC 9293 3.10.7.4)。窓の大きさが
-    /// 変わったかを返します。
+    /// 相手の窓を更新します (RFC 9293 3.10.7.4)。窓の大きさが変わったかを返します。SND.UNA を進める前に呼びます。
+    ///
+    /// SEG.ACK が SND.UNA より前の segment (古い ACK) の窓は使いません。RFC 9293 は SND.UNA =< SEG.ACK の時
+    /// だけ窓を更新します。SND.UNA を進める ACK の窓は、SEG.SEQ が SND.WL1 より前でも使います。これは
+    /// RFC 9293 3.10.7.4 の文言より広い規則です。SND.WL1 と SND.WL2 は古い segment が窓を更新しないための
+    /// 確かめで、相手の ACK の番号は送った順に減らないので、SND.UNA を進める segment は、窓を取ったどの segment
+    /// より後に送られています。SEG.SEQ だけで新しさを決めると、相手が再送した segment に載った新しい確認の窓を
+    /// 捨て、古い窓を新しい SND.UNA から測って、相手が広告した右端の先へ送ります。それ以外は RFC 9293 の
+    /// SND.WL1 と SND.WL2 の規則で、並べ替えで遅れた古い segment の窓を使いません (wgstack-rs.md の
+    /// 「相手の窓の更新」)。
     fn update_send_window(&mut self, seg: &Segment<'_>) -> bool {
         let t = &mut *self.t;
-        if !(seq::lt(t.snd_wl1, seg.seq) || (t.snd_wl1 == seg.seq && seq::le(t.snd_wl2, seg.ack))) {
+        if seq::lt(seg.ack, t.snd_una) {
+            return false;
+        }
+        if !(seq::gt(seg.ack, t.snd_una)
+            || seq::lt(t.snd_wl1, seg.seq)
+            || (t.snd_wl1 == seg.seq && seq::le(t.snd_wl2, seg.ack)))
+        {
             return false;
         }
         let w = u32::from(seg.wnd) << t.snd_wscale;
