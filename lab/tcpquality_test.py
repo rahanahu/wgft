@@ -261,6 +261,24 @@ class HostCounters(unittest.TestCase):
         self.assertEqual((got["agent_vcpu_guest"], got["agent_vcpu_stime"], got["agent_vcpu_vcs"]), ("5", "2", "3"))
         self.assertEqual((got["agent_vhostp_ns"], got["agent_vhoste_ns"]), ("0", "50"))
 
+    def test_hostsample_stops_when_its_lab_is_gone(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "123"))
+            self.assertTrue(tq.lab_alive(123, d))
+            self.assertFalse(tq.lab_alive(124, d))
+            lab = subprocess.Popen(["sleep", "0.6"])
+            out = os.path.join(d, "samples.txt")
+            sampler = subprocess.Popen([sys.executable, TQ, "hostsample", out, "0.1", "--lab-pid=%d" % lab.pid])
+            lab.wait()
+            try:
+                self.assertEqual(sampler.wait(timeout=10), 0)
+            finally:
+                sampler.kill()
+            with open(out) as f:
+                rows = f.read().splitlines()
+            self.assertGreater(len(rows), 0)
+            self.assertNotIn("lab-pid", rows[0])
+
     def test_hostwin_line_splits_the_vcpu_time(self):
         hz = os.sysconf("SC_CLK_TCK")
         rows = []

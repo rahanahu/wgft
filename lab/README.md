@@ -337,6 +337,8 @@ iperf3 は送り手と受け手の byte あたりの CPU が `tcpquality.py` よ
 `FAIL` の行があるか組が足りない場合は、終了コードが 0 以外になります。
 VM は終わると消し、`--keep` を付けると残します。
 残った VM は `lab/lab suite-gc` が消します。
+`--split` のホストの標本 (`tcpquality.py hostsample`) は、作った `lab/lab` のプロセスが SIGKILL などで消えると、次の標本の時に自分で止まります。
+`lab/lab suite-gc` も、作った `lab/lab` のプロセスが無い標本を `--lab-pid` の印で選んで止め、使われていない `--split` のネットワークを消します。
 
 ### agent を専用の VM に置く (`--split`)
 

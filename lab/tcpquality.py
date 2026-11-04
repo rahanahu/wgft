@@ -1748,8 +1748,15 @@ def proc_stat_cpus(text):
     return busy, irq
 
 
+def lab_alive(pid, proc="/proc"):
+    # whether the process pid (the `lab/lab` that started a sampler) still exists
+    return os.path.isdir("%s/%s" % (proc, pid))
+
+
 def hostsample(out, interval, *specs):
-    # on the host, every <interval> seconds until killed: the busy time of every host CPU (ticks)
+    # on the host, every <interval> seconds until killed, or with --lab-pid=<pid> until that process
+    # (the `lab/lab` that started it) is gone, so that a SIGKILLed lab leaves no sampler behind; the
+    # marker also lets `lab/lab suite-gc` find a sampler whose lab is gone: the busy time of every host CPU (ticks)
     # and its irq and softirq time, and per VM given as <label>=<qemu pid> the counters of its vCPU
     # threads, its vhost workers and its other threads: run and runqueue wait (ns, schedstat), user,
     # system and guest time (ticks), and the voluntary and involuntary context switches; the vhost
@@ -1758,10 +1765,12 @@ def hostsample(out, interval, *specs):
     # their time went. In a vCPU thread, guest time is the time in the guest, system time is KVM in
     # the host kernel (exits, interrupt injection and halt polling) and user time beyond guest time
     # is qemu's own device code. Reading /proc of qemu, which runs as another user, needs no rights.
+    lab = next((sp.split("=", 1)[1] for sp in specs if sp.startswith("--lab-pid=")), None)
+    specs = [sp for sp in specs if not sp.startswith("--lab-pid=")]
     sampler = HostSampler(pcores())
     step = float(interval)
     with open(out, "a") as f:
-        while True:
+        while lab is None or lab_alive(lab):
             t0 = time.time()
             parts = ["t=%.3f" % t0]
             with open("/proc/stat") as st:
@@ -1793,6 +1802,7 @@ def hostsample(out, interval, *specs):
             f.write(" ".join(parts) + "\n")
             f.flush()
             time.sleep(max(0.0, step - (time.time() - t0)))
+    return 0
 
 
 def kvmsample(out, interval, root="/sys/kernel/debug/kvm"):

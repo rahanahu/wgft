@@ -421,6 +421,17 @@ cmd_suite_gc() {
     info "deleting the split network $net whose lab process is gone"
     inc network delete "$net" >/dev/null 2>&1 || info "could not delete the network $net"
   done < <(inc network list -f csv -c n,u 2>/dev/null || true)
+  # lab paired --split のホストの標本 (tcpquality.py hostsample --lab-pid=<PID>):作った lab が無いものを止める。
+  # 標本は lab が消えると次の標本で自分でも止まる。ここでは /proc の引数を 1 つずつ見て、印の付いたものだけを選ぶ
+  local p args lab
+  for p in /proc/[0-9]*; do
+    args=$(tr '\0' '\n' <"$p/cmdline" 2>/dev/null) || continue
+    grep -qx hostsample <<<"$args" && grep -q '/tcpquality.py$' <<<"$args" || continue
+    lab=$(sed -n 's/^--lab-pid=\([0-9][0-9]*\)$/\1/p' <<<"$args")
+    [[ -n $lab ]] && ! suite_alive "$lab" || continue
+    info "stopping the host sampler ${p#/proc/} whose lab process $lab is gone"
+    kill "${p#/proc/}" 2>/dev/null || true
+  done
 }
 
 suite_cleanup() {
@@ -1146,7 +1157,8 @@ paired_split_setup() {
   SPLIT_TAPS=""
   for i in 0 1; do SPLIT_TAPS+=" tap:${vms[i]}=$(inc config get "${names[i]}" volatile.eth1.host_name)"; done
   # shellcheck disable=SC2086 # the two tap specs are words on purpose
-  python3 "$REPO/lab/tcpquality.py" hostsample "$out/host-samples.txt" 0.5 "agent=$SPLIT_QEMU_AGENT" "peer=$SPLIT_QEMU_PEER" $SPLIT_TAPS &
+  # --lab-pid:この lab が SIGKILL で消えても、標本は自分で止まる (suite-gc もこの印で探す)
+  python3 "$REPO/lab/tcpquality.py" hostsample "$out/host-samples.txt" 0.5 "agent=$SPLIT_QEMU_AGENT" "peer=$SPLIT_QEMU_PEER" $SPLIT_TAPS "--lab-pid=$$" &
   PAIRED_SAMPLER=$!
 }
 
