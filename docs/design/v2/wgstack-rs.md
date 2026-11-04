@@ -1080,11 +1080,12 @@ TCP の正しさを Go の記録との bit の一致より優先するという�
 - 番号が同じ:SND.WL1 = SEG.SEQ かつ SND.WL2 =< SEG.ACK
 
 更新したときは、SND.WL1 と SND.WL2 をその segment の SEG.SEQ と SEG.ACK にします。
-このため SND.WL1 は前より小さな値に戻ることがあります。
+このため SND.WL1 は前の番号に戻ることがあります。
 SND.UNA を進める ACK はかならず窓を更新するので、SND.WL2 はいつも SND.UNA に等しくなります。
 このため核が SND.UNA から測る右端は、窓を最後に更新した segment で相手が広告した右端と同じです。
 SEG.ACK が SND.UNA より前の segment (古い ACK) の窓は使いません。
-SEG.ACK が SND.NXT より先の segment は、その前の ACK の受け入れの範囲の確かめ (RFC 5961 5.2) が捨てます。
+SEG.ACK が SND.MAX より先の segment は、その前の ACK の受け入れの範囲の確かめ (RFC 5961 5.2) が捨てます。
+この核は SND.NXT を前に戻さないので、SND.NXT は SND.MAX と同じ値です。
 
 凍結した Go の wgstack は、後の 2 つの項だけで窓を更新し、古い ACK も断りません。
 
@@ -1097,41 +1098,35 @@ SND.UNA だけが進むので、前の窓を新しい SND.UNA から測ること
 決定的な試験では、右端を 1,736 byte 越えて送りました。
 データの破損や接続の停止にはなりません。
 
+1 つ目の項は RFC 9293 3.10.7.4 の文言より広い規則です。
+3.10.7.4 は SND.UNA =< SEG.ACK =< SND.NXT の segment の窓を、後の 2 つの項を満たす時だけ使います。
+SND.WL1 と SND.WL2 は、古い segment が窓を更新しないための確かめです (RFC 9293 3.10.7.4)。
 相手が送る ACK の番号は、送った順に減りません。
-SND.UNA を進める segment は、それまでに受けたどの segment より後に送られたものなので、その窓が最も新しい窓です。
+窓を取った segment の SEG.ACK は SND.WL2 で、SND.WL2 は SND.UNA に等しいので、SND.UNA を進める segment は、窓を取ったどの segment より後に送られています。
+その窓を使っても、古い segment が窓を更新することにはならず、確かめの目的は保たれます。
 SEG.SEQ は再送で前に戻るので、SEG.SEQ だけでは segment の新しさを決められません。
-SND.UNA を進めない segment には、RFC 9293 3.10.7.4 の SND.WL1 と SND.WL2 の規則をそのまま使い、並べ替えで遅れた古い segment の窓を使いません。
+SND.UNA を進めない segment には、3.10.7.4 の SND.WL1 と SND.WL2 の規則をそのまま使い、並べ替えで遅れた古い segment の窓を使いません。
 
-古い ACK を断るのは、RFC 9293 3.10.7.4 が SND.UNA =< SEG.ACK =< SND.NXT の時だけ窓を更新するためです。
+古い ACK を断るのは、3.10.7.4 が SND.UNA =< SEG.ACK の時だけ窓を更新するためです。
 SND.WL1 を戻した後には、戻した値より先の番号と古い確認を持つ segment が遅れて届くことがあります。
 その窓を新しい SND.UNA から測ると、同じく右端の先へ送ります。
 
-### Linux との比べ
-
-Linux の `net/ipv4/tcp_input.c` の `tcp_ack` は、SEG.ACK が SND.UNA より前の ACK の窓を使いません。
-読んだのは v7.2 と、その後の master の d89e1d186ec9 で、どちらも同じ形です。
-それ以外の ACK では、`tcp_may_update_window` が次のどれかを満たすときに窓を更新し、SND.WL1 を SEG.SEQ にします。
-
-- `after(ack, snd_una)`
-- `after(ack_seq, snd_wl1)`
-- `ack_seq == snd_wl1 && (nwin > snd_wnd || !nwin)`
-
-3 つ目の項の `!nwin` は v6.6 の 800a666141de で加わりました。
-古い ACK を断ることと初めの 2 つの項は、wgstack の規則と同じです。
-3 つ目の項は違います。
-Linux は SND.WL2 を持たず、番号が同じ segment からは、窓を広げる値か 0 だけを使います。
-wgstack は RFC 9293 と Go のまま、番号が同じ segment の窓を、縮める値も使います。
+3 つ目の項は RFC 9293 と Go のままで、番号が同じ segment の窓を、縮める値も使います。
 古い ACK を断った後は SND.WL2 =< SND.UNA =< SEG.ACK なので、この項は SEG.SEQ = SND.WL1 だけで決まります。
 縮めた窓を使っても送るのが遅れるだけで、右端の先へは送りません。
 この項は右端の先へ送る不具合に関わらず、変えると Go の記録との違いが増えるので、Go のままにします。
+
+Linux も、SND.UNA を進める ACK の窓を SEG.SEQ によらず使い、古い ACK の窓を使いません。
+番号が同じ segment からは、Linux は窓を広げる値か 0 だけを使うので、3 つ目の項は Linux と違います。
 
 ### 試験
 
 `crates/wgft-wgstack/src/send_window_tests.rs` が規則を確かめます。
 
-- 再送の segment に載った確認の窓を使い、右端の先へ送らないこと。窓の scale の無い相手、scale 0 と 14 の相手、相手と核の番号が 2^32 をまたぐ所で確かめます
+- 再送の segment に載った確認の窓を使い、右端の先へ送らないこと。窓の scale の無い相手、scale 0 と 14 の相手、相手と核の番号が 2^32 をまたぐ所、核の RTO の後、相手の FIN の後で確かめます
 - 再送の segment が窓を 0 にしたときは、送らずに窓の probe に移り、窓が開いてから送ること
 - 並べ替えで遅れた古い ACK が、中身の有無によらず窓を変えないこと
+- SND.WL1 が前の番号に戻り、その後の窓の更新が戻った SND.WL1 から先の番号で効くこと
 - SND.UNA を進めない segment には SND.WL1 の規則が効き、番号が同じ segment が窓を縮めるか 0 にすること
 
 `check_invariants` も SND.WL2 = SND.UNA を確かめるので ([送り手の不変条件](#送り手の不変条件))、記録の照合、fuzz、敵対的な送り手の試験もこの規則を確かめます。
