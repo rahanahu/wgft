@@ -1,9 +1,9 @@
-//! 相手の窓 (SND.WND) の更新の規則の試験です (RFC 9293 3.10.7.4 の SND.WL1 と SND.WL2、Linux の
-//! `tcp_may_update_window`)。
+//! 相手の窓 (SND.WND) の更新の規則の試験です (RFC 9293 3.10.7.4 の SND.WL1 と SND.WL2、wgstack-rs.md の
+//! 「相手の窓の更新」)。
 //!
 //! 核は SND.UNA を進める ACK の窓を、SEG.SEQ が SND.WL1 より前でも使い、SEG.ACK が SND.UNA より前の segment の
-//! 窓は使いません。並べ替えで遅れた古い segment が窓を戻さないこと、窓が 0 の時と窓の probe、窓の scale の端、
-//! 番号の 1 周をまたぐ所も確かめます。
+//! 窓は使いません。並べ替えで遅れた古い segment が窓を戻さないこと、SND.WL1 が前の番号に戻ること、窓が 0 の時と
+//! 窓の probe、窓の scale の端、番号の 1 周をまたぐ所、核の RTO の後と相手の FIN の後も確かめます。
 
 #![expect(
     clippy::disallowed_macros,
@@ -20,7 +20,7 @@
 use crate::seq;
 use crate::tcp::conn::ConnId;
 use crate::testnet_tests::{Out, PeerConn, TSeg, TestNet, show, small_limits};
-use crate::wire::{FLAG_ACK, FLAG_SYN};
+use crate::wire::{FLAG_ACK, FLAG_FIN, FLAG_SYN};
 use core::time::Duration;
 
 /// 相手の SYN が示す条件です。
@@ -144,8 +144,7 @@ fn lose_a_deliver_b(
 
 /// 相手が自分のデータの再送 (SEG.SEQ < SND.WL1) に新しい累積の確認と小さめの窓を載せたとき、核はその segment の
 /// 窓を使い、相手が広告した右端の先へ新しいデータを送りません。SEG.SEQ だけで新しさを決める RFC 9293 3.10.7.4 の
-/// SND.WL1 の規則では、核はこの窓を使わず、前の窓を新しい SND.UNA から測って右端の先へ送ります。Linux の
-/// tcp_may_update_window は SND.UNA を進める ACK の窓を常に使います。
+/// SND.WL1 の規則では、核はこの窓を使わず、前の窓を新しい SND.UNA から測って右端の先へ送ります。
 #[test]
 fn ack_on_a_peer_retransmission_does_not_extend_the_send_window() {
     let mut n = TestNet::new(small_limits());
@@ -178,6 +177,11 @@ fn ack_on_a_peer_retransmission_does_not_extend_the_send_window() {
         beyond.is_empty(),
         "the core sent past the advertised right edge {edge}: {beyond:?}"
     );
+    assert!(
+        outs.iter().any(|o| !o.payload.is_empty()),
+        "the core sent nothing into the window up to {edge}: {}",
+        show(&outs)
+    );
 }
 
 /// 上の形を、窓の scale の無い相手、scale 0 の相手、相手と核の番号が 1 周をまたぐ所で確かめます。核は再送の
@@ -196,7 +200,8 @@ fn ack_on_a_peer_retransmission_takes_its_window_across_scales_and_the_wrap() {
             2816,
             1024,
         ),
-        // 相手の番号が A と B の間で 2^32 をまたぎ、核の確認 (SND.UNA) も 2^32 をまたぎます。
+        // 相手の番号が B の中で 2^32 をまたぎ (A は 2^32 - 150 から、B は 2^32 - 50 から 50 まで)、核の確認
+        // (SND.UNA) も 2^32 をまたぎます。
         (
             Open {
                 peer_iss: u32::MAX - 150,
@@ -285,12 +290,13 @@ fn zero_window_on_a_peer_retransmission_starts_the_persist_timer() {
     assert!(n.s.conn(c.slot).t.persist, "the core did not start probing");
     p.rcv = a2.ack;
     p.wnd = 0;
-    // 窓の probe に窓 0 のまま応えます。
+    // 窓の probe (SND.UNA - 1 の番号の中身の無い segment) に窓 0 のまま応えます。その間に中身は送りません。
     let mut probes = 0;
     for _ in 0..40 {
         n.advance(Duration::from_millis(100));
         let outs = n.drain();
-        if !outs.is_empty() {
+        assert!(outs.iter().all(|o| o.payload.is_empty()), "{}", show(&outs));
+        if outs.iter().any(|o| o.seq == p.rcv.wrapping_sub(1)) {
             probes += 1;
             n.peer_ack(&mut p, &[]);
             n.drain();
@@ -317,8 +323,7 @@ fn zero_window_on_a_peer_retransmission_starts_the_persist_timer() {
 
 /// 窓を開く ACK の後に、並べ替えで遅れた古い ACK (SEG.ACK < SND.UNA) が大きな窓を運んで届いても、核は窓を
 /// 変えません。相手の再送の segment が SND.WL1 を戻した後に、それより先の番号の古い segment が届く場合も
-/// 同じです (RFC 9293 3.10.7.4 は SND.UNA =< SEG.ACK の時だけ窓を更新します。Linux の tcp_ack も古い ACK の
-/// 窓を使いません)。
+/// 同じです (RFC 9293 3.10.7.4 は SND.UNA =< SEG.ACK の時だけ窓を更新します)。
 #[test]
 fn old_ack_after_a_newer_one_does_not_change_the_window() {
     // 相手は A、B の後に C (中身か中身の無い ACK) を古い確認と大きな窓で送り、その後に A を新しい確認で再送します。
@@ -416,4 +421,120 @@ fn reordered_segment_with_the_same_ack_follows_wl1() {
     let outs = n.drain();
     assert!(outs.iter().all(|o| o.payload.is_empty()), "{}", show(&outs));
     assert!(n.s.conn(c.slot).t.persist);
+}
+
+/// 窓を更新した segment の番号が SND.WL1 になるので、SND.WL1 は前の番号に戻ります。相手のデータ A と B が
+/// 失われて C だけが届き (SND.WL1 は C の番号)、相手が A を新しい確認と窓 0 で再送すると、SND.WL1 は A の番号に
+/// 戻ります。その後に相手が送る窓の更新は、同じ確認と B の番号 (A の再送の後の相手の SND.NXT で、C より前) を
+/// 持ちます。核はこの窓を使って送ります。SND.WL1 を C の番号に残すと、この更新を古い segment とみなして断り、
+/// 窓 0 のまま止まります。
+#[test]
+fn window_update_after_wl1_moved_back_is_taken() {
+    let (mut n, c, mut p) = open(PLAIN);
+    p.wnd = 22;
+    n.peer_ack(&mut p, &[]);
+    n.drain();
+    n.s.write(n.now, c, &vec![b'z'; 20_000]).unwrap();
+    let first = n.drain();
+    let sent: u32 = first.iter().map(|o| o.payload.len() as u32).sum();
+    let a = p.seg(FLAG_ACK, &[b'a'; 100]);
+    p.snd = p.snd.wrapping_add(100);
+    let b_seq = p.snd;
+    p.snd = p.snd.wrapping_add(100); // B は失われました
+    let c_seg = p.seg(FLAG_ACK, &[b'c'; 100]);
+    p.snd = p.snd.wrapping_add(100);
+    n.inject(&c_seg);
+    n.drain();
+    assert_eq!(n.s.conn(c.slot).t.snd_wl1, c_seg.seq);
+    let mut a2 = a.clone();
+    a2.ack = p.rcv.wrapping_add(sent);
+    a2.wnd = 0;
+    n.inject(&a2);
+    n.drain();
+    assert_eq!(snd_wnd(&mut n, c), 0);
+    assert_eq!(
+        n.s.conn(c.slot).t.snd_wl1,
+        a.seq,
+        "SND.WL1 did not move back"
+    );
+    p.rcv = a2.ack;
+    p.snd = b_seq;
+    p.wnd = 22;
+    n.peer_ack(&mut p, &[]);
+    let outs = n.drain();
+    assert_eq!(snd_wnd(&mut n, c), 22 << 7, "{}", show(&outs));
+    assert!(
+        sent_past(&outs, p.rcv.wrapping_add(22 << 7)).is_empty(),
+        "{}",
+        show(&outs)
+    );
+    assert!(
+        outs.iter().any(|o| !o.payload.is_empty()),
+        "the core did not send into the reopened window: {}",
+        show(&outs)
+    );
+}
+
+/// 核の RTO の後でも、相手の再送の segment に載った SND.UNA を進める ACK の窓を使います。核が先頭を再送した後に、
+/// 相手が A を再送して送ったものをすべて確認し、窓を 1024 byte にします。
+#[test]
+fn ack_on_a_peer_retransmission_after_the_cores_rto() {
+    let (mut n, c, mut p) = open(PLAIN);
+    let (sent, a) = lose_a_deliver_b(&mut n, c, &mut p, 22, 20_000);
+    let mut rtx = Vec::new();
+    for _ in 0..30 {
+        n.advance(Duration::from_millis(100));
+        rtx.extend(n.drain());
+        if !rtx.is_empty() {
+            break;
+        }
+    }
+    assert!(
+        rtx.iter().any(|o| o.seq == p.rcv && !o.payload.is_empty()),
+        "the core did not retransmit after its RTO: {}",
+        show(&rtx)
+    );
+    let mut a2 = a.clone();
+    a2.ack = p.rcv.wrapping_add(sent);
+    a2.wnd = 8;
+    let edge = a2.ack.wrapping_add(8 << 7);
+    n.inject(&a2);
+    let outs = n.drain();
+    assert_eq!(snd_wnd(&mut n, c), 8 << 7);
+    let beyond = sent_past(&outs, edge);
+    assert!(beyond.is_empty(), "the core sent past {edge}: {beyond:?}");
+}
+
+/// 相手の FIN が順番の外で先に届いた後も同じです。B が FIN を運び、失われた A の再送が新しい確認と小さめの窓を
+/// 運びます。核は窓を使い、A と B の中身と FIN を受け取ります。
+#[test]
+fn ack_on_a_peer_retransmission_after_its_fin() {
+    let (mut n, c, mut p) = open(PLAIN);
+    p.wnd = 22;
+    n.peer_ack(&mut p, &[]);
+    n.drain();
+    n.s.write(n.now, c, &vec![b'z'; 20_000]).unwrap();
+    let first = n.drain();
+    let sent: u32 = first.iter().map(|o| o.payload.len() as u32).sum();
+    let a = p.seg(FLAG_ACK, &[b'a'; 100]);
+    p.snd = p.snd.wrapping_add(100);
+    let b = p.seg(FLAG_ACK | FLAG_FIN, &[b'b'; 100]);
+    p.snd = p.snd.wrapping_add(101);
+    n.inject(&b);
+    n.drain();
+    let mut a2 = a.clone();
+    a2.ack = p.rcv.wrapping_add(sent);
+    a2.wnd = 8;
+    let edge = a2.ack.wrapping_add(8 << 7);
+    n.inject(&a2);
+    let outs = n.drain();
+    assert_eq!(snd_wnd(&mut n, c), 8 << 7);
+    let beyond = sent_past(&outs, edge);
+    assert!(beyond.is_empty(), "the core sent past {edge}: {beyond:?}");
+    assert!(
+        outs.iter().any(|o| o.ack == p.snd),
+        "the core did not acknowledge the FIN: {}",
+        show(&outs)
+    );
+    assert_eq!(n.read_all(c).len(), 200);
 }
