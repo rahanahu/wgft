@@ -131,6 +131,16 @@
 # TCP_BUF_MAX, in bytes, raises the largest TCP buffer autotuning may use (the third value of
 # net.ipv4.tcp_rmem and tcp_wmem) in the client and LAN host namespaces, so that the kernel's TCP
 # ends are not what limits a path with a delay; the agent's own netstack keeps its own limits.
+# Those buffers count against net.ipv4.tcp_mem, which is the whole VM's: with 64 MiB buffers and
+# 4 streams the client and the LAN host of a 2 GiB VM went past it, and the receiver dropped
+# segments for lack of protocol memory and pruned its out-of-order queue. So with TCP_BUF_MAX the
+# pressure and maximum of tcp_mem are raised, never lowered, in each VM holding a TCP end (this VM,
+# and the agent VM with TARGET_LOCAL) to STREAMS x 2 x TCP_BUF_MAX x 1.25, at most half of the VM's
+# memory, and put back at exit. When half the memory is not enough the run says so and names a VM
+# size that would do. The result line has, per VM, tcp_mem's maximum and the TCP memory in use at
+# the start and the end of the window (_tcp_mem_max_mb, _tcpmem_start_mb, _tcpmem_end_mb), and the
+# namespaces' memory pressure counters when they move (tcp_prune, tcp_rcvpruned, tcp_ofopruned,
+# tcp_ofodrop, tcp_mempressures, tcp_abortonmem).
 #
 # AGENT_AT=<ip>:<port> runs the agent in another VM, for `lab/lab paired --split`: this VM has the
 # client, vps, router and LAN host namespaces (lab/netns.sh up-split-peer) and the agent VM has
@@ -460,14 +470,59 @@ restore_rmem() {
   restore_or_fail "put tcp_rmem back to $rmem_was in the $READER_NS namespace" set_rmem $rmem_was || return 1
   rmem_set=
 }
+# tcp_mem of the VMs holding a TCP end, raised for TCP_BUF_MAX and put back at exit
+tcpmem_sysctl() { # tcpmem_sysctl here|agent <sysctl args...>: sysctl in that VM's root namespace
+  local where=$1
+  shift
+  if [ "$where" = agent ]; then agentx -- sysctl "$@"; else sysctl "$@"; fi
+}
+tcpmem_memkb() { # tcpmem_memkb here|agent: the VM's MemTotal in kB
+  if [ "$1" = agent ]; then agentx -- awk '$1 == "MemTotal:" { print $2 }' /proc/meminfo; else awk '$1 == "MemTotal:" { print $2 }' /proc/meminfo; fi
+}
+tcpmem_was_here= tcpmem_was_agent=
+raise_tcpmem() { # raise_tcpmem here|agent
+  local where=$1 was memkb new
+  was=$(tcpmem_sysctl "$where" -n net.ipv4.tcp_mem | tr -s ' \t' ' ') || return 1
+  memkb=$(tcpmem_memkb "$where") || return 1
+  new=$(awk -v w="$was" -v kb="$memkb" -v s="$STREAMS" -v b="$TCP_BUF_MAX" -v pg="$(getconf PAGESIZE)" -v vm="$where" 'BEGIN {
+    split(w, v, " "); need = s * 2 * b * 1.25 / pg; cap = kb * 1024 / 2 / pg
+    if (need > cap) {
+      printf "WARN  TCP memory: %d streams x 2 x %d bytes x 1.25 need %d MiB, more than half of the %s VM'"'"'s %d MiB; tcp_mem is capped at %d MiB; WGFT_LAB_MEM=%dGiB would hold it\n",
+        s, b, need * pg / 1048576, vm == "here" ? "peer" : "agent", kb / 1024, cap * pg / 1048576, int(need * pg * 2 / 1073741824) + 1 > "/dev/stderr"
+      need = cap
+    }
+    p = v[2] > need ? v[2] : need; m = v[3] > need ? v[3] : need
+    printf "%d %d %d", v[1], p, m }') || return 1
+  [ "$new" = "$was" ] && { echo "   tcp_mem in the ${where/here/peer} VM: $was pages, enough"; return 0; }
+  if [ "$where" = agent ]; then tcpmem_was_agent=$was; else tcpmem_was_here=$was; fi
+  tcpmem_sysctl "$where" -qw net.ipv4.tcp_mem="$new" || return 1
+  echo "   tcp_mem in the ${where/here/peer} VM: $was -> $new pages"
+}
+restore_tcpmem() {
+  local rc=0
+  if [ -n "$tcpmem_was_here" ]; then
+    restore_or_fail "put tcp_mem back to $tcpmem_was_here" tcpmem_sysctl here -qw net.ipv4.tcp_mem="$tcpmem_was_here" || rc=1
+    tcpmem_was_here=
+  fi
+  if [ -n "$tcpmem_was_agent" ]; then
+    restore_or_fail "put tcp_mem back to $tcpmem_was_agent in the agent VM" tcpmem_sysctl agent -qw net.ipv4.tcp_mem="$tcpmem_was_agent" || rc=1
+    tcpmem_was_agent=
+  fi
+  return "$rc"
+}
 on_exit() {
   local rc=$?
   cleanup
   restore_gso || rc=1
   restore_rmem || rc=1
+  restore_tcpmem || rc=1
   exit "$rc"
 }
 trap on_exit EXIT
+if [ -n "$TCP_BUF_MAX" ]; then
+  raise_tcpmem here || { echo "FAIL  cannot raise tcp_mem for TCP_BUF_MAX"; exit 1; }
+  if [ -n "$TARGET_LOCAL" ]; then raise_tcpmem agent || { echo "FAIL  cannot raise tcp_mem in the agent VM for TCP_BUF_MAX"; exit 1; }; fi
+fi
 gso_now=$(agent_gso "$AGENT_GSO") ||
   { echo "FAIL  cannot turn $AGENT_GSO UDP segmentation offload on the agent's eth0: $gso_now"; exit 1; }
 echo "   agent eth0: $gso_now"

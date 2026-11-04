@@ -4,23 +4,26 @@
 # and acts on the lab namespaces that VM holds: home in the agent VM; client, vps, homerouter and lan
 # in the peer VM.
 #
-#   splitcase.sh save            record the TCP buffer sysctls of the lab namespaces, once after setup
+#   splitcase.sh save            record the TCP buffer sysctls of the lab namespaces and the VM's
+#                                tcp_mem, once after setup
 #   splitcase.sh reset           stop every process in the lab namespaces and, in the peer VM, any
 #                                tcpquality run a timed-out case left behind; remove the agent's
 #                                interface and table in home and the netem qdiscs of the peer's
-#                                vps-homerouter link; put the recorded sysctls back
+#                                vps-homerouter link; put the recorded sysctls and tcp_mem back
 #   splitcase.sh target lan|local  move the LAN host's address as `--target` sets it up: local puts
 #                                192.168.50.3 on home's lo (agent VM) and takes it off lan's eth0
 #                                (peer VM); lan does the reverse
 #
 # tcpquality.sh itself undoes at exit what a run changes (netem, the server, the agent, UDP GSO and
 # KERNEL_RMEM_MAX), except TCP_BUF_MAX, which raises tcp_rmem and tcp_wmem in client and in the LAN
-# host's namespace (lan, or home with --target local) and leaves them raised. agentd runs in the root
-# namespace of the agent VM and is left alone.
+# host's namespace (lan, or home with --target local) and leaves them raised. tcp_mem, which
+# tcpquality.sh raises for TCP_BUF_MAX and puts back at exit, is put back here too, for a run that
+# was killed before its exit. agentd runs in the root namespace of the agent VM and is left alone.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/sandbox.sh"
 STATE=/run/wgft-split-case.state
+TCPMEM_STATE=/run/wgft-split-case.tcp_mem
 LAN_ADDR=192.168.50.3  # lab/netns.sh LAN_ADDR
 HR_LAN=192.168.50.1    # lab/netns.sh HR_LAN
 
@@ -38,7 +41,9 @@ case "${1:-}" in
     for ns in $(lab_ns); do
       echo "$ns $(ip netns exec "$ns" sysctl -n net.ipv4.tcp_rmem | tr -s ' \t' ' ')|$(ip netns exec "$ns" sysctl -n net.ipv4.tcp_wmem | tr -s ' \t' ' ')" >> "$STATE"
     done
+    sysctl -n net.ipv4.tcp_mem | tr -s ' \t' ' ' > "$TCPMEM_STATE"
     cat "$STATE"
+    echo "tcp_mem $(cat "$TCPMEM_STATE")"
     ;;
   reset)
     [ -s "$STATE" ] || { echo "splitcase.sh: no saved state in $STATE; run save after the setup" >&2; exit 1; }
@@ -81,6 +86,11 @@ case "${1:-}" in
       [ "$(ip netns exec "$ns" sysctl -n net.ipv4.tcp_rmem | tr -s ' \t' ' ')" = "$r" ] || { echo "splitcase.sh: tcp_rmem of $ns stays changed"; rc=1; }
       [ "$(ip netns exec "$ns" sysctl -n net.ipv4.tcp_wmem | tr -s ' \t' ' ')" = "$w" ] || { echo "splitcase.sh: tcp_wmem of $ns stays changed"; rc=1; }
     done < "$STATE"
+    if [ -s "$TCPMEM_STATE" ]; then
+      m=$(cat "$TCPMEM_STATE")
+      sysctl -qw net.ipv4.tcp_mem="$m" || rc=1
+      [ "$(sysctl -n net.ipv4.tcp_mem | tr -s ' \t' ' ')" = "$m" ] || { echo "splitcase.sh: tcp_mem stays changed"; rc=1; }
+    fi
     # sockets left over, orphaned or in TIME_WAIT, keep TCP memory, which matters with 64 MiB buffers;
     # the counts per namespace go to the log
     for ns in $(lab_ns); do
