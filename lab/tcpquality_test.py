@@ -139,6 +139,50 @@ class CpuPaired(unittest.TestCase):
             self.assertIn("--placement apart", p.stderr)
             self.assertIn("one CPU", p.stderr)
 
+    def lab_paired(self, args, cases=None):
+        # lab/lab paired with arguments that must stop before provisioning. --out lies under /proc, so even
+        # a command line that passed every check would stop at creating it, before any build or VM
+        lab = os.path.join(os.path.dirname(TQ), "lab")
+        with tempfile.TemporaryDirectory() as d:
+            if cases is not None:
+                path = os.path.join(d, "cases.txt")
+                with open(path, "w") as f:
+                    f.write(cases)
+                args = [a.replace("CASES", path) for a in args]
+            p = subprocess.run(["bash", lab, "paired", "--out", "/proc/wgft-no-such-dir/out", *args], capture_output=True, text=True,
+                               env={k: v for k, v in os.environ.items() if not k.startswith("WGFT_LAB")}, timeout=60)
+        self.assertNotIn("built", p.stdout + p.stderr)
+        self.assertNotIn("deleting", p.stdout + p.stderr)
+        return p.returncode, p.stderr
+
+    def test_cases_are_checked_before_provisioning(self):
+        good = "# comment\nupload fast --direction up --tool iperf3\n\nlocal-down fast --target local --tool iperf3 --streams 4\n"
+        base = ["--split", "--placement", "apart", "--cases", "CASES"]
+        for args, cases, want in (
+                (["--cases", "CASES", "rust", "kernel"], good, "--cases goes with --split"),
+                (base + ["fast", "rust", "kernel"], good, "give the two arms only"),
+                (base + ["rust", "kernel"], "a fast\na fast --direction up\n", "the name a is used twice"),
+                (base + ["rust", "kernel"], "a fast --vcpus 2\n", "--vcpus is not a per-case flag"),
+                (base + ["rust", "kernel"], "a fast --direction\n", "--direction wants a value"),
+                (base + ["rust", "kernel"], "# nothing\n", "has no case"),
+                (base + ["rust", "kernel"], "a fast --tool iperf3\nb slow\n", "the path is fast, rate or delay"),
+                (base + ["rust", "kernel"], "a fast --tool iperf3\nb fast --target local\n", "--target local wants --tool iperf3"),
+                (base + ["gvisor", "rust"], good, "--placement apart pins"),
+        ):
+            rc, err = self.lab_paired(args, cases)
+            self.assertEqual(rc, 1, err)
+            self.assertIn(want, err)
+        # the case that is wrong is named
+        rc, err = self.lab_paired(base + ["rust", "kernel"], "a fast --tool iperf3\nb fast --target local\n")
+        self.assertIn("case b: see the message above", err)
+        rc, err = self.lab_paired(base + ["rust", "kernel"], None)
+        self.assertEqual(rc, 1, err)
+        self.assertIn("is not a readable file", err)
+        # a file that passes every check gets as far as the output directory, which cannot be made
+        rc, err = self.lab_paired(base + ["--tool", "iperf3", "rust", "kernel"], good)
+        self.assertNotEqual(rc, 0, err)
+        self.assertIn("/proc/wgft-no-such-dir", err)
+
     def test_peer_value_does_not_change_a_single_vm_log(self):
         lines = [l + " peervm_maxcpu=0.99" if l.startswith("PAIRED") else l for l in synthetic_log()]
         self.assertEqual(analyse(lines), (0, EXPECTED_PLAIN))

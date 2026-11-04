@@ -445,6 +445,36 @@ client と LAN のホストの TCP のバッファの上限は 64 MiB に上げ�
 
 `tcpquality.sh` の `CPU=1` の結果の行には、interface ごとの packet の数と平均の大きさ、namespace ごとの TCP の segment と UDP の datagram の数、tunnel を戻る ACK の数 (`tun_ack_pkts_per_gb`)、受け手の GRO の後の segment の大きさ (`recv_seg_avg_b`) も入ります。
 
+### 1 組の VM で複数の case を流す (`--cases`)
+
+```sh
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus 4 --base HEAD --tool iperf3 --cases cases.txt rust base:rust
+```
+
+`--split` の 1 つの case のうち、測るのは約 3 分で、残りの約 2.5 分は VM 2 台の作成、起動、build の導入と削除です。
+`--cases FILE` は 1 組の VM で FILE の case を順に流し、この固定の費用を case の数で割ります。
+
+- FILE:1 行が 1 case で、`<名前> <経路> [case ごとのフラグ...]` と書きます。
+  `#` から後と空行は読みません。
+  例は `up-s1 fast --direction up --streams 1` と `d10-down delay --delay-ms 10 --direction down` です
+- case ごとのフラグ:`--direction`、`--bytes`、`--tool`、`--streams`、`--udp-ping`、`--bulk-mbit`、`--agent-gso`、`--kernel-rmem-max`、`--delay-ms`、`--delay-rate-mbit`、`--delay-queue-pkts`、`--target`、`--rounds`、`--runs` です。
+  コマンド行に書いた値は全 case の既定になり、行の値がそれを上書きします。
+  VM の形を決めるフラグ (`--vcpus`、`--peer-vcpus`、`--placement`、`--base`、`--x-agent-env` など) と腕はコマンド行だけに書き、全 case に共通です
+- 確かめ:VM を立てる前に全 case を確かめ、誤りがあればその case の名前を出して止まります
+- 出力:case ごとに `--out` の下の `<名前>/` に、今と同じ形の `paired.log`、`header.txt`、`result.txt`、`host-samples.txt`、round ごとのログを置きます。
+  `PLAN` の行に `case_index` と `cases` が付き、`header.txt` に VM の組を使い回したことと、前に流れた case の数を書きます。
+  `--out` の直下には VM の組を立てた記録 (`setup.txt`、`vm-*.log`、`guestinfo.txt`) と、case ごとの結果の一覧 `cases.log` を置きます
+- case の間:両方の VM を `lab/splitcase.sh` で戻します。
+  lab の namespace に残ったプロセスと、時間切れの case が残した `tcpquality` の実行を止めます。
+  netem の qdisc と agent の interface を消し、TCP のバッファの sysctl (`TCP_BUF_MAX` が上げる) を VM を立てた時の値に戻します。
+  `--target` が前の case と違えば転送先のアドレスを移し、agentd と LAN の疎通を確かめます。
+  割り込みと RPS の固定 (`--placement apart`) と NIC の queue は、立てた時のままです
+- 失敗:失敗した case は次の case を止めません。
+  VM の組を戻せないときは、残りの case を流さず、`cases.log` に `status=not_run` と書きます。
+  どれかの case が失敗すると、終了コードが 0 以外になります
+- 未確認:`--cases` はまだラボで流していません。
+  使い回した VM の組の値が、新しく立てた組の値と同じになるかも未確認です
+
 ## 対応する VPS の環境
 
 カーネルと nftables の対応範囲は[セットアップの前提](../docs/manual/setup.md)に従います。
