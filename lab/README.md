@@ -442,6 +442,16 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
 netem の待ち行列の長さは `tcpquality.sh` が決め、20 Gbit/s で遅れの間に飛ぶ packet の 2 倍にします。
 待ち行列で packet が落ちた実行は失敗にします。
 client と LAN のホストの TCP のバッファの上限は 64 MiB に上げ、カーネルの TCP の端が速さを抑えないようにします。
+このバッファは VM 全体の TCP のメモリの上限 (`net.ipv4.tcp_mem`) に数えられます。
+2 GiB の相手の VM で 4 stream を流すと、client と LAN のホストがこの上限を超え、受け手がメモリの不足で segment を捨て、順序外の待ち行列を刈りました。
+そのため `tcpquality.sh` は、TCP の端を持つ VM (相手の VM と、`--target local` では agent の VM) の `tcp_mem` の pressure と最大を、stream の数 × 2 × バッファの上限 × 1.25 まで上げ、終わると戻します。
+上げる値は VM のメモリの半分までで、足りなければ警告を出し、足りる `WGFT_LAB_MEM` の大きさを示します。
+`--cases` では case の間にも戻します。
+`--split` の無い 1 台の VM の `lab paired` の `delay` の経路も、同じく `tcp_mem` を上げます。
+この変更の前に取ったカーネルモードの `delay` の経路の値は、上げた後の値と混ぜません。
+結果の行には、VM ごとの `tcp_mem` の最大 (`_tcp_mem_max_mb`) と、窓の始めと終わりに使っていた TCP のメモリ (`_tcpmem_start_mb`、`_tcpmem_end_mb`) が入ります。
+namespace ごとのメモリの圧迫の数 (`tcp_prune`、`tcp_rcvpruned`、`tcp_ofopruned`、`tcp_ofodrop`、`tcp_mempressures`、`tcp_abortonmem`) は、動いたときだけ入ります。
+上げた後に崩れが消えるかは未確認です。
 
 `tcpquality.sh` の `CPU=1` の結果の行には、interface ごとの packet の数と平均の大きさ、namespace ごとの TCP の segment と UDP の datagram の数、tunnel を戻る ACK の数 (`tun_ack_pkts_per_gb`)、受け手の GRO の後の segment の大きさ (`recv_seg_avg_b`) も入ります。
 
@@ -469,7 +479,7 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus
   `--out` の直下には VM の組を立てた記録 (`setup.txt`、`vm-*.log`、`guestinfo.txt`) と、case ごとの結果の一覧 `cases.log` を置きます
 - case の間:両方の VM を `lab/splitcase.sh` で戻します。
   lab の namespace に残ったプロセスと、時間切れの case が残した `tcpquality` の実行を止めます。
-  netem の qdisc と agent の interface を消し、TCP のバッファの sysctl (`TCP_BUF_MAX` が上げる) を VM を立てた時の値に戻します。
+  netem の qdisc と agent の interface を消し、TCP のバッファの sysctl (`TCP_BUF_MAX` が上げる) と `tcp_mem` を VM を立てた時の値に戻します。
   `--target` が前の case と違えば転送先のアドレスを移し、agentd と LAN の疎通を確かめます。
   割り込みと RPS の固定 (`--placement apart`) と NIC の queue は、立てた時のままです
 - 失敗:失敗した case は次の case を止めません。

@@ -288,6 +288,33 @@ class GuestCounters(unittest.TestCase):
         self.assertEqual(got["homerouter_lan0_tx_queue_0_kicks_per_s"], "300")
 
 
+class TcpMemory(unittest.TestCase):
+    def test_parse_tcpmem(self):
+        sockstat = "sockets: used 120\nTCP: inuse 9 orphan 0 tw 3 alloc 12 mem 20480\nUDP: inuse 2 mem 4\n"
+        self.assertEqual(tq.parse_tcpmem(sockstat, "45984\t61312\t91968\n"),
+                         [("tcpmem_pages", 20480), ("tcp_mem_pressure_pages", 61312), ("tcp_mem_max_pages", 91968)])
+        self.assertEqual(tq.parse_tcpmem("TCP: inuse 0\n", "1 2\n"), [])
+
+    def test_snapdiff_tcpmem(self):
+        common = "peervm_busy_us=%d peervm_user_us=0 peervm_sys_us=0 peervm_soft_us=0 peervm_irq_us=0 peervm_steal_us=0 " \
+                 "peervm_tcpmem_pages=%d peervm_tcp_mem_pressure_pages=163840 peervm_tcp_mem_max_pages=163840 " \
+                 "snmp_client_tcp_ofodrop=%d snmp_client_tcp_mempressures=%d snmp_client_tcp_rcvpruned=0"
+        p = subprocess.run([sys.executable, TQ, "snapdiff", "2000000000", "10", "up", common % (0, 256, 5, 0),
+                            common % (1000000, 131072, 105, 2)], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        got = dict(kv.split("=") for kv in p.stdout.split())
+        pg = os.sysconf("SC_PAGE_SIZE")
+        self.assertEqual(got["peervm_tcpmem_start_mb"], "%.1f" % (256 * pg / 1048576))
+        self.assertEqual(got["peervm_tcpmem_end_mb"], "%.1f" % (131072 * pg / 1048576))
+        self.assertEqual(got["peervm_tcp_mem_max_mb"], "%.0f" % (163840 * pg / 1048576))
+        self.assertEqual((got["client_tcp_ofodrop"], got["client_tcp_mempressures"]), ("100", "2"))
+        self.assertNotIn("client_tcp_rcvpruned", got)
+
+    def test_snmp_keys_cover_memory_pressure(self):
+        for name in ("PruneCalled", "RcvPruned", "OfoPruned", "TCPOFODrop", "TCPMemoryPressures", "TCPAbortOnMemory"):
+            self.assertIn(("TcpExt", name), tq.SNMP_KEYS)
+
+
 class HostCounters(unittest.TestCase):
     def test_sampler_keeps_exited_threads_and_counts_new_ones(self):
         s = tq.HostSampler(pcores={0})

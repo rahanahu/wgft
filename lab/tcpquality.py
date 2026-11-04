@@ -1254,6 +1254,8 @@ SNMP_KEYS = {("TcpExt", "TCPOFOQueue"): "tcp_ofoq", ("TcpExt", "TCPOFODrop"): "t
              ("TcpExt", "TCPSACKReorder"): "tcp_sackreorder", ("TcpExt", "TCPTSReorder"): "tcp_tsreorder",
              ("TcpExt", "TCPLostRetransmit"): "tcp_lostretrans", ("TcpExt", "TCPSpuriousRTOs"): "tcp_spurrto",
              ("TcpExt", "TCPFastRetrans"): "tcp_fastretrans", ("TcpExt", "TCPTimeouts"): "tcp_timeouts",
+             ("TcpExt", "RcvPruned"): "tcp_rcvpruned", ("TcpExt", "OfoPruned"): "tcp_ofopruned",
+             ("TcpExt", "TCPMemoryPressures"): "tcp_mempressures", ("TcpExt", "TCPAbortOnMemory"): "tcp_abortonmem",
              ("Tcp", "InSegs"): "tcp_insegs", ("Tcp", "OutSegs"): "tcp_outsegs",
              ("Tcp", "RetransSegs"): "tcp_retrans", ("Udp", "InDatagrams"): "udp_in",
              ("Udp", "OutDatagrams"): "udp_out", ("Udp", "RcvbufErrors"): "udp_rcvbuferr",
@@ -1318,6 +1320,7 @@ def snap_line(prefix, pid="", cg="", *specs):
                 pass
         kv += [("proc_vcs", vcs), ("proc_nvcs", nvcs)]
     kv += guest_counters()
+    kv += tcpmem_counters()
     # nicirq:<ns>:<ifname> and thread:<label>:<comm> (with a pid): the placement counters above
     for spec in specs:
         kind, _, rest = spec.partition(":")
@@ -1362,6 +1365,34 @@ def snap_line(prefix, pid="", cg="", *specs):
                         if k:
                             out.append("snmp_%s_%s=%s" % (ns, k, num))
     return " ".join(out)
+
+
+def parse_tcpmem(sockstat, tcp_mem):
+    # the TCP memory in use (pages, the "mem" of the TCP: line of /proc/net/sockstat) and tcp_mem's
+    # three values (pages); both are the whole VM's
+    out = []
+    for l in sockstat.splitlines():
+        v = l.split()
+        if v and v[0] == "TCP:" and "mem" in v:
+            out.append(("tcpmem_pages", int(v[v.index("mem") + 1])))
+    t = tcp_mem.split()
+    if len(t) == 3:
+        out += [("tcp_mem_pressure_pages", int(t[1])), ("tcp_mem_max_pages", int(t[2]))]
+    return out
+
+
+def tcpmem_counters():
+    try:
+        with open("/proc/net/sockstat") as f:
+            ss = f.read()
+        with open("/proc/sys/net/ipv4/tcp_mem") as f:
+            tm = f.read()
+    except OSError:
+        return []
+    try:
+        return parse_tcpmem(ss, tm)
+    except (ValueError, IndexError):
+        return []
 
 
 def snap(prefix, pid="", cg="", *specs):
@@ -1488,6 +1519,13 @@ def snapdiff(nbytes, window_s, direction, before, after):
             if d("%s_idle_%s_us" % (p, st)) is not None:
                 put("%s_idle_%s_share" % (p, st), d("%s_idle_%s_us" % (p, st)) / 1e6 / t)
         out.extend(placement_parts(p, d, a, t))
+        # the VM's TCP memory: tcp_mem's maximum, and the memory in use at the start and the end
+        pg = os.sysconf("SC_PAGE_SIZE")
+        if p + "_tcpmem_pages" in a and p + "_tcpmem_pages" in b:
+            put(p + "_tcpmem_start_mb", int(b[p + "_tcpmem_pages"]) * pg / 1048576, "%.1f")
+            put(p + "_tcpmem_end_mb", int(a[p + "_tcpmem_pages"]) * pg / 1048576, "%.1f")
+        if p + "_tcp_mem_max_pages" in a:
+            put(p + "_tcp_mem_max_mb", int(a[p + "_tcp_mem_max_pages"]) * pg / 1048576, "%.0f")
     if "agentvm" in prefixes and "peervm" in prefixes:
         put("vm_cpu_s_per_gb", total / gb if gb > 0 else -1)
         put("vm_cpu_share", total / t)
