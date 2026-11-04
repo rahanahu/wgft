@@ -125,13 +125,17 @@ mod tests {
     #[test]
     fn the_running_store_is_what_the_bound_counts() {
         let mtu = wgft_wgstack::MAX_MTU;
+        let caps = flowpool::Limits::default();
+        let workers = wgft_udp_batch::pool::MAX_WORKERS;
         for b in [
             Batching::OFF,
-            Batching::new(Some(1), flowpool::Limits::default()),
-            Batching::default(),
+            Batching::for_workers(Some(1), caps, workers),
+            Batching::for_workers(None, caps, workers),
+            Batching::for_workers(Some(1), caps, 0),
+            Batching::for_workers(None, caps, 0),
         ] {
             let b = b.running();
-            let lanes = crypto_lanes(b, wgft_udp_batch::pool::MAX_WORKERS);
+            let lanes = crypto_lanes(b, b.workers());
             let rx = rx_store(b, mtu + wgft_wireguard::DATA_OVERHEAD, lanes);
             let tx = tx_store(b, mtu, mtu + wgft_wireguard::DATA_OVERHEAD, lanes);
             assert_eq!(rx.slots(), b.slots());
@@ -154,7 +158,7 @@ mod tests {
             assert_eq!(b.bytes(), store_bytes(b, mtu, lanes) + second);
             assert_eq!(b.bytes(), all_store_bytes(b, mtu, lanes));
             // 作業者の少ないホストの置き場は、上界が数える置き場より大きくならない
-            for workers in 0..wgft_udp_batch::pool::MAX_WORKERS {
+            for workers in 0..=b.workers() {
                 assert!(store_bytes(b, mtu, crypto_lanes(b, workers)) <= b.bytes());
             }
         }

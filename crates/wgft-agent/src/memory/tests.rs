@@ -112,7 +112,11 @@ mod table {
             let limits = flowpool::Limits { udp, tcp };
             let core = Bound::for_limits(&CoreLimits::with_max_flows(tcp), MAX_MTU);
             (
-                MemoryBound::for_limits(limits, Batching::derived(limits)),
+                // 表は作業者を使うホストの値である。作業者の無いホストは、2 つ目の置き場と暗号の項を数えない
+                MemoryBound::for_limits(
+                    limits,
+                    Batching::for_workers(None, limits, wgft_udp_batch::pool::MAX_WORKERS),
+                ),
                 core,
             )
         });
