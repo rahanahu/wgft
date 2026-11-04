@@ -142,6 +142,8 @@ mod sackpeer_tests;
 #[cfg(test)]
 mod scan_tests;
 #[cfg(test)]
+mod send_turn_rule_tests;
+#[cfg(test)]
 mod send_window_tests;
 #[cfg(test)]
 mod send_turn_tests;
