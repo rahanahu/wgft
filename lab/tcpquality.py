@@ -90,6 +90,7 @@ import hashlib
 import math
 import os
 import random
+import re
 import socket
 import statistics
 import struct
@@ -992,6 +993,47 @@ class ThreadSampler:
 
 THREAD_SAMPLERS = {}
 
+# the kernel threads bound to one CPU: workqueue workers (kworker/<N>:<id>, which run, among other
+# work, kernel WireGuard's per-CPU crypto) and the softirq threads (ksoftirqd/<N>)
+KTHREAD_KINDS = (("kw", re.compile(r"kworker/(\d+):")), ("ksi", re.compile(r"ksoftirqd/(\d+)$")))
+
+
+def parse_kthread(comm):
+    # (kind, cpu) of a per-CPU kernel thread's comm, ("kwu", -1) for an unbound worker, or None
+    for kind, rx in KTHREAD_KINDS:
+        m = rx.match(comm)
+        if m:
+            return kind, int(m.group(1))
+    if comm.startswith("kworker/u"):
+        return "kwu", -1
+    return None
+
+
+def kthread_counters(proc="/proc", ncpu=None):
+    # snap_line's kthreads: the CPU time so far (utime and stime, us) of the per-CPU kernel workers,
+    # summed per CPU (kw_cpu<N>_us, ksi_cpu<N>_us), and of the unbound workers (kwu_us). Kernel
+    # threads are processes of their own, so one pass over /proc reads each comm and stat once
+    hz = os.sysconf("SC_CLK_TCK")
+    ncpu = ncpu or os.cpu_count() or 1
+    tot = {("kw", c): 0 for c in range(ncpu)}
+    tot.update({("ksi", c): 0 for c in range(ncpu)})
+    tot[("kwu", -1)] = 0
+    for d in os.listdir(proc):
+        if not d.isdigit():
+            continue
+        try:
+            with open("%s/%s/comm" % (proc, d)) as f:
+                k = parse_kthread(f.read().strip())
+            if k is None:
+                continue
+            with open("%s/%s/stat" % (proc, d)) as f:
+                st = f.read().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if k in tot:
+            tot[k] += (int(st[11]) + int(st[12])) * 1000000 // hz
+    return [("kwu_us" if kind == "kwu" else "%s_cpu%d_us" % (kind, c), v) for (kind, c), v in sorted(tot.items())]
+
 
 def thread_counters_of(pid, label, comm):
     # snap_line's thread:<label>:<comm>: the sampler of that thread of pid, started on the first call
@@ -1140,7 +1182,7 @@ SNMP_KEYS = {("TcpExt", "TCPOFOQueue"): "tcp_ofoq", ("TcpExt", "TCPOFODrop"): "t
 def snap_line(prefix, pid="", cg="", *specs):
     # one line of cumulative counters, each key starting with <prefix>_:
     #   busy_us, user_us, sys_us, soft_us, irq_us, steal_us, cpu<N>_us (busy per CPU) and
-    #   cpu<N>_soft_us (softirq per CPU) from
+    #   cpu<N>_{soft,user,sys}_us (softirq, user and system time per CPU) from
     #   /proc/stat, busy being user, nice, system, irq and softirq as in tcpquality.sh; ctxt;
     #   with a pid, proc_us (from the cgroup's cpu.stat when cg is given) and proc_vcs and
     #   proc_nvcs, the voluntary and involuntary context switches summed over its threads.
@@ -1148,7 +1190,8 @@ def snap_line(prefix, pid="", cg="", *specs):
     # snmp:<ns> adds snmp_<ns>_<counter> from /proc/net/snmp, read in that namespace;
     # nicirq:<ns>:<ifname> adds nicirq_cpu<N> and nicirq_eff (nicirq_counters) and, with a pid,
     # thread:<label>:<comm> adds thr_<label>_* (ThreadSampler, which keeps sampling between calls in
-    # a long-lived process such as agentd).
+    # a long-lived process such as agentd); kthreads adds the per-CPU kernel workers' time
+    # (kthread_counters).
     hz = os.sysconf("SC_CLK_TCK")
     us = lambda ticks: int(ticks) * 1000000 // hz
     kv = [("t", "%.6f" % time.time())]
@@ -1162,7 +1205,7 @@ def snap_line(prefix, pid="", cg="", *specs):
                        ("sys_us", us(v[3])), ("irq_us", us(v[6])), ("soft_us", us(v[7])), ("steal_us", us(v[8]))]
             elif v[0].startswith("cpu"):
                 kv.append((v[0] + "_us", us(sum(int(v[i]) for i in (1, 2, 3, 6, 7)))))
-                kv.append((v[0] + "_soft_us", us(v[7])))
+                kv += [(v[0] + "_soft_us", us(v[7])), (v[0] + "_user_us", us(int(v[1]) + int(v[2]))), (v[0] + "_sys_us", us(v[3]))]
             elif v[0] == "ctxt":
                 kv.append(("ctxt", v[1]))
     # the per-CPU input backlog: packets dropped because netdev_max_backlog was full, and rounds of
@@ -1201,11 +1244,13 @@ def snap_line(prefix, pid="", cg="", *specs):
             kv += nicirq_counters(*rest.split(":", 1))
         elif kind == "thread" and pid:
             kv += thread_counters_of(pid, *rest.split(":", 1))
+        elif kind == "kthreads":
+            kv += kthread_counters()
     out = ["%s_%s=%s" % (prefix, k, v) for k, v in kv]
     by_ns = {}
     for spec in specs:
         kind, _, rest = spec.partition(":")
-        if kind in ("nicirq", "thread"):
+        if kind in ("nicirq", "thread", "kthreads"):
             continue
         ns = rest.split(":")[0]
         by_ns.setdefault(ns, []).append((kind, rest))
@@ -1246,7 +1291,9 @@ def snap(prefix, pid="", cg="", *specs):
 def placement_parts(p, d, a, t):
     # snapdiff's placement values of the VM prefix p (d: the window's increase of a key, a: the
     # after snapshot, t: the window in seconds). For the agent and the peer VM, the busy share of each vCPU
-    # (<p>_cpu<N>_busy, 1.0 is the whole vCPU) and its softirq part (<p>_cpu<N>_soft); when the snapshots have them, the data NIC's
+    # (<p>_cpu<N>_busy, 1.0 is the whole vCPU), its softirq, user and system parts (<p>_cpu<N>_soft,
+    # _user, _sys) and, with the kthreads snapshots, the per-CPU kernel workers' share
+    # (<p>_cpu<N>_kw, _ksi) and the unbound workers' (<p>_kwu); when the snapshots have them, the data NIC's
     # interrupts per vCPU as fractions (<p>_nicirq_cpu<N>_frac), the vCPU that took most
     # (<p>_nicirq_top_cpu) and the vectors' effective affinity (<p>_nicirq_eff); and per sampled
     # thread label L the fraction of samples on each vCPU (<p>_thr_L_cpu<N>_frac), the share of
@@ -1269,8 +1316,14 @@ def placement_parts(p, d, a, t):
     if p in ("agentvm", "peervm"):
         for n, v in sorted(per_cpu("cpu", "_us").items()):
             put("%s_cpu%d_busy" % (p, n), v / 1e6 / t, "%.2f")
-        for n, v in sorted(per_cpu("cpu", "_soft_us").items()):
-            put("%s_cpu%d_soft" % (p, n), v / 1e6 / t, "%.2f")
+        for part in ("soft", "user", "sys"):
+            for n, v in sorted(per_cpu("cpu", "_%s_us" % part).items()):
+                put("%s_cpu%d_%s" % (p, n, part), v / 1e6 / t, "%.2f")
+        for kind in ("kw", "ksi"):
+            for n, v in sorted(per_cpu(kind + "_cpu", "_us").items()):
+                put("%s_cpu%d_%s" % (p, n, kind), v / 1e6 / t, "%.2f")
+        if d(pre + "kwu_us") is not None:
+            put(p + "_kwu", d(pre + "kwu_us") / 1e6 / t, "%.2f")
     nic = per_cpu("nicirq_cpu", "")
     nic_frac = {}
     if nic and sum(nic.values()) > 0:

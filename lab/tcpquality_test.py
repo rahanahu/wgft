@@ -308,19 +308,41 @@ class Placement(unittest.TestCase):
             s.sample()
             self.assertFalse(s.alive)
 
+    def test_kthreads_per_cpu(self):
+        self.assertEqual(tq.parse_kthread("kworker/3:1-events"), ("kw", 3))
+        self.assertEqual(tq.parse_kthread("kworker/12:0H"), ("kw", 12))
+        self.assertEqual(tq.parse_kthread("ksoftirqd/1"), ("ksi", 1))
+        self.assertEqual(tq.parse_kthread("kworker/u16:2-wg-crypt-wgft0"), ("kwu", -1))
+        self.assertIsNone(tq.parse_kthread("iperf3"))
+        hz = os.sysconf("SC_CLK_TCK")
+        with tempfile.TemporaryDirectory() as d:
+            for pid, comm, ut, st in ((10, "kworker/1:0-wg", 1, 2), (11, "kworker/1:1", 3, 4), (12, "ksoftirqd/0", 5, 0),
+                                      (13, "kworker/u4:0", 0, 7), (14, "iperf3", 50, 50)):
+                os.makedirs(os.path.join(d, str(pid)))
+                with open(os.path.join(d, str(pid), "comm"), "w") as f:
+                    f.write(comm + "\n")
+                with open(os.path.join(d, str(pid), "stat"), "w") as f:
+                    f.write("%d (%s) S %s %d %d %s\n" % (pid, comm, " ".join(["0"] * 10), ut, st, " ".join(["0"] * 30)))
+            os.makedirs(os.path.join(d, "self"))
+            got = dict(tq.kthread_counters(d, ncpu=2))
+        tick = 1000000 // hz
+        self.assertEqual(got, {"kw_cpu0_us": 0, "kw_cpu1_us": 10 * tick, "ksi_cpu0_us": 5 * tick, "ksi_cpu1_us": 0,
+                               "kwu_us": 7 * tick})
+
     def test_snapdiff_placement(self):
         common = "agentvm_busy_us=%d agentvm_user_us=0 agentvm_sys_us=0 agentvm_soft_us=0 agentvm_irq_us=0 agentvm_steal_us=0 " \
-                 "agentvm_cpu0_us=%d agentvm_cpu1_us=%d agentvm_cpu0_soft_us=%d agentvm_cpu1_soft_us=0 agentvm_nicirq_cpu0=%d agentvm_nicirq_cpu1=%d agentvm_nicirq_eff=1 " \
+                 "agentvm_cpu0_us=%d agentvm_cpu1_us=%d agentvm_cpu0_soft_us=%d agentvm_cpu1_soft_us=0 agentvm_kw_cpu0_us=%d agentvm_kwu_us=0 agentvm_nicirq_cpu0=%d agentvm_nicirq_cpu1=%d agentvm_nicirq_eff=1 " \
                  "agentvm_thr_dp_samples=%d agentvm_thr_dp_running=%d agentvm_thr_dp_oncpu0=%d agentvm_thr_dp_oncpu1=%d " \
                  "agentvm_thr_dp_wait_us=%d agentvm_thr_dp_mig=%d"
-        before = common % (0, 0, 0, 0, 100, 100, 10, 10, 5, 5, 0, 4)
-        after = common % (15000000, 5000000, 10000000, 3000000, 400, 1000, 210, 200, 55, 155, 500000, 6)
+        before = common % (0, 0, 0, 0, 0, 100, 100, 10, 10, 5, 5, 0, 4)
+        after = common % (15000000, 5000000, 10000000, 3000000, 2000000, 400, 1000, 210, 200, 55, 155, 500000, 6)
         p = subprocess.run([sys.executable, TQ, "snapdiff", "2000000000", "10", "up", before, after],
                            capture_output=True, text=True)
         self.assertEqual(p.returncode, 0, p.stderr)
         got = dict(kv.split("=") for kv in p.stdout.split())
         self.assertEqual((got["agentvm_cpu0_busy"], got["agentvm_cpu1_busy"]), ("0.50", "1.00"))
         self.assertEqual((got["agentvm_cpu0_soft"], got["agentvm_cpu1_soft"]), ("0.30", "0.00"))
+        self.assertEqual((got["agentvm_cpu0_kw"], got["agentvm_kwu"]), ("0.20", "0.00"))
         self.assertEqual((got["agentvm_nicirq_cpu0_frac"], got["agentvm_nicirq_cpu1_frac"], got["agentvm_nicirq_top_cpu"]),
                          ("0.25", "0.75", "1"))
         self.assertEqual(got["agentvm_nicirq_eff"], "1")

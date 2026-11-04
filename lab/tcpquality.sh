@@ -143,7 +143,8 @@
 # context switches; agentvm is what the agent machine pays, for every mode alike, and
 # vm_cpu_s_per_gb is the two VMs together. agentvm_proc_* are the agent process's context
 # switches. The placement values follow, for both VMs: each vCPU's busy share (agentvm_cpu<N>_busy,
-# peervm_cpu<N>_busy) and its softirq part (_cpu<N>_soft), the data NIC's interrupts per vCPU
+# peervm_cpu<N>_busy) with its softirq, user and system parts (_cpu<N>_soft, _user, _sys) and the
+# share of the per-CPU kernel workers (_cpu<N>_kw, _cpu<N>_ksi), the data NIC's interrupts per vCPU
 # (_nicirq_cpu<N>_frac, _nicirq_top_cpu) and their effective affinity (_nicirq_eff), and for the
 # Rust agent where its data-plane thread ran, sampled every 50 ms by agentd
 # (agentvm_thr_dp_cpu<N>_frac, agentvm_thr_dp_on_nicirq_frac, the thread's migrations
@@ -596,8 +597,8 @@ for mode in $MODES; do
       if [ -n "$AGENT_AT" ]; then
         # the agent VM first and the peer VM last at the start, and the other way round at the end,
         # so that the agent VM's window holds the peer VM's
-        sa0=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0" "nicirq:$HOME_NS:eth0" "thread:dp:wgft-dataplane")
-        sp0=$($Q snap peervm "" "" "${SNAP_SPECS[@]}" "eth:$ROUTER_NS:lan0" "nicirq:$ROUTER_NS:lan0") nd0=$(netem_drops)
+        sa0=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0" "nicirq:$HOME_NS:eth0" "thread:dp:wgft-dataplane" kthreads)
+        sp0=$($Q snap peervm "" "" "${SNAP_SPECS[@]}" "eth:$ROUTER_NS:lan0" "nicirq:$ROUTER_NS:lan0" kthreads) nd0=$(netem_drops)
         t0=$(date +%s.%N) a0=$(field agentvm_proc_us "$sa0") s0=$(cpu_us "$server_pid" "$server_cg") l0=$(lan_us) v0=0
       else
         sa0= sp0=$($Q snap vm "$agent_pid" "$agent_cg" "${SNAP_SPECS[@]}" "if:$HOME_NS:eth0" "snmp:$HOME_NS") nd0=$(netem_drops)
@@ -645,8 +646,8 @@ for mode in $MODES; do
     if [ -n "$CPU" ]; then
       if [ -n "$AGENT_AT" ]; then
         t1=$(date +%s.%N) s1=$(cpu_us "$server_pid" "$server_cg") l1=$(lan_us) v1=0
-        sp1=$($Q snap peervm "" "" "${SNAP_SPECS[@]}" "eth:$ROUTER_NS:lan0" "nicirq:$ROUTER_NS:lan0") nd1=$(netem_drops)
-        sa1=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0" "nicirq:$HOME_NS:eth0" "thread:dp:wgft-dataplane")
+        sp1=$($Q snap peervm "" "" "${SNAP_SPECS[@]}" "eth:$ROUTER_NS:lan0" "nicirq:$ROUTER_NS:lan0" kthreads) nd1=$(netem_drops)
+        sa1=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0" "nicirq:$HOME_NS:eth0" "thread:dp:wgft-dataplane" kthreads)
         a1=$(field agentvm_proc_us "$sa1")
       else
         t1=$(date +%s.%N) a1=$(cpu_us "$agent_pid" "$agent_cg") s1=$(cpu_us "$server_pid" "$server_cg") l1=$(cpu_us "$lan_pid" "$lan_cg") v1=$(vm_cpu_us)

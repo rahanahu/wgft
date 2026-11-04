@@ -372,7 +372,9 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus
 - ゲストの値:両方の VM の割り込み (virtio の vector、`LOC`、`RES`、`CAL` など) と softirq を秒あたりで、data の NIC の `ethtool -S` の packet と kick (ゲストからホストへの通知) を GB あたりで記録します。
   cpuidle の driver があれば idle の状態ごとの回数と割合も記録します。
   2 台の cpuidle の driver、clock source、data の NIC の virtio の device と feature は `guestinfo.txt` に残します
-- 置き場所の値:両方の VM の vCPU ごとの忙しさ (`agentvm_cpu<N>_busy`、`peervm_cpu<N>_busy`、1.0 が 1 つの vCPU の全部) とその softirq の分 (`_cpu<N>_soft`)、data の NIC の割り込みを vCPU ごとに分けた割合 (`_nicirq_cpu<N>_frac`)、割り込みの実効の affinity (`_nicirq_eff`) を記録します。
+- 置き場所の値:両方の VM の vCPU ごとの忙しさ (`agentvm_cpu<N>_busy`、`peervm_cpu<N>_busy`、1.0 が 1 つの vCPU の全部) と、その softirq、user、system の分 (`_cpu<N>_soft`、`_user`、`_sys`) を記録します。
+  CPU ごとのカーネルの worker (`kworker/<N>`、`ksoftirqd/<N>`) の分 (`_cpu<N>_kw`、`_cpu<N>_ksi`) と、CPU に縛られない worker の和 (`_kwu`) も記録します。
+  data の NIC の割り込みを vCPU ごとに分けた割合 (`_nicirq_cpu<N>_frac`) と、割り込みの実効の affinity (`_nicirq_eff`) も記録します。
   Rust の agent では、agentd が data plane のスレッド (`wgft-dataplane`) の載った vCPU を 50 ms ごとに読み、vCPU ごとの割合 (`agentvm_thr_dp_cpu<N>_frac`)、移った回数 (`agentvm_thr_dp_mig`)、CPU を待った時間の割合 (`agentvm_thr_dp_wait_share`) を記録します。
   `agentvm_thr_dp_on_nicirq_frac` は、スレッドが NIC の割り込みを受ける vCPU に載っていた割合です
 - ホストの halt polling:`PAIRED_HOSTPOLL_X` と `PAIRED_HOSTPOLL_Y` (`on` か `off`) は、その腕の前に VM のホストの halt polling を入れるか切ります。
