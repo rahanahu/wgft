@@ -432,12 +432,16 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
   暗号の worker のように data plane のスレッドを足した build には、次の `--placement apart-mt` を使います
 - `--placement apart-mt`:暗号の worker を持つ build 用です。
   NIC の割り込みと相手の VM の固定は `apart` と同じです。
-  Rust の agent のプロセスを CPU 1 から後に置き、agent が tunnel を張った後に、data plane のスレッド (`wgft-dataplane`) を CPU 1、暗号の worker (`wgft-crypto`) を CPU 2 から後に agentd を通して置きます。
-  置けなければその腕を失敗にし、各実行の後にも確かめます。
-  後から作られた worker は data plane のスレッドの CPU を受け継ぐので、その実行は失敗になります。
-  agent のすべてのスレッドの載った vCPU を、`dp`、`crypto`、`other` の組ごとに記録します (`agentvm_thr_<組>_cpu<N>_frac` など)。
-  worker の置き場所に CPU が要るので `--vcpus 3` 以上を求め、worker 2 つが別の vCPU に載る 4 vCPU が意味のある最小の大きさです。
+  Rust の agent のプロセスを CPU 1 から後に置き、agent が tunnel を張った後と各実行の始めに、data plane のスレッド (`wgft-dataplane`) を CPU 1、暗号の worker (`wgft-crypto`) を CPU 2 と 3 に 1 つずつ、agentd を通して置きます。
+  CPU 0 から 3 は lane の先頭の 1 つの L2 の塊にあるので、8 vCPU でも worker は data plane のスレッドと同じ塊に留まります。
+  置けなければその腕か実行を失敗にし、各実行の終わりにも確かめます。
+  実行の途中で作られた worker は data plane のスレッドの CPU を受け継ぐので、その実行は失敗になります。
+  結果の行には、実行の始めに見つけた worker の数 (`agent_crypto_threads`) が入り、0 なら警告を出します。
+  agent のすべてのスレッドの載った vCPU を、`dp`、`crypto`、`other` の組ごとに 0.1 秒ごとに記録します (`agentvm_thr_<組>_cpu<N>_frac` など)。
+  この標本は、8 スレッドの試しのプロセスに対してホストで測って、1 つの CPU の約 0.65 % を使います。
+  A+ の agent はプロセスの使える CPU が 2 つ以下だと worker を作らないので、`--vcpus 4` 以上を求めます。
   worker の無い build でも流せ、そのときは data plane のスレッドが CPU 1 に載ります。
+  `apart-mt` の値は `apart` で取った表と混ぜません。
   ラボではまだ流していません
 - 相手の VM:data の NIC の全 vector の割り込みを CPU 0 に固定し、全 veth の RPS から CPU 0 を外します (`lab/netns.sh split-peer-rps`)。
   1 つの flow の受信の softirq は RPS が flow ごとに選ぶ 1 つの vCPU で走るので、その vCPU が NIC の割り込みの vCPU と重ならなくなります。
@@ -462,6 +466,8 @@ client と LAN のホストの TCP のバッファの上限は 64 MiB に上げ�
 そのため `tcpquality.sh` は、TCP の端を持つ VM (相手の VM と、`--target local` では agent の VM) の `tcp_mem` の pressure と最大を、stream の数 × 2 × バッファの上限 × 1.25 まで上げ、終わると戻します。
 上げる値は VM のメモリの半分までで、足りなければ警告を出し、足りる `WGFT_LAB_MEM` の大きさを示します。
 `--cases` では case の間にも戻します。
+`--split` の無い 1 台の VM の `lab paired` の `delay` の経路も、同じく `tcp_mem` を上げます。
+この変更の前に取ったカーネルモードの `delay` の経路の値は、上げた後の値と混ぜません。
 結果の行には、VM ごとの `tcp_mem` の最大 (`_tcp_mem_max_mb`) と、窓の始めと終わりに使っていた TCP のメモリ (`_tcpmem_start_mb`、`_tcpmem_end_mb`) が入ります。
 namespace ごとのメモリの圧迫の数 (`tcp_prune`、`tcp_rcvpruned`、`tcp_ofopruned`、`tcp_ofodrop`、`tcp_mempressures`、`tcp_abortonmem`) は、動いたときだけ入ります。
 上げた後に崩れが消えるかは未確認です。
@@ -492,7 +498,7 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus
   `--out` の直下には VM の組を立てた記録 (`setup.txt`、`vm-*.log`、`guestinfo.txt`) と、case ごとの結果の一覧 `cases.log` を置きます
 - case の間:両方の VM を `lab/splitcase.sh` で戻します。
   lab の namespace に残ったプロセスと、時間切れの case が残した `tcpquality` の実行を止めます。
-  netem の qdisc と agent の interface を消し、TCP のバッファの sysctl (`TCP_BUF_MAX` が上げる) を VM を立てた時の値に戻します。
+  netem の qdisc と agent の interface を消し、TCP のバッファの sysctl (`TCP_BUF_MAX` が上げる) と `tcp_mem` を VM を立てた時の値に戻します。
   `--target` が前の case と違えば転送先のアドレスを移し、agentd と LAN の疎通を確かめます。
   割り込みと RPS の固定 (`--placement apart`) と NIC の queue は、立てた時のままです
 - 失敗:失敗した case は次の case を止めません。

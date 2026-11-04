@@ -927,8 +927,9 @@ paired_validate() {
   [[ -z $peervcpus || -n $split ]] || die "--peer-vcpus goes with --split"
   [[ -z $target || ( -n $split && ( $target == lan || $target == local ) ) ]] || die "--target wants lan or local, with --split"
   [[ -z $placement || ( -n $split && ( $placement == apart || $placement == apart-mt ) ) ]] || die "--placement wants apart or apart-mt, with --split"
-  # apart-mt は data plane のスレッドを CPU 1、暗号の worker を CPU 2 から後に置く。worker の置き場所に CPU が 1 つは要る
-  [[ $placement != apart-mt ]] || ((vcpus >= 3)) || die "--placement apart-mt puts the data-plane thread on CPU 1 and the workers on CPU 2 and up, so it wants --vcpus 3 or more"
+  # apart-mt は data plane のスレッドを CPU 1、暗号の worker を CPU 2 と 3 に 1 つずつ置く。A+ の agent はプロセスの使える
+  # CPU が 2 つ以下だと worker を作らない (taskset 1-2 の 3 vCPU では 0)。4 vCPU で worker が 2 つ、CPU 2 と 3 に載る
+  [[ $placement != apart-mt ]] || ((vcpus >= 4)) || die "--placement apart-mt puts the data-plane thread on CPU 1 and the crypto workers on CPUs 2 and 3, and the agent starts workers only with more than two CPUs to run on, so it wants --vcpus 4 or more"
   # --placement apart は userspace の agent のプロセス全体を 1 つの CPU に置く。data plane が 1 スレッドの Rust の agent と、
   # 置くプロセスの無いカーネルモードだけに使える (gVisor の Go の agent や、暗号の worker を足した build には別の置き方が要る)
   local m
@@ -1097,7 +1098,7 @@ paired_header() {
       echo "lab paired: split: agent VM ${names[0]} limits.cpu=${pins[0]} qemu $SPLIT_QEMU_AGENT, peer VM ${names[1]} limits.cpu=${pins[1]} qemu $SPLIT_QEMU_PEER, network $PAIRED_SPLIT_NET (taps$SPLIT_TAPS, queue ${PAIRED_TAP_QLEN:-4096}, NIC queues $SPLIT_PEER_Q), agentd $SPLIT_AGENT_AT, kernel $kern, template $SUITE_TEMPLATE"
       [[ -z ${PAIRED_HOSTPOLL_X:-}${PAIRED_HOSTPOLL_Y:-} ]] || echo "lab paired: split: host halt polling of the ${PAIRED_HOSTPOLL_VMS:-both} VM(s), set by the guests: x ${PAIRED_HOSTPOLL_X:-on}, y ${PAIRED_HOSTPOLL_Y:-on} (hostpoll= in paired.log)"
       [[ -z ${PAIRED_KVM_SAMPLES:-} ]] || echo "lab paired: split: KVM statistics from $PAIRED_KVM_SAMPLES (tcpquality.py kvmsample, started by root)"
-      [[ -z $placement ]] || echo "lab paired: split: placement $placement: the data NIC's interrupts on CPU 0 of the agent VM, a userspace-mode agent on CPUs $SPLIT_AGENT_CPUS${SPLIT_AGENT_DP_CPUS:+, its data-plane thread on CPU $SPLIT_AGENT_DP_CPUS and its crypto workers on CPUs $SPLIT_AGENT_WORKER_CPUS}; the kernel mode has no agent process to place; peer VM: NIC interrupts on CPU 0, RPS on CPUs ${SPLIT_PEER_RPS:-unchanged}"
+      [[ -z $placement ]] || echo "lab paired: split: placement $placement: the data NIC's interrupts on CPU 0 of the agent VM, a userspace-mode agent on CPUs $SPLIT_AGENT_CPUS${SPLIT_AGENT_DP_CPUS:+, its data-plane thread on CPU $SPLIT_AGENT_DP_CPUS and its crypto workers one each on CPUs $SPLIT_AGENT_WORKER_CPUS}; the kernel mode has no agent process to place; peer VM: NIC interrupts on CPU 0, RPS on CPUs ${SPLIT_PEER_RPS:-unchanged}"
       echo "lab paired: split: the arms take turns in the same two VMs; vm=a in paired.log is the arm that ran first in the round. vhost and qemu's other threads are not pinned (host samples in host-samples.txt)"
     else
       echo "lab paired: VM a ${names[0]} limits.cpu=${pins[0]}, VM b ${names[1]} limits.cpu=${pins[1]}, kernel $kern, template $SUITE_TEMPLATE"
@@ -1156,14 +1157,15 @@ paired_split_setup() {
   # 効き、カーネルモードには置くプロセスが無い (tqagent.sh は kernel の腕を固定しない)
   if [[ -n $placement ]]; then
     # apart-mt:暗号の worker を持つ build 用。プロセスを CPU 1 から後に置き、agent が上がった後に data plane のスレッドを
-    # CPU 1、worker (wgft-crypto) を CPU 2 から後に置く (tcpquality.sh が agentd を通して行い、効かなければ失敗にする)
+    # CPU 1、worker (wgft-crypto) を CPU 2 と 3 に 1 つずつ置く (tcpquality.sh が agentd を通して行い、効かなければ失敗にする)
     (VM=${names[0]}; in_vm ip netns exec home python3 "$SHARE/lab/tcpquality.py" nicirq eth0 0) >>"$out/vm-${vms[0]}.log" 2>&1 \
       || die "cannot put the data NIC's interrupts of ${names[0]} on CPU 0; see $out/vm-${vms[0]}.log"
     SPLIT_AGENT_CPUS=0
     ((vcpus == 1)) || SPLIT_AGENT_CPUS=1
     if [[ $placement == apart-mt ]]; then
-      SPLIT_AGENT_CPUS=1-$((vcpus - 1)) SPLIT_AGENT_DP_CPUS=1 SPLIT_AGENT_WORKER_CPUS=2
-      ((vcpus == 3)) || SPLIT_AGENT_WORKER_CPUS=2-$((vcpus - 1))
+      # worker は 1 つずつ CPU 2、3 に置く。lane の先頭の CPU から固定した vCPU 0 から 3 は 1 つの L2 の塊にあり、
+      # 8 vCPU でも worker が data plane のスレッドと同じ塊に留まる
+      SPLIT_AGENT_CPUS=1-$((vcpus - 1)) SPLIT_AGENT_DP_CPUS=1 SPLIT_AGENT_WORKER_CPUS=2,3
     fi
     # 相手の VM:1 つの flow の受信の softirq は RPS が flow ごとに選ぶ 1 つの vCPU で走る。その vCPU が NIC の割り込みの
     # vCPU と重なった実行が詰まったので、NIC の全 vector を CPU 0 に固定し、全 veth の RPS から CPU 0 を外す
@@ -1196,7 +1198,7 @@ paired_split_setup() {
   SPLIT_TAPS=""
   for i in 0 1; do SPLIT_TAPS+=" tap:${vms[i]}=$(inc config get "${names[i]}" volatile.eth1.host_name)"; done
   if [[ -n $cases ]]; then
-    # --cases:case の間に戻す値 (namespace ごとの TCP のバッファの sysctl) を記録する。標本は case ごとに始める
+    # --cases:case の間に戻す値 (namespace ごとの TCP のバッファの sysctl と VM の tcp_mem) を記録する。標本は case ごとに始める
     for i in 0 1; do
       (VM=${names[i]}; in_vm bash "$SHARE/lab/splitcase.sh" save) >>"$out/vm-${vms[i]}.log" 2>&1 \
         || die "cannot record the state of ${names[i]} for --cases; see $out/vm-${vms[i]}.log"

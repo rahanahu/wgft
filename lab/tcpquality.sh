@@ -164,9 +164,11 @@
 # that list; the kernel mode has no data-plane process and is not pinned. AGENT_DP_CPUS and
 # AGENT_WORKER_CPUS (`--placement apart-mt`, for builds with crypto workers) then put the Rust
 # agent's thread wgft-dataplane on AGENT_DP_CPUS and its wgft-crypto workers on AGENT_WORKER_CPUS
-# once the tunnel is up, fail the mode when that does not take, check the threads again after
-# every run, failing the run when one left its CPUs (a worker started later inherits the data-plane
-# thread's CPUs), and sample every thread of the agent (agentvm_thr_dp_*, _crypto_*, _other_*).
+# once the tunnel is up and again at the start of every run, fail the mode or run when that does not
+# take, check the threads at the end of every run, failing the run when one left its CPUs (a worker
+# started later inherits the data-plane thread's CPUs), record the number of workers
+# (agent_crypto_threads) and warn when there is none, and sample every thread of the agent
+# (agentvm_thr_dp_*, _crypto_*, _other_*). AGENT_WORKER_CPUS is a comma list, one CPU per worker.
 # The peer VM's vCPUs are also sampled every 0.5 s over the run (tcpquality.py peerseries): the
 # result line gets the window's intervals (peervm_series_intervals), those in which some vCPU was
 # saturated, at least 0.95 busy with its own bound kernel workers at 0.9 or more
@@ -492,22 +494,26 @@ tcpmem_memkb() { # tcpmem_memkb here|agent: the VM's MemTotal in kB
 }
 tcpmem_was_here= tcpmem_was_agent=
 raise_tcpmem() { # raise_tcpmem here|agent
-  local where=$1 was memkb new
+  local where=$1 was memkb new vmname
   was=$(tcpmem_sysctl "$where" -n net.ipv4.tcp_mem | tr -s ' \t' ' ') || return 1
   memkb=$(tcpmem_memkb "$where") || return 1
-  new=$(awk -v w="$was" -v kb="$memkb" -v s="$STREAMS" -v b="$TCP_BUF_MAX" -v pg="$(getconf PAGESIZE)" -v vm="$where" 'BEGIN {
+  # the VM's name in messages: the peer or the agent VM with --split, the VM in the single-VM lab
+  vmname="the VM"
+  [ -z "$AGENT_AT" ] || vmname="the ${where/here/peer} VM"
+  new=$(awk -v w="$was" -v kb="$memkb" -v s="$STREAMS" -v b="$TCP_BUF_MAX" -v pg="$(getconf PAGESIZE)" -v vm="$vmname" 'BEGIN {
     split(w, v, " "); need = s * 2 * b * 1.25 / pg; cap = kb * 1024 / 2 / pg
     if (need > cap) {
-      printf "WARN  TCP memory: %d streams x 2 x %d bytes x 1.25 need %d MiB, more than half of the %s VM'"'"'s %d MiB; tcp_mem is capped at %d MiB; WGFT_LAB_MEM=%dGiB would hold it\n",
-        s, b, need * pg / 1048576, vm == "here" ? "peer" : "agent", kb / 1024, cap * pg / 1048576, int(need * pg * 2 / 1073741824) + 1 > "/dev/stderr"
+      # the hint asks for 10% above twice the need, since the VM sees less MemTotal than its RAM
+      printf "WARN  TCP memory: %d streams x 2 x %d bytes x 1.25 need %d MiB, more than half of %s'"'"'s %d MiB; tcp_mem is capped at %d MiB; WGFT_LAB_MEM=%dGiB would hold it\n",
+        s, b, need * pg / 1048576, vm, kb / 1024, cap * pg / 1048576, int(need * pg * 2 * 1.1 / 1073741824) + 1 > "/dev/stderr"
       need = cap
     }
     p = v[2] > need ? v[2] : need; m = v[3] > need ? v[3] : need
     printf "%d %d %d", v[1], p, m }') || return 1
-  [ "$new" = "$was" ] && { echo "   tcp_mem in the ${where/here/peer} VM: $was pages, enough"; return 0; }
+  [ "$new" = "$was" ] && { echo "   tcp_mem in $vmname: $was pages, enough"; return 0; }
   if [ "$where" = agent ]; then tcpmem_was_agent=$was; else tcpmem_was_here=$was; fi
   tcpmem_sysctl "$where" -qw net.ipv4.tcp_mem="$new" || return 1
-  echo "   tcp_mem in the ${where/here/peer} VM: $was -> $new pages"
+  echo "   tcp_mem in $vmname: $was -> $new pages"
 }
 restore_tcpmem() {
   local rc=0
@@ -632,6 +638,9 @@ for mode in $MODES; do
             echo "FAIL  agent $mode: cannot place its threads: $threads_now"; fail=1; continue
           fi
           echo "   agent $threads_now"
+          case $threads_now in
+            crypto_threads=0\ *) echo "WARN  agent $mode: no wgft-crypto thread; this build has no crypto workers, so apart-mt places only its data-plane thread" ;;
+          esac
           DP_SAMPLE=threads:all
         fi
       fi
@@ -678,6 +687,17 @@ for mode in $MODES; do
     fi
     if [ -n "$CPU" ]; then
       if [ -n "$AGENT_AT" ]; then
+        # apart-mt: place the threads again at the start of every run, so that workers a new tunnel
+        # generation started since the last run are put on their CPUs too; the result line gets the
+        # number of workers
+        crypto_field=
+        if [ -n "$AGENT_DP_CPUS" ] && [ "$mode" = rust ]; then
+          if threads_now=$(agentsh pin-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" 2>&1); then
+            crypto_field=" agent_crypto_threads=$(echo "$threads_now" | sed -n 's/^crypto_threads=\([0-9]*\).*/\1/p' | head -1)"
+          else
+            echo "FAIL  agent $mode run $run: cannot place its threads: $threads_now"; fail=1 run_pass=0
+          fi
+        fi
         # the peer VM's vCPUs every 0.5 s over the run (peerseries); the window's share of saturated
         # intervals goes into the result line
         series=$W/wgft-tq-series-$mode
@@ -785,7 +805,7 @@ for mode in $MODES; do
           if (snd != "") printf " sender_cpu_share=%.3f", snd / 1e6 / t
           if (rcv != "" && (tool == "iperf3" || dir == "up")) printf " receiver_cpu_share=%.3f", rcv / 1e6 / t }')"
       stats="$stats $($Q snapdiff "$(field received "$got")" "$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.3f", b - a }')" "$DIRECTION" "$sa0 $sp0" "$sa1 $sp1")"
-      stats="$stats netem_drops=$((nd1 - nd0))"
+      stats="$stats netem_drops=$((nd1 - nd0))${crypto_field:-}"
       if [ -n "$AGENT_AT" ]; then
         series_vals=$($Q peerseries_sum "$series" "$t0" "$t1" 2>/dev/null)
         [ -z "$series_vals" ] || stats="$stats $series_vals"
