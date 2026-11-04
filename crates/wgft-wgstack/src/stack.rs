@@ -318,6 +318,9 @@ impl<H: Hook> Stack<H> {
                         udp_queued: 0,
                         cur: 0,
                         deficit: [0; shared::NUM_CLASSES],
+                        turn: crate::output::NIL,
+                        turn_bytes: 0,
+                        turn_limit: config.send_turn_bytes(),
                     },
                     events: t.events,
                     wheel: t.wheel,
@@ -524,6 +527,7 @@ impl<H: Hook> Stack<H> {
         s.syn.check()?;
         s.tw.check()?;
         s.out.conns.check()?;
+        s.out.check_turn()?;
         s.out.rows.check()?;
         events(&s.events)?;
         s.wheel.check()?;
@@ -669,6 +673,7 @@ impl<H: Hook> Stack<H> {
         s.out.ctl.clear();
         s.events.clear();
         while s.out.conns.pop_front().is_some() {}
+        s.out.end_turn();
         while s.out.rows.pop_front().is_some() {}
         for l in s.qlinks.iter_mut() {
             *l = QLink::default();
@@ -925,7 +930,11 @@ impl<H: Hook> Stack<H> {
             let n = match cls {
                 shared::CLASS_CTL => self.s.out.ctl.pop(buf).unwrap_or(0),
                 shared::CLASS_CONN => match self.s.out.conns.pop_front() {
-                    Some(id) => self.conn(id).poll(buf, now),
+                    Some(id) => {
+                        let n = self.conn(id).poll(buf, now);
+                        self.s.out.turn_after(id, n);
+                        n
+                    }
                     None => 0,
                 },
                 shared::CLASS_ROW => match self.s.out.rows.pop_front() {

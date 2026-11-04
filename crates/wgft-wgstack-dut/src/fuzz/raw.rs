@@ -17,7 +17,8 @@
 //! - 時刻の進み。最大で 25 日まで跳びます
 //!
 //! 各段の後に不変条件と保持の上界を確かめ (`Net::check`)、最後に核を閉じて会計が 0 に戻ることを確かめます。
-//! 入力が尽きたら終えるので、短い入力は短い列です。
+//! 入力が尽きたら終えるので、短い入力は短い列です。入力のおよそ半分は、送信の番を有効にした核で流します
+//! ([`super::send_turn_for`])。
 
 #![expect(
     clippy::many_single_char_names,
@@ -34,7 +35,7 @@ use wgft_tcpharness::ip::{self, Icmp, Ipv4};
 use wgft_tcpharness::packet::{ACK, FIN, Options, RST, SYN, SackBlock, Segment, Timestamps};
 use wgft_wgstack::{ConnId, Hook, ListenerId, PingId, UdpId};
 
-use super::net::{DUT, MTU, Net, PEER, small_limits};
+use super::net::{DUT, MTU, Net, PEER, small_limits, with_send_turn_for};
 
 /// 1 つの入力で進める段の上限です。
 const MAX_STEPS: usize = 2000;
@@ -137,7 +138,8 @@ fn ts(r: &mut Src<'_>, p: &mut Peer) -> Option<Timestamps> {
 pub fn raw_adversary(data: &[u8]) {
     let mut r = Src(data);
     let may_return = Rc::new(Cell::new(true));
-    let mut n = Net::new(RawNet::config(small_limits()), Flip(may_return.clone()));
+    let config = with_send_turn_for(RawNet::config(small_limits()), data);
+    let mut n = Net::new(config, Flip(may_return.clone()));
     let now = n.now();
     let l = n
         .stack()

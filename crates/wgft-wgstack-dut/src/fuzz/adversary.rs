@@ -23,6 +23,7 @@
 //!   見ないので、値は下がり続け、600 以下で送るのを止めます
 //! - 表の大きさは Go と同じ `small_limits` ですが、相手が触れない UDP の datagram の表だけを `fuzz_limits` と
 //!   同じ小ささにします。各段の不変条件の検査が datagram の表をすべてたどるためです
+//! - 種のおよそ半分は、送信の番を有効にした核で流します (Go の wgstack に番はありません)
 //! - stream の長さは `2000 + (seed × 7919 mod 2^64) mod 200000` です。Go の元の式は積を符号つきの int に
 //!   してから剰余を取ったので、積が 2^63 以上の種では長さが負になり、`make` が panic しました。Go の
 //!   `adversaryCfg` も同じ符号なしの剰余に直したので、2 つは同じ長さを返します。積が 2^63 より小さい種
@@ -66,6 +67,9 @@ pub struct AdversaryCfg {
     pub peer_data: bool,
     pub boost_flip: bool,
     pub newreno: bool,
+    /// 送信の番を有効にするか。Go に無い選択で、種の Fibonacci hash の最上位の bit で決め、ほかの選択と
+    /// 揃わないようにします (wgstack-rs.md の「送信の番」)。
+    pub send_turn: bool,
 }
 
 impl AdversaryCfg {
@@ -87,6 +91,7 @@ impl AdversaryCfg {
             peer_data: seed % 3 == 2 || seed % 5 == 1,
             boost_flip: seed % 4 == 1,
             newreno: seed % 6 == 5,
+            send_turn: seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 63 == 1,
         }
     }
 }
@@ -137,6 +142,11 @@ fn run(cfg: &AdversaryCfg) {
         udp_tx_datagrams: fuzz_limits().udp_tx_datagrams,
         ..small_limits()
     });
+    let base_cfg = if cfg.send_turn {
+        base_cfg.with_send_turn()
+    } else {
+        base_cfg
+    };
     let config = Config {
         congestion: if cfg.newreno {
             Congestion::NewReno

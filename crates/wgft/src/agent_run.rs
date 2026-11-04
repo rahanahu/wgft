@@ -97,6 +97,10 @@ pub fn prepare_door(
     }
     let settings = agent::check_door(&cfg, os)?;
     early.extend(agent::join_warning(&settings));
+    let send_turn = agent::send_turn(env)?;
+    if send_turn {
+        early.push(agent::send_turn_warning());
+    }
     let options = Options {
         data_dir: settings.data_dir.clone().into(),
         join: settings.join.clone(),
@@ -105,6 +109,7 @@ pub fn prepare_door(
         allow_targets: settings.allow_targets.clone(),
         limits: settings.flow_caps(),
         batching: settings.batching(),
+        send_turn,
     };
     Ok(Prepared {
         options,
@@ -191,5 +196,30 @@ mod tests {
         assert_eq!(early_lines("WGFT_JOIN=\nWGFT_NAME=x\n", 0o644, &[]), vec![]);
         // 秘密でない項目だけなら警告しない
         assert_eq!(early_lines("WGFT_NAME=x\n", 0o644, &[]), vec![]);
+    }
+
+    /// 実験の送信の番は環境変数だけで有効になり、警告の行を 1 つ書く。dotenv の鍵は読まない。
+    #[test]
+    fn the_experimental_send_turn_comes_only_from_the_environment() {
+        let env = agent::SEND_TURN_ENV;
+        let e = early_lines("", 0o600, &[(env, "1")]);
+        assert_eq!(e, vec![agent::send_turn_warning()]);
+        assert_eq!(early_lines("", 0o600, &[(env, "0")]), vec![]);
+        assert_eq!(early_lines(&format!("{env}=1\n"), 0o600, &[]), vec![]);
+    }
+
+    /// 実験の送信の番の誤った値は設定の誤りで、終了コード 3 で止まる。
+    #[test]
+    fn a_bad_experimental_send_turn_value_exits_with_code_3() {
+        let argv = ["wgft", "agent", "run", "--data-dir", "/d"].map(OsString::from);
+        let Ok(Parsed::AgentRun { global, run }) = cli::parse(argv) else {
+            panic!("parse");
+        };
+        let env: HashMap<String, OsString> =
+            HashMap::from([(agent::SEND_TURN_ENV.to_owned(), OsString::from("yes"))]);
+        let mut early = Vec::new();
+        let e = prepare_door(&global, &run, &env, "linux", &mut early).unwrap_err();
+        assert_eq!(e.exit_code(), 3, "{e}");
+        assert!(e.to_string().contains(agent::SEND_TURN_ENV), "{e}");
     }
 }
