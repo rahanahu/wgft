@@ -13,7 +13,7 @@ use std::io::Read;
 use std::path::Path;
 
 use flate2::read::GzDecoder;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use wgft_tcpharness::dut::{ClockedDut, answer_frame};
 use wgft_tcpharness::frame::{Kind, Msg, VERSION};
 
@@ -303,14 +303,14 @@ fn check_row(
 pub const FUZZ_CACHE_PREFIX: &str = "fuzzcore/cache-";
 
 /// 完全な集まりの意図した違いの一覧の 1 行です (`testdata/wgstack-rec/divergences-full.json`)。
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FullDivergence {
     /// `<元>/<名前>`。`sha256` を持つ行では一覧を作った時の名前で、照らす時には使いません
     pub record: String,
     /// Go の fuzz の cache の記録 (`fuzzcore/cache-*`) だけが持つ、frame の列 ([`Recording::frames`]) の
     /// SHA-256 の小文字の 16 進
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
     /// 最初に食い違う応答の要求の番号。0 は `HELLO`
     pub request: usize,
@@ -397,6 +397,26 @@ impl FullDivergences {
         self.by_record.keys().map(String::as_str)
     }
 
+    /// frame の列の SHA-256 で引く行の hash です。
+    pub fn hashes(&self) -> impl Iterator<Item = &str> {
+        self.by_sha256.keys().map(String::as_str)
+    }
+
+    /// すべての行です。名前で引く行、hash で引く行の順です。
+    pub fn rows(&self) -> impl Iterator<Item = &FullDivergence> {
+        self.by_record.values().chain(self.by_sha256.values())
+    }
+
+    /// 記録 `rec` の行です。`fuzzcore/cache-*` の記録は frame の列の SHA-256 で、ほかは名前で引きます。
+    pub fn row(&self, rec: &Recording) -> Option<&FullDivergence> {
+        let id = rec.id();
+        if id.starts_with(FUZZ_CACHE_PREFIX) {
+            self.by_sha256.get(&frames_sha256(rec))
+        } else {
+            self.by_record.get(&id)
+        }
+    }
+
     /// 行の数です。
     pub fn len(&self) -> usize {
         self.by_record.len() + self.by_sha256.len()
@@ -410,14 +430,9 @@ impl FullDivergences {
     /// 記録 `rec` の行を、[`judge`] が読む形 (`record` を今の記録の名前にした行) で返します。
     /// `fuzzcore/cache-*` の記録は frame の列の SHA-256 で、ほかは名前で引きます。
     pub fn for_recording(&self, rec: &Recording) -> Option<Divergence> {
-        let id = rec.id();
-        let d = if id.starts_with(FUZZ_CACHE_PREFIX) {
-            self.by_sha256.get(&frames_sha256(rec))?
-        } else {
-            self.by_record.get(&id)?
-        };
+        let d = self.row(rec)?;
         Some(Divergence {
-            record: id,
+            record: rec.id(),
             request: d.request,
             response: format!("{SHA256_PREFIX}{}", d.response_sha256),
             reason: d.reason.clone(),
@@ -442,6 +457,23 @@ fn response_is(want: &str, got: &[u8]) -> bool {
         }
         None => want == hex(got),
     }
+}
+
+/// 完全な集まりの一覧の行を、ファイルの形 (JSON の配列で 1 行に 1 つ、`record` と `sha256` の順) に書きます。
+pub fn write_full_divergences(rows: &[FullDivergence]) -> String {
+    let mut rows: Vec<&FullDivergence> = rows.iter().collect();
+    rows.sort_by(|a, b| (&a.record, &a.sha256).cmp(&(&b.record, &b.sha256)));
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|r| format!("  {}", serde_json::to_string(r).expect("a row serializes")))
+        .collect();
+    format!("[\n{}\n]\n", lines.join(",\n"))
+}
+
+/// 応答の frame の SHA-256 の小文字の 16 進です (完全な集まりの一覧の `response_sha256`)。
+pub fn response_sha256(frame: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex(&Sha256::digest(frame))
 }
 
 /// 記録の frame の列 (要求と応答) の SHA-256 の小文字の 16 進です。meta と圧縮を含まないので、同じ要求と応答の

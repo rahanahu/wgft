@@ -14,7 +14,7 @@
 //! 落とし、frame の列の SHA-256 で指す行 (Go の fuzz の cache の記録) は、その記録が無ければ照らしません。`WGFT_WGSTACK_REPLAY_SHARD=i/n` (0 ≤ i < n) は、名前の順の記録の
 //! うち番号を n で割った余りが i のものだけを照らします。大きな集まりを関門の段に分けるためです。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -115,7 +115,23 @@ fn main() {
                 dir.display()
             );
         }
-        eprintln!("replay: {} rows in divergences-full.json", full.len());
+        // hash で引く行のうち記録が手元に無い行の数を出します。cache の集まりは育つので、古い行が黙って溜まらない
+        // ようにするためです。すべての shard で同じ数になるよう、shard に分ける前のすべての記録を数えます。
+        let present: BTreeSet<String> = recordings(&dir)
+            .iter()
+            .filter(|p| {
+                p.strip_prefix(&dir)
+                    .is_ok_and(|r| r.to_string_lossy().starts_with(rec::FUZZ_CACHE_PREFIX))
+            })
+            .map(|p| rec::frames_sha256(&rec::read_file(p).unwrap_or_else(|e| panic!("{e}"))))
+            .collect();
+        let hashed = full.hashes().count();
+        let absent = full.hashes().filter(|h| !present.contains(*h)).count();
+        eprintln!(
+            "replay: {} rows in divergences-full.json; {absent} of the {hashed} rows found by frames hash have no recording in {}",
+            full.len(),
+            dir.display()
+        );
         full
     } else {
         FullDivergences::default()
