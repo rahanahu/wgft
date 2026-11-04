@@ -145,12 +145,13 @@
 # switches. The placement values follow, for both VMs: each vCPU's busy share (agentvm_cpu<N>_busy,
 # peervm_cpu<N>_busy) with its softirq, user and system parts (_cpu<N>_soft, _user, _sys) and the
 # share of the per-CPU kernel workers (_cpu<N>_kw, _cpu<N>_ksi), the data NIC's interrupts per vCPU
-# (_nicirq_cpu<N>_frac, _nicirq_top_cpu) and their effective affinity (_nicirq_eff), and for the
-# Rust agent where its data-plane thread ran, sampled every 50 ms by agentd
+# (_nicirq_cpu<N>_frac, _nicirq_top_cpu) and their effective affinity (_nicirq_eff), and, with
+# AGENT_CPUS and the rust mode only, where the agent's data-plane thread ran, sampled every 50 ms by agentd
 # (agentvm_thr_dp_cpu<N>_frac, agentvm_thr_dp_on_nicirq_frac, the thread's migrations
 # agentvm_thr_dp_mig and its wait for a CPU agentvm_thr_dp_wait_share).
 # AGENT_CPUS, a CPU list, starts a userspace-mode agent under `taskset -c AGENT_CPUS` in the agent
-# VM (`lab/lab paired --placement`); the kernel mode has no data-plane process and is not pinned.
+# VM (`lab/lab paired --placement`) and fails the mode when the agent's Cpus_allowed_list is not
+# that list; the kernel mode has no data-plane process and is not pinned.
 # In every lab, CPU=1 adds the packets per GB and mean size per interface, the TCP
 # segments and UDP datagrams per GB per namespace, tun_data_pkts_per_gb and tun_ack_pkts_per_gb on
 # the tunnel at the vps, and recv_seg_avg_b, the bytes per TCP segment the receiving end got after
@@ -549,9 +550,18 @@ for mode in $MODES; do
       own=$(agentsh own-lan "iperf3 -s" "$CG_ROOT")
       lan_pid=$(field pid "$own") lan_cg=$(field cg "$own")
     elif [ "$TOOL" = iperf3 ]; then lan_pid=$(ns_pid "$LAN_NS" "iperf3 -s"); else lan_pid=$(ns_pid "$LAN_NS" "tcpquality.py serve"); fi
+    DP_SAMPLE=
     if [ -n "$AGENT_AT" ]; then
       own=$(agentsh own "$ADATA" "$CG_ROOT")
       agent_pid=$(field pid "$own") agent_cg=$(field cg "$own")
+      if [ -n "$AGENT_CPUS" ] && [ "$mode" != kernel ] && [ -n "$agent_pid" ]; then
+        # --placement apart: the pin must have taken, and only then is the data-plane thread sampled
+        pinned=$(agentsh cpus "$agent_pid")
+        if [ "$pinned" != "$AGENT_CPUS" ]; then
+          echo "FAIL  agent $mode: the agent process runs on CPUs ${pinned:-unknown}, not $AGENT_CPUS"; fail=1; continue
+        fi
+        [ "$mode" != rust ] || DP_SAMPLE=thread:dp:wgft-dataplane
+      fi
     else
       agent_pid=$(ns_pid "$HOME_NS" "agent run --data-dir $ADATA")
       agent_cg=$(cg_own agent "$agent_pid")
@@ -597,7 +607,7 @@ for mode in $MODES; do
       if [ -n "$AGENT_AT" ]; then
         # the agent VM first and the peer VM last at the start, and the other way round at the end,
         # so that the agent VM's window holds the peer VM's
-        sa0=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0" "nicirq:$HOME_NS:eth0" "thread:dp:wgft-dataplane" kthreads)
+        sa0=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0" "nicirq:$HOME_NS:eth0" kthreads ${DP_SAMPLE:+"$DP_SAMPLE"})
         sp0=$($Q snap peervm "" "" "${SNAP_SPECS[@]}" "eth:$ROUTER_NS:lan0" "nicirq:$ROUTER_NS:lan0" kthreads) nd0=$(netem_drops)
         t0=$(date +%s.%N) a0=$(field agentvm_proc_us "$sa0") s0=$(cpu_us "$server_pid" "$server_cg") l0=$(lan_us) v0=0
       else
@@ -647,7 +657,7 @@ for mode in $MODES; do
       if [ -n "$AGENT_AT" ]; then
         t1=$(date +%s.%N) s1=$(cpu_us "$server_pid" "$server_cg") l1=$(lan_us) v1=0
         sp1=$($Q snap peervm "" "" "${SNAP_SPECS[@]}" "eth:$ROUTER_NS:lan0" "nicirq:$ROUTER_NS:lan0" kthreads) nd1=$(netem_drops)
-        sa1=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0" "nicirq:$HOME_NS:eth0" "thread:dp:wgft-dataplane" kthreads)
+        sa1=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0" "nicirq:$HOME_NS:eth0" kthreads ${DP_SAMPLE:+"$DP_SAMPLE"})
         a1=$(field agentvm_proc_us "$sa1")
       else
         t1=$(date +%s.%N) a1=$(cpu_us "$agent_pid" "$agent_cg") s1=$(cpu_us "$server_pid" "$server_cg") l1=$(cpu_us "$lan_pid" "$lan_cg") v1=$(vm_cpu_us)

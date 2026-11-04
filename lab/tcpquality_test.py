@@ -127,6 +127,18 @@ class CpuPaired(unittest.TestCase):
         self.assertNotIn("peer_bound", out)
         self.assertIn("LEFT_OUT planned=8 used=8 ", out)
 
+    def test_placement_rejects_userspace_arms_with_more_threads(self):
+        # --placement apart pins the agent to one CPU: only the rust and kernel arms. --rounds 3 is
+        # invalid too, so the command stops in validation even if the placement check were gone
+        lab = os.path.join(os.path.dirname(TQ), "lab")
+        for arms in (("gvisor", "rust"), ("rust", "base:wgstack")):
+            p = subprocess.run(["bash", lab, "paired", "--split", "--placement", "apart", "--tool", "iperf3", "--rounds", "3",
+                                "--base", "HEAD", "fast", *arms], capture_output=True, text=True,
+                               env={k: v for k, v in os.environ.items() if not k.startswith("WGFT_LAB")})
+            self.assertEqual(p.returncode, 1, p.stderr)
+            self.assertIn("--placement apart", p.stderr)
+            self.assertIn("one CPU", p.stderr)
+
     def test_peer_value_does_not_change_a_single_vm_log(self):
         lines = [l + " peervm_maxcpu=0.99" if l.startswith("PAIRED") else l for l in synthetic_log()]
         self.assertEqual(analyse(lines), (0, EXPECTED_PLAIN))

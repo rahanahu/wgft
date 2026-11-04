@@ -380,7 +380,9 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus
 - 置き場所の値:両方の VM の vCPU ごとの忙しさ (`agentvm_cpu<N>_busy`、`peervm_cpu<N>_busy`、1.0 が 1 つの vCPU の全部) と、その softirq、user、system の分 (`_cpu<N>_soft`、`_user`、`_sys`) を記録します。
   CPU ごとのカーネルの worker (`kworker/<N>`、`ksoftirqd/<N>`) の分 (`_cpu<N>_kw`、`_cpu<N>_ksi`) と、CPU に縛られない worker の和 (`_kwu`) も記録します。
   data の NIC の割り込みを vCPU ごとに分けた割合 (`_nicirq_cpu<N>_frac`) と、割り込みの実効の affinity (`_nicirq_eff`) も記録します。
-  Rust の agent では、agentd が data plane のスレッド (`wgft-dataplane`) の載った vCPU を 50 ms ごとに読み、vCPU ごとの割合 (`agentvm_thr_dp_cpu<N>_frac`)、移った回数 (`agentvm_thr_dp_mig`)、CPU を待った時間の割合 (`agentvm_thr_dp_wait_share`) を記録します。
+  `--placement apart` の Rust の腕 (`rust`、`base:rust`) だけ、agentd が data plane のスレッド (`wgft-dataplane`) の載った vCPU を 50 ms ごとに読み、vCPU ごとの割合 (`agentvm_thr_dp_cpu<N>_frac`)、移った回数 (`agentvm_thr_dp_mig`)、CPU を待った時間の割合 (`agentvm_thr_dp_wait_share`) を記録します。
+  この標本を取る agentd のスレッドは、ホストで測って 1 つの CPU の約 0.5 % を agent の VM で使います。
+  腕によって有無が変わると agent の VM の CPU に差が出るので、既定では動かしません。
   `agentvm_thr_dp_on_nicirq_frac` は、スレッドが NIC の割り込みを受ける vCPU に載っていた割合です
 - ホストの halt polling:`PAIRED_HOSTPOLL_X` と `PAIRED_HOSTPOLL_Y` (`on` か `off`) は、その腕の前に VM のホストの halt polling を入れるか切ります。
   片方だけを指定すると、もう片方の腕は `on` です。
@@ -403,6 +405,7 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
 
 `--placement apart` は、2 台の VM の中で NIC の割り込みと、1 つの flow の仕事を別の vCPU に固定します。
 同じ build の 2 つの腕を比べる (`--base HEAD rust base:rust` など) ときに使います。
+腕は `rust` (`base:rust` を含む) と `kernel` だけで、`gvisor` と `wgstack` の腕を指定すると VM を立てる前に止まります。
 
 - 理由:data の NIC は 1 つの queue なので、その割り込みと受信の softirq は 1 つの vCPU で走ります。
   Rust の agent の data plane は 1 つのスレッドです。
@@ -411,10 +414,14 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
   2 vCPU 以上では、この 2 つの値が同じ build の比べにも混ざります
 - 割り込み:data の NIC の全 vector の割り込みを agent の VM の CPU 0 に固定します (`tcpquality.py nicirq`)。
   VM の設定なので両方の腕に効きます
-- agent のプロセス:userspace の腕 (`rust`、`gvisor`、`wgstack`) の agent を `taskset` で CPU 1 だけに置きます。
+- agent のプロセス:Rust の agent のプロセス全体を `taskset` で CPU 1 だけに置き、起動の後に `Cpus_allowed_list` を確かめます。
+  固定が効いていなければ、その腕を失敗にします。
   CPU 1 から後の全部に置くと、8 vCPU でスレッドが 2 つの L2 の塊の間を移り、どちらの塊に載るかでも速さが数 % 揺れました。
   1 vCPU では CPU 0 で、既定と同じ置き方です。
   カーネルモードの腕の data plane はカーネルの WireGuard で、置くプロセスが無いので固定しません
+- 使える範囲:この置き方は agent を 1 つの CPU に抑えます。
+  比べる 2 つの build の data plane がどちらも 1 スレッドの間だけ有効です。
+  暗号の worker のように data plane のスレッドを足した build には、別の置き方が要ります
 - 相手の VM:data の NIC の全 vector の割り込みを CPU 0 に固定し、全 veth の RPS から CPU 0 を外します (`lab/netns.sh split-peer-rps`)。
   1 つの flow の受信の softirq は RPS が flow ごとに選ぶ 1 つの vCPU で走るので、その vCPU が NIC の割り込みの vCPU と重ならなくなります。
   相手の VM が 1 vCPU のときは固定しません

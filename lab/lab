@@ -903,6 +903,13 @@ paired_validate() {
   [[ -z $peervcpus || -n $split ]] || die "--peer-vcpus goes with --split"
   [[ -z $target || ( -n $split && ( $target == lan || $target == local ) ) ]] || die "--target wants lan or local, with --split"
   [[ -z $placement || ( -n $split && $placement == apart ) ]] || die "--placement wants apart, with --split"
+  # --placement apart は userspace の agent のプロセス全体を 1 つの CPU に置く。data plane が 1 スレッドの Rust の agent と、
+  # 置くプロセスの無いカーネルモードだけに使える (gVisor の Go の agent や、暗号の worker を足した build には別の置き方が要る)
+  local m
+  for m in "${spec_x#base:}" "${spec_y#base:}"; do
+    [[ -z $placement || $m == rust || $m == kernel ]] \
+      || die "--placement apart pins the agent process to one CPU, which fits only an agent with one data-plane thread; arm $m is not rust or kernel"
+  done
   local hp
   for hp in "${PAIRED_HOSTPOLL_X:-}" "${PAIRED_HOSTPOLL_Y:-}"; do
     [[ -z $hp || ( -n $split && ( $hp == on || $hp == off ) ) ]] || die "PAIRED_HOSTPOLL_X and PAIRED_HOSTPOLL_Y want on or off, with --split"

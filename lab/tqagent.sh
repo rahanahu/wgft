@@ -15,6 +15,7 @@
 #   tqagent.sh own-lan <cmdline> <cgroup root>  with the LAN host in home (TARGET_LOCAL): that
 #                                         process's PID and own cgroup
 #   tqagent.sh cpu <pid> <cgroup>         a process's CPU time so far in microseconds
+#   tqagent.sh cpus <pid>                 the CPUs a process may run on (its Cpus_allowed_list)
 #   tqagent.sh killlan                    stop tcpquality.py's processes in home
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -72,6 +73,10 @@ case "${1:-}" in
   own-lan)
     pid=$(home_pid "${2:?own-lan <cmdline> <cgroup root>}") || { echo "pid= cg="; exit 1; }
     own_cg "$pid" "${3:?}-lan"
+    ;;
+  cpus)
+    # the CPUs a process may run on (Cpus_allowed_list), to check a pin
+    awk '$1 == "Cpus_allowed_list:" { print $2 }' "/proc/${2:?cpus <pid>}/status"
     ;;
   cpu)
     pid=${2:-} cg=${3:-}
