@@ -168,6 +168,8 @@ class CpuPaired(unittest.TestCase):
                 (base + ["rust", "kernel"], "a fast --tool iperf3\nb slow\n", "the path is fast, rate or delay"),
                 (base + ["rust", "kernel"], "a fast --tool iperf3\nb fast --target local\n", "--target local wants --tool iperf3"),
                 (base + ["gvisor", "rust"], good, "--placement apart pins"),
+                (base + ["rust", "kernel"], "setup.txt fast --tool iperf3\n", "dash or underscore only"),
+                (base + ["--max-wall", "1h", "rust", "kernel"], good, "--max-wall wants a whole number of seconds"),
         ):
             rc, err = self.lab_paired(args, cases)
             self.assertEqual(rc, 1, err)

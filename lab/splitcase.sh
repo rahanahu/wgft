@@ -45,14 +45,14 @@ case "${1:-}" in
     rc=0
     stale=0
     # a case that timed out can leave its tcpquality-cpu.sh, tcpquality.sh or tcpquality.py running in
-    # the peer VM's root namespace; agentd (tcpquality.py agentd) lives only in the agent VM
+    # the peer VM's root namespace, agentx clients among them; agentd lives only in the agent VM, so
+    # in the peer VM every such process goes
     if has_ns "$VPS_NS"; then
       for p in /proc/[0-9]*; do
         pid=${p#/proc/}
         [ "$pid" = $$ ] && continue
         args=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
         case $args in
-          *"/lab/tcpquality"*agentd*) ;;
           *"/lab/tcpquality-cpu.sh"* | *"/lab/tcpquality.sh"* | *"/lab/tcpquality.py"*) kill -9 "$pid" 2>/dev/null && stale=$((stale + 1)) ;;
         esac
       done
@@ -79,8 +79,14 @@ case "${1:-}" in
       r=${vals%|*} w=${vals#*|}
       ip netns exec "$ns" sysctl -qw net.ipv4.tcp_rmem="$r" net.ipv4.tcp_wmem="$w" || rc=1
       [ "$(ip netns exec "$ns" sysctl -n net.ipv4.tcp_rmem | tr -s ' \t' ' ')" = "$r" ] || { echo "splitcase.sh: tcp_rmem of $ns stays changed"; rc=1; }
+      [ "$(ip netns exec "$ns" sysctl -n net.ipv4.tcp_wmem | tr -s ' \t' ' ')" = "$w" ] || { echo "splitcase.sh: tcp_wmem of $ns stays changed"; rc=1; }
     done < "$STATE"
-    echo "splitcase.sh: reset $(lab_ns | tr '\n' ' ')stopped $stale process(es), rc=$rc"
+    # sockets left over, orphaned or in TIME_WAIT, keep TCP memory, which matters with 64 MiB buffers;
+    # the counts per namespace go to the log
+    for ns in $(lab_ns); do
+      echo "splitcase.sh: sockstat $ns: $(ip netns exec "$ns" grep -E '^(TCP|UDP):' /proc/net/sockstat | tr '\n' ' ')"
+    done
+    echo "splitcase.sh: reset $(lab_ns | tr '\n' ' ')processes stopped: $stale, rc=$rc"
     exit "$rc"
     ;;
   target)
