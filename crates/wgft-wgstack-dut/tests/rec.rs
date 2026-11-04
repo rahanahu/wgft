@@ -222,8 +222,18 @@ fn full_divergence_rows_match_by_name_or_content() {
     let mut cached = bad.clone();
     cached.meta.source = "fuzzcore".to_owned();
     cached.meta.name = "cache-0123".to_owned();
+    // hash は meta と圧縮を含まない frame の列だけの値です。git の記録の値を固定し、meta (go_version を含みます)
+    // を変えても同じ値になることを確かめます。値は記録のファイルの形から別に計算しました。frame の列が変わるように
+    // 記録を作り直したら、値を直します。
+    let mut other_go = r.clone();
+    other_go.meta.go_version = "go0.0".to_owned();
+    for x in [&r, &other_go] {
+        assert_eq!(
+            rec::frames_sha256(x),
+            "f0e70d5891066c9f748b75d45d852b1dc6fddeb01fa0423394321f1306987730"
+        );
+    }
     let sha = rec::frames_sha256(&cached);
-    assert_eq!(sha, rec::hex(&Sha256::digest(&cached.frames)));
     let row = list("fuzzcore/cache-other", Some(sha.clone()), m.request, &resp);
     assert!(judge(&cached, &row).is_ok());
     assert!(
