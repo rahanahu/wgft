@@ -330,7 +330,7 @@ impl Device {
         };
         let rx = datagram.len() as u64;
         match inbound {
-            Inbound::CookieReply(reply) => self.push_transmit(from, reply),
+            Inbound::CookieReply(reply) => self.push_cookie_reply(from, reply),
             Inbound::CookieStored => {}
             Inbound::InitiationAnswered { peer, response } => {
                 if self.peers[peer].roaming == Roaming::Any {
@@ -617,8 +617,10 @@ impl Device {
         p.keepalive_at = p.keepalive.map(|interval| now + interval);
     }
 
-    fn push_transmit(&mut self, to: SocketAddr, payload: Vec<u8>) {
-        if !self.transmits.push(Transmit { to, payload }) {
+    /// cookie の返事は外からの message に答えるだけなので、キューの半分までにする。timer が出す自身の
+    /// ハンドシェイクと keepalive の場所を残す (wireguard-device.md の device が持つものの上限)。
+    fn push_cookie_reply(&mut self, to: SocketAddr, payload: Vec<u8>) {
+        if !self.transmits.push_within_half(Transmit { to, payload }) {
             self.drops.add(DropReason::TransmitOverflow, 1);
         }
     }

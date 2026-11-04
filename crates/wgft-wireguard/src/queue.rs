@@ -42,6 +42,17 @@ impl<T: ByteLen> BoundedQueue<T> {
         true
     }
 
+    /// 件数とバイト数のそれぞれ上限の半分までだけ入れる。入れば `true`、入らなければ捨てて `false` を返す。
+    /// 外から届いた message に答える datagram が、device 自身の message の場所を使い切らないようにする。
+    pub(crate) fn push_within_half(&mut self, item: T) -> bool {
+        if self.items.len() >= self.max_items / 2
+            || self.bytes + item.byte_len() > self.max_bytes / 2
+        {
+            return false;
+        }
+        self.push(item)
+    }
+
     /// 入れる。上限を超えるなら古いものから捨て、捨てた数を返す。1 件で上限を超えるものは
     /// それ自体を捨てる。
     pub(crate) fn push_evicting(&mut self, item: T) -> usize {
