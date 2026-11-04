@@ -250,5 +250,88 @@ class HostCounters(unittest.TestCase):
 
 
 
+class Placement(unittest.TestCase):
+    def test_parse_irq_cpus_sums_one_device_per_cpu(self):
+        text = INTERRUPTS + "  30:        900        800  PCI-MSIX-0000:06:00.0   1-edge      virtio12-input.0\n"
+        self.assertEqual(tq.parse_irq_cpus(text, "virtio1"), ([116, 229], [25, 27, 24, 26]))
+        self.assertEqual(tq.parse_irq_cpus(text, "virtio12"), ([900, 800], [30]))
+        self.assertEqual(tq.parse_irq_cpus(text, ""), ([], []))
+
+    def test_irq_affinity_sets_and_reads_back(self):
+        with tempfile.TemporaryDirectory() as d:
+            for n, eff in ((25, "3"), (26, None)):
+                os.makedirs(os.path.join(d, str(n)))
+                with open(os.path.join(d, str(n), "smp_affinity_list"), "w") as f:
+                    f.write("0-3\n")
+                if eff:
+                    with open(os.path.join(d, str(n), "effective_affinity_list"), "w") as f:
+                        f.write(eff + "\n")
+            self.assertEqual(tq.irq_affinity([25, 26], base=d), "3+0-3")
+            self.assertEqual(tq.irq_affinity([26], "1", base=d), "1")
+
+    def test_parse_thread_sched(self):
+        self.assertEqual(tq.parse_thread_sched("wgft-dataplane (812, #threads: 5)\n---\n"
+                                               "se.exec_start                                :     123.4\n"
+                                               "se.nr_migrations                             :                   17\n"), 17)
+        self.assertIsNone(tq.parse_thread_sched("se.exec_start : 1\n"))
+
+    def test_thread_sampler_counts_cpus_and_follows_the_thread(self):
+        with tempfile.TemporaryDirectory() as d:
+            def task(tid, comm, state, cpu):
+                td = os.path.join(d, "812", "task", str(tid))
+                os.makedirs(td, exist_ok=True)
+                fields = [state] + ["0"] * 35 + [str(cpu)] + ["0"] * 10
+                for name, body in (("comm", comm), ("stat", "%d (%s) %s" % (tid, comm, " ".join(fields))),
+                                   ("schedstat", "5000000 2000000 40"), ("sched", "se.nr_migrations : 3")):
+                    with open(os.path.join(td, name), "w") as f:
+                        f.write(body + "\n")
+            task(812, "wgft", "S", 0)
+            s = tq.ThreadSampler(812, "wgft-dataplane", 4, proc=d)
+            s.sample()
+            self.assertEqual((s.samples, s.counters("dp")), (0, []))
+            task(813, "wgft-dataplane", "R", 2)
+            s.sample()
+            s.sample()
+            task(813, "wgft-dataplane", "S", 1)
+            s.sample()
+            got = dict(s.counters("dp"))
+            self.assertEqual((got["thr_dp_samples"], got["thr_dp_running"]), (3, 2))
+            self.assertEqual([got["thr_dp_oncpu%d" % i] for i in range(4)], [0, 1, 2, 0])
+            self.assertEqual((got["thr_dp_run_us"], got["thr_dp_wait_us"], got["thr_dp_mig"], got["thr_dp_now"]),
+                             (5000, 2000, 3, 1))
+            # the thread goes, then the process
+            import shutil
+            shutil.rmtree(os.path.join(d, "812", "task", "813"))
+            s.sample()
+            self.assertTrue(s.alive)
+            shutil.rmtree(os.path.join(d, "812"))
+            s.sample()
+            self.assertFalse(s.alive)
+
+    def test_snapdiff_placement(self):
+        common = "agentvm_busy_us=%d agentvm_user_us=0 agentvm_sys_us=0 agentvm_soft_us=0 agentvm_irq_us=0 agentvm_steal_us=0 " \
+                 "agentvm_cpu0_us=%d agentvm_cpu1_us=%d agentvm_cpu0_soft_us=%d agentvm_cpu1_soft_us=0 agentvm_nicirq_cpu0=%d agentvm_nicirq_cpu1=%d agentvm_nicirq_eff=1 " \
+                 "agentvm_thr_dp_samples=%d agentvm_thr_dp_running=%d agentvm_thr_dp_oncpu0=%d agentvm_thr_dp_oncpu1=%d " \
+                 "agentvm_thr_dp_wait_us=%d agentvm_thr_dp_mig=%d"
+        before = common % (0, 0, 0, 0, 100, 100, 10, 10, 5, 5, 0, 4)
+        after = common % (15000000, 5000000, 10000000, 3000000, 400, 1000, 210, 200, 55, 155, 500000, 6)
+        p = subprocess.run([sys.executable, TQ, "snapdiff", "2000000000", "10", "up", before, after],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        got = dict(kv.split("=") for kv in p.stdout.split())
+        self.assertEqual((got["agentvm_cpu0_busy"], got["agentvm_cpu1_busy"]), ("0.50", "1.00"))
+        self.assertEqual((got["agentvm_cpu0_soft"], got["agentvm_cpu1_soft"]), ("0.30", "0.00"))
+        self.assertEqual((got["agentvm_nicirq_cpu0_frac"], got["agentvm_nicirq_cpu1_frac"], got["agentvm_nicirq_top_cpu"]),
+                         ("0.25", "0.75", "1"))
+        self.assertEqual(got["agentvm_nicirq_eff"], "1")
+        self.assertEqual((got["agentvm_thr_dp_cpu0_frac"], got["agentvm_thr_dp_cpu1_frac"]), ("0.25", "0.75"))
+        self.assertEqual((got["agentvm_thr_dp_running_frac"], got["agentvm_thr_dp_mig"], got["agentvm_thr_dp_wait_share"]),
+                         ("0.95", "2", "0.050"))
+        # 0.25 * 0.25 + 0.75 * 0.75
+        self.assertEqual(got["agentvm_thr_dp_on_nicirq_frac"], "0.62")
+        # the existing values stay as they were
+        self.assertEqual((got["agentvm_cpu_share"], got["agentvm_maxcpu"]), ("1.500", "1.00"))
+
+
 if __name__ == "__main__":
     unittest.main()
