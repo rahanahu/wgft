@@ -568,7 +568,7 @@ fn dsack_extends_and_quickack_only_rises() {
     assert_eq!(cs.t.dsack, blk, "D-SACK [100,200)");
     cs.note_duplicate(500, 10); // 接しない重複は最初の block を保つ
     assert_eq!(cs.t.dsack, blk, "D-SACK after a separate duplicate");
-    // quickack の数の上限は 16 です (Linux の TCP_MAX_QUICKACKS)。
+    // quickack の数の上限は 16 です (Linux と同じ)。
     assert!(
         !cs.t.pingpong && cs.t.quick_acks == 16,
         "pingpong {} quick_acks {} after a duplicate",

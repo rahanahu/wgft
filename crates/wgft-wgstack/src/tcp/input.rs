@@ -28,8 +28,8 @@ impl Conn<'_> {
         }
     }
 
-    /// 受け入れられない segment に ACK を返します。Linux の tcp_oow_rate_limited と同じく、中身のある segment
-    /// には制限なく返し、中身の無い segment には接続ごとに 500 ms に 1 回まで返します。
+    /// 受け入れられない segment に ACK を返します。Linux と同じく、中身のある segment には制限なく返し、
+    /// 中身の無い segment には接続ごとに 500 ms に 1 回まで返します。
     fn oow_ack(&mut self, seg: &Segment<'_>, now: i64) {
         if seg.payload.is_empty() || seg.has(FLAG_SYN) {
             if self.t.last_oow != 0 && now - self.t.last_oow < 500 * MS {
@@ -37,7 +37,7 @@ impl Conn<'_> {
             }
             self.t.last_oow = now;
         }
-        // RCV.NXT より前にある重複の部分は、範囲を D-SACK で知らせます (RFC 2883、Linux の tcp_dsack_set)。
+        // RCV.NXT より前にある重複の部分は、範囲を D-SACK で知らせます (RFC 2883、Linux と同じ)。
         let n = u32::try_from(seg.payload.len()).unwrap_or(0);
         if n > 0 && !seg.has(FLAG_SYN) && seq::lt(seg.seq, self.t.rcv_nxt) {
             let end = seq::min(seg.seq.wrapping_add(n), self.t.rcv_nxt);
@@ -258,8 +258,7 @@ impl Conn<'_> {
             self.t.rcv_since_ack += i64::try_from(res.accepted).unwrap_or(i64::MAX);
             self.measure_rcv_mss(n);
             self.note_quickack(now);
-            // 推定した相手の MSS より多くの byte を確認していなければ ACK を遅らせます (Linux の
-            // __tcp_ack_snd_check)。
+            // 推定した相手の MSS より多くの byte を確認していなければ ACK を遅らせます (Linux と同じ)。
             let t = &*self.t;
             if t.rcv_since_ack > i64::from(t.rcv_mss_est) || (t.quick_acks > 0 && !t.pingpong) {
                 self.t.ack_now = true;
@@ -322,8 +321,7 @@ impl Conn<'_> {
         }
         self.t.pmtu = mtu;
         if self.t.snd_max != self.t.snd_una {
-            // 記録の境目は保ち、新しい大きさに入らない記録だけを損失にして送り直します (Linux の
-            // tcp_simple_retransmit と同じです)。入る記録は届いているかもしれないので、損失の印を付けません。
+            // 記録の境目は保ち、新しい大きさに入らない記録だけを損失にして送り直します (Linux と同じです)。入る記録は届いているかもしれないので、損失の印を付けません。
             // SACK の無い接続は記録の印を使わないので、今までどおり SND.UNA から送り直します。
             self.t.fast_rtx = false;
             if self.t.sack_ok {

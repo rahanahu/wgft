@@ -174,7 +174,7 @@ impl Conn<'_> {
         let sent = ns(r.sent_at);
         let t = &mut *self.t;
         if r.flags & REC_RETRANSMITTED != 0 {
-            // 元の segment への確認かもしれない再送は使いません。Linux の tcp_rack_advance と同じく最小の RTT
+            // 元の segment への確認かもしれない再送は使いません。Linux と同じく最小の RTT
             // だけで見分け、RFC 8985 の TSecr による判定は使いません。穴のある間の SACK の TSecr は受け手の
             // TS.Recent で、穴より前の segment の時刻のままなので、再送への SACK をすべて元の segment への確認と
             // みなしてしまいます。
@@ -183,7 +183,7 @@ impl Conn<'_> {
             }
         } else {
             if seq::le(end, t.recover) {
-                // RTO の前に送り、再送していないデータ (Linux の FLAG_ORIG_SACK_ACKED)
+                // RTO の前に送り、再送していないデータ
                 t.orig_delivered = true;
             }
             if t.rack_fack_ok && seq::lt(end, t.rack_fack) {
@@ -218,7 +218,7 @@ impl Conn<'_> {
             return;
         }
         (k.dsack_round, k.dsack_round_on) = (self.t.snd_max, true);
-        // 倍率の上限は Linux の reo_wnd_steps と同じ 255 で、欄の型の上限です。倍率と最小の RTT の積が溢れません。
+        // 倍率の上限は Linux と同じ 255 で、欄の型の上限です。倍率と最小の RTT の積が溢れません。
         self.t.reo_wnd_mult = self.t.reo_wnd_mult.max(1).saturating_add(1);
         k.reo_persist = RACK_REO_PERSIST;
         self.s.stats.dsacks_in += 1;
@@ -323,7 +323,7 @@ impl Conn<'_> {
         self.tlp_eligible() && self.t.tlp_sampled
     }
 
-    /// probe の確認を処理します (RFC 8985 7.4、Linux の tcp_process_tlp_ack)。probe が再送で、確認が probe より
+    /// probe の確認を処理します (RFC 8985 7.4、Linux と同じ)。probe が再送で、確認が probe より
     /// 先まで進んだときは、probe が損失を直したとみなして、この ACK の前の窓で輻輳の窓を下げます。この縮小は今の
     /// SND.MAX までに送ったデータの輻輳の事象なので、SND.UNA がそこへ届く前に入る回復は窓を下げ直さず、その番号で
     /// 終わります (`enter_fast_recovery`)。

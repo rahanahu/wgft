@@ -61,7 +61,7 @@ impl Conn<'_> {
                     t.ack_delayed = true;
                 }
                 t.ack_now = true;
-                t.pingpong = false; // Linux の tcp_delack_timer_handler と同じく対話の印を外します
+                t.pingpong = false; // Linux と同じく対話の印を外します
             }
             TMR_CLOSE => {
                 if matches!(self.t.state, State::TimeWait | State::FinWait2) {
@@ -97,7 +97,7 @@ impl Conn<'_> {
             st.rtos_short_of_dup_thresh += 1;
         }
         // SACK の取り消し:先頭の記録が SACK 済みのままか、同じ SND.UNA で 2 回目の RTO なら、相手が SACK 済みの
-        // データを捨てたとみなします (Linux の tcp_timeout_mark_lost)。
+        // データを捨てたとみなします (Linux と同じ)。
         let mut reneged = false;
         if self.t.sack_ok
             && (self.t.backoff > 0 || (self.b.recs.len() > 0 && self.is_sacked(0)))
@@ -147,7 +147,7 @@ impl Conn<'_> {
             return;
         }
         self.t.probes_out += 1;
-        // アプリケーションが閉じた接続は、Linux の tcp_probe_timer と同じく、相手が応えても戻らない後退の回数が
+        // アプリケーションが閉じた接続は、Linux と同じく、相手が応えても戻らない後退の回数が
         // orphan の上限以上で、後退を含めた RTO が上限に届いたときに打ち切ります。
         if self.t.probes_out > PROBE_RETRIES
             || (self.t.app_closed && self.t.backoff >= ORPHAN_RETRIES && self.cur_rto() >= RTO_MAX)

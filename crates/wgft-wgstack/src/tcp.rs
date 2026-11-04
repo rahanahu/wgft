@@ -62,7 +62,7 @@ pub(crate) const SEC: i64 = 1_000 * MS;
 
 /// SYN の MSS の下限で、MSS の option が無いときの値です (RFC 1122)。
 pub(crate) const MIN_MSS: u32 = 536;
-/// Fragmentation Needed の next-hop MTU の下限です (Linux の min_pmtu)。
+/// Fragmentation Needed の next-hop MTU の下限です (Linux と同じ)。
 pub(crate) const MIN_PMTU: u32 = 552;
 /// IPv4 と TCP の header の和です。
 pub(crate) const IP_TCP_HEADERS: u32 = 40;
@@ -74,13 +74,13 @@ pub(crate) const RCV_WINDOW_SHIFT: u8 = 7;
 pub(crate) const RTO_INIT: i64 = SEC;
 pub(crate) const RTO_MIN: i64 = 200 * MS;
 pub(crate) const RTO_MAX: i64 = 120 * SEC;
-/// Linux の TCP_DELACK_MIN です。
+/// 遅延 ACK の時間で、Linux と同じ 40 ms です。
 pub(crate) const DELACK_TIMEOUT: i64 = 40 * MS;
-/// TIME_WAIT の長さ (Linux の TCP_TIMEWAIT_LEN) です。
+/// TIME_WAIT の長さ (Linux と同じ) です。
 pub(crate) const TW_TIMEOUT: i64 = 60 * SEC;
 /// 閉じた後の FIN_WAIT_2 の長さ (Linux の tcp_fin_timeout) です。
 pub(crate) const FIN_TIMEOUT: i64 = 60 * SEC;
-/// 最初の SYN-ACK の再送までの時間 (Linux の TCP_TIMEOUT_INIT) です。
+/// 最初の SYN-ACK の再送までの時間 (Linux と同じ) です。
 pub(crate) const SYNACK_RTO: i64 = SEC;
 /// Linux の tcp_retries2 です。
 pub(crate) const RETRIES2: u32 = 15;
@@ -93,7 +93,7 @@ pub(crate) const INITIAL_WINDOW_SEGS: u32 = 10;
 /// TS.Recent を古いとみなすまでの時間 (RFC 7323 5.5 の 24 日) です。
 pub(crate) const PAWS_IDLE: i64 = 24 * 24 * 3600 * SEC;
 
-/// Linux の tcp_model_timeout と同じく、最小の RTO から倍にしていった retries2 回の再送が使う時間です。
+/// Linux と同じく、最小の RTO から倍にしていった retries2 回の再送が使う時間です。
 pub(crate) const RETRANSMIT_DEADLINE: i64 = {
     let mut total = 0;
     let mut rto = RTO_MIN;

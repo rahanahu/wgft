@@ -112,7 +112,7 @@ impl Conn<'_> {
     }
 
     /// 送り残しが無いまま `idle` ns の間何も送らなかった後に、時刻 `now` に送り始める時に呼びます。CUBIC は
-    /// 送らなかった時間だけ epoch を後ろへずらします (Linux の CA_EVENT_TX_START)。ずらさないと、黙った後の最初の
+    /// 送らなかった時間だけ epoch を後ろへずらします (Linux と同じ)。ずらさないと、黙った後の最初の
     /// ACK で 3 次の式が先へ進んだ窓を一度に求めます。epoch は今より先へずらしません。
     pub(crate) fn cc_on_idle(&mut self, idle: i64, now: i64) {
         if self.s.config.congestion == Congestion::Cubic {
@@ -230,8 +230,8 @@ impl Conn<'_> {
         self.cc_loss_thresh(cwnd, base)
     }
 
-    /// RTO の後の状態を整えます。ssthresh は呼び手が `loss_thresh` で決めます。CUBIC は Linux の bictcp_reset と
-    /// 同じく、RTO の後の epoch を 3 次の式の原点から始め直します。
+    /// RTO の後の状態を整えます。ssthresh は呼び手が `loss_thresh` で決めます。CUBIC は Linux と同じく、
+    /// RTO の後の epoch を 3 次の式の原点から始め直します。
     pub(crate) fn cc_on_rto(&mut self) {
         match self.s.config.congestion {
             Congestion::NewReno => self.t.ca_acc = 0,
@@ -270,7 +270,7 @@ impl Conn<'_> {
         }
     }
 
-    /// 窓を増やしてよいかを返します (Linux の tcp_is_cwnd_limited)。
+    /// 窓を増やしてよいかを返します (Linux と同じ)。
     pub(crate) fn is_cwnd_limited(&self) -> bool {
         let t = &*self.t;
         if t.cwnd_limited {

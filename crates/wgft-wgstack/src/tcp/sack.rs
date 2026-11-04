@@ -43,7 +43,7 @@ pub(crate) fn steps() -> u64 {
 /// RFC 6675 の DupThresh です。
 pub(crate) const DUP_THRESH: i64 = 3;
 
-/// SACK の取り消しを疑ってから RTO の処理に移るまでの最短の時間です (Linux の tcp_check_sack_reneging と同じく
+/// SACK の取り消しを疑ってから RTO の処理に移るまでの最短の時間です (Linux と同じく
 /// max(SRTT/2, 10 ms))。
 const RENEGE_DELAY_MIN: i64 = 10 * MS;
 
@@ -89,7 +89,7 @@ pub(crate) fn lost_bytes(t: &Tcb, recs: &RecordRing) -> u32 {
 }
 
 /// RFC 6675 の送り残しの量を、増減で保つ欄から求めます。SACK を交渉しない接続では、回復の外の重複した ACK 2 つ
-/// までを受け手が受けた segment とみなします (RFC 3042 の Limited Transmit、Linux の tcp_add_reno_sack)。
+/// までを受け手が受けた segment とみなします (RFC 3042 の Limited Transmit、Linux と同じ)。
 pub(crate) fn pipe(t: &Tcb, recs: &RecordRing) -> u32 {
     let mut p = t
         .snd_max
@@ -286,7 +286,7 @@ impl Conn<'_> {
     /// 超える量) に届く間、境目を先へ進めます。境目は後ろへ戻りません。
     pub(crate) fn advance_loss(&mut self) {
         if self.t.reorder_seen {
-            return; // 並べ替えを見た後は RACK だけで損失を決めます (Linux の tcp_time_to_recover)
+            return; // 並べ替えを見た後は RACK だけで損失を決めます (Linux と同じ)
         }
         let limit = u32_of((DUP_THRESH - 1) * i64::from(self.seg_mss()));
         while idx(self.t.loss_idx) < self.b.recs.len() {
@@ -570,7 +570,7 @@ impl Conn<'_> {
         };
         sndcnt = sndcnt.max(0);
         if k.prr_out == 0 && sndcnt < mss {
-            sndcnt = mss; // 回復に入った時の最初の再送 (Linux の tcp_cwnd_reduction)
+            sndcnt = mss; // 回復に入った時の最初の再送 (Linux と同じ)
         }
         t.cwnd = u32_of((pipe + sndcnt).min(1 << 30));
     }
