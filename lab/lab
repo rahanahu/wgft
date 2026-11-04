@@ -411,6 +411,16 @@ cmd_suite_gc() {
     info "deleting suite VMs whose lab process is gone: ${dead[*]}"
     suite_delete_vms "${dead[@]}"
   fi
+  # lab paired --split のネットワーク wgftsp<PID>:作った lab の PID が無く、どの instance も使っていなければ消す。
+  # SIGKILL、--keep の後に VM を手で消した場合、削除の失敗で残ったもの
+  local net used
+  while IFS=, read -r net used; do
+    [[ $net =~ ^wgftsp([0-9]+)$ ]] || continue
+    suite_alive "${BASH_REMATCH[1]}" && continue
+    [[ $used == 0 ]] || continue
+    info "deleting the split network $net whose lab process is gone"
+    inc network delete "$net" >/dev/null 2>&1 || info "could not delete the network $net"
+  done < <(inc network list -f csv -c n,u 2>/dev/null || true)
 }
 
 suite_cleanup() {
@@ -715,8 +725,18 @@ cmd_suite() {
 PAIRED_BASE_WT=""
 PAIRED_SPLIT_NET=""
 PAIRED_SAMPLER=""
+PAIRED_AGENT_AT=""
+PAIRED_OUT=""
 paired_cleanup() {
   [[ -z $PAIRED_SAMPLER ]] || kill "$PAIRED_SAMPLER" 2>/dev/null || true
+  # --split:VM を消す前に、agent の VM の agent と agentd の log を出力先に写す。agentd の子は incus の agent の
+  # PrivateTmp の /tmp に書くので、incus exec の /tmp からは見えず、agentd に頼んで読む。FAIL の原因を後で追うため
+  if [[ -n $PAIRED_AGENT_AT && -n $PAIRED_OUT && -s $PAIRED_OUT/.agentd-token ]]; then
+    timeout 20 python3 "$REPO/lab/tcpquality.py" agentx "$PAIRED_AGENT_AT" "$PAIRED_OUT/.agentd-token" -- \
+      sh -c 'for f in /tmp/wgft-agentd.log /tmp/wgft-tq-agent-*.log; do [ -f "$f" ] && { echo "==> $f"; tail -c 262144 "$f"; }; done' \
+      >"$PAIRED_OUT/agent-vm-logs.txt" 2>&1 || info "could not copy the agent VM's logs"
+    rm -f "$PAIRED_OUT/.agentd-token"
+  fi
   suite_cleanup || true
   if [[ -n $PAIRED_SPLIT_NET && -z ${SUITE_KEEP:-} ]]; then
     inc network delete "$PAIRED_SPLIT_NET" >/dev/null 2>&1 || info "could not delete the network $PAIRED_SPLIT_NET"
@@ -819,7 +839,7 @@ paired_sync() {
 }
 
 # lab paired の使い方。lab help と引数の誤りの両方がこの 1 つの文字列を出す
-PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local]] [--delay-ms MS] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y"
+PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y"
 
 # is_uint <値>:1 以上の整数か
 is_uint() { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
@@ -850,6 +870,8 @@ paired_parse_args() {
       --peer-vcpus) peervcpus=${2:?--peer-vcpus N}; shift 2 ;;
       --target) target=${2:?--target lan|local}; shift 2 ;;
       --delay-ms) delayms=${2:?--delay-ms MS}; shift 2 ;;
+      --delay-rate-mbit) delayrate=${2:?--delay-rate-mbit N}; shift 2 ;;
+      --delay-queue-pkts) delayqueue=${2:?--delay-queue-pkts N}; shift 2 ;;
       --out) out=${2:?--out DIR}; shift 2 ;;
       --keep) keep=1; shift ;;
       -*) die "usage: lab $PAIRED_SYNOPSIS" ;;
@@ -867,6 +889,9 @@ paired_validate() {
   [[ $path == fast || $path == rate || $path == delay ]] || die "the path is fast, rate or delay; usage: lab $PAIRED_SYNOPSIS"
   [[ $path != delay ]] || { is_uint "$delayms" || die "the delay path wants --delay-ms, a whole number of ms each way"; }
   [[ -z $delayms || $path == delay ]] || die "--delay-ms goes with the delay path"
+  [[ -z $delayrate && -z $delayqueue || $path == delay ]] || die "--delay-rate-mbit and --delay-queue-pkts go with the delay path"
+  [[ -z $delayrate ]] || require_uint --delay-rate-mbit "$delayrate"
+  [[ -z $delayqueue ]] || require_uint --delay-queue-pkts "$delayqueue"
   [[ -z $peervcpus || -n $split ]] || die "--peer-vcpus goes with --split"
   [[ -z $target || ( -n $split && ( $target == lan || $target == local ) ) ]] || die "--target wants lan or local, with --split"
   local hp
@@ -953,7 +978,7 @@ paired_provision() {
   out=${out:-${XDG_CACHE_HOME:-$HOME/.cache}/wgft-lab/paired-$(date +%Y%m%d-%H%M%S)}
   mkdir -p "$out"
   out=$(cd "$out" && pwd)
-  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}" > "$out/paired.log"
+  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${delayrate:+ delay_rate_mbit=$delayrate}${delayqueue:+ delay_queue_pkts=$delayqueue}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}" > "$out/paired.log"
   SUITE_KEEP=$keep
   SUITE_TEMPLATE=${WGFT_LAB_TEMPLATE:-$VM}
   PAIR_LEAD_S=${PAIR_LEAD_S:-1}
@@ -1038,6 +1063,9 @@ paired_split_setup() {
   [[ -n $ip ]] || die "VM ${names[0]} has no IPv4 address for agentd"
   (VM=${names[0]}; in_vm sh -c "setsid nohup python3 $SHARE/lab/tcpquality.py agentd $ip 7390 /run/wgft-agentd.token > /tmp/wgft-agentd.log 2>&1 < /dev/null &")
   SPLIT_AGENT_AT=$ip:7390
+  # 後片付けで agent の VM の log を読むため、agentd の宛先と token を全体の変数と出力先 (0600) に残す
+  PAIRED_AGENT_AT=$SPLIT_AGENT_AT PAIRED_OUT=$out
+  (umask 077; echo "$token" > "$out/.agentd-token")
   local tries
   for tries in $(seq 1 50); do
     (VM=${names[1]}; in_vm python3 "$SHARE/lab/tcpquality.py" agentx "$SPLIT_AGENT_AT" /run/wgft-agentd.token -- true) >/dev/null 2>&1 && break
@@ -1138,6 +1166,8 @@ paired_round_env() {
   [[ $spec != base:* ]] || env+=(WGFT_BIN_DIR=/usr/local/lib/wgft-base)
   # 遅れのある経路:netem の待ち行列は tcpquality.sh が遅れから決め、カーネルの TCP の端のバッファは 64 MiB まで許す
   [[ $path != delay ]] || env+=(DELAY_MS="$delayms" TCP_BUF_MAX="${PAIRED_TCP_BUF_MAX:-67108864}")
+  [[ -z $delayrate ]] || env+=(DELAY_RATE_MBIT="$delayrate")
+  [[ -z $delayqueue ]] || env+=(DELAY_QUEUE_PKTS="$delayqueue")
 }
 
 # paired_run_round <r>:round r を 2 台で同時に流し、結果の行を paired.log に足す。rc と fails と prev_offs を更新する
@@ -1199,7 +1229,7 @@ paired_report() {
 
 cmd_paired() {
   local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes="" tool="" streams="" udpping="" bulkmbit="" agentgso="" rmemmax="" rtarget_flag=""
-  local split="" peervcpus="" delayms="" target="" SPLIT_HOSTPOLL="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
+  local split="" peervcpus="" delayms="" delayrate="" delayqueue="" target="" SPLIT_HOSTPOLL="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
   local rest=() path spec_x spec_y uses_base rust pins=() names=() vms=() t0 run_timeout r
   local rc=0 fails=0 prev_offs=()
   paired_parse_args "$@"
