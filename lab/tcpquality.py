@@ -326,6 +326,7 @@ def cpupaired(logfile):
     rc = cpupaired_ratios(data, logfile)
     for w in dict.fromkeys(PEER_WARNS):
         print(w)
+    peer_series_lines(data)
     peer_window_lines(data, logfile)
     return rc
 
@@ -361,6 +362,32 @@ def cpupaired_ratios(data, logfile):
                 rc = cpupaired_key(data, key, vm=vcpus is not None, pre=pre, share_key=share, vcpus=vcpus) or rc
     rc = paired_ratio(data, "overall_mbit", "MBITRATIO", sender_check=True) or rc
     return rc
+
+
+def peer_series_lines(data):
+    # with the peer VM's series: per arm the mean share of saturated intervals and their sum, and a
+    # warning when one arm has at least twice the other's saturated intervals and 2 or more, even
+    # below the threshold: saturation the arms cause differently is a difference between the arms
+    plan, names, runs = data
+    if plan.get("split") != "1" or not any("peervm_series_intervals" in r for r in runs.values()):
+        return
+    frac = {"x": [], "y": []}
+    sat = {"x": 0, "y": 0}
+    for (_, _, arm), r in sorted(runs.items()):
+        if "peervm_series_intervals" not in r:
+            continue
+        frac[arm].append(peer_sat_frac(r))
+        try:
+            sat[arm] += int(r.get("peervm_sat_intervals", "0"))
+        except ValueError:
+            pass
+    mean = lambda v: sum(v) / len(v) if v else 0.0
+    print("PEERSERIES threshold=%.2f x_sat_frac_mean=%.3f y_sat_frac_mean=%.3f x_sat_intervals=%d y_sat_intervals=%d x=%s y=%s"
+          % (PEER_SAT_FRAC, mean(frac["x"]), mean(frac["y"]), sat["x"], sat["y"], names.get("x", "x"), names.get("y", "y")))
+    hi, lo = max(sat.values()), min(sat.values())
+    if hi >= 2 and hi >= 2 * lo:
+        print("WARN peer series x=%d y=%d: one arm's runs saturate a peer vCPU in at least twice as many intervals as the other's"
+              % (sat["x"], sat["y"]))
 
 
 def peer_window_lines(data, logfile):
@@ -432,10 +459,16 @@ def peer_bound(r):
         return True
     if PEER_RULE == "window":
         return False
+    return peer_sat_frac(r) >= PEER_SAT_FRAC
+
+
+def peer_sat_frac(r):
+    # the share of saturated intervals, from the counts rather than the rounded peervm_sat_frac
     try:
-        return float(r.get("peervm_sat_frac", "0")) >= PEER_SAT_FRAC
+        n = int(r.get("peervm_series_intervals", "0"))
+        return int(r.get("peervm_sat_intervals", "0")) / n if n > 0 else float(r.get("peervm_sat_frac", "0"))
     except ValueError:
-        return False
+        return 0.0
 
 
 def peer_bound_window(r):
@@ -1946,7 +1979,8 @@ def proc_stat_cpus(text):
 # (the whole-window saturated runs ran at 4.1 to 4.6 against 7.7 to 8.0 Gbit/s), so 10% of the
 # window saturated costs a run about 5%, twice the 2% that the A/A comparisons have to resolve.
 
-PEER_SAT_FRAC = 0.1
+# WGFT_LAB_PEER_SAT_FRAC re-picks it when a log is analysed again, for example 0.05 for one interval
+PEER_SAT_FRAC = float(os.environ.get("WGFT_LAB_PEER_SAT_FRAC", "0.1"))
 
 
 def kworker_pids(proc="/proc"):
@@ -1973,7 +2007,8 @@ def peerseries_row(busy, kw, t):
 
 def peerseries(out, interval="0.5", seconds="900", proc="/proc"):
     # in the peer VM during a run, every <interval> s for at most <seconds> s, or until killed: one
-    # peerseries_row per sample. The kernel workers are listed again every tenth sample, since
+    # peerseries_row per sample, with the TCP memory in use (pages, sockstat) as tcpmem. The kernel
+    # workers are listed again every tenth sample, since
     # workers come and go; between listings only their stat files are read. The kw columns are
     # cumulative from the first sample, for differences only
     hz = os.sysconf("SC_CLK_TCK")
@@ -1982,13 +2017,15 @@ def peerseries(out, interval="0.5", seconds="900", proc="/proc"):
     pids, last, done, n = {}, {}, {}, 0
     with open(out, "a") as f:
         while time.time() < end:
-            t0 = time.time()
             fresh = set()
             if n % 10 == 0:
                 found = kworker_pids(proc)
                 fresh = {p for p in found if p not in pids}
                 pids.update(found)
             n += 1
+            # the sample's time is taken right before /proc/stat, after the rescan, so that a rescan
+            # does not stretch the interval it falls in
+            t0 = time.time()
             with open("%s/stat" % proc) as st:
                 busy, _ = proc_stat_cpus(st.read())
             for pid, cpu in list(pids.items()):
@@ -2007,7 +2044,13 @@ def peerseries(out, interval="0.5", seconds="900", proc="/proc"):
             kw = {c: done.get(c, 0) for c in busy}
             for pid, cpu in pids.items():
                 kw[cpu] = kw.get(cpu, 0) + last.get(pid, 0)
-            f.write(peerseries_row({c: us(b) for c, b in busy.items()}, kw, t0) + "\n")
+            row = peerseries_row({c: us(b) for c, b in busy.items()}, kw, t0)
+            try:
+                with open("%s/net/sockstat" % proc) as g:
+                    row += "".join(" tcpmem=%d" % v for k, v in parse_tcpmem(g.read(), "") if k == "tcpmem_pages")
+            except OSError:
+                pass
+            f.write(row + "\n")
             f.flush()
             time.sleep(max(0.0, step - (time.time() - t0)))
     return 0
@@ -2016,7 +2059,7 @@ def peerseries(out, interval="0.5", seconds="900", proc="/proc"):
 def peerseries_sum(samples, t_start, t_end):
     # the window's values from peerseries's file: peervm_series_intervals, peervm_sat_intervals and
     # peervm_sat_frac (intervals with some vCPU saturated), and the peak of the busiest vCPU over the
-    # intervals, peervm_maxcpu_peak
+    # intervals, peervm_maxcpu_peak, and the most TCP memory in use at a sample, peervm_tcpmem_peak_mb
     rows = []
     with open(samples) as f:
         for l in f:
@@ -2025,6 +2068,8 @@ def peerseries_sum(samples, t_start, t_end):
                 rows.append(r)
     n = sat = 0
     peak = 0.0
+    pg = os.sysconf("SC_PAGE_SIZE")
+    tcpmem = [int(r["tcpmem"]) for r in rows if "tcpmem" in r]
     for a, b in zip(rows, rows[1:]):
         dt = (float(b["t"]) - float(a["t"])) * 1e6
         if dt <= 0:
@@ -2042,7 +2087,10 @@ def peerseries_sum(samples, t_start, t_end):
         sat += hot
     if n == 0:
         return ""
-    return "peervm_series_intervals=%d peervm_sat_intervals=%d peervm_sat_frac=%.2f peervm_maxcpu_peak=%.2f" % (n, sat, sat / n, peak)
+    out = "peervm_series_intervals=%d peervm_sat_intervals=%d peervm_sat_frac=%.2f peervm_maxcpu_peak=%.2f" % (n, sat, sat / n, peak)
+    if tcpmem:
+        out += " peervm_tcpmem_peak_mb=%.1f" % (max(tcpmem) * pg / 1048576)
+    return out
 
 
 def peerseries_line(samples, t_start, t_end):
