@@ -175,8 +175,8 @@ class CpuPaired(unittest.TestCase):
             self.assertEqual(rc, 1, err)
             self.assertIn(want, err)
         # --placement apart-mt: 3 vCPUs at least, and rust or kernel arms only
-        for args, want in ((["--split", "--placement", "apart-mt", "--vcpus", "2", "--tool", "iperf3", "fast", "rust", "kernel"],
-                            "wants --vcpus 3 or more"),
+        for args, want in ((["--split", "--placement", "apart-mt", "--vcpus", "3", "--tool", "iperf3", "fast", "rust", "kernel"],
+                            "wants --vcpus 4 or more"),
                            (["--split", "--placement", "apart-mt", "--vcpus", "4", "--tool", "iperf3", "fast", "gvisor", "rust"],
                             "--placement apart-mt places the Rust agent's data-plane thread and crypto workers"),
                            (["--split", "--placement", "apart-st", "fast", "rust", "kernel"], "--placement wants apart or apart-mt")):

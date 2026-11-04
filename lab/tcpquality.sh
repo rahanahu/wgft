@@ -164,9 +164,11 @@
 # that list; the kernel mode has no data-plane process and is not pinned. AGENT_DP_CPUS and
 # AGENT_WORKER_CPUS (`--placement apart-mt`, for builds with crypto workers) then put the Rust
 # agent's thread wgft-dataplane on AGENT_DP_CPUS and its wgft-crypto workers on AGENT_WORKER_CPUS
-# once the tunnel is up, fail the mode when that does not take, check the threads again after
-# every run, failing the run when one left its CPUs (a worker started later inherits the data-plane
-# thread's CPUs), and sample every thread of the agent (agentvm_thr_dp_*, _crypto_*, _other_*).
+# once the tunnel is up and again at the start of every run, fail the mode or run when that does not
+# take, check the threads at the end of every run, failing the run when one left its CPUs (a worker
+# started later inherits the data-plane thread's CPUs), record the number of workers
+# (agent_crypto_threads) and warn when there is none, and sample every thread of the agent
+# (agentvm_thr_dp_*, _crypto_*, _other_*). AGENT_WORKER_CPUS is a comma list, one CPU per worker.
 # In every lab, CPU=1 adds the packets per GB and mean size per interface, the TCP
 # segments and UDP datagrams per GB per namespace, tun_data_pkts_per_gb and tun_ack_pkts_per_gb on
 # the tunnel at the vps, and recv_seg_avg_b, the bytes per TCP segment the receiving end got after
@@ -632,6 +634,9 @@ for mode in $MODES; do
             echo "FAIL  agent $mode: cannot place its threads: $threads_now"; fail=1; continue
           fi
           echo "   agent $threads_now"
+          case $threads_now in
+            crypto_threads=0\ *) echo "WARN  agent $mode: no wgft-crypto thread; this build has no crypto workers, so apart-mt places only its data-plane thread" ;;
+          esac
           DP_SAMPLE=threads:all
         fi
       fi
@@ -678,6 +683,17 @@ for mode in $MODES; do
     fi
     if [ -n "$CPU" ]; then
       if [ -n "$AGENT_AT" ]; then
+        # apart-mt: place the threads again at the start of every run, so that workers a new tunnel
+        # generation started since the last run are put on their CPUs too; the result line gets the
+        # number of workers
+        crypto_field=
+        if [ -n "$AGENT_DP_CPUS" ] && [ "$mode" = rust ]; then
+          if threads_now=$(agentsh pin-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" 2>&1); then
+            crypto_field=" agent_crypto_threads=$(echo "$threads_now" | sed -n 's/^crypto_threads=\([0-9]*\).*/\1/p' | head -1)"
+          else
+            echo "FAIL  agent $mode run $run: cannot place its threads: $threads_now"; fail=1 run_pass=0
+          fi
+        fi
         # the agent VM first and the peer VM last at the start, and the other way round at the end,
         # so that the agent VM's window holds the peer VM's
         sa0=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0" "nicirq:$HOME_NS:eth0" kthreads ${DP_SAMPLE:+"$DP_SAMPLE"})
@@ -777,7 +793,7 @@ for mode in $MODES; do
           if (snd != "") printf " sender_cpu_share=%.3f", snd / 1e6 / t
           if (rcv != "" && (tool == "iperf3" || dir == "up")) printf " receiver_cpu_share=%.3f", rcv / 1e6 / t }')"
       stats="$stats $($Q snapdiff "$(field received "$got")" "$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.3f", b - a }')" "$DIRECTION" "$sa0 $sp0" "$sa1 $sp1")"
-      stats="$stats netem_drops=$((nd1 - nd0))"
+      stats="$stats netem_drops=$((nd1 - nd0))${crypto_field:-}"
       if [ "$((nd1 - nd0))" -gt 0 ] && [ "$LOSS_PCT" = 0 ] && [ -z "$RATE_MBIT" ]; then
         echo "FAIL  agent $mode run $run: netem dropped $((nd1 - nd0)) packets on a path without loss; raise NETEM_LIMIT"; fail=1 run_pass=0
       fi

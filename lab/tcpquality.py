@@ -1084,11 +1084,11 @@ def thread_group(comm):
 
 
 class ThreadsSampler:
-    # like ThreadSampler, for every thread of a process, summed per group (thread_group): samples,
+    # like ThreadSampler, every 0.1 s instead of 0.05, for every thread of a process, summed per group (thread_group): samples,
     # running and per CPU the samples there, cumulative; and at each snapshot the scheduler's run and
     # wait time and the migrations, summed over the group's threads as increments since the last
     # snapshot, so that threads that come and go do not make the sums go back
-    def __init__(self, pid, ncpu, interval=0.05, proc="/proc"):
+    def __init__(self, pid, ncpu, interval=0.1, proc="/proc"):
         self.pid, self.proc, self.interval, self.ncpu = str(pid), proc, interval, ncpu
         self.groups = {}
         self.last, self.tot = {}, {}
@@ -1098,6 +1098,7 @@ class ThreadsSampler:
         return self.groups.setdefault(label, {"samples": 0, "running": 0, "oncpu": [0] * self.ncpu})
 
     def sample(self):
+        # one read per thread: the comm, state and CPU all come from the thread's stat line
         try:
             tids = os.listdir("%s/%s/task" % (self.proc, self.pid))
         except OSError:
@@ -1105,18 +1106,19 @@ class ThreadsSampler:
             return
         for tid in tids:
             try:
-                with open("%s/%s/task/%s/comm" % (self.proc, self.pid, tid)) as f:
-                    comm = f.read().strip()
-            except OSError:
-                continue
-            st = thread_state(self.pid, tid, self.proc)
-            if st is None:
+                with open("%s/%s/task/%s/stat" % (self.proc, self.pid, tid)) as f:
+                    line = f.read()
+                head, _, rest = line.rpartition(")")
+                comm = head.partition("(")[2]
+                st = rest.split()
+                state, cpu = st[0], int(st[36])
+            except (OSError, ValueError, IndexError):
                 continue
             g = self.group(thread_group(comm))
             g["samples"] += 1
-            g["running"] += st[0] == "R"
-            if 0 <= st[1] < self.ncpu:
-                g["oncpu"][st[1]] += 1
+            g["running"] += state == "R"
+            if 0 <= cpu < self.ncpu:
+                g["oncpu"][cpu] += 1
 
     def start(self):
         import threading
