@@ -207,4 +207,19 @@ mod tests {
         assert_eq!(early_lines("", 0o600, &[(env, "0")]), vec![]);
         assert_eq!(early_lines(&format!("{env}=4\n"), 0o600, &[]), vec![]);
     }
+
+    /// 実験の送信の番の誤った値は設定の誤りで、終了コード 3 で止まる。
+    #[test]
+    fn a_bad_experimental_send_turn_value_exits_with_code_3() {
+        let argv = ["wgft", "agent", "run", "--data-dir", "/d"].map(OsString::from);
+        let Ok(Parsed::AgentRun { global, run }) = cli::parse(argv) else {
+            panic!("parse");
+        };
+        let env: HashMap<String, OsString> =
+            HashMap::from([(agent::SEND_TURN_ENV.to_owned(), OsString::from("yes"))]);
+        let mut early = Vec::new();
+        let e = prepare_door(&global, &run, &env, "linux", &mut early).unwrap_err();
+        assert_eq!(e.exit_code(), 3, "{e}");
+        assert!(e.to_string().contains(agent::SEND_TURN_ENV), "{e}");
+    }
 }

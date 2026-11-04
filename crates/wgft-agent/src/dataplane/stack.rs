@@ -83,6 +83,7 @@ impl StackSettings {
     pub(crate) fn config(&self, mtu: usize) -> Config {
         Config {
             limits: self.limits,
+            send_turn: self.send_turn,
             ..Config::new(self.addr, mtu)
         }
         .with_send_turn_segments(self.send_turn)

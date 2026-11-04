@@ -103,6 +103,9 @@ impl Output {
             return;
         }
         if self.turn != id {
+            // 番を持つ接続はいつも list の先頭にあり、先頭から取り出した枠だけがここに来るので、ほかの枠の番は
+            // 残っていません。
+            debug_assert_eq!(self.turn, NIL, "a send turn was left on another slot");
             self.turn = id;
             self.turn_bytes = 0;
         }
