@@ -1196,7 +1196,7 @@ paired_split_setup() {
   SPLIT_TAPS=""
   for i in 0 1; do SPLIT_TAPS+=" tap:${vms[i]}=$(inc config get "${names[i]}" volatile.eth1.host_name)"; done
   if [[ -n $cases ]]; then
-    # --cases:case の間に戻す値 (namespace ごとの TCP のバッファの sysctl) を記録する。標本は case ごとに始める
+    # --cases:case の間に戻す値 (namespace ごとの TCP のバッファの sysctl と VM の tcp_mem) を記録する。標本は case ごとに始める
     for i in 0 1; do
       (VM=${names[i]}; in_vm bash "$SHARE/lab/splitcase.sh" save) >>"$out/vm-${vms[i]}.log" 2>&1 \
         || die "cannot record the state of ${names[i]} for --cases; see $out/vm-${vms[i]}.log"
