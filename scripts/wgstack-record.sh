@@ -5,8 +5,7 @@
 #   scripts/wgstack-record.sh [--set git|full] [--out DIR] [--keep DIR] [--check]
 #
 #   --set git   the set kept in git (default), installed into testdata/wgstack-rec/; the set must
-#               fit in the budget that TestRecordingsBudget checks. divergences.json and
-#               divergences-full.json stay.
+#               fit in the budget that TestRecordingsBudget checks. divergences.json stays.
 #   --set full  the larger set for a local cache, such as every stream seed; --out names where.
 #   --out DIR   where the full set goes (required with --set full).
 #   --keep DIR  make the sets in DIR, which must be absent or empty, and keep them.
