@@ -322,6 +322,9 @@ iperf3 は送り手と受け手の byte あたりの CPU が `tcpquality.py` よ
   x が VM a の組の比の中央値と、x が VM b の組の比の中央値の幾何平均を比として出し、組を引き直す bootstrap の 95% の区間を付けます。
   2 台の CPU の差は `vm_a_over_b` に出ます。
   失敗した実行、始まりの同期を待ちきれなかった実行、送り手が 1 つの CPU の 0.7 以上を使った実行を含む組は除き、予定の組の数に対する理由ごとの数を出します。
+  `--split` では、相手の VM の最も忙しい vCPU が 0.95 以上で、その vCPU に縛られたカーネルの worker (`peervm_cpu<N>_kw`) が 0.9 以上だった実行を含む組も除き、`peer_bound` として数えます。
+  この実行は agent ではなく相手の側の詰まりを測っています。
+  worker の値の無い前のラボの記録では `peervm_maxcpu` が 0.95 以上かだけで判定し、出力に `peer_bound_rule=maxcpu` を 1 度出します。
   iperf3 の送り手の値は、stream ごとに 1 つのスレッドを使うので stream の数で割ります。
   どちらかの側で予定の組の半分より少なくしか残らなければ、比を出さずに失敗します。
   round ごとの比の中央値と、組の 2 つの実行が重なった割合も出し、重なりが 0.9 より小さければ警告します。
@@ -422,7 +425,7 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
   この worker は全 vCPU で 0.2 CPU 前後ずつ動き、server のカーネルの WireGuard の暗号の仕事と推定しています。
   一部の実行では、その vCPU の worker が 1.0 に達し、flow の softirq の仕事もその中で走って、相手の側で詰まり速さが落ちます。
   CPU の固定ではこの重なりを避けられません。
-  `peervm_maxcpu` と、その vCPU の `peervm_cpu<N>_kw` が 1.0 に近い実行がこれに当たります
+  `peervm_maxcpu` と、その vCPU の `peervm_cpu<N>_kw` が 1.0 に近い実行がこれに当たり、解析はその組を `peer_bound` として除きます
 
 `delay` の経路は、vps と homerouter の間の両方の向きに `--delay-ms` の遅れを netem で入れます。
 netem の待ち行列の長さは `tcpquality.sh` が決め、20 Gbit/s で遅れの間に飛ぶ packet の 2 倍にします。

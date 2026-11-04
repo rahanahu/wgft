@@ -45,8 +45,11 @@
 #       difference between the two VMs' CPUs; that difference is printed as vm_a_over_b. The 95%
 #       interval resamples the pairs of each side on their own 10,000 times. A pair is left out
 #       when a run is missing, failed (pass=0, no CPU time, undetermined), started without the
-#       start barrier (sync=timeout) or measured its sender; the counts are printed against the
-#       PLAN's rounds times runs. With fewer than half the planned pairs on either side it prints
+#       start barrier (sync=timeout) or measured its sender; with --split (split=1 on the PLAN
+#       line) also when the run measured the peer (peer_bound): its busiest vCPU at PEER_BOUND or
+#       more with the kernel workers bound to it at PEER_KWORKER or more, or, for runs without that
+#       worker time, peervm_maxcpu at PEER_BOUND or more, noted once as peer_bound_rule=maxcpu; the
+#       counts are printed against the PLAN's rounds times runs. With fewer than half the planned pairs on either side it prints
 #       no RATIO line and fails. It also prints the median share of the longer run's window that
 #       the two runs overlapped, and warns below OVERLAP_WARN and for runs that started late.
 #       MBITRATIO gives the ratio of the arms' rates in the same way, for throughput targets.
@@ -98,6 +101,13 @@ import sys
 import time
 
 SENDER_BOUND = 0.7
+# `lab/lab paired --split`: a run whose peer VM had one vCPU at least PEER_BOUND busy, with the
+# kernel workers bound to that vCPU taking at least PEER_KWORKER of it, measured the peer: the flow's
+# softirq ran inside a saturated per-CPU worker and the agent waited for data. The saturated runs had
+# 0.99 to 1.00 of both; unsaturated runs reached 0.97 busy with 0.15 to 0.53 of worker time. Runs
+# without the per-vCPU worker time (older lab heads) fall back to peervm_maxcpu alone
+PEER_BOUND = 0.95
+PEER_KWORKER = 0.9
 
 
 def serve(ip, port, nbytes, seed):
@@ -314,6 +324,9 @@ def iperf(jsonfile):
 def cpupaired(logfile):
     data = load_paired(logfile)
     rc = 0
+    if data[0].get("split") == "1" and any(not has_peer_kworker(r) for r in data[2].values()):
+        print("NOTE peer_bound_rule=maxcpu: some runs have no per-vCPU kernel worker time, so they are peer bound "
+              "when peervm_maxcpu is %.2f or more" % PEER_BOUND)
     for arm in ("x", "y"):
         if kernel_arm(data[1].get(arm, arm)):
             print("RATIO unavailable: arm %s (%s) is the kernel-mode agent, whose work runs outside its process; "
@@ -373,8 +386,31 @@ def side_of(rnd):
     return "a" if rnd % 2 == 1 else "b"
 
 
-def classify_pair(x, y, key, sender_check):
-    # why a pair is left out ("failed", "sync_timeout" or "sender_bound"), or None when it is used
+def has_peer_kworker(r):
+    return any(k.startswith("peervm_cpu") and k.endswith("_kw") for k in r)
+
+
+def peer_bound(r):
+    # whether a run of `lab/lab paired --split` measured the peer: the busiest peer vCPU at
+    # PEER_BOUND or more and, when the run has the per-vCPU kernel worker time, that vCPU's worker
+    # time at PEER_KWORKER or more; without it, peervm_maxcpu alone (the maxcpu rule)
+    num = lambda k: float(r.get(k, "0"))
+    try:
+        if not has_peer_kworker(r):
+            return num("peervm_maxcpu") >= PEER_BOUND
+        busy = {int(k[10:-5]): num(k) for k in r
+                if k.startswith("peervm_cpu") and k.endswith("_busy") and k[10:-5].isdigit()}
+        if not busy:
+            return False
+        hot = max(sorted(busy), key=lambda c: busy[c])
+        return busy[hot] >= PEER_BOUND and num("peervm_cpu%d_kw" % hot) >= PEER_KWORKER
+    except ValueError:
+        return False
+
+
+def classify_pair(x, y, key, sender_check, peer_check=False):
+    # why a pair is left out ("failed", "sync_timeout", "sender_bound" or, with peer_check,
+    # "peer_bound"), or None when it is used
     why = None
     for r in (x, y):
         try:
@@ -387,6 +423,8 @@ def classify_pair(x, y, key, sender_check):
             why = why or "sync_timeout"
         elif sender_check and sender_share(r) >= SENDER_BOUND:
             why = why or "sender_bound"
+        elif peer_check and peer_bound(r):
+            why = why or "peer_bound"
     return why
 
 
@@ -410,8 +448,11 @@ def paired_ratio(data, key, label, sender_check=False):
     expected = {"a": 0, "b": 0}
     pairs = {"a": [], "b": []}
     counts = {"missing": 0, "failed": 0, "sync_timeout": 0}
+    peer_check = sender_check and plan.get("split") == "1"
     if sender_check:
         counts["sender_bound"] = 0
+    if peer_check:
+        counts["peer_bound"] = 0
     for rnd, run in keys:
         side = side_of(rnd)
         expected[side] += 1
@@ -419,7 +460,7 @@ def paired_ratio(data, key, label, sender_check=False):
         if x is None or y is None:
             counts["missing"] += 1
             continue
-        why = classify_pair(x, y, key, sender_check)
+        why = classify_pair(x, y, key, sender_check, peer_check)
         if why:
             counts[why] += 1
             continue
@@ -450,6 +491,9 @@ def cpupaired_key(data, key, vm, pre=None, share_key="vm_cpu_share", vcpus=None)
     by_round = {}
     arm_vals = {"x": [], "y": []}
     counts = {"missing": 0, "failed": 0, "sync_timeout": 0, "sender_bound": 0}
+    peer_check = plan.get("split") == "1"
+    if peer_check:
+        counts["peer_bound"] = 0
     late = 0
     overlaps = []
     for rnd, run in keys:
@@ -460,7 +504,7 @@ def cpupaired_key(data, key, vm, pre=None, share_key="vm_cpu_share", vcpus=None)
             counts["missing"] += 1
             continue
         late += sum(r.get("sync") == "late" for r in (x, y))
-        why = classify_pair(x, y, key, True)
+        why = classify_pair(x, y, key, True, peer_check)
         if why:
             counts[why] += 1
             continue
