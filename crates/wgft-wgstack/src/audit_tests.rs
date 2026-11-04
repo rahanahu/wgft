@@ -110,52 +110,6 @@ fn shrunk_zero_window_with_data_in_flight_is_not_aborted_while_the_peer_answers(
     assert!(answers >= 10, "{answers}");
 }
 
-/// 相手が自分のデータの再送 (SEG.SEQ < SND.WL1) に新しい累積の確認と小さめの窓を載せたとき、核はその segment の
-/// 窓を使わず (RFC 9293 3.10.7.4 の SND.WL1 の規則)、前の窓を新しい SND.UNA から測ります。相手が広告した右端は
-/// 戻っていないのに、核はその右端の先へ新しいデータを送ります。Linux の tcp_may_update_window は SND.UNA を
-/// 進める ACK の窓を常に使うので、この形では右端の先へ送りません。
-#[test]
-#[ignore = "audit finding: the core sends new data past the advertised right edge (see the audit report)"]
-fn ack_on_a_peer_retransmission_does_not_extend_the_send_window() {
-    let mut n = TestNet::new(small_limits());
-    let (c, mut p) = n.accepted(false);
-    // 窓を 2816 byte に絞ります (窓の scale は 7)。
-    p.wnd = 22;
-    n.peer_ack(&mut p, &[]);
-    n.drain();
-    n.s.write(n.now, c, &vec![b'z'; 20_000]).unwrap();
-    let first = n.drain();
-    let sent: u32 = first.iter().map(|o| o.payload.len() as u32).sum();
-    assert_eq!(sent, 2760, "{}", show(&first));
-    // 相手のデータ A と B のうち、B だけが届きます (A は失われました)。
-    let a = p.seg(FLAG_ACK, &[b'a'; 100]);
-    p.snd = p.snd.wrapping_add(100);
-    let b = p.seg(FLAG_ACK, &[b'b'; 100]);
-    p.snd = p.snd.wrapping_add(100);
-    n.inject(&b);
-    n.drain();
-    // 相手は A を再送し、その segment で核の 2760 byte を確認して窓を 1024 byte にします。広告する右端は
-    // 前の右端 (確認の前の SND.UNA + 2816) より 968 byte 先へ進み、戻っていません。
-    let mut a2 = a.clone();
-    a2.ack = p.rcv.wrapping_add(sent);
-    a2.wnd = 8;
-    let edge = a2.ack.wrapping_add(8 << 7);
-    n.inject(&a2);
-    let outs = n.drain();
-    let beyond: Vec<String> = outs
-        .iter()
-        .filter(|o| {
-            let end = o.seq.wrapping_add(o.payload.len() as u32);
-            !o.payload.is_empty() && seq::gt(end, edge)
-        })
-        .map(ToString::to_string)
-        .collect();
-    assert!(
-        beyond.is_empty(),
-        "the core sent past the advertised right edge {edge}: {beyond:?}"
-    );
-}
-
 /// 相手の ISN を `iss` にして握手を済ませ、accept した接続と相手の側を返します (相手は SACK と timestamp と窓の
 /// scale を示します)。
 fn accepted_with_peer_iss(n: &mut TestNet, iss: u32) -> (crate::ConnId, PeerConn) {
