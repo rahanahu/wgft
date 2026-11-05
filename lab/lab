@@ -739,6 +739,8 @@ cmd_suite() {
 PAIRED_BASE_WT=""
 PAIRED_SPLIT_NET=""
 PAIRED_SAMPLER=""
+PAIRED_AGENTLOAD_VM=""
+PAIRED_AGENTLOAD_LOG=""
 PAIRED_AGENT_AT=""
 PAIRED_OUT=""
 paired_cleanup() {
@@ -755,6 +757,7 @@ paired_cleanup() {
     paired_agent_logs "$PAIRED_OUT/agent-vm-logs.txt"
     rm -f "$PAIRED_OUT/.agentd-token"
   fi
+  paired_agentload_kill
   suite_cleanup || true
   if [[ -n $PAIRED_SPLIT_NET && -z ${SUITE_KEEP:-} ]]; then
     inc network delete "$PAIRED_SPLIT_NET" >/dev/null 2>&1 || info "could not delete the network $PAIRED_SPLIT_NET"
@@ -864,7 +867,7 @@ paired_sync() {
 }
 
 # lab paired の使い方。lab help と引数の誤りの両方がこの 1 つの文字列を出す
-PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local] [--placement apart|apart-mt]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y, or with --split: paired --split [options] --cases FILE [--max-wall SECONDS] ARM_X ARM_Y"
+PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local] [--placement apart|apart-mt] [--agent-load CPU:DUTY]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y, or with --split: paired --split [options] --cases FILE [--max-wall SECONDS] ARM_X ARM_Y"
 
 # is_uint <値>:1 以上の整数か
 is_uint() { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
@@ -895,6 +898,7 @@ paired_parse_args() {
       --peer-vcpus) peervcpus=${2:?--peer-vcpus N}; shift 2 ;;
       --target) target=${2:?--target lan|local}; shift 2 ;;
       --placement) placement=${2:?--placement apart|apart-mt}; shift 2 ;;
+      --agent-load) agentload=${2:?--agent-load CPU:DUTY}; shift 2 ;;
       --cases) cases=${2:?--cases FILE}; shift 2 ;;
       --max-wall) maxwall=${2:?--max-wall SECONDS}; shift 2 ;;
       --delay-ms) delayms=${2:?--delay-ms MS}; shift 2 ;;
@@ -962,6 +966,17 @@ paired_validate() {
   [[ -z $agentgso || $agentgso == off || ( $agentgso == on && $path == fast ) ]] || die "--agent-gso wants off, or on with the fast path"
   [[ -z $rmemmax ]] || { is_uint "$rmemmax" && ((rmemmax >= 4096)); } || die "--kernel-rmem-max wants a whole number of bytes of 4096 or more"
   [[ -z $rmemmax || ${spec_x#base:} == kernel || ${spec_y#base:} == kernel ]] || die "--kernel-rmem-max sets the receiver of a kernel arm; neither arm is kernel"
+  if [[ -n $agentload ]]; then
+    [[ -n $split ]] || die "--agent-load goes with --split"
+    [[ $agentload =~ ^([0-9]+):([0-9]+)$ ]] || die "--agent-load wants CPU:DUTY, the agent VM's CPU and the percent of every 10 ms the hog is busy; got $agentload"
+    # 先頭の 0 は bash で 8 進になるので、10 進に読む。値は正規化して以後に渡す
+    local al_cpu=$((10#${BASH_REMATCH[1]})) al_duty=$((10#${BASH_REMATCH[2]}))
+    ((al_cpu < vcpus)) || die "--agent-load CPU $al_cpu is not a CPU of the agent VM, which has --vcpus $vcpus"
+    ((al_duty <= 100)) || die "--agent-load DUTY wants 0 to 100"
+    agentload=$al_cpu:$al_duty
+    # カーネルモードの腕は VM 全体の CPU でしか比べられず、負荷がそこに入るので使えない
+    [[ ${spec_x#base:} != kernel && ${spec_y#base:} != kernel ]] || die "--agent-load cannot be used with a kernel arm: kernel arms are compared by VM-wide CPU, which the load would fill"
+  fi
   # 同じ腕は、--split でホストの halt polling だけを腕の間で替える比べ (PAIRED_HOSTPOLL_X と _Y が違う) に限る
   [[ $spec_x != "$spec_y" || ( -n $split && ${PAIRED_HOSTPOLL_X:-on} != "${PAIRED_HOSTPOLL_Y:-on}" ) ]] \
     || die "the two arms are the same: $spec_x; with --split, the same arm twice needs PAIRED_HOSTPOLL_X and PAIRED_HOSTPOLL_Y that differ"
@@ -1019,7 +1034,7 @@ paired_plan_pins() {
 
 # paired_plan_line [<追加の key=value>]:paired.log の先頭の PLAN の行。--cases では case ごとに case_index と cases が付く
 paired_plan_line() {
-  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${delayrate:+ delay_rate_mbit=$delayrate}${delayqueue:+ delay_queue_pkts=$delayqueue}${xagentenv:+ x_agent_env=${xagentenv// /,}}${yagentenv:+ y_agent_env=${yagentenv// /,}}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}${placement:+ placement=$placement}${1:+ $1}"
+  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${delayrate:+ delay_rate_mbit=$delayrate}${delayqueue:+ delay_queue_pkts=$delayqueue}${xagentenv:+ x_agent_env=${xagentenv// /,}}${yagentenv:+ y_agent_env=${yagentenv// /,}}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}${placement:+ placement=$placement}${agentload:+ agent_load=$agentload}${1:+ $1}"
 }
 
 # paired_provision:出力先を作り、build して VM を 2 台立て、header.txt を書く。t0 と names、vms を決める
@@ -1098,6 +1113,7 @@ paired_header() {
       echo "lab paired: split: agent VM ${names[0]} limits.cpu=${pins[0]} qemu $SPLIT_QEMU_AGENT, peer VM ${names[1]} limits.cpu=${pins[1]} qemu $SPLIT_QEMU_PEER, network $PAIRED_SPLIT_NET (taps$SPLIT_TAPS, queue ${PAIRED_TAP_QLEN:-4096}, NIC queues $SPLIT_PEER_Q), agentd $SPLIT_AGENT_AT, kernel $kern, template $SUITE_TEMPLATE"
       [[ -z ${PAIRED_HOSTPOLL_X:-}${PAIRED_HOSTPOLL_Y:-} ]] || echo "lab paired: split: host halt polling of the ${PAIRED_HOSTPOLL_VMS:-both} VM(s), set by the guests: x ${PAIRED_HOSTPOLL_X:-on}, y ${PAIRED_HOSTPOLL_Y:-on} (hostpoll= in paired.log)"
       [[ -z ${PAIRED_KVM_SAMPLES:-} ]] || echo "lab paired: split: KVM statistics from $PAIRED_KVM_SAMPLES (tcpquality.py kvmsample, started by root)"
+      [[ -z $agentload ]] || echo "lab paired: split: agent load: CPU ${agentload%%:*} of the agent VM busy ${agentload##*:}% of every 10 ms during each arm"
       [[ -z $placement ]] || echo "lab paired: split: placement $placement: the data NIC's interrupts on CPU 0 of the agent VM, a userspace-mode agent on CPUs $SPLIT_AGENT_CPUS${SPLIT_AGENT_DP_CPUS:+, its data-plane thread on CPU $SPLIT_AGENT_DP_CPUS and its crypto workers one each on CPUs $SPLIT_AGENT_WORKER_CPUS}; the kernel mode has no agent process to place; peer VM: NIC interrupts on CPU 0, RPS on CPUs ${SPLIT_PEER_RPS:-unchanged}"
       echo "lab paired: split: the arms take turns in the same two VMs; vm=a in paired.log is the arm that ran first in the round. vhost and qemu's other threads are not pinned (host samples in host-samples.txt)"
     else
@@ -1233,11 +1249,13 @@ paired_run_split_round() {
     cur_arm=${arms[k]}
     paired_round_env
     log=$out/round-$r-${arms[k]}.log
+    paired_agentload_start
     # 後ろで流して wait で待つ。前で流すと、TERM の trap が arm の終わり (最長 run_timeout) まで待たされる
     (VM=${names[1]}; suite_timeout "$run_timeout" in_vm env "${env[@]}" bash "$SHARE/lab/tcpquality-cpu.sh" "$path" "$mode") >"$log" 2>&1 &
     local arm_rc=0
     wait $! || arm_rc=$?
     ((arm_rc == 0)) || rc=1
+    paired_agentload_stop "$r" "${arms[k]}"
     # --cases:時間切れ (timeout の 124、-k の 137) か agentd に届かなかった arm の後は、VM の組を確かめ直す
     if [[ -n $cases ]] && { ((arm_rc == 124 || arm_rc == 137)) || grep -q '^agentx: ' "$log"; }; then
       PAIRED_CASE_SUSPECT=1
@@ -1251,6 +1269,40 @@ paired_run_split_round() {
       | awk -v o="$off" '{ for (i = 1; i <= NF; i++) if ($i ~ /^t_(start|end)=/) { split($i, kv, "="); $i = sprintf("%s=%.3f", kv[1], kv[2] - o) } print }' >>"$out/paired.log"
   done
   echo "lab paired: round $r of $rounds done, ${arms[0]} first, $((SECONDS - t0)) s"
+}
+
+# paired_agentload_start / paired_agentload_stop <round> <arm>:--agent-load CPU:DUTY の間、agent の VM の CPU に
+# 固定した負荷 (lab/agentload.py) を腕の実行の前後で動かす。負荷は VM の root の netns で走り、agent の CPU を取り合う。
+# 負荷が実際に使った CPU の割合 (share) を paired.log に AGENTLOAD の行で残す。腕の実行ごと (起動と後片付けを含む) で、
+# 転送 1 回ごとではない
+paired_agentload_start() {
+  [[ -n $agentload ]] || return 0
+  PAIRED_AGENTLOAD_VM=${names[0]} PAIRED_AGENTLOAD_LOG=$out/vm-${vms[0]}.log
+  (VM=${names[0]}; suite_timeout 60 in_vm python3 "$SHARE/lab/agentload.py" start "${agentload%%:*}" "${agentload##*:}" /run/wgft-agentload) >>"$out/vm-${vms[0]}.log" 2>&1 \
+    || die "cannot start the load on ${names[0]}; see $out/vm-${vms[0]}.log"
+}
+# stop は後ろで流して wait で待つ (TERM の trap が効くように)。失敗したら残りを kill して状態を消し、次の腕の start が
+# 古い状態で落ちて残りの case が失われないようにする
+paired_agentload_stop() {
+  [[ -n $agentload ]] || return 0
+  local res=$out/.agentload-stop stop_rc=0
+  (VM=${names[0]}; suite_timeout 60 in_vm python3 "$SHARE/lab/agentload.py" stop /run/wgft-agentload) >"$res" 2>>"$out/vm-${vms[0]}.log" &
+  wait $! || stop_rc=$?
+  if ((stop_rc != 0)) || ! grep -q '^AGENTLOAD ' "$res"; then
+    info "could not stop the load on ${names[0]} (rc=$stop_rc); killing it"
+    paired_agentload_kill
+    fails=1
+    PAIRED_CASE_SUSPECT=1
+  else
+    echo "$(grep '^AGENTLOAD ' "$res") round=$1 arm=$2" >>"$out/paired.log"
+  fi
+  rm -f "$res"
+}
+# paired_agentload_kill:負荷を SIGKILL し、状態のファイルを消す (できる範囲で。失敗しても続ける)
+paired_agentload_kill() {
+  # EXIT の trap からも呼ばれ、そのとき cmd_paired の local は消えている。global だけを使う
+  [[ -n ${PAIRED_AGENTLOAD_VM:-} ]] || return 0
+  (VM=$PAIRED_AGENTLOAD_VM; suite_timeout 60 in_vm python3 "$SHARE/lab/agentload.py" kill /run/wgft-agentload) >>"${PAIRED_AGENTLOAD_LOG:-/dev/null}" 2>&1 || true
 }
 
 # paired_hostpoll <arm>:PAIRED_HOSTPOLL_X、PAIRED_HOSTPOLL_Y (on か off、片方だけなら他方は on) があれば、その腕の前に
@@ -1549,7 +1601,7 @@ paired_cases_mark() {
 
 cmd_paired() {
   local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes="" tool="" streams="" udpping="" bulkmbit="" agentgso="" rmemmax="" rtarget_flag=""
-  local split="" peervcpus="" delayms="" delayrate="" delayqueue="" target="" placement="" SPLIT_AGENT_CPUS="" SPLIT_AGENT_DP_CPUS="" SPLIT_AGENT_WORKER_CPUS="" SPLIT_PEER_RPS="" xagentenv="" yagentenv="" SPLIT_HOSTPOLL="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
+  local split="" peervcpus="" delayms="" delayrate="" delayqueue="" target="" placement="" agentload="" SPLIT_AGENT_CPUS="" SPLIT_AGENT_DP_CPUS="" SPLIT_AGENT_WORKER_CPUS="" SPLIT_PEER_RPS="" xagentenv="" yagentenv="" SPLIT_HOSTPOLL="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
   local rest=() path spec_x spec_y uses_base rust pins=() names=() vms=() t0 run_timeout r
   local rc=0 fails=0 prev_offs=()
   local cases="" maxwall="" case_names=() case_paths=() case_flags=() PAIRED_KERN="" PAIRED_DIRTY="" PAIRED_READY_S="" SPLIT_CUR_TARGET=lan
