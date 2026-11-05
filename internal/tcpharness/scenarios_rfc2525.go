@@ -133,7 +133,7 @@ func rfc2525StretchACK(h *H) {
 
 // burstSegments is how many full segments the burst variants of the stretch-ACK scenario inject
 // before the DUT reads anything: more than the two a receiver may leave unacknowledged, and few
-// enough to stay inside the initial window of every engine.
+// enough to stay inside the receive window every engine opens.
 const burstSegments = 12
 
 // ackSpan counts the pure ACKs of the DUT that advance the cumulative ACK, and the most full
@@ -159,7 +159,7 @@ func (a *ackSpan) take(p *Peer, segs []Segment, last *uint32, size int) {
 // measured; the check is the one-by-one scenario's, RFC 5681 4.2 and RFC 9293 3.8.6.3, that no
 // ACK covers more than two full segments.
 func rfc2525StretchACKBurst(h *H) {
-	const port = 8306
+	const port = 8308
 	l := h.Listen(port)
 	p, _, _ := h.Connect(l, port, StandardSYN())
 	size := segSize(p)
@@ -187,7 +187,7 @@ func rfc2525StretchACKBurst(h *H) {
 // with one. The duplicate ACKs are counted and measured, and the check is that there is one for
 // each segment. Filling the hole then has to be acknowledged in full.
 func rfc2525StretchACKBurstOOO(h *H) {
-	const port = 8307
+	const port = 8309
 	const ooo = 8
 	l := h.Listen(port)
 	p, _, _ := h.Connect(l, port, StandardSYN())

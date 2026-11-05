@@ -82,17 +82,21 @@ wgstack は受け身の open だけの IPv4 の TCP ですが、中継のため�
 2.13 の burst の変種は、`cubic-ack-burst` と同じく、DUT が読む前に複数の segment を入れます。
 `rfc2525-stretch-ack-burst` は順序どおりの 12 segment を続けて入れ、ACK の数と 1 つの ACK が確認する最大の segment 数を測ります。
 `rfc2525-stretch-ack-burst-ooo` は先頭の 1 segment を抜き、順序外の 8 segment を続けて入れ、重複した ACK の数を測ります(RFC 5681 3.2)。
-どちらも測った値は `Measure` に記録し、確かめは 2 segment を超える ACK が無いことと、順序外の segment ごとに重複した ACK が 1 つ出ることです。
+どちらも測った値は `Measure` に記録します。
+確かめは、2 segment を超える ACK が無いこと、順序外の segment ごとに重複した ACK が 1 つ出ること、穴を埋めた segment で全体が確認されることです。
 2026-11-06 の結果は次のとおりです。
 
 | 実装 | 順序どおりの 12 segment への ACK | 順序外の 8 segment への重複した ACK |
 |---|---|---|
-| Linux 7.2 | 12 個(1 つ目の ACK から 1 segment ずつ) | 8 個 |
-| gVisor | 実行ごとに 1 から 7 個で、最大の ACK は 3 から 12 segment | 8 個 |
+| Linux 7.2 | 12 個(どの ACK も 1 segment) | 8 個 |
+| gVisor | 実行ごとに 1 から 9 個で、最大の ACK は 3 から 12 segment | 8 個 |
 | wgstack の Rust 版と凍結した Go 版 | 1 個(12 segment) | 1 個 |
 
 Linux は通ります。
-gVisor は入れた segment をどこまで取り込んでから答えるかが実行ごとに違い、2 segment を超える ACK が出る実行が多いので、一部の実行だけの差として記録します。
+burst は握手の直後に入れるので、この結果は接続の始めの Linux の挙動です。
+回線速度の転送では、参照の受け手も 2 segment ごとよりずっと少ない回数で ACK を返します([起床ごとの ACK の合わせ](../v2/wgstack-rs.md#起床ごとの-ack-の合わせ))。
+gVisor は入れた segment をどこまで取り込んでから答えるかが実行ごとに違い、ACK の数も変わります。
+測った実行はどれも 2 segment を超える ACK が出ましたが、通る実行も起こり得るので、一部の実行だけの差として記録します。
 wgstack は 1 回の起床で接続ごとに ACK を 1 つしか作らないので、2 つの確かめとも落ち、手で進める時計で毎回同じ値になります。
 これは[起床ごとの ACK の合わせ](../v2/wgstack-rs.md#起床ごとの-ack-の合わせ)が選んだ既知の違いで、測った値を添えて wgstack の期待した差の一覧に入れました。
 この 2 行は、試験の書き手が測定の結果を添えて足しました。

@@ -11,8 +11,8 @@ import (
 var Known = map[string]tcpharness.Known{
 	"rfc2525-stretch-ack-burst/every-second-segment": {
 		Observed: "an ACK covers more than two segments; all acknowledged",
-		Reason: "gVisor acknowledges a burst of twelve segments written to the Device before it reads with one to six ACKs, " +
-			"the widest over three to twelve segments, depending on how many it has taken in when it answers, past the every-second-segment SHOULD of RFC 5681 4.2; " +
+		Reason: "gVisor acknowledges a burst of twelve segments written to the Device before it reads with a number of ACKs that varies from run to run, " +
+			"the widest over three or more segments in every run measured, past the every-second-segment SHOULD of RFC 5681 4.2; " +
 			"the burst-ooo scenario shows it still sends a duplicate ACK for each out-of-order segment",
 		Sometimes: true,
 	},

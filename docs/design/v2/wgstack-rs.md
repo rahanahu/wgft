@@ -458,11 +458,15 @@ agent は転送するだけで、vCPU の数は agent の VM のものです。
 
 参照の受け手も、回線速度では 2 segment ごとよりずっと少ない回数で ACK を返します(12 から 43 segment に 1 つ)。
 この違いが送り手の slow start と損失の回復に与える影響は、まだ測っていません。
+
+適合の台本の burst の変種 `rfc2525-stretch-ack-burst` と `rfc2525-stretch-ack-burst-ooo` が、この違いを核、gVisor、Linux で測ります([RFC 2525 の既知の問題](../userspace/wgstack-verification.md#rfc-2525-の既知の問題))。
+順序どおりの 12 segment に対し、核は ACK を 1 つ返します(Linux は 12 個で、gVisor は実行ごとに変わります)。
+順序外の 8 segment に対しては、核の重複した ACK は 1 つです(Linux と gVisor は 8 個)。
+この違いは期待した差の一覧に入れてあり、台本は落ちずに測った値を記録します。
+Linux の値は握手の直後の接続のものです。
+
 次の確かめは、まだ行っていません。
 
-- 適合の台本の burst の変種:`rfc2525-stretch-ack-burst` と `rfc2525-stretch-ack-burst-ooo` を足し、核、gVisor、Linux に流しました([RFC 2525 の既知の問題](../userspace/wgstack-verification.md#rfc-2525-の既知の問題))。
-  順序どおりの 12 segment に対し、核は ACK を 1 つ返し(Linux は 12、gVisor は実行ごとに 1 から 7)、順序外の 8 segment に対し重複した ACK は 1 つでした(Linux と gVisor は 8)。
-  この違いは期待した差の一覧に入れ、台本は違いを測って記録します
 - ラボでの確かめ:損失のある経路で、損失 1 回あたりの重複した ACK の数を参照の受け手と比べます
 
 ### 操作の知らせ
