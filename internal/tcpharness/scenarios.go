@@ -62,6 +62,8 @@ var Scenarios = []Scenario{
 	script("rfc2525-synack-rto"),
 	{Name: "rfc2525-window-deflation", Refs: "RFC 2525 2.8, RFC 6582 3.2", Run: rfc2525WindowDeflation},
 	{Name: "rfc2525-stretch-ack", Refs: "RFC 2525 2.13, RFC 5681 4.2, RFC 1122 4.2.3.2", Run: rfc2525StretchACK},
+	{Name: "rfc2525-stretch-ack-burst", Refs: "RFC 2525 2.13, RFC 5681 4.2, RFC 9293 3.8.6.3; wireguard-go writes a received batch to the Device before it reads", Run: rfc2525StretchACKBurst},
+	{Name: "rfc2525-stretch-ack-burst-ooo", Refs: "RFC 5681 3.2 and 4.2; wireguard-go writes a received batch to the Device before it reads", Run: rfc2525StretchACKBurstOOO},
 	script("rfc2525-close-fin"),
 	script("rfc2525-data-after-close"),
 	{Name: "chained-recovery", Refs: "RFC 5681 3.1, RFC 6675 5, RFC 9438 4.6, which allow up to beta x FlightSize; the bound is the reference Linux's, tcp_enter_recovery and tcp_fastretrans_alert", Run: chainedRecovery},

@@ -25,6 +25,17 @@ var Known = map[string]tcpharness.Known{
 		Observed: "1 retransmissions",
 		Reason:   "wgstack-performance.md, RACK-TLP: RACK, always on, resends the first segment before any duplicate-ACK threshold",
 	},
+	"rfc2525-stretch-ack-burst/every-second-segment": {
+		Observed: "an ACK covers more than two segments; all acknowledged",
+		Reason: "wgstack-rs.md, per-wake ACK merging: the core makes at most one content-free ACK per connection per wake, " +
+			"so a burst of twelve segments injected before the poll gets one ACK over all twelve, past the " +
+			"every-second-segment SHOULD of RFC 5681 4.2. Measured: 1 ACK for 12 segments on the Rust core and on the frozen Go wgstack",
+	},
+	"rfc2525-stretch-ack-burst-ooo/dupack-per-segment": {
+		Observed: "1 duplicate ACKs",
+		Reason: "wgstack-rs.md, per-wake ACK merging: eight out-of-order segments injected before the poll get one duplicate ACK, " +
+			"not one each as RFC 5681 3.2 asks. Measured: 1 duplicate ACK for 8 segments on the Rust core and on the frozen Go wgstack",
+	},
 	"icmp-echo/oversized": {
 		Observed: "no reply",
 		Reason: "wgstack.md, Linux との一致を確かめていない選択, MTU を超える echo request: wgstack does not fragment what it " +
