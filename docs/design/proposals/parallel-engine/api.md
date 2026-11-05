@@ -43,14 +43,17 @@ unit の核は、65,536 行のポートの表を持ちません。
 
 - 作成:設定 (アドレス、上限、MTU) と link と変換を受け、起動の時の利用できる CPU の数から helper の数と unit の数を決めます。
   設定は持ちません([CPU の数ごとの動かし方](performance.md#cpu-の数ごとの動かし方))
-- 利用できる CPU が 1 つ:Inline の駆動の経路をそのまま使います。
-  ほかの経路とは別の関数にし、輪と atomic を置きません(設計判断)
+- 利用できる CPU が 1 つ:今の核をそのまま使い、front だけの executor で動きます。
+  unit の輪と atomic を経路に置きません(設計判断)
 - executor:front のスレッドと helper のスレッドです。
-  データプレーンの executor は tokio を使わず、executor ごとの poller で動きます([LAN の側の I/O](ownership.md#lan-の側の-io))
+  データプレーンの executor は tokio を使わず、executor ごとの poller で動きます([unit の epoll](ownership.md#unit-の-epoll))
 - 停止:engine を閉じると全 executor を止め、予算と置き場を返します。
   今の `close` と同じく、次の世代に予算を渡せます
-- 対応する OS:利用できる CPU が 2 つ以上の経路は Linux だけです。
-  Windows と macOS は CPU の数によらず Inline の経路です
+- データプレーン:推奨は、tokio を使わない executor のデータプレーンを全 OS で 1 つにする形です。
+  Windows と macOS と、利用できる CPU が 1 つの Linux は、front だけの executor で動きます。
+  front だけの時は unit の受け渡しが無いので、IOCP で poller を付け替えられないことが問題になりません。
+  今の tokio のデータプレーンを残して 2 つを持ち続けるかは、所有者が決めます([所有者に決めてもらうこと](README.md#所有者に決めてもらうこと))
+- 複数の CPU:helper を使う経路は Linux だけで作ります
 
 ## link の adapter
 
@@ -81,24 +84,25 @@ TAP は L2 の header と近隣の解決を要し、核は IPv4 の L3 だけを
 |---|---|---|
 | 受信 | front | 今の `Device::handle_datagram` の 1 回の呼び出し |
 | 送信 (front が実行する unit と UDP) | front | 今の `Device::handle_packet` の 1 回の呼び出し |
-| 送信の貸し出し | front | device の層に加える口で、`begin_encapsulate` を求められた数だけ呼び、`PendingEncapsulate` と endpoint を返します |
-| 送信 (helper が実行する unit) | helper | 借りた `PendingEncapsulate::encrypt` で暗号化します。`Device::handle_packet` が行う確かめ (内側の header、MTU、経路、ピアごとの数え) は helper の側の写しで行います([device の層の確かめ](ownership.md#device-の層の確かめ)) |
+| counter の在庫の補充 | front | device の層に加える口で、`begin_encapsulate` を在庫の分だけ呼び、`PendingEncapsulate` と endpoint の世代を返します。セッションが無ければ、`handle_packet` と同じくデータによるハンドシェイクの開始を行います |
+| 送信 (helper が実行する unit) | helper | 在庫の `PendingEncapsulate::encrypt` で暗号化します。経路は接続を置く時に front が確かめ、MTU は核が MSS で守るので、packet ごとには確かめません。送った数は front が集めます([counter の在庫](ownership.md#counter-の在庫)) |
 | 制御 | front | ハンドシェイク、cookie、keepalive、鍵の交換、タイマー |
 
 sanstun は変えません。
 使う口はどれも sanstun の公開の API です。
-`PendingEncapsulate` をスレッドの間で渡せる型であること (`Send`) は、コードの読みでは鍵の写しと数値だけを持つ値ですが、型の確認は実装の時に行います(未確認)。
+`PendingEncapsulate` の欄は `Zeroizing` の鍵、index、`u64` だけなので、スレッドの間で渡せます (sanstun のコードの読み)。
 
-何もしない変換は大きさ 0 の型で、受信は link の枠をそのまま平文として借用させ、貸し出しを作りません。
-engine は変換を型の引数で受けるので、何もしない変換の時は貸し出しの輪と暗号の呼び出しを作らず、その費用を払いません(設計判断)。
+何もしない変換は大きさ 0 の型で、受信は link の枠をそのまま平文として借用させ、counter の在庫を作りません。
+engine は変換を型の引数で受けるので、何もしない変換の時は counter の在庫と暗号の呼び出しを作らず、その費用を払いません(設計判断)。
 
 ## アプリケーションの API
 
 ### アプリケーションの置き場
 
-アプリケーションは、接続の unit の中で、その unit の持ち主の executor の上で動きます。
+アプリケーションは、接続の unit の中で、その unit を実行する executor の上で動きます。
 agent の中継はこの形の最初のアプリケーションです。
 アプリケーションは今と同じ核の操作を同じスレッドで呼ぶので、スレッドをまたぐ読み書きはありません。
+engine が接続ごとにアプリケーションを作る口、LAN の側の I/O とタイマーを unit の epoll から受ける口、dial を unit から front へ求めて完了を受ける道は、骨格だけを決め、形は P0 で決めます([未決の項目](verification.md#未決の項目))。
 
 外のスレッドから接続を読み書きするライブラリの API (データを持つ命令と結果をスレッドの間で渡す形) は、P0 から P3 の範囲の外にします([所有者に決めてもらうこと](README.md#所有者に決めてもらうこと))。
 1 つのスレッドで使う汎用の sans-IO の TCP/IP スタックとしては、今の核をそのまま使えます。
@@ -119,7 +123,7 @@ agent の中継はこの形の最初のアプリケーションです。
 
 | 加えるもの | 中身 |
 |---|---|
-| `dial_tcp(now, remote, local, deadline)` | 能動の open を始め、`ConnId` を返します。完了は知らせで届きます |
+| `dial_tcp(now, remote, local, deadline)` | 能動の open を求めます。unit のアプリケーションが呼び、求めは front へ渡り、front が一時ポートを選んで同じ unit に接続を作ります。`ConnId` と完了は、その unit の知らせで届きます |
 | `Event::Connected(ConnId)` | 確立した知らせです |
 | `Event::ConnectFailed(ConnId, reason)` | 拒否、期限、再送の上限、同時の open、ポートの不足のどれかで失敗した知らせです |
 | `abort` の SYN-SENT での意味 | 取り消しです。RST を送らずに枠を返します |
