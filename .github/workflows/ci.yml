@@ -172,6 +172,8 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - 'deny.toml'
+              # The musl chunk fill check that rust-check runs.
+              - 'scripts/check-musl-fill.sh'
               # The scenario scripts and parser fixtures, which the Rust tests read as well.
               - 'internal/tcpharness/scripts/**'
               # The Go wgstack's recordings and the Rust wgstack's expected-difference list,
@@ -476,6 +478,15 @@ jobs:
         run: |
           cargo check -p wgft-wgstack --locked
           cargo check -p wgft-wireguard --features fuzzing,deterministic --locked
+      # The shipping Linux agent is a musl build whose zig memset is a byte loop, so the chunk fill
+      # writes wide stores itself (fill_chunk in crates/wgft-wgstack/src/buf/chunk.rs). A toolchain
+      # bump could fold that loop back into a memset call; this checks the emitted assembly of
+      # fill_chunk without zig, and runs the chunk tests on the musl code path.
+      - name: musl chunk fill
+        run: |
+          scripts/check-musl-fill.sh --asm x86_64-unknown-linux-musl
+          scripts/check-musl-fill.sh --asm aarch64-unknown-linux-musl
+          cargo test -p wgft-wgstack --locked --target x86_64-unknown-linux-musl chunk
 
   rust-deny:
     # B15. cargo-deny: licence allowlist, RustSec advisories, duplicate versions, and

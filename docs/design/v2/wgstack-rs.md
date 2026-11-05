@@ -696,6 +696,7 @@ Go の測った値 (c_conn、記録 1 件、区間 1 つ) は Rust の型の大�
   zigbuild の musl の `memset` が 1 byte の store の loop で、16 KiB の埋めが約 8.8 GB/s にとどまるためです。
   musl 以外は `fill` のままです (glibc の `memset` の方が速い)。
   `scripts/check-musl-fill.sh` が製品の musl の build で `fill_chunk` に `memset` の呼び出しが無いことを確かめます。
+  CI は zig を使わず、`--asm` で rustc の出力するアセンブリの `fill_chunk` を確かめます。
 - chunk の確保:chunk は 16 KiB の配列の `Box` で、輪は Go と同じく枠ごとに chunk への pointer の配列を持ちます。
   `Box::new` は失敗するとプロセスを止めるので、`FixedVec` の module の関数が `try_reserve_exact` で取り、容量がちょうど 16 KiB のときだけ `into_boxed_slice` で `Box` にします。
   容量が違えば確保の失敗として扱います
