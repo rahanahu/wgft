@@ -52,7 +52,7 @@ pub(crate) fn check_free_list(
     Ok(())
 }
 
-/// SYN-ACK の再送の回数 (Linux の tcp_synack_retries) です。握手の途中の表は回数ごとに list を持ちます。
+/// SYN-ACK の再送の回数です。値は Go の wgstack と同じです。握手の途中の表は回数ごとに list を持ちます。
 pub(crate) const SYNACK_RETRIES: usize = 5;
 
 /// 1 ms の ns です。
@@ -62,7 +62,7 @@ pub(crate) const SEC: i64 = 1_000 * MS;
 
 /// SYN の MSS の下限で、MSS の option が無いときの値です (RFC 1122)。
 pub(crate) const MIN_MSS: u32 = 536;
-/// Fragmentation Needed の next-hop MTU の下限です (Linux の既定の `net.ipv4.route.min_pmtu` と同じ)。
+/// Fragmentation Needed の next-hop MTU の下限です (値は Go の wgstack と同じです)。
 pub(crate) const MIN_PMTU: u32 = 552;
 /// IPv4 と TCP の header の和です。
 pub(crate) const IP_TCP_HEADERS: u32 = 40;
@@ -78,11 +78,11 @@ pub(crate) const RTO_MAX: i64 = 120 * SEC;
 pub(crate) const DELACK_TIMEOUT: i64 = 40 * MS;
 /// TIME_WAIT の長さ (Linux と同じ) です。
 pub(crate) const TW_TIMEOUT: i64 = 60 * SEC;
-/// 閉じた後の FIN_WAIT_2 の長さ (Linux の tcp_fin_timeout) です。
+/// 閉じた後の FIN_WAIT_2 の長さです。値は Go の wgstack と同じです。
 pub(crate) const FIN_TIMEOUT: i64 = 60 * SEC;
 /// 最初の SYN-ACK の再送までの時間 (Linux と同じ) です。
 pub(crate) const SYNACK_RTO: i64 = SEC;
-/// Linux の tcp_retries2 です。
+/// 再送を諦めるまでの再送の回数です (RFC 1122 4.2.3.5 の R2 に当たります)。
 pub(crate) const RETRIES2: u32 = 15;
 /// 応答の無い窓の probe の上限です。
 pub(crate) const PROBE_RETRIES: i64 = 15;
@@ -93,7 +93,7 @@ pub(crate) const INITIAL_WINDOW_SEGS: u32 = 10;
 /// TS.Recent を古いとみなすまでの時間 (RFC 7323 5.5 の 24 日) です。
 pub(crate) const PAWS_IDLE: i64 = 24 * 24 * 3600 * SEC;
 
-/// Linux と同じく、最小の RTO から倍にしていった retries2 回の再送が使う時間です。
+/// 最小の RTO から倍にしていった RETRIES2 回の再送が使う時間です。
 pub(crate) const RETRANSMIT_DEADLINE: i64 = {
     let mut total = 0;
     let mut rto = RTO_MIN;

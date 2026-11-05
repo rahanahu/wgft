@@ -419,7 +419,7 @@ impl Shared {
             return false;
         }
         if seg.has(FLAG_RST) {
-            // Linux の既定 (tcp_rfc1337=0) と同じく、番号の合う RST で行を外します。
+            // RFC 1337 の対策 (TIME-WAIT での RST を無視すること) は入れず、番号の合う RST で行を外します。
             if seg.seq == r.rcv_nxt {
                 self.remove_tw_row(id);
             }

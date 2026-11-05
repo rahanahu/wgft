@@ -232,7 +232,7 @@ impl Conn<'_> {
                     t.ssthresh.min(flight.max(mss) + mss)
                 };
                 if self.may_undo(seg) {
-                    self.undo(); // 回復の再送は不要でした (Linux と同じ)
+                    self.undo(); // 回復の再送は不要でした (RFC 3708 と RFC 3522 型の取り消し)
                 }
                 self.k.undo_marker = false;
             } else if self.t.sack_ok {
@@ -252,7 +252,7 @@ impl Conn<'_> {
                 t.cwnd = t.cwnd.max(mss);
             }
         } else if !self.is_cwnd_limited() {
-            // アプリケーションに制限された間は窓を増やしません (RFC 7661、Linux と同じ)。
+            // アプリケーションに制限された間は窓を増やしません (RFC 7661)。
         } else if self.t.cwnd < self.t.ssthresh {
             self.slow_start_ack(ack, acked, ack_rtt);
         } else {

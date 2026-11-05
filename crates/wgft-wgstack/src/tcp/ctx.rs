@@ -242,7 +242,7 @@ impl Conn<'_> {
         }
         if !self.b.rcv.empty() || self.t.snd_una != self.t.snd_max || !self.fin_acked() {
             if self.t.state == State::FinWait2 && self.t.tdl[TMR_CLOSE] == 0 {
-                // 順序外のデータを持って閉じた FIN_WAIT_2。Linux の `tcp_fin_timeout` の後に終えます。
+                // 順序外のデータを持って閉じた FIN_WAIT_2。FIN_TIMEOUT の後に終えます。
                 self.arm(TMR_CLOSE, now + FIN_TIMEOUT);
             }
             return false;

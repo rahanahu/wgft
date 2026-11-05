@@ -377,7 +377,7 @@ impl Shared {
 
     /// 握手の途中の行への segment を処理します。握手の最後の ACK で accept の待ち行列の枠を予約できたら
     /// [`RowVerdict::Promote`] を返し、呼び手は接続の枠を取って行を移します。予約できなければ ACK を捨て、行は
-    /// 残ります (Linux の既定の `tcp_abort_on_overflow=0` と同じ)。
+    /// 残ります (RST は返しません)。
     pub(crate) fn syn_input(&mut self, id: u32, seg: &Segment<'_>, now: i64) -> RowVerdict {
         let r = *self.syn.row(id);
         let rcv_nxt = r.irs.wrapping_add(1);
