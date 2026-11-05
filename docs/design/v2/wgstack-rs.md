@@ -428,6 +428,43 @@ UDP のソケットは駆動の task が持ちます。
 UDP の応答だけは例外で、核の送信の予算の中に積もります。積もる量の上界は予算と、古いものから捨てる決まりと時間の上限で決まります ([トンネルへ送る応答の詰まり](agent-parity.md#トンネルへ送る応答の詰まり))。
 これは Go の設計の「出力の詰まり」と同じ性質です。
 
+### 起床ごとの ACK の合わせ
+
+核が返す中身の無い ACK は、1 回の起床で接続ごとに最大 1 つです。
+入力の処理は ACK を送る必要を接続の 1 つの印(`ack_now`)に立てるだけで、ACK の segment は送信の相の `poll_transmit` で作ります。
+そのため、受信の相で同じ接続の segment を複数受けても、送信の相で作る ACK は 1 つです。
+Go の wgstack も、ACK を接続ごとの 1 つの印にまとめていました。
+[wgstack のバッチ](../userspace/wgstack-batching.md#受信の向きの決定)の ACK の控えは、測定の結果、実装しないと決めました。
+合わせるのは、受信と送信を 2 つの相に分けた起床と引き換えに意図して選んだ形です。
+受信と送信を交互にすると、byte あたりの CPU が約 19% 増え、バッチの前の経路でも ACK は約 64 segment に 1 つでした([バッチの作り](agent-throughput.md#バッチの作り))。
+
+これは既知の違いで、RFC の次の SHOULD から外れます。
+
+- RFC 5681 4.2 と RFC 9293 3.8.6.3:順序どおりのデータは、少なくとも 2 つ目の full-sized segment ごとに ACK を返します。
+  1 回の起床で 3 つ以上の segment を受けると、1 つの ACK が 2 segment を超えて確認します
+- RFC 5681 3.2:順序外の segment ごとに、すぐ重複した ACK を返します。
+  1 回の起床で複数の順序外の segment を受けると、重複した ACK は 1 つです
+
+[agent を専用の VM に置くラボ](../../../lab/README.md#agent-を専用の-vm-に置く---split)(`lab/lab paired --split`)で、agent が受ける向きの 1 stream を RTT 0、速さの制限なしで転送し、tunnel の ACK の数から data の segment 何個に ACK 1 つかを求めました。
+値は 2026-11-05 の今のデータプレーン (受信と送信を 1 つのスレッドで行う形) の基準の測定で、組ごとに 4 round × 2 回の中央値です。
+受け手のカーネルモードは、LAN 側の host の Linux の TCP が受ける形です(ラボでは相手の VM の `lan` namespace)。
+agent は転送するだけで、vCPU の数は agent の VM のものです。
+
+| agent の VM の vCPU | wgstack の Rust 版(agent が受ける) | LAN 側の受け手(カーネルモード) |
+| --- | --- | --- |
+| 1 | 49 segment に 1 つ | 43 segment に 1 つ |
+| 4 | 82 segment に 1 つ | 27 segment に 1 つ |
+| 8 | 78 segment に 1 つ | 12 segment に 1 つ |
+
+参照の受け手も、回線速度では 2 segment ごとよりずっと少ない回数で ACK を返します(12 から 43 segment に 1 つ)。
+この違いが送り手の slow start と損失の回復に与える影響は、まだ測っていません。
+次の 2 つの確かめは、まだ行っていません。
+
+- 適合の台本の burst の変種:既存の `rfc2525-stretch-ack` は 1 segment ごとに応答を待つので、この違いを検出できません(2.13 が通っていたのはこのためです。[RFC 2525 の既知の問題](../userspace/wgstack-verification.md#rfc-2525-の既知の問題))。
+  `cubic-ack-burst` と `hystart-css-ack-burst` のように、DUT が読む前に複数の segment を入れる変種を、核、gVisor、Linux に流します。
+  順序外の burst の変種で、重複した ACK の数も確かめます
+- ラボでの確かめ:損失のある経路で、損失 1 回あたりの重複した ACK の数を参照の受け手と比べます
+
 ### 操作の知らせ
 
 `wgft-netstack` の handle は、出力を生みうる操作の後に、同じスレッドの知らせで駆動の task を起こします。
