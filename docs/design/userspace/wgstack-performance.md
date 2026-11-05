@@ -380,13 +380,13 @@ RFC 6675 の pipe と IsLost を記録を順に調べて求めると、1 回の�
   Linux はこの ACK を推定した MSS より小さな segment を受けた後に限るので、この規則は Linux との意図した違いです。
   経路の記録では、gVisor と Linux の受け手は順序どおりの ACK の約 45% を 1 segment ごとに返し、wgstack は約 5% でした。
   Linux の受け手が 1 segment ごとに返す原因は確かめていません。
-  この比は、Go の記録(受け手の読みと送り手の間に台本がある試験の条件)の値で、次の回線速度の値とは条件が違います。
-  [agent を専用の VM に置くラボ](../../../lab/README.md#agent-を専用の-vm-に置く---split)(`lab/lab paired --split`)で、agent が受ける向きの 1 stream を RTT 0 で転送し、tunnel の ACK の数から求めた値は次のとおりです(2026-11-05 の Inline の基準の測定、組ごとに 4 round × 2 回の中央値)。
+  この比は、qbench の経路の記録の値で、次の回線速度の値とは条件が違います。
+  [agent を専用の VM に置くラボ](../../../lab/README.md#agent-を専用の-vm-に置く---split)(`lab/lab paired --split`)で、agent が受ける向きの 1 stream を RTT 0 で転送し、tunnel の ACK の数から求めた値は次のとおりです(2026-11-05 の今のデータプレーン (受信と送信を 1 つのスレッドで行う形) の基準の測定、組ごとに 4 round × 2 回の中央値)。
   wgstack の Rust 版が返す ACK は data の segment 49 個に 1 つ(agent の VM が 1 vCPU)、82 個に 1 つ(4 vCPU)、78 個に 1 つ(8 vCPU)でした。
   LAN 側の host の Linux の TCP が受けるカーネルモードの受け手は、同じ条件で 43 個、27 個、12 個に 1 つでした。
   参照の受け手も、回線速度では 2 segment ごとよりずっと少ない回数で ACK を返します。
   Rust 版の比が大きいのは、起床ごとの合わせが原因だと考えます(推測です)。
-  根拠は、[2 つの相に分ける理由](../v2/agent-throughput.md)の、バッチの前の経路で約 64 segment に 1 つだった ACK です。
+  根拠は、[バッチの作り](../v2/agent-throughput.md#バッチの作り)の、バッチの前の経路で約 64 segment に 1 つだった ACK です。
   受ける向きの損失 1%(gVisor の相手)は gVisor と Linux の値に近づきました。
   gVisor の相手の 2 秒の途絶は、どの実装でも約 4.3 か約 10.5 Mbit/s の 2 つの値に分かれ、中央値は 7.37 から 4.40 Mbit/s になりましたが、種ごとの比の区間は前後のどちらも約 0.44 から 1.02 で重なります。
   ほかの受ける向きの場合は下がりませんでした(測った値は #542 にあります)

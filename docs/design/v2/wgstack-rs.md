@@ -429,7 +429,8 @@ UDP の応答だけは例外で、核の送信の予算の中に積もります�
 そのため、受信の相で同じ接続の segment を複数受けても、送信の相で作る ACK は 1 つです。
 Go の wgstack も、ACK を接続ごとの 1 つの印にまとめていました。
 [wgstack のバッチ](../userspace/wgstack-batching.md#受信の向きの決定)の ACK の控えは、測定の結果、実装しないと決めました。
-合わせるのは、受信と送信を 2 つの相に分けた起床の意図した取引です。受信と送信を交互にすると、byte あたりの CPU が約 19% 増え、バッチの前の経路でも ACK は約 64 segment に 1 つでした([2 つの相に分ける理由](agent-throughput.md))。
+合わせるのは、受信と送信を 2 つの相に分けた起床と引き換えに意図して選んだ形です。
+受信と送信を交互にすると、byte あたりの CPU が約 19% 増え、バッチの前の経路でも ACK は約 64 segment に 1 つでした([バッチの作り](agent-throughput.md#バッチの作り))。
 
 これは既知の違いで、RFC の次の SHOULD から外れます。
 
@@ -439,7 +440,7 @@ Go の wgstack も、ACK を接続ごとの 1 つの印にまとめていまし�
   1 回の起床で複数の順序外の segment を受けると、重複した ACK は 1 つです
 
 [agent を専用の VM に置くラボ](../../../lab/README.md#agent-を専用の-vm-に置く---split)(`lab/lab paired --split`)で、agent が受ける向きの 1 stream を RTT 0、速さの制限なしで転送し、tunnel の ACK の数から data の segment 何個に ACK 1 つかを求めました。
-値は 2026-11-05 の Inline の基準の測定で、組ごとに 4 round × 2 回の中央値です。
+値は 2026-11-05 の今のデータプレーン (受信と送信を 1 つのスレッドで行う形) の基準の測定で、組ごとに 4 round × 2 回の中央値です。
 受け手のカーネルモードは、LAN 側の host の Linux の TCP が受ける形です(ラボでは相手の VM の `lan` namespace)。
 agent は転送するだけで、vCPU の数は agent の VM のものです。
 
