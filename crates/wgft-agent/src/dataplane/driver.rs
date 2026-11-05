@@ -74,9 +74,9 @@ pub(super) trait Source {
 
 /// WireGuard の UDP のソケットと、そこで使える送受信の形。
 pub(super) struct Io<'a> {
-    socket: &'a UdpSocket,
+    pub(super) socket: &'a UdpSocket,
     /// UDP の GSO を使う。Linux でバッチが有効で、カーネルが GSO を持つときだけ真である。
-    gso: bool,
+    pub(super) gso: bool,
 }
 
 impl<'a> Io<'a> {
@@ -170,7 +170,7 @@ pub(super) struct Outbox {
     /// `WouldBlock` 以外の理由で送れず捨てた datagram の数。
     pub(super) send_errors: u64,
     /// カーネルが UDP の GSO の message を拒んだ。このソケットでは以後 1 つずつ送る。
-    gso_refused: bool,
+    pub(super) gso_refused: bool,
 }
 
 impl Outbox {
@@ -226,7 +226,7 @@ impl Outbox {
     /// 送り切っていないバッチを送る。device の層は、自分が持つ datagram を先に送ることを求める
     /// (`Device::handle_packet`)。バッチの途中でハンドシェイクを待っていた packet が流れ出たときも、
     /// その順を保つ。すべて送れば `true`。
-    fn drain(&mut self, device: &mut Device, sink: &mut impl Sink) -> bool {
+    pub(super) fn drain(&mut self, device: &mut Device, sink: &mut impl Sink) -> bool {
         self.drain_queue(device, sink) && self.flush_batch(sink)
     }
 
@@ -426,7 +426,7 @@ pub(super) async fn receive_batch<U: Upper>(
 
 /// 埋めた `n` 個の枠の datagram を、GRO がまとめた列は segment ごとに、device の層で平文の領域に
 /// 詰めて復号する。平文の領域の使った長さを返す。平文は暗号文より短いので、領域は足りる。
-fn decrypt(device: &mut Device, rx: &mut RxBatch, n: usize, now: Instant) -> usize {
+pub(super) fn decrypt(device: &mut Device, rx: &mut RxBatch, n: usize, now: Instant) -> usize {
     rx.decrypt_each(n, |from, datagram, out| {
         device
             .handle_datagram(now, from, datagram, out)
@@ -437,7 +437,7 @@ fn decrypt(device: &mut Device, rx: &mut RxBatch, n: usize, now: Instant) -> usi
 /// 1 つずつ送受信する道の 1 回の起床の上限。受信の相と送信の相のそれぞれで、バッチの前の値のままにする。
 pub(super) const ONE_SLOT_CAP: usize = 64;
 
-fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+pub(super) fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
@@ -449,7 +449,7 @@ pub(super) struct Rest {
     socket: UdpSocket,
     outbox: Outbox,
     peer: PublicKey,
-    gso: bool,
+    pub(super) gso: bool,
 }
 
 /// 最後の送り出しで引く packet の上限。中継の task を落とした後の RST は核の制御の輪に入るので、輪の
@@ -457,6 +457,16 @@ pub(super) struct Rest {
 const FINAL_PACKETS: usize = 4096;
 
 impl Rest {
+    /// 最後の送り出しに要るもの (Hash S の front が作る)。
+    pub(super) fn new(socket: UdpSocket, outbox: Outbox, peer: PublicKey, gso: bool) -> Self {
+        Self {
+            socket,
+            outbox,
+            peer,
+            gso,
+        }
+    }
+
     /// 駆動の task が終わり、local の task を落とした後に、上の層に残った出力 (中継の接続を切った RST
     /// など) を 1 回だけ送り出す。セッションが無いか、ソケットが書けなければ送らずに終える。
     pub(super) fn flush<U: Upper>(mut self, local: &Local<U>, device: &mut Device) {

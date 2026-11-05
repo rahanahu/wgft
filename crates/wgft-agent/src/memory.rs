@@ -219,6 +219,63 @@ impl MemoryBound {
         }
     }
 
+    /// The bound of a Hash S data plane of `parts` partitions (prototype). With one partition it
+    /// is [`MemoryBound::for_limits`]. Otherwise the core, its tables and the driver's waker list
+    /// are summed over the partitions' shares of the tables ([`crate::dataplane::stack::part_limits`]),
+    /// counting the shared boost slots once; `batch` adds per partition a second full batch store
+    /// (an over-count: a partition holds only the send side), its stock and the hand-over batches.
+    #[must_use]
+    pub fn for_partitions(limits: flowpool::Limits, batching: Batching, parts: usize) -> Self {
+        let mut b = Self::for_limits(limits, batching);
+        if parts <= 1 {
+            return b;
+        }
+        let base = CoreLimits::with_max_flows(limits.tcp);
+        let mut core = 0usize;
+        let mut fixed = 0usize;
+        let mut arrays = 0usize;
+        let mut tables = 0usize;
+        let mut driver = 0usize;
+        let mut boost = 0usize;
+        for k in 0..parts {
+            let l = crate::dataplane::stack::part_limits(base, k, parts);
+            let cb = Bound::for_limits(&l, MAX_MTU);
+            let conv = |v: u64| usize::try_from(v).unwrap_or(usize::MAX);
+            core = core.saturating_add(conv(cb.total));
+            fixed = fixed.saturating_add(conv(cb.fix));
+            arrays = arrays.saturating_add(conv(cb.floor_arrays));
+            boost = conv(cb.boost);
+            let conns = l.conns();
+            tables = tables.saturating_add(
+                Netstack::<wgft_wgstack::NoHook>::waker_bound(conns)
+                    + LanSockets::<LanConn>::table_bytes(conns),
+            );
+            driver = driver.saturating_add(
+                2 * Netstack::<wgft_wgstack::NoHook>::waker_slots(conns) * size_of::<Waker>(),
+            );
+        }
+        // boost の枠は全区画で 1 つの集まりなので 1 回だけ数える
+        core = core.saturating_sub(boost.saturating_mul(parts - 1));
+        let per_part = batching
+            .bytes()
+            .saturating_add(crate::dataplane::hashs::part_bytes(batching));
+        let batch = b
+            .batch
+            .saturating_add(per_part.saturating_mul(parts - 1));
+        let old = b.core + b.tables + b.driver + b.batch;
+        b.core = core;
+        b.core_fixed = fixed;
+        b.core_arrays = arrays;
+        b.tables = tables;
+        b.driver = driver;
+        b.batch = batch;
+        b.total = b
+            .total
+            .saturating_sub(old)
+            .saturating_add(core + tables + driver + batch);
+        b
+    }
+
     /// The bound with `tcp` TCP and `udp` UDP listeners open.
     #[must_use]
     pub fn with_listeners(mut self, tcp: usize, udp: usize) -> Self {

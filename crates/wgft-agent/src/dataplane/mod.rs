@@ -17,6 +17,7 @@
 pub(crate) mod batch;
 pub(crate) mod clock;
 mod driver;
+pub(crate) mod hashs;
 mod socket;
 pub(crate) mod stack;
 #[cfg(test)]
@@ -72,6 +73,22 @@ pub trait Upper: 'static {
 
     /// Closes everything and returns the budget for the next generation.
     fn close(self, now: Instant) -> Self::Budget;
+
+    /// Hash S prototype: when another partition wants a boost slot, returns this partition's
+    /// idle holders' slots to the shared pool and the number returned. A layer without a shared
+    /// pool returns 0.
+    fn release_wanted(&mut self, _now: Instant) -> usize {
+        0
+    }
+
+    /// Hash S prototype: whether this layer raised the slot-wanted flag since the last call, so
+    /// that the driver wakes the other partitions.
+    fn take_boost_wanted(&mut self) -> bool {
+        false
+    }
+
+    /// Hash S prototype: returns the boost slots this layer freed to the shared pool.
+    fn sync_boost(&mut self) {}
 }
 
 /// What the data plane passes to the factory of the layer above, on the data plane thread.
@@ -320,6 +337,9 @@ pub struct StartError<B> {
     pub carry: Carry<B>,
 }
 
+/// Hash S の区画の budget を 1 つに戻す (試作)。
+type Rejoin<B> = Box<dyn FnOnce(Vec<Option<B>>) -> Option<B> + Send + Sync>;
+
 /// A running data plane generation. Dropping it stops the thread without waiting for it.
 pub struct Dataplane<U: Upper> {
     commands: mpsc::Sender<Command<U>>,
@@ -328,6 +348,12 @@ pub struct Dataplane<U: Upper> {
     high_water: Arc<AtomicU64>,
     local: SocketAddr,
     socket_buffers: SocketBuffers,
+    /// Hash S (prototype): the commands of partitions 1 to P - 1. Empty for Inline.
+    parts: Vec<mpsc::Sender<Command<U>>>,
+    /// Hash S: the partition threads, which return their budgets.
+    part_threads: Vec<std::thread::JoinHandle<Option<U::Budget>>>,
+    /// Hash S: joins the partitions' budgets into the next generation's.
+    rejoin: Option<Rejoin<U::Budget>>,
 }
 
 impl<U: Upper> fmt::Debug for Dataplane<U> {
@@ -441,6 +467,9 @@ impl<U: Upper> Dataplane<U> {
                 high_water,
                 local,
                 socket_buffers: buffers,
+                parts: Vec::new(),
+                part_threads: Vec::new(),
+                rejoin: None,
             }),
             Ok(Err((error, budget))) => {
                 let _ = join(thread).await;
@@ -486,7 +515,14 @@ impl<U: Upper> Dataplane<U> {
     pub fn handle(&self) -> Handle<U> {
         Handle {
             commands: self.commands.clone(),
+            parts: self.parts.clone(),
         }
+    }
+
+    /// The number of partitions P: 1 for Inline.
+    #[must_use]
+    pub fn partitions(&self) -> usize {
+        1 + self.parts.len()
     }
 
     /// The current status.
@@ -544,10 +580,36 @@ impl<U: Upper> Dataplane<U> {
     /// generation needs. After a panic in the layer above, the carry has no budget.
     pub async fn stop(mut self) -> Carry<U::Budget> {
         let _ = self.commands.send(Command::Stop).await;
+        for p in &self.parts {
+            let _ = p.send(Command::Stop).await;
+        }
         let last = self.unix_high_water();
         let exit = match self.thread.take() {
             Some(t) => join(t).await,
             None => None,
+        };
+        let mut budgets = Vec::new();
+        for t in self.part_threads.drain(..) {
+            budgets.push(
+                tokio::task::spawn_blocking(move || t.join().ok().flatten())
+                    .await
+                    .ok()
+                    .flatten(),
+            );
+        }
+        let exit = match (exit, self.rejoin.take()) {
+            (Some(mut exit), Some(rejoin)) => {
+                budgets.insert(0, exit.budget.take());
+                exit.budget = rejoin(budgets);
+                Some(exit)
+            }
+            (Some(exit), None) => Some(exit),
+            (None, Some(rejoin)) => {
+                budgets.insert(0, None);
+                let _ = rejoin(budgets);
+                None
+            }
+            (None, None) => None,
         };
         match exit {
             Some(exit) => Carry {
@@ -565,12 +627,15 @@ impl<U: Upper> Dataplane<U> {
 /// cheap; it fails every call once the generation's thread has ended.
 pub struct Handle<U: Upper> {
     commands: mpsc::Sender<Command<U>>,
+    /// Hash S (prototype): the commands of partitions 1 to P - 1.
+    parts: Vec<mpsc::Sender<Command<U>>>,
 }
 
 impl<U: Upper> Clone for Handle<U> {
     fn clone(&self) -> Self {
         Self {
             commands: self.commands.clone(),
+            parts: self.parts.clone(),
         }
     }
 }
@@ -613,6 +678,35 @@ impl<U: Upper> Handle<U> {
         F: FnOnce(&Local<U>) -> R + Send + 'static,
     {
         call(&self.commands, f).await
+    }
+
+    /// The number of partitions P: 1 for Inline (Hash S prototype).
+    #[must_use]
+    pub fn partitions(&self) -> usize {
+        1 + self.parts.len()
+    }
+
+    /// As [`Handle::call`], on partition `k`; partition 0 is the front's, the one
+    /// [`Handle::call`] uses (Hash S prototype).
+    ///
+    /// # Errors
+    ///
+    /// Fails when the partition does not exist, or as for [`Handle::call`].
+    pub async fn call_on<R, F>(&self, k: usize, f: F) -> io::Result<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(&Local<U>) -> R + Send + 'static,
+    {
+        match k {
+            0 => call(&self.commands, f).await,
+            k => match self.parts.get(k - 1) {
+                Some(c) => call(c, f).await,
+                None => Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "no such data plane partition",
+                )),
+            },
+        }
     }
 
     /// Resolves when the generation's thread has ended or is ending, for any reason.

@@ -276,7 +276,11 @@ pub fn startup_lines(c: &Config, s: &Settings) -> Vec<LogLine> {
     let mut out = vec![LogLine::Plain("effective config:".to_owned())];
     out.extend(c.effective_lines().into_iter().map(LogLine::Plain));
     // Go の `memory soft limit:` の行の代わり。フロー数の上限から導く (agent-parity.md のメモリの上界の行)
-    let bound = crate::memory::MemoryBound::for_limits(s.flow_caps(), s.batching());
+    let bound = crate::memory::MemoryBound::for_partitions(
+        s.flow_caps(),
+        s.batching(),
+        crate::dataplane::hashs::part_count(s.batching().running().is_on()),
+    );
     out.push(LogLine::Stamped(bound.line()));
     out.push(LogLine::Stamped(bound.terms_line()));
     // バッチの予算が何をするかを、Go の `send batch budget:` の行の代わりに書く

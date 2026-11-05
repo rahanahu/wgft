@@ -259,17 +259,23 @@ impl Tunnel {
         }
         .validate()
         .map_err(|e| format!("TCP/IP settings: {e}"))?;
-        generations
-            .start(
-                dc,
-                Settings {
-                    batching,
-                    ..Settings::default()
-                },
-                move |init| dataplane::stack::make(stack, init),
-            )
-            .await
-            .map_err(|e| format!("start the tunnel data plane: {e}"))?;
+        let settings = Settings {
+            batching,
+            ..Settings::default()
+        };
+        // Hash S の試作:使える CPU が 2 つ以上なら区画に分ける。1 つなら今の Inline の駆動である
+        let parts = dataplane::hashs::part_count(batching.running().is_on());
+        if parts > 1 {
+            generations
+                .start_hashs(dc, settings, stack, parts)
+                .await
+                .map_err(|e| format!("start the tunnel data plane: {e}"))?;
+        } else {
+            generations
+                .start(dc, settings, move |init| dataplane::stack::make(stack, init))
+                .await
+                .map_err(|e| format!("start the tunnel data plane: {e}"))?;
+        }
         let dataplane = generations
             .current()
             .map(Dataplane::handle)

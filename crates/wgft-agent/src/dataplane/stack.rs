@@ -11,11 +11,12 @@
 use std::io;
 use std::net::Ipv4Addr;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::task::Waker;
 use std::time::Instant;
 
 use wgft_netstack::{Access, LanHook, LanSocket, LanSockets, Netstack};
-use wgft_wgstack::{Budget, Config, Hook, Limits};
+use wgft_wgstack::{BoostPool, Budget, Config, Hook, Limits, Partition};
 
 use super::{Local, Upper, UpperError, UpperInit, clock};
 
@@ -48,6 +49,19 @@ impl<H: Hook + 'static> Upper for Netstack<H> {
 
     fn close(self, now: Instant) -> Budget {
         Netstack::close(self, now).budget
+    }
+
+    fn release_wanted(&mut self, now: Instant) -> usize {
+        let t = self.time(now);
+        self.core_mut().release_wanted(t)
+    }
+
+    fn take_boost_wanted(&mut self) -> bool {
+        self.core_mut().take_boost_wanted()
+    }
+
+    fn sync_boost(&mut self) {
+        self.core_mut().sync_boost();
     }
 }
 
@@ -113,6 +127,59 @@ pub(crate) fn make<T: LanSocket + 'static>(
             budget: Some(e.into_budget()),
         }
     })
+}
+
+/// Makes partition `part.index` of a Hash S core (prototype): its share of the tables
+/// ([`part_limits`]), its own seed, the keys from `part.shared_seed`, and a budget that takes its
+/// boost slots from `pool`.
+///
+/// # Errors
+///
+/// As for [`make`]; the error carries no budget, since the pool keeps the slots.
+pub(crate) fn make_part<T: LanSocket + 'static>(
+    settings: StackSettings,
+    now: Instant,
+    mtu: usize,
+    part: Partition,
+    pool: &Arc<BoostPool>,
+) -> Result<Netstack<LanHook<T>>, io::Error> {
+    let budget = pool
+        .view()
+        .map_err(|e| io::Error::other(format!("allocate the TCP/IP memory budget: {e}")))?;
+    let limits = part_limits(settings.limits, usize::from(part.index), usize::from(part.count));
+    let config = Config {
+        limits,
+        partition: Some(part),
+        ..Config::new(settings.addr, mtu)
+    };
+    let mut seed = [0u8; 64];
+    if ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut seed).is_err() {
+        return Err(io::Error::other("no randomness for the TCP/IP seed"));
+    }
+    let hook = LanHook::shared(LanSockets::new(limits.conns()), Arc::clone(pool));
+    Netstack::new(config, budget, &seed, hook, now, clock::now)
+        .map_err(|e| io::Error::other(format!("make the TCP/IP core of partition {}: {e}", part.index)))
+}
+
+/// The tables of partition `k` of `parts` (Hash S prototype): the connection slots, the accept
+/// queue, the half-open rows and the TIME_WAIT rows divided by P, rounded up. Partition 0 keeps
+/// reassembly and UDP; the others get the smallest tables the core accepts, since no UDP and no
+/// fragment reaches them.
+pub(crate) fn part_limits(l: Limits, k: usize, parts: usize) -> Limits {
+    let parts = parts.max(1);
+    let share = |n: usize| n.div_ceil(parts).max(1);
+    let mut p = Limits {
+        max_flows: share(l.max_flows),
+        accept_queue: share(l.accept_queue).max(2),
+        syn_rows: share(l.syn_rows).max(2),
+        tw_rows: share(l.tw_rows),
+        ..l
+    };
+    if k > 0 {
+        p.udp_rx_datagrams = 1;
+        p.udp_tx_datagrams = 1;
+    }
+    p
 }
 
 /// The LAN socket table of a core made by [`make`].
