@@ -18,11 +18,13 @@ impl<H: Hook> Stack<H> {
         if self.s.budget.held_by(id).is_some() {
             return;
         }
-        let got = match self.s.budget.acquire(id) {
+        let got = match self.s.budget.acquire_in(id, self.hook.boost_pool()) {
             Some(x) => Some(x),
             None => self.reclaim_for(id, now),
         };
         let Some((slot, arrays)) = got else {
+            // Hash S の区画は、ほかの区画の需要の無い保有者に枠を返させます (試作)。1 つの核では何もしません。
+            self.s.budget.raise(self.hook.boost_pool());
             return;
         };
         let i = id.slot;
@@ -63,6 +65,42 @@ impl<H: Hook> Stack<H> {
             return Some((n, arrays));
         }
         None
+    }
+
+    /// Hash S の区画の核で、取ったまま空いた boost の枠を区画が分け合う集まりに返します (試作)。駆動が起床の終わりに
+    /// 呼びます。1 つの核では何もしません。
+    pub fn sync_boost(&mut self) {
+        self.s.budget.sync(self.hook.boost_pool());
+    }
+
+    /// Hash S の区画の核で、ほかの区画が「枠が欲しい」の印を立てていれば、この区画の需要の無い保有者を floor に
+    /// 戻して枠を集まりに返し、戻した数を返します (試作、6.8.5 節)。1 本でも返せば印を外します。駆動が起床ごとに
+    /// 呼びます。1 つの核では何もしません。
+    pub fn release_wanted(&mut self, now: crate::Time) -> usize {
+        if !self.s.budget.is_shared() || !self.hook.boost_pool().is_some_and(|p| p.wanted()) {
+            return 0;
+        }
+        let now = self.clock(now);
+        let mut freed = 0;
+        for n in 0..self.s.budget.slots() {
+            if let Some(h) = self.s.budget.holder(n)
+                && self.demote(h, now)
+            {
+                freed += 1;
+            }
+        }
+        if freed > 0 {
+            self.s.budget.sync(self.hook.boost_pool());
+            if let Some(p) = self.hook.boost_pool() {
+                p.clear_wanted();
+            }
+        }
+        freed
+    }
+
+    /// 前に呼んでから、この区画の核が「枠が欲しい」の印を立てたか (試作)。駆動はこれでほかの区画を起こします。
+    pub fn take_boost_wanted(&mut self) -> bool {
+        self.s.budget.take_raised()
     }
 
     /// 需要の無い保有者 `h` を floor に戻せたかを返します (Go の `demote`)。戻すのは次の条件がすべて成り立つときだけ

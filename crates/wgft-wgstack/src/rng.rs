@@ -200,6 +200,22 @@ impl Seeds {
             },
         }
     }
+
+    /// Hash S の区画の種です (試作)。鍵 (ISN、timestamp、SYN cookie) は全区画が共有する種 `shared` から、変わる
+    /// 状態 (表の鍵、IP の ID、乱数) は区画の種 `own` から作ります。同じ 4 つ組の ISN と timestamp の offset は
+    /// どの区画でも同じ値になります。
+    pub(crate) fn partition(own: &[u8; 64], shared: &[u8; 64]) -> Self {
+        let keys = Self::new(shared);
+        let state = Self::new(own);
+        Self {
+            isn_key: keys.isn_key,
+            table_key: state.table_key,
+            ts_key: keys.ts_key,
+            ip_id: state.ip_id,
+            rng: state.rng,
+            cookie_key: keys.cookie_key,
+        }
+    }
 }
 
 #[cfg(test)]

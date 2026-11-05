@@ -38,8 +38,10 @@ mod wheel;
 mod wire;
 
 pub use bound::{Bound, Held};
-pub use budget::{Budget, BudgetError};
-pub use config::{BoostPolicy, Config, ConfigError, Congestion, Limits, MAX_MTU, MIN_MTU};
+pub use budget::{BoostPool, Budget, BudgetError};
+pub use config::{
+    BoostPolicy, Config, ConfigError, Congestion, Limits, MAX_MTU, MIN_MTU, Partition,
+};
 pub use icmp::PingId;
 pub use stack::{
     Closed, Error, Event, Hook, InvariantError, ListenerId, LogKind, LogLine, NewError,

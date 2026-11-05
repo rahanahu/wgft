@@ -249,6 +249,7 @@ impl WgstackDut {
                 frame::Boost::AtAccept => BoostPolicy::AtAccept,
                 frame::Boost::Never => BoostPolicy::Never,
             },
+            partition: None,
         }
     }
 

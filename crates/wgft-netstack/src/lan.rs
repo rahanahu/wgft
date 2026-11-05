@@ -12,7 +12,9 @@ use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::rc::Rc;
 
-use wgft_wgstack::{ConnId, Hook};
+use std::sync::Arc;
+
+use wgft_wgstack::{BoostPool, ConnId, Hook};
 
 /// The LAN side of a relayed connection, as the boost hook sees it.
 ///
@@ -156,6 +158,8 @@ impl<T> Drop for LanRegistration<T> {
 /// The core's hook that passes the boost changes to the paired LAN sockets.
 pub struct LanHook<T> {
     table: Rc<LanSockets<T>>,
+    /// The boost slots a Hash S partition shares with the other partitions (prototype).
+    pool: Option<Arc<BoostPool>>,
 }
 
 impl<T> fmt::Debug for LanHook<T> {
@@ -167,7 +171,16 @@ impl<T> fmt::Debug for LanHook<T> {
 impl<T> LanHook<T> {
     /// A hook over `table`.
     pub fn new(table: Rc<LanSockets<T>>) -> Self {
-        Self { table }
+        Self { table, pool: None }
+    }
+
+    /// A hook over `table` for a Hash S partition's core, which takes its boost slots from
+    /// `pool` (prototype).
+    pub fn shared(table: Rc<LanSockets<T>>, pool: Arc<BoostPool>) -> Self {
+        Self {
+            table,
+            pool: Some(pool),
+        }
     }
 
     /// The table, for the relay tasks to register their sockets.
@@ -187,5 +200,9 @@ impl<T: LanSocket> Hook for LanHook<T> {
 
     fn boost_returned(&mut self, conn: ConnId) {
         self.table.call(conn, LanSocket::boost_returned);
+    }
+
+    fn boost_pool(&self) -> Option<&BoostPool> {
+        self.pool.as_deref()
     }
 }

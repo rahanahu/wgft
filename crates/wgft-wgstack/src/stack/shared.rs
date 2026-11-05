@@ -298,6 +298,10 @@ pub(crate) struct Shared {
     /// 最後に cookie の SYN-ACK を積んだ時刻 (ns) です。
     pub(crate) cookie_sent: Option<i64>,
     pub(crate) ip_id: u32,
+    /// IP の ID の範囲 (始まり、幅)。幅 0 は 16 bit の全部の空間です (Hash S の区画 1 以降だけが幅を持ちます)。
+    pub(crate) ip_ids: (u16, u32),
+    /// challenge ACK の上限を割る数です。1 つの核は 1、Hash S の区画は P です。
+    pub(crate) ch_share: u64,
     pub(crate) rng: ChaCha8,
     /// 空きの接続の枠です。
     pub(crate) conn_free: FixedVec<u32>,
@@ -366,7 +370,11 @@ impl Shared {
     )]
     pub(crate) fn next_id(&mut self) -> u16 {
         self.ip_id = self.ip_id.wrapping_add(1);
-        self.ip_id as u16
+        let (base, span) = self.ip_ids;
+        if span == 0 {
+            return self.ip_id as u16;
+        }
+        base.wrapping_add((self.ip_id % span) as u16)
     }
 
     /// `[0, n)` の乱数です (Go の `randomU64N`)。
@@ -409,7 +417,9 @@ impl Shared {
         let sec = now / 1_000_000_000;
         if sec != self.ch_sec || self.ch_count < 0 {
             self.ch_sec = sec;
-            self.ch_count = i64::try_from(LIMIT / 2 + self.random_below(LIMIT)).unwrap_or(0);
+            // Hash S の区画は上限を P で割り、全区画の和を 1 つの核の上限に収めます (試作)。1 つの核は割りません。
+            let limit = LIMIT / self.ch_share;
+            self.ch_count = i64::try_from(limit / 2 + self.random_below(limit)).unwrap_or(0);
         }
         let ok = self.ch_count > 0;
         if ok {

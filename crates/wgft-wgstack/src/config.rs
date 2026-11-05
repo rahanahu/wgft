@@ -111,6 +111,50 @@ pub struct Config {
     pub congestion: Congestion,
     /// boost の与え方です。
     pub boost: BoostPolicy,
+    /// Hash S の区画 (試作)。`None` は今の 1 つの核です。
+    pub partition: Option<Partition>,
+}
+
+/// Hash S の区画の 1 つとして核を作る時の値です (試作、independent-exploration.md の 6.8 節)。
+///
+/// 区画は鍵 (ISN、timestamp、SYN cookie) を全区画で共有し、変わる状態 (乱数、IP の ID、challenge ACK の bucket)
+/// を区画ごとに持ちます。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Partition {
+    /// 区画の番号です。0 は front のスレッドが実行し、UDP と DF の無い出力を持ちます。
+    pub index: u16,
+    /// 区画の数 P です。2 以上です。
+    pub count: u16,
+    /// 全区画が共有する 64 byte の種です。鍵だけをここから作ります。
+    pub shared_seed: [u8; 64],
+}
+
+impl fmt::Debug for Partition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Partition")
+            .field("index", &self.index)
+            .field("count", &self.count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Partition {
+    /// IP の ID の範囲 (始まり、幅) です。幅 0 は 16 bit の全部の空間です。区画 0 は全部の空間で数え、区画 1 以降
+    /// は重ならない範囲で数えます。区画 1 以降の出力は DF の TCP だけで、ID は意味を持ちません。
+    pub(crate) fn ip_ids(&self) -> (u16, u32) {
+        if self.index == 0 {
+            return (0, 0);
+        }
+        let span = 65536 / u32::from(self.count.max(1));
+        let base = u32::from(self.index) * span;
+        (u16::try_from(base).unwrap_or(0), span)
+    }
+
+    /// challenge ACK の bucket の割り当ての分母です。全区画の和が今の 1 つの核の上限を超えないように、上限を P で
+    /// 割ります。
+    pub(crate) fn challenge_share(&self) -> u64 {
+        u64::from(self.count.max(1))
+    }
 }
 
 impl Config {
@@ -122,6 +166,7 @@ impl Config {
             limits: Limits::with_max_flows(0),
             congestion: Congestion::Cubic,
             boost: BoostPolicy::OnDemand,
+            partition: None,
         }
     }
 }
@@ -181,6 +226,9 @@ impl Config {
             || frag.base_cost().is_err()
             || !udp(l.udp_rx_datagrams)
             || !udp(l.udp_tx_datagrams)
+            || self
+                .partition
+                .is_some_and(|p| p.count < 2 || p.index >= p.count)
         {
             return Err(ConfigError::Limits);
         }

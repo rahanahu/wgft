@@ -13,6 +13,8 @@ use crate::buf::ring::{BOOST_RING_SLOTS, ChunkTable, try_chunk_table};
 use crate::buf::{BOOST_INTERVALS, BOOST_RECORDS, BOOST_SLOTS};
 use crate::fixed_vec::{AllocError, FixedVec};
 use crate::tcp::conn::ConnId;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 /// boost の枠が貸す配列の 1 組です。
 #[derive(Debug, Default)]
@@ -71,16 +73,26 @@ impl BoostArrays {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Slot {
     holder: Option<ConnId>,
-    /// 貸していない間の boost の配列です。貸している間は空です。
+    /// 貸していない間の boost の配列です。貸している間は空です。Hash S の区画の `Budget` では、区画が集まりから
+    /// 取った枠 (`owned`) の空きの間だけ配列を控え、それ以外は空です。
     arrays: BoostArrays,
+    /// Hash S の区画の `Budget` で、この枠を集まり ([`BoostPool`]) から取っているか。
+    owned: bool,
 }
 
 /// boost の枠の集まりです。プロセスで 1 つ作り、核から核へ渡します。
+///
+/// Hash S の区画の核は、[`BoostPool::view`] が作る配列を持たない `Budget` を持ち、枠は hook の
+/// [`Hook::boost_pool`](crate::Hook::boost_pool) が返す集まりから取ります (試作)。
 pub struct Budget {
     slots: FixedVec<Slot>,
+    /// Hash S の区画の `Budget` か。
+    shared: bool,
+    /// 前に [`Budget::take_raised`] を呼んでから「枠が欲しい」の印を立てたか。
+    raised: bool,
     /// 前に [`Budget::take_dirty`] を呼んでから、空きの枠に配列を返した枠の印です (枠 `i` が bit `i`)。試験と fuzz の
     /// build だけにあります。書き換えた所だけの確かめが、空きの枠の chunk の表の確かめをこの枠に絞ります。
     #[cfg(any(test, feature = "harness"))]
@@ -131,6 +143,7 @@ impl Budget {
             let slot = Slot {
                 holder: None,
                 arrays: BoostArrays::try_new()?,
+                owned: false,
             };
             if slots.try_push(slot).is_err() {
                 return Err(BudgetError);
@@ -138,9 +151,74 @@ impl Budget {
         }
         Ok(Self {
             slots,
+            shared: false,
+            raised: false,
             #[cfg(any(test, feature = "harness"))]
             dirty: 0,
         })
+    }
+
+    /// `c` に枠を貸します。1 つの核では [`Budget::acquire`] と同じです。Hash S の区画の `Budget` では、先に自分が
+    /// 取ったまま空いた枠を、無ければ集まり `pool` の最も小さい空きの枠を取ります (試作)。
+    pub(crate) fn acquire_in(
+        &mut self,
+        c: ConnId,
+        pool: Option<&BoostPool>,
+    ) -> Option<(usize, BoostArrays)> {
+        if !self.shared {
+            return self.acquire(c);
+        }
+        if self.held_by(c).is_some() {
+            return None;
+        }
+        if let Some(i) = self
+            .slots
+            .iter()
+            .position(|s| s.owned && s.holder.is_none())
+        {
+            let s = &mut self.slots[i];
+            s.holder = Some(c);
+            return Some((i, core::mem::take(&mut s.arrays)));
+        }
+        let pool = pool?;
+        let i = pool.take()?;
+        let arrays = pool.take_arrays(i);
+        let s = &mut self.slots[i];
+        s.owned = true;
+        s.holder = Some(c);
+        Some((i, arrays))
+    }
+
+    /// Hash S の区画の `Budget` で、空きを見つけず自分の区画に降ろせる保有者もいない時に、集まりに「枠が欲しい」の
+    /// 印を立てます。1 つの核では何もしません。
+    pub(crate) fn raise(&mut self, pool: Option<&BoostPool>) {
+        if let (true, Some(pool)) = (self.shared, pool) {
+            pool.wanted.store(true, Ordering::Release);
+            self.raised = true;
+        }
+    }
+
+    /// 前に呼んでから「枠が欲しい」の印を立てたかを返し、記録を外します。駆動はこれでほかの区画を起こします。
+    pub(crate) fn take_raised(&mut self) -> bool {
+        core::mem::take(&mut self.raised)
+    }
+
+    /// Hash S の区画の `Budget` で、取ったまま空いた枠の配列を集まりに返し、印を外します。1 つの核では何もしません。
+    pub(crate) fn sync(&mut self, pool: Option<&BoostPool>) {
+        let (true, Some(pool)) = (self.shared, pool) else {
+            return;
+        };
+        for (i, s) in self.slots.iter_mut().enumerate() {
+            if s.owned && s.holder.is_none() {
+                s.owned = false;
+                pool.give(i, core::mem::take(&mut s.arrays));
+            }
+        }
+    }
+
+    /// Hash S の区画の `Budget` か。
+    pub(crate) fn is_shared(&self) -> bool {
+        self.shared
     }
 
     /// 枠の管理の配列の byte 数 (boost の配列を除く) です。上界が数えます。
@@ -189,7 +267,10 @@ impl Budget {
     /// [`Budget::release`] で返した枠を受け取る時に使います。枠が空きでなければ `None` です。
     pub(crate) fn hand_over(&mut self, i: usize, c: ConnId) -> Option<BoostArrays> {
         let s = self.slots.get_mut(i)?;
-        if s.holder.is_some() || self.slots.iter().any(|o| o.holder == Some(c)) {
+        if s.holder.is_some()
+            || (self.shared && !s.owned)
+            || self.slots.iter().any(|o| o.holder == Some(c))
+        {
             return None;
         }
         let s = &mut self.slots[i];
@@ -235,6 +316,12 @@ impl Budget {
     pub(crate) fn check_scanning(&self, scan: u64) -> Result<(), &'static str> {
         for (i, s) in self.slots.iter().enumerate() {
             match s.holder {
+                // Hash S の区画が取っていない枠の配列は集まりにあります。
+                None if self.shared && !s.owned => {
+                    if !s.arrays.is_empty() {
+                        return Err("a boost slot of the pool holds arrays in a partition");
+                    }
+                }
                 None if !s.arrays.is_full() => {
                     return Err("a free boost slot lost its arrays");
                 }
@@ -251,6 +338,167 @@ impl Budget {
             }
         }
         Ok(())
+    }
+}
+
+/// Hash S の区画が分け合う boost の枠の集まりです (試作、independent-exploration.md の 6.8.5 節)。
+///
+/// 枠を取る区画は印 `taken` の bit を CAS で立て (Acquire)、その枠の配列を取り出します。返す区画は配列を入れて
+/// から bit を外します (Release)。bit を持つ区画だけが枠の配列を出し入れするので、枠ごとの錠は取り合いません
+/// (錠は安全な所有の受け渡しのためだけで、取るのは枠の出入りの時だけです)。空きを見つけず自分の区画に降ろせる
+/// 保有者もいない区画は「枠が欲しい」の印を立て、ほかの区画は [`Stack::release_wanted`](crate::Stack) で自分の
+/// 区画の需要の無い保有者を降ろして枠を返します。
+pub struct BoostPool {
+    taken: AtomicU64,
+    wanted: AtomicBool,
+    cells: FixedVec<Mutex<BoostArrays>>,
+}
+
+impl core::fmt::Debug for BoostPool {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BoostPool")
+            .field("taken", &self.taken())
+            .field("wanted", &self.wanted())
+            .finish_non_exhaustive()
+    }
+}
+
+impl BoostPool {
+    /// `budget` の枠をすべて区画で分け合う集まりにします。貸している枠があるか確保に失敗すれば、`budget` を返します。
+    pub fn new(budget: Budget) -> Result<Self, Budget> {
+        if budget.shared || budget.lent() != 0 {
+            return Err(budget);
+        }
+        let mut cells = match FixedVec::try_with_capacity(budget.slots()) {
+            Ok(c) => c,
+            Err(_) => return Err(budget),
+        };
+        let mut budget = budget;
+        for s in budget.slots.iter_mut() {
+            if cells
+                .try_push(Mutex::new(core::mem::take(&mut s.arrays)))
+                .is_err()
+            {
+                // 容量は枠の数なので起きません。
+                return Err(budget);
+            }
+        }
+        Ok(Self {
+            taken: AtomicU64::new(0),
+            wanted: AtomicBool::new(false),
+            cells,
+        })
+    }
+
+    /// 区画の核に渡す、配列を持たない `Budget` です。
+    pub fn view(&self) -> Result<Budget, BudgetError> {
+        Ok(Budget {
+            slots: FixedVec::try_filled(self.cells.len(), |_| Slot::default())?,
+            shared: true,
+            raised: false,
+            #[cfg(any(test, feature = "harness"))]
+            dirty: 0,
+        })
+    }
+
+    /// 閉じた区画の核が返した `Budget` が控えた配列を集まりに返します。
+    pub fn put_back(&self, mut budget: Budget) {
+        if !budget.shared {
+            return;
+        }
+        for (i, s) in budget.slots.iter_mut().enumerate() {
+            if s.owned {
+                s.owned = false;
+                self.give(i, core::mem::take(&mut s.arrays));
+            }
+        }
+    }
+
+    /// すべての枠が返っていれば、1 つの核の `Budget` に戻します。区画の panic で配列を失った枠があれば `None` です。
+    pub fn into_budget(self) -> Option<Budget> {
+        if self.taken() != 0 {
+            return None;
+        }
+        let mut slots = FixedVec::try_with_capacity(self.cells.len()).ok()?;
+        let mut cells = self.cells;
+        while let Some(cell) = cells.pop() {
+            let arrays = cell.into_inner().unwrap_or_else(PoisonError::into_inner);
+            if !arrays.is_full() {
+                return None;
+            }
+            if slots
+                .try_push(Slot {
+                    holder: None,
+                    arrays,
+                    owned: false,
+                })
+                .is_err()
+            {
+                return None;
+            }
+        }
+        // 取り出しは後ろからなので、枠の順に戻します。
+        slots.reverse();
+        Some(Budget {
+            slots,
+            shared: false,
+            raised: false,
+            #[cfg(any(test, feature = "harness"))]
+            dirty: 0,
+        })
+    }
+
+    /// どこかの区画が「枠が欲しい」の印を立てているか。
+    pub fn wanted(&self) -> bool {
+        self.wanted.load(Ordering::Acquire)
+    }
+
+    /// 「枠が欲しい」の印を外します。枠を返した区画が呼びます。
+    pub(crate) fn clear_wanted(&self) {
+        self.wanted.store(false, Ordering::Release);
+    }
+
+    /// 区画が取っている枠の数です。
+    pub fn taken(&self) -> u32 {
+        self.taken.load(Ordering::Acquire).count_ones()
+    }
+
+    /// 最も小さい空きの枠の bit を立て、番号を返します。空きが無ければ `None` です。
+    fn take(&self) -> Option<usize> {
+        let all = if self.cells.len() >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << self.cells.len()) - 1
+        };
+        let mut t = self.taken.load(Ordering::Relaxed);
+        loop {
+            let free = !t & all;
+            if free == 0 {
+                return None;
+            }
+            let i = free.trailing_zeros();
+            match self.taken.compare_exchange_weak(
+                t,
+                t | 1 << i,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(i as usize),
+                Err(now) => t = now,
+            }
+        }
+    }
+
+    /// bit を立てた枠 `i` の配列を取り出します。
+    fn take_arrays(&self, i: usize) -> BoostArrays {
+        let mut cell = self.cells[i].lock().unwrap_or_else(PoisonError::into_inner);
+        core::mem::take(&mut *cell)
+    }
+
+    /// 枠 `i` に配列を入れ、bit を外します。
+    fn give(&self, i: usize, arrays: BoostArrays) {
+        *self.cells[i].lock().unwrap_or_else(PoisonError::into_inner) = arrays;
+        self.taken.fetch_and(!(1u64 << i), Ordering::Release);
     }
 }
 
