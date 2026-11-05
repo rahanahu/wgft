@@ -447,6 +447,13 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
   worker の無い build でも流せ、そのときは data plane のスレッドが CPU 1 に載ります。
   `apart-mt` の値は `apart` で取った表と混ぜません。
   ラボではまだ流していません
+- `--placement apart-mt2` と `--placement apart-mt2-cpu0`:2 vCPU の agent の VM で、スレッドが複数ある build (前面の data plane のスレッドと、補助のスレッド) を測る置き方です。`--vcpus 2` を求めます。
+  NIC の割り込みと相手の VM の固定は `apart` と同じで、割り込みと softirq は CPU 0 で受けます。
+  Rust の agent のプロセスは CPU 0 と 1 に置き、データの経路を担う data plane のスレッド (`wgft-dataplane`) を CPU 1 に固定します。
+  `apart-mt2` は、ほかのスレッドを固定せず、CPU 0 と 1 の中でスケジューラに任せます。
+  `apart-mt2-cpu0` は、ほかのスレッドをすべて CPU 0 に固定し、割り込みと同じ CPU に置きます。
+  固定は `apart-mt` と同じく、tunnel を張った後と各実行の始めに agentd を通して行い、効かなければ失敗にし、各実行の終わりにも確かめます (実行の途中で作られたスレッドは data plane のスレッドの CPU を受け継ぐので、`apart-mt2-cpu0` ではその実行が失敗になります)。
+  腕は Rust かカーネルモードだけです。`apart` と `apart-mt` の表とは混ぜません
 - `--agent-load CPU:DUTY`:`--split` で、agent の VM の CPU `CPU` に固定した負荷 (`lab/agentload.py`) を、各腕の実行の前から後まで動かします。
   負荷は 10 ms ごとに `DUTY` % の間だけ CPU を使い切り、残りは眠ります。VM の root の netns で走り、agent のスレッドと CPU を取り合います。
   `--placement apart-mt` と合わせると、`CPU` に 1 を置けば data plane のスレッドと、2 か 3 を置けば暗号の worker と競合します。

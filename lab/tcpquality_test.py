@@ -179,7 +179,10 @@ class CpuPaired(unittest.TestCase):
                             "wants --vcpus 4 or more"),
                            (["--split", "--placement", "apart-mt", "--vcpus", "4", "--tool", "iperf3", "fast", "gvisor", "rust"],
                             "--placement apart-mt places the Rust agent's data-plane thread and crypto workers"),
-                           (["--split", "--placement", "apart-st", "fast", "rust", "kernel"], "--placement wants apart or apart-mt")):
+                           (["--split", "--placement", "apart-st", "fast", "rust", "kernel"], "--placement wants apart, apart-mt, apart-mt2 or apart-mt2-cpu0"),
+                           (["--split", "--placement", "apart-mt2", "--vcpus", "4", "fast", "rust", "kernel"], "wants --vcpus 2"),
+                           (["--split", "--placement", "apart-mt2-cpu0", "--vcpus", "2", "fast", "gvisor", "rust"],
+                            "--placement apart-mt2-cpu0 places the Rust agent's")):
             rc, err = self.lab_paired(args)
             self.assertEqual(rc, 1, err)
             self.assertIn(want, err)

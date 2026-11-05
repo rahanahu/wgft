@@ -168,7 +168,9 @@
 # take, check the threads at the end of every run, failing the run when one left its CPUs (a worker
 # started later inherits the data-plane thread's CPUs), record the number of workers
 # (agent_crypto_threads) and warn when there is none, and sample every thread of the agent
-# (agentvm_thr_dp_*, _crypto_*, _other_*). AGENT_WORKER_CPUS is a comma list, one CPU per worker.
+# (agentvm_thr_dp_*, _crypto_*, _other_*). AGENT_WORKER_CPUS is a comma list, one CPU per worker,
+# and may be empty. AGENT_OTHER_CPUS, when set, pins every thread that is neither of those too
+# (`--placement apart-mt2-cpu0`); left empty, such threads keep the process's CPUs.
 # The peer VM's vCPUs are also sampled every 0.5 s over the run (tcpquality.py peerseries): the
 # result line gets the window's intervals (peervm_series_intervals), those in which some vCPU was
 # saturated, at least 0.95 busy with its own bound kernel workers at 0.9 or more
@@ -216,6 +218,7 @@ AGENT_TOKEN=${AGENT_TOKEN:-/run/wgft-agentd.token}
 AGENT_CPUS=${AGENT_CPUS:-}
 AGENT_DP_CPUS=${AGENT_DP_CPUS:-}
 AGENT_WORKER_CPUS=${AGENT_WORKER_CPUS:-}
+AGENT_OTHER_CPUS=${AGENT_OTHER_CPUS:-}
 TARGET_LOCAL=${TARGET_LOCAL:-}
 if [ -n "${WGFT_BIN_DIR:-}" ]; then
   PATH=$WGFT_BIN_DIR:$PATH
@@ -634,12 +637,12 @@ for mode in $MODES; do
         fi
         [ "$mode" != rust ] || DP_SAMPLE=thread:dp:wgft-dataplane
         if [ -n "$AGENT_DP_CPUS" ] && [ "$mode" = rust ]; then
-          if ! threads_now=$(agentsh pin-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" 2>&1); then
+          if ! threads_now=$(agentsh pin-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" "$AGENT_OTHER_CPUS" 2>&1); then
             echo "FAIL  agent $mode: cannot place its threads: $threads_now"; fail=1; continue
           fi
           echo "   agent $threads_now"
           case $threads_now in
-            crypto_threads=0\ *) echo "WARN  agent $mode: no wgft-crypto thread; this build has no crypto workers, so apart-mt places only its data-plane thread" ;;
+            crypto_threads=0\ *) echo "WARN  agent $mode: no wgft-crypto thread; this build has no crypto workers, so the placement moves only its data-plane thread" ;;
           esac
           DP_SAMPLE=threads:all
         fi
@@ -692,7 +695,7 @@ for mode in $MODES; do
         # number of workers
         crypto_field=
         if [ -n "$AGENT_DP_CPUS" ] && [ "$mode" = rust ]; then
-          if threads_now=$(agentsh pin-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" 2>&1); then
+          if threads_now=$(agentsh pin-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" "$AGENT_OTHER_CPUS" 2>&1); then
             crypto_field=" agent_crypto_threads=$(echo "$threads_now" | sed -n 's/^crypto_threads=\([0-9]*\).*/\1/p' | head -1)"
           else
             echo "FAIL  agent $mode run $run: cannot place its threads: $threads_now"; fail=1 run_pass=0
@@ -760,7 +763,7 @@ for mode in $MODES; do
         wait "$series_pid" 2>/dev/null
         sa1=$(agentx --snap agentvm "$agent_pid" "$agent_cg" "if:$HOME_NS:eth0" "snmp:$HOME_NS" "eth:$HOME_NS:eth0" "nicirq:$HOME_NS:eth0" kthreads ${DP_SAMPLE:+"$DP_SAMPLE"})
         a1=$(field agentvm_proc_us "$sa1")
-        if [ -n "$AGENT_DP_CPUS" ] && [ "$mode" = rust ] && ! threads_now=$(agentsh check-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" 2>&1); then
+        if [ -n "$AGENT_DP_CPUS" ] && [ "$mode" = rust ] && ! threads_now=$(agentsh check-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" "$AGENT_OTHER_CPUS" 2>&1); then
           echo "FAIL  agent $mode run $run: the agent's threads left their CPUs: $threads_now"; fail=1 run_pass=0
         fi
       else
