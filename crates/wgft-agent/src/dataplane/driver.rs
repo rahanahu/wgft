@@ -370,6 +370,7 @@ pub(super) fn pump<U: Upper>(
 /// 読んだ順に渡す。核に渡す TCP の segment の順は変えない。
 pub(super) async fn receive_batch<U: Upper>(
     local: &Local<U>,
+    device: &mut Device,
     source: &mut impl Source,
     rx: &mut RxBatch,
     now: Instant,
@@ -394,9 +395,8 @@ pub(super) async fn receive_batch<U: Upper>(
     };
     let (end, udp, others) = {
         let mut guard = local.0.borrow();
-        let inner = &mut *guard;
-        let end = decrypt(&mut inner.device, rx, n, now);
-        let upper = &mut inner.upper;
+        let end = decrypt(device, rx, n, now);
+        let upper = &mut *guard;
         let (udp, others) = each_packet(&rx.plain[..end], true, |p| upper.handle_packet(now, p));
         (end, udp, others)
     };
@@ -405,7 +405,7 @@ pub(super) async fn receive_batch<U: Upper>(
     }
     let mut yielded = Duration::ZERO;
     if udp > 0 {
-        local.0.borrow().upper.poll_wakers(wakers);
+        local.0.borrow().poll_wakers(wakers);
         for waker in wakers.drain(..) {
             waker.wake();
         }
@@ -419,7 +419,7 @@ pub(super) async fn receive_batch<U: Upper>(
         }
     }
     let mut guard = local.0.borrow();
-    let upper = &mut guard.upper;
+    let upper = &mut *guard;
     each_packet(&rx.plain[..end], false, |p| upper.handle_packet(now, p));
     Ok((n, yielded))
 }
@@ -459,17 +459,16 @@ const FINAL_PACKETS: usize = 4096;
 impl Rest {
     /// 駆動の task が終わり、local の task を落とした後に、上の層に残った出力 (中継の接続を切った RST
     /// など) を 1 回だけ送り出す。セッションが無いか、ソケットが書けなければ送らずに終える。
-    pub(super) fn flush<U: Upper>(mut self, local: &Local<U>) {
+    pub(super) fn flush<U: Upper>(mut self, local: &Local<U>, device: &mut Device) {
         let mut guard = local.0.borrow();
-        let inner = &mut *guard;
         let now = clock::now();
         let mut io = Io {
             socket: &self.socket,
             gso: self.gso,
         };
         pump(
-            &mut inner.device,
-            &mut inner.upper,
+            device,
+            &mut *guard,
             &self.peer,
             now,
             &mut self.outbox,
@@ -503,6 +502,7 @@ impl Wake {
 /// 受ける向きに飢えないためである。予算で止めて上の層にまだ送るものが残るかを返す。
 fn send_phase<U: Upper>(
     local: &Local<U>,
+    device: &mut Device,
     peer: &PublicKey,
     outbox: &mut Outbox,
     io: &mut Io<'_>,
@@ -511,12 +511,12 @@ fn send_phase<U: Upper>(
     now: &mut Instant,
 ) -> bool {
     let mut guard = local.0.borrow();
-    let inner = &mut *guard;
-    if inner.device.poll_timeout().is_some_and(|t| t <= *now) {
-        inner.device.handle_timeout(*now);
+    let upper = &mut *guard;
+    if device.poll_timeout().is_some_and(|t| t <= *now) {
+        device.handle_timeout(*now);
     }
-    if inner.upper.poll_timeout().is_some_and(|t| t <= *now) {
-        inner.upper.handle_timeout(*now);
+    if upper.poll_timeout().is_some_and(|t| t <= *now) {
+        upper.handle_timeout(*now);
     }
     let mut tx_done = 0;
     loop {
@@ -526,8 +526,8 @@ fn send_phase<U: Upper>(
             1
         };
         let (pulled, state) = send_batch(
-            &mut inner.device,
-            &mut inner.upper,
+            device,
+            upper,
             peer,
             *now,
             outbox,
@@ -552,31 +552,33 @@ fn send_phase<U: Upper>(
 /// 起床の終わり:device の event を流し、上の層の waker とログを引き、水位を残し、次の timer の時刻を返す。
 fn finish_wake<U: Upper>(
     local: &Local<U>,
+    device: &mut Device,
     events: &mpsc::Sender<Event>,
     high_water: &AtomicU64,
     wakers: &mut Vec<Waker>,
 ) -> Option<Instant> {
     let mut guard = local.0.borrow();
-    let inner = &mut *guard;
-    while let Some(event) = inner.device.poll_event() {
+    let upper = &mut *guard;
+    while let Some(event) = device.poll_event() {
         // 受け手が遅ければ捨てる。駆動の task を event の受け手に止めさせない
         let _ = events.try_send(event);
     }
-    inner.upper.poll_wakers(wakers);
-    while let Some(line) = inner.upper.poll_log() {
+    upper.poll_wakers(wakers);
+    while let Some(line) = upper.poll_log() {
         crate::logf!("{line}");
     }
     high_water.store(
-        duration_to_nanos(inner.device.unix_high_water()),
+        duration_to_nanos(device.unix_high_water()),
         Ordering::Relaxed,
     );
-    earliest(inner.device.poll_timeout(), inner.upper.poll_timeout())
+    earliest(device.poll_timeout(), upper.poll_timeout())
 }
 
 /// 駆動の task。命令の channel が閉じるか止める命令で、最後の送り出しに要るものを返す。上の層の中の
 /// panic の後と、ソケットの準備を待てなくなったときに誤りを返す。
 pub(super) async fn drive<U: Upper>(
     local: Local<U>,
+    device: &mut Device,
     socket: UdpSocket,
     mut commands: mpsc::Receiver<Command<U>>,
     events: mpsc::Sender<Event>,
@@ -585,12 +587,10 @@ pub(super) async fn drive<U: Upper>(
     buffers: SocketBuffers,
 ) -> io::Result<Rest> {
     let (peer, mtu, max_datagram) = {
-        let inner = local.0.inner.borrow();
-        let peer =
-            inner.device.peers().next().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "the device has no peer")
-            })?;
-        (peer, inner.device.mtu(), inner.device.max_transmit_len())
+        let peer = device.peers().next().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "the device has no peer")
+        })?;
+        (peer, device.mtu(), device.max_transmit_len())
     };
     let local_addr = socket
         .local_addr()
@@ -628,6 +628,7 @@ pub(super) async fn drive<U: Upper>(
             };
             let (n, yielded) = receive_batch(
                 &local,
+                device,
                 &mut io,
                 &mut rx,
                 now,
@@ -654,6 +655,7 @@ pub(super) async fn drive<U: Upper>(
         }
         let tx_more = send_phase(
             &local,
+            device,
             &peer,
             &mut outbox,
             &mut io,
@@ -662,7 +664,7 @@ pub(super) async fn drive<U: Upper>(
             &mut now,
         );
         let more = rx_more || tx_more;
-        let deadline = finish_wake(&local, &events, high_water, &mut wakers);
+        let deadline = finish_wake(&local, device, &events, high_water, &mut wakers);
         for waker in wakers.drain(..) {
             waker.wake();
         }
@@ -682,22 +684,21 @@ pub(super) async fn drive<U: Upper>(
             command = commands.recv() => match command {
                 None | Some(Command::Stop) => break,
                 Some(Command::Status(reply)) => {
-                    let inner = local.0.inner.borrow();
                     let now = clock::now();
                     let _ = reply.send(Status {
-                        peer: inner.device.peer_status(&peer, now),
-                        drops: *inner.device.drops(),
-                        held: inner.device.held(),
+                        peer: device.peer_status(&peer, now),
+                        drops: *device.drops(),
+                        held: device.held(),
                         local: local_addr,
                         send_errors: outbox.send_errors,
                         receive_errors,
                         receive_truncated: rx.truncated,
                         socket_buffers: buffers.clone(),
-                        unix_high_water: inner.device.unix_high_water(),
+                        unix_high_water: device.unix_high_water(),
                     });
                 }
                 Some(Command::SetEndpoint(endpoint)) => {
-                    local.0.borrow().device.set_endpoint(clock::now(), &peer, endpoint);
+                    device.set_endpoint(clock::now(), &peer, endpoint);
                 }
                 Some(Command::Run(job)) => job(&local),
             },

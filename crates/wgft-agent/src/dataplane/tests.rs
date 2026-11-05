@@ -1070,19 +1070,26 @@ async fn a_receive_batch_hands_udp_first_and_keeps_the_tcp_order() {
             .push_back((B_ADDR.parse().unwrap(), sealed[..out.len].to_vec()));
     }
     let local = super::Local(std::rc::Rc::new(super::Shared {
-        inner: std::cell::RefCell::new(super::Inner {
-            device: t.a,
-            upper: Stub::new(None),
-        }),
+        inner: std::cell::RefCell::new(Stub::new(None)),
         poisoned: std::cell::Cell::new(false),
         wake: super::Wake::default(),
     }));
+    let mut device = t.a;
     // 密な部分を枠の全体にして、枠 i が data の i × RX_SLOT から始まるようにする
     let mut rx = RxBatch::new(8, false, RX_SLOT);
     let (mut errors, mut wakers) = (0, Vec::new());
-    let (n, _) = receive_batch(&local, &mut feed, &mut rx, now, 8, &mut errors, &mut wakers)
-        .await
-        .unwrap();
+    let (n, _) = receive_batch(
+        &local,
+        &mut device,
+        &mut feed,
+        &mut rx,
+        now,
+        8,
+        &mut errors,
+        &mut wakers,
+    )
+    .await
+    .unwrap();
     assert_eq!((n, errors), (5, 0));
     let got: Vec<u32> = local.with(|s| s.got.iter().map(|p| seq(p)).collect());
     assert_eq!(

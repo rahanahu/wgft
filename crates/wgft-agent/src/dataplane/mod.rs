@@ -162,14 +162,10 @@ pub struct Status {
     pub unix_high_water: Duration,
 }
 
-struct Inner<U> {
-    device: Device,
-    upper: U,
-}
-
-/// データプレーンのスレッドの上の、device の層と上の層。
+/// データプレーンのスレッドの上の、上の層。device の層は駆動の task が持つ (Hash S の試作で、device を持たない
+/// 区画のスレッドも同じ型を使うために分けた)。
 struct Shared<U> {
-    inner: RefCell<Inner<U>>,
+    inner: RefCell<U>,
     poisoned: Cell<bool>,
     /// 出力を生みうる操作の後に鳴らし、駆動の task を起こす。
     wake: Wake,
@@ -221,7 +217,7 @@ impl<U> Shared<U> {
 }
 
 struct Borrow<'a, U> {
-    inner: RefMut<'a, Inner<U>>,
+    inner: RefMut<'a, U>,
     shared: &'a Shared<U>,
     /// 借用の前から巻き戻しの途中だったか。巻き戻しで落ちる handle の `Drop` が借用するときは、
     /// 核の中の panic ではないので印を付けない。
@@ -229,14 +225,14 @@ struct Borrow<'a, U> {
 }
 
 impl<U> Deref for Borrow<'_, U> {
-    type Target = Inner<U>;
-    fn deref(&self) -> &Inner<U> {
+    type Target = U;
+    fn deref(&self) -> &U {
         &self.inner
     }
 }
 
 impl<U> DerefMut for Borrow<'_, U> {
-    fn deref_mut(&mut self) -> &mut Inner<U> {
+    fn deref_mut(&mut self) -> &mut U {
         &mut self.inner
     }
 }
@@ -277,7 +273,7 @@ impl<U> Local<U> {
     /// Panics when called from inside another `with` or `operate`, which hold the same borrow.
     pub fn with<R>(&self, f: impl FnOnce(&mut U) -> R) -> R {
         let mut guard = self.0.borrow();
-        f(&mut guard.upper)
+        f(&mut guard)
     }
 
     /// Calls `f` with the layer above for an operation that may produce output, such as a write,
@@ -707,6 +703,7 @@ where
     U: Upper,
     F: FnOnce(UpperInit<U::Budget>) -> Result<U, UpperError<U::Budget>>,
 {
+    let mut device = device;
     let unix_high_water = device.unix_high_water();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -752,7 +749,7 @@ where
         }
     };
     let shared = Rc::new(Shared {
-        inner: RefCell::new(Inner { device, upper }),
+        inner: RefCell::new(upper),
         poisoned: Cell::new(false),
         wake: Wake::default(),
     });
@@ -762,6 +759,7 @@ where
         &runtime,
         driver::drive(
             Local(Rc::clone(&shared)),
+            &mut device,
             socket,
             commands,
             events,
@@ -785,15 +783,15 @@ where
         if let Some(rest) = rest
             && !shared.poisoned.get()
         {
-            rest.flush(&Local(Rc::clone(&shared)));
+            rest.flush(&Local(Rc::clone(&shared)), &mut device);
         }
     }
     drop(runtime);
-    let unix_high_water = shared.inner.borrow().device.unix_high_water();
+    let unix_high_water = device.unix_high_water();
     high_water.fetch_max(duration_to_nanos(unix_high_water), Ordering::Relaxed);
     let budget = match Rc::try_unwrap(shared) {
         Ok(s) if !s.poisoned.get() => {
-            let Inner { upper, .. } = s.inner.into_inner();
+            let upper = s.inner.into_inner();
             Some(upper.close(clock::now()))
         }
         _ => None,
