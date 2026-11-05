@@ -245,6 +245,7 @@ impl Conn<'_> {
     /// 下げます。TLP は SACK を交渉した接続だけで使うので、SACK の無い接続では `tlp_cut` は立ちません。
     pub(crate) fn enter_fast_recovery(&mut self) {
         self.init_undo();
+        self.t.rto_slow_start = false; // 高速の回復の後の slow start は RTO の後ではありません
         if self.t.tlp_cut && seq::lt(self.t.snd_una, self.t.tlp_cut_seq) {
             self.t.recover = self.t.tlp_cut_seq;
         } else {
@@ -313,9 +314,11 @@ impl Conn<'_> {
     }
 
     /// slow start の ACK で窓を増やします。`acked` は新しく確認された byte、`sample` はこの ACK で測った RTT
-    /// (ns、無ければ -1) です。増やす量は RFC 3465 の L = 2 で、CSS の間は 4 分の 1 にします。
+    /// (ns、無ければ -1) です。増やす量は RFC 3465 の L で、RTO の後の slow start は L = 1 (同 2.3)、それ以外は
+    /// L = 2 です。CSS の間は 4 分の 1 にします。
     pub(crate) fn slow_start_ack(&mut self, ack: u32, acked: u32, sample: i64) {
-        let mut inc = acked.min(2 * self.seg_mss());
+        let limit = if self.t.rto_slow_start { 1 } else { 2 };
+        let mut inc = acked.min(limit * self.seg_mss());
         if !self.hystart_on() {
             self.t.cwnd = self.t.cwnd.wrapping_add(inc);
             return;

@@ -448,3 +448,181 @@ fn rto_episode_ends_without_sack() {
         "RTO episode still marked after SND.UNA reached recover"
     );
 }
+
+/// RTO の後の slow start だけが 1 ACK の増分を 1 SMSS までにすることの試験です (RFC 3465 2.3)。
+/// 最初の slow start、高速の回復の後、RTO の取り消しの後は 2 SMSS までのままです。
+mod rto_slow_start_limit {
+    use super::*;
+    use crate::sack_tests::TEST_SEG_PAYLOAD;
+
+    /// 5 segment を書いてすべて失い、RTO を起こした接続を返します。
+    fn after_rto(cc: Congestion, sack: bool) -> (TestNet, crate::ConnId, PeerConn) {
+        let mut n = TestNet::with_config(config(cc), [7; 64]);
+        let (id, p) = n.accepted_sack(true, sack);
+        let data = vec![0u8; 5 * TEST_SEG_PAYLOAD];
+        assert_eq!(n.s.write(n.now, id, &data).unwrap(), data.len());
+        n.drain(); // すべて失う
+        // SACK を交渉した接続は TLP の probe が先に出るので、probe も失いながら最初の RTO まで進める
+        for _ in 0..10 {
+            n.advance(Duration::from_millis(500));
+            if n.s.stats().rtos != 0 {
+                break;
+            }
+            n.drain();
+        }
+        assert_eq!(n.s.stats().rtos, 1, "{cc:?}: setup");
+        (n, id, p)
+    }
+
+    /// 窓を 1 SMSS、ssthresh を 100 SMSS にして、`acked` byte を確認する ACK 1 つの窓の増分を返します。
+    fn grow_by_one_ack(c: &mut Conn<'_>, acked: u32) -> u32 {
+        let mss = c.seg_mss();
+        c.t.cwnd = mss;
+        c.t.ssthresh = 100 * mss;
+        let ack = c.t.snd_una;
+        c.slow_start_ack(ack, acked, -1);
+        c.t.cwnd - mss
+    }
+
+    /// 凍結した Go との照合用の切り替え (feature `harness` だけ):RTO の後も `rto_slow_start` を立てず、増分は
+    /// 2 SMSS のままです。切り替えは既定で偽で、製品と同じ L = 1 です。
+    #[cfg(feature = "harness")]
+    #[test]
+    fn go_compat_switch_keeps_two_segments_after_rto() {
+        crate::set_go_compat_rto_l2(true);
+        let (mut n, id, _) = after_rto(Congestion::NewReno, true);
+        crate::set_go_compat_rto_l2(false);
+        let mut c = n.s.conn(id.slot);
+        let mss = c.seg_mss();
+        assert!(!c.t.rto_slow_start, "the switch leaves rto_slow_start down");
+        assert_eq!(grow_by_one_ack(&mut c, 2 * mss), 2 * mss);
+    }
+
+    /// 損失の無い接続の最初の slow start:増分は 2 SMSS までです。
+    #[test]
+    fn initial_slow_start_keeps_two_segments() {
+        let (mut n, i) = cc_conn(Congestion::Cubic);
+        let mut c = n.s.conn(i);
+        let mss = c.seg_mss();
+        assert!(!c.t.rto_slow_start, "set only by an RTO");
+        assert_eq!(c.t.ssthresh, u32::MAX, "setup: initial slow start");
+        c.t.cwnd = mss;
+        let ack = c.t.snd_una;
+        c.slow_start_ack(ack, 3 * mss, -1);
+        assert_eq!(c.t.cwnd, 3 * mss, "an ACK of 3 SMSS grows by 2 SMSS");
+    }
+
+    /// RTO の後:2 SMSS を確認する ACK でも 1 SMSS しか増えず、1 SMSS 未満の確認は確認された分だけ増えます。
+    #[test]
+    fn slow_start_after_rto_grows_one_segment_per_ack() {
+        for cc in [Congestion::Cubic, Congestion::NewReno] {
+            let (mut n, id, _) = after_rto(cc, true);
+            let mut c = n.s.conn(id.slot);
+            let mss = c.seg_mss();
+            assert!(
+                c.t.rto_slow_start,
+                "{cc:?}: the RTO starts the limited slow start"
+            );
+            assert_eq!(c.t.cwnd, mss, "{cc:?}: window after the RTO");
+            assert_eq!(
+                grow_by_one_ack(&mut c, 2 * mss),
+                mss,
+                "{cc:?}: ACK of 2 SMSS"
+            );
+            assert_eq!(
+                grow_by_one_ack(&mut c, mss / 2),
+                mss / 2,
+                "{cc:?}: ACK of half a segment"
+            );
+        }
+    }
+
+    /// ACK を受ける流れで、RTO の後の slow start は 1 ACK で 1 SMSS までしか増えず、窓が ssthresh に届くと終わります。
+    #[test]
+    fn rto_slow_start_ends_at_ssthresh() {
+        for sack in [true, false] {
+            let (mut n, id, mut p) = after_rto(Congestion::NewReno, sack);
+            let i = id.slot;
+            let mss = n.s.conn(i).seg_mss();
+            let ssthresh = n.s.conn(i).t.ssthresh;
+            assert!(ssthresh > 2 * mss, "sack {sack}: setup: room to grow");
+            let mut grew = false;
+            for _ in 0..100 {
+                let (before, limited) = {
+                    let t = &*n.s.conn(i).t;
+                    (t.cwnd, t.rto_slow_start)
+                };
+                let outs = n.drain();
+                p.absorb(&outs);
+                n.peer_ack(&mut p, &[]);
+                n.advance(10 * MS);
+                let t = &*n.s.conn(i).t;
+                if limited && t.cwnd < ssthresh {
+                    assert!(
+                        t.cwnd <= before + mss,
+                        "sack {sack}: {before} to {}",
+                        t.cwnd
+                    );
+                    grew |= t.cwnd > before;
+                }
+                if !t.rto_slow_start || t.snd_una == t.snd_max {
+                    break;
+                }
+            }
+            assert!(grew, "sack {sack}: the window never grew in the slow start");
+            let t = &*n.s.conn(i).t;
+            if t.snd_una != t.snd_max {
+                assert!(
+                    t.cwnd >= ssthresh,
+                    "sack {sack}: slow start ended below ssthresh"
+                );
+            }
+        }
+    }
+
+    /// 高速の回復に入ると RTO の印を下ろし、回復の後の slow start は 2 SMSS までに戻ります。
+    #[test]
+    fn fast_recovery_ends_the_rto_limit() {
+        let (mut n, id, _) = after_rto(Congestion::Cubic, true);
+        let mut c = n.s.conn(id.slot);
+        assert!(c.t.rto_slow_start, "setup");
+        c.enter_fast_recovery();
+        assert!(!c.t.rto_slow_start, "fast recovery clears the mark");
+        c.t.in_recovery = false;
+        let mss = c.seg_mss();
+        assert_eq!(
+            grow_by_one_ack(&mut c, 2 * mss),
+            2 * mss,
+            "slow start after a recovery"
+        );
+    }
+
+    /// 取り消しは、印を取り消した事象の前の値に戻します。先の RTO の slow start の途中で起きた事象を取り消しても、
+    /// その slow start の L = 1 は続きます。
+    #[test]
+    fn undo_restores_the_mark_of_the_undone_event() {
+        let (mut n, id, _) = after_rto(Congestion::Cubic, true);
+        let mut c = n.s.conn(id.slot);
+        assert!(c.t.rto_slow_start, "setup: first RTO");
+        c.init_undo(); // 先の slow start の途中の事象 (2 回目の RTO や高速の回復) の前
+        c.t.rto_slow_start = false;
+        c.undo();
+        assert!(c.t.rto_slow_start, "the first RTO's slow start goes on");
+    }
+
+    /// RTO が不要と分かって窓を戻すと RTO の印を下ろし、戻った先の slow start は 2 SMSS までのままです。
+    #[test]
+    fn spurious_rto_undo_ends_the_rto_limit() {
+        let (mut n, id, _) = after_rto(Congestion::Cubic, true);
+        let mut c = n.s.conn(id.slot);
+        assert!(c.t.rto_slow_start, "setup");
+        c.undo();
+        assert!(!c.t.rto_slow_start, "the undo clears the mark");
+        let mss = c.seg_mss();
+        assert_eq!(
+            grow_by_one_ack(&mut c, 2 * mss),
+            2 * mss,
+            "slow start after the undo"
+        );
+    }
+}

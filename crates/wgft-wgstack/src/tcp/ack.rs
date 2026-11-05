@@ -259,6 +259,9 @@ impl Conn<'_> {
             self.cong_avoid(acked, now);
         }
         self.t.cwnd = self.t.cwnd.min(1 << 30);
+        if self.t.cwnd >= self.t.ssthresh {
+            self.t.rto_slow_start = false; // RTO の後の slow start は窓が ssthresh に届いて終わります
+        }
     }
 
     /// 累積の確認の後に再送のタイマーを張り直します (RFC 6298 5.2、5.3)。窓の probe の間は張り直しません。

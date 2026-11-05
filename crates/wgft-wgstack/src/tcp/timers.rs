@@ -121,6 +121,11 @@ impl Conn<'_> {
         self.cc_on_rto();
         let t = &mut *self.t;
         t.cwnd = mss;
+        t.rto_slow_start = true;
+        #[cfg(feature = "harness")]
+        if crate::stack::go_compat_rto_l2() {
+            t.rto_slow_start = false; // 凍結した Go の記録との照合用の切り替え: RTO の後も L = 2
+        }
         t.recover = t.snd_max;
         t.in_recovery = false;
         t.dup_acks = 0;

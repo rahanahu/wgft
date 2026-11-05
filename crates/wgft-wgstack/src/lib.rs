@@ -47,6 +47,8 @@ pub use stack::{
 };
 #[cfg(any(test, feature = "harness"))]
 pub use stack::{Spare, TouchedCheck};
+#[cfg(feature = "harness")]
+pub use stack::{go_compat_rto_l2, set_go_compat_rto_l2};
 pub use tcp::conn::ConnId;
 pub use time::Time;
 pub use udp::{UdpFault, UdpId};
@@ -88,6 +90,10 @@ mod listen_tests;
 mod netsim_tests;
 #[cfg(test)]
 mod rack_tests;
+#[cfg(test)]
+mod rto_l1_tests;
+#[cfg(test)]
+mod rto_wire_tests;
 #[cfg(test)]
 mod sack_tests;
 #[cfg(test)]

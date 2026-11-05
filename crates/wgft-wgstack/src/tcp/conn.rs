@@ -186,6 +186,9 @@ pub(crate) struct Tcb {
     pub(crate) fin_sent: bool,
     pub(crate) ws_ok: bool,
     pub(crate) rto_episode: bool,
+    /// RTO の後の slow start の間だけ真です (RFC 3465 2.3:1 ACK の増分は 1 SMSS まで)。RTO で立て、窓が
+    /// ssthresh に届くか、高速の回復に入るか、RTO を不要と取り消したら下ろします。
+    pub(crate) rto_slow_start: bool,
     pub(crate) tlp_active: bool,
     pub(crate) tlp_retrans: bool,
     pub(crate) tlp_probe: bool,
@@ -250,6 +253,8 @@ pub(crate) struct ConnCold {
     pub(crate) retrans_ts_ok: bool,
     pub(crate) undo_seq: u32,
     pub(crate) undo_cwnd: u32,
+    /// `init_undo` の時点の `rto_slow_start`。取り消しで窓と ssthresh と一緒に戻します。
+    pub(crate) undo_rto_slow_start: bool,
     pub(crate) undo_ssthresh: u32,
     pub(crate) undo_retrans: i32,
     pub(crate) retrans_ts: u32,

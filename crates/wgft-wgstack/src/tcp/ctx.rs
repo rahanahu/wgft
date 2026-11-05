@@ -182,7 +182,8 @@ impl Conn<'_> {
         }
         let mss = self.seg_mss();
         self.t.cwnd = if r.rtx {
-            mss // RFC 5681 3.1、Linux と同じく 1 segment
+            // RFC 5681 3.1、Linux と同じく 1 segment。SYN の再送は RTO の後の slow start に数えず、L = 2 のままです。
+            mss
         } else {
             INITIAL_WINDOW_SEGS * mss
         };
