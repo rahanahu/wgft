@@ -645,9 +645,58 @@ impl Manager {
             return;
         }
         let opened: Vec<(Key, SocketAddrV4)> = specs.iter().map(|s| (s.key, s.addr)).collect();
+        // Hash S の試作:TCP の待ち受けは全区画で開く。区画 1 から P - 1 で先に開き、区画 0 で開いた後に、全区画が
+        // 開けた時だけ成功にする。どれかが失敗したら、開けた区画を閉じてから失敗を返す
+        let mut others: BTreeMap<Key, Vec<Result<Running, String>>> = BTreeMap::new();
+        for k in 1..self.dataplane.partitions() {
+            let tcp: Vec<Spec> = specs
+                .iter()
+                .filter(|s| s.key.kind == Kind::Tcp)
+                .cloned()
+                .collect();
+            if tcp.is_empty() {
+                break;
+            }
+            let keys: Vec<Key> = tcp.iter().map(|s| s.key).collect();
+            let got = self
+                .dataplane
+                .call_on(k, move |net| {
+                    tcp.into_iter()
+                        .map(|s| start_tcp(net, s))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            match got {
+                Ok(rs) => {
+                    for (key, r) in keys.into_iter().zip(rs) {
+                        others.entry(key).or_default().push(r);
+                    }
+                }
+                Err(e) => {
+                    for key in keys {
+                        others
+                            .entry(key)
+                            .or_default()
+                            .push(Err(format!("bind on data plane partition {k}: {e}")));
+                    }
+                }
+            }
+        }
         let results = match self
             .dataplane
-            .call(move |net| specs.into_iter().map(|s| start(net, s)).collect())
+            .call(move |net| {
+                specs
+                    .into_iter()
+                    .map(|s| {
+                        let key = s.key;
+                        let first = start(net, s);
+                        match others.remove(&key) {
+                            Some(rest) => all_partitions(first, rest),
+                            None => first,
+                        }
+                    })
+                    .collect()
+            })
             .await
         {
             Ok(r) => r,
@@ -807,6 +856,7 @@ async fn close_all(mut ls: Vec<(Key, Listener)>) {
 }
 
 /// データプレーンのスレッドで待ち受けを開くための材料。
+#[derive(Clone)]
 struct Spec {
     key: Key,
     addr: SocketAddrV4,
@@ -849,6 +899,44 @@ fn start_tcp(net: &Net, s: Spec) -> Result<Running, String> {
             targets: s.targets,
         },
     }));
+    Ok(Running { stop, task })
+}
+
+/// Hash S の試作:全区画の待ち受けを 1 つの [`Running`] にまとめる。どれかが失敗したら、開けた区画に止める
+/// 知らせを送って失敗を返す。まとめた task は区画 0 にあり、止める知らせで全区画に止める知らせを送り、全部の
+/// 終わりを待つ。まとめた task が abort されれば、区画の止める口が落ちて区画の task も止まる。
+fn all_partitions(
+    first: Result<Running, String>,
+    rest: Vec<Result<Running, String>>,
+) -> Result<Running, String> {
+    let mut ok = Vec::new();
+    let mut err = None;
+    for r in std::iter::once(first).chain(rest) {
+        match r {
+            Ok(x) => ok.push(x),
+            Err(e) => {
+                err.get_or_insert(e);
+            }
+        }
+    }
+    if let Some(e) = err {
+        for r in ok {
+            let _ = r.stop.send(());
+        }
+        return Err(e);
+    }
+    let (stop, stopped) = oneshot::channel::<()>();
+    let task = tokio::task::spawn_local(async move {
+        let _ = stopped.await;
+        let mut tasks = Vec::new();
+        for r in ok {
+            let _ = r.stop.send(());
+            tasks.push(r.task);
+        }
+        for t in tasks {
+            let _ = t.await;
+        }
+    });
     Ok(Running { stop, task })
 }
 
