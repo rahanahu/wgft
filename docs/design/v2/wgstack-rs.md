@@ -437,12 +437,14 @@ Go の wgstack も、ACK を接続ごとの 1 つの印にまとめていまし�
 - RFC 5681 3.2:順序外の segment ごとに、すぐ重複した ACK を返します。
   1 回の起床で複数の順序外の segment を受けると、重複した ACK は 1 つです
 
-ラボの回線速度の転送で測った、data の segment 1 つあたりの ACK の間隔は次のとおりです。
+分けたラボ (agent を専用の VM に置く形) で、agent が受ける向きの 1 stream を RTT 0、速さの制限なしで転送し、tunnel の ACK の数から data の segment 何個に ACK 1 つかを求めました。
+値は組の中央値です。
 
-| 条件 | wgstack の Rust 版 | 参照のカーネルモードの受け手 |
+| agent の VM の vCPU | wgstack の Rust 版 | 参照のカーネルモードの受け手 |
 | --- | --- | --- |
-| 1 vCPU | 49 segment に 1 つ | 43 segment に 1 つ |
-| 4 から 8 vCPU | 78 から 82 segment に 1 つ | 27 と 12 segment に 1 つ(vCPU の数が増える順) |
+| 1 | 49 segment に 1 つ | 43 segment に 1 つ |
+| 4 | 82 segment に 1 つ | 27 segment に 1 つ |
+| 8 | 78 segment に 1 つ | 12 segment に 1 つ |
 
 この違いが送り手の slow start と損失の回復に与える影響は、まだ測っていません。
 次の 2 つの確かめは、まだ行っていません。

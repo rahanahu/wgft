@@ -379,7 +379,7 @@ RFC 6675 の pipe と IsLost を記録を順に調べて求めると、1 回の�
   順序外の segment と穴を埋める segment には、今までどおり遅らせずに ACK を返します(RFC 5681 3.2 と 4.2)。
   Linux はこの ACK を推定した MSS より小さな segment を受けた後に限るので、この規則は Linux との意図した違いです。
   経路の記録では、gVisor と Linux の受け手は順序どおりの ACK の約 45% を 1 segment ごとに返し、wgstack は約 5% でした。
-  ラボの回線速度の転送では、wgstack の Rust 版が返す ACK は data の segment 49 個に 1 つ(1 vCPU)、78 から 82 個に 1 つ(4 から 8 vCPU)でした。
+  分けたラボで agent が受ける向きの 1 stream を RTT 0 で転送すると、wgstack の Rust 版が返す ACK は data の segment 49 個に 1 つ (agent の VM が 1 vCPU)、82 個に 1 つ (4 vCPU)、78 個に 1 つ (8 vCPU) でした。
   参照のカーネルモードの受け手は、同じ条件で 43 個、27 個、12 個に 1 つでした。
   起床ごとの ACK の合わせ(接続ごとに最大 1 つ)が主な原因です。
   Linux の受け手が 1 segment ごとに返す原因は確かめていません。
