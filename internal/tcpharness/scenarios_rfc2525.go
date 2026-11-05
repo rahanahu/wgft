@@ -130,3 +130,100 @@ func rfc2525StretchACK(h *H) {
 	h.Check("every-second-segment", worst <= 2 && last == p.SndNxt, "RFC 2525 2.13: no ACK covers more than two full segments, and all twelve are acknowledged",
 		fmt.Sprintf("the widest ACK covers %d segments; %v", worst, yesNo(last == p.SndNxt, "all acknowledged", "not all acknowledged")))
 }
+
+// burstSegments is how many full segments the burst variants of the stretch-ACK scenario inject
+// before the DUT reads anything: more than the two a receiver may leave unacknowledged, and few
+// enough to stay inside the receive window every engine opens.
+const burstSegments = 12
+
+// ackSpan counts the pure ACKs of the DUT that advance the cumulative ACK, and the most full
+// segments one of them covered.
+type ackSpan struct{ acks, widest int }
+
+// take counts the ACKs among segs that advance last, which is updated. size is a full segment.
+func (a *ackSpan) take(p *Peer, segs []Segment, last *uint32, size int) {
+	for _, s := range segs {
+		if s.Src != p.Remote || !isPureAck(s) || !after(s.Ack, *last) {
+			continue
+		}
+		a.acks++
+		a.widest = max(a.widest, (int(s.Ack-*last)+size-1)/size)
+		*last = s.Ack
+	}
+}
+
+// rfc2525StretchACKBurst is rfc2525StretchACK with the twelve segments injected back to back,
+// before the DUT reads or polls, as wireguard-go writes a received batch to the Device before it
+// reads (compare cubic-ack-burst). A receiver that sends one ACK per wake instead of one per two
+// segments covers the whole burst with one ACK. The number of ACKs and the widest one are
+// measured; the check is the one-by-one scenario's, RFC 5681 4.2 and RFC 9293 3.8.6.3, that no
+// ACK covers more than two full segments.
+func rfc2525StretchACKBurst(h *H) {
+	const port = 8308
+	l := h.Listen(port)
+	p, _, _ := h.Connect(l, port, StandardSYN())
+	size := segSize(p)
+	last := p.SndNxt
+	for range burstSegments {
+		p.SendData(pattern(size, 0xd6))
+	}
+	var span ackSpan
+	span.take(p, h.Collect(h.Prompt()), &last, size)
+	immediate := span.acks
+	// whatever the delayed-ACK timer still holds comes within its bound
+	span.take(p, h.Collect(500*time.Millisecond), &last, size)
+	h.Measure("segments", burstSegments)
+	h.Measure("acks", span.acks)
+	h.Measure("acks-before-delayed-timer", immediate)
+	h.Measure("widest-ack-segments", span.widest)
+	h.Check("every-second-segment", span.widest <= 2 && last == p.SndNxt, "RFC 5681 4.2: no ACK covers more than two full segments of a burst of twelve, and all twelve are acknowledged",
+		yesNo(span.widest <= 2, "no ACK covers more than two segments", "an ACK covers more than two segments")+"; "+
+			yesNo(last == p.SndNxt, "all acknowledged", "not all acknowledged"))
+}
+
+// rfc2525StretchACKBurstOOO leaves a hole at the start of the receive window and injects eight
+// out-of-order segments back to back. RFC 5681 3.2 asks for an immediate duplicate ACK for each,
+// so the sender can count to the third. A receiver that sends one ACK per wake answers the eight
+// with one. The duplicate ACKs are counted and measured, and the check is that there is one for
+// each segment. Filling the hole then has to be acknowledged in full.
+func rfc2525StretchACKBurstOOO(h *H) {
+	const port = 8309
+	const ooo = 8
+	l := h.Listen(port)
+	p, _, _ := h.Connect(l, port, StandardSYN())
+	size := segSize(p)
+	hole := p.SndNxt
+	// the first segment is lost; the ones after it arrive out of order
+	p.SndNxt += uint32(size)
+	for range ooo {
+		p.SendData(pattern(size, 0xd7))
+	}
+	dups := 0
+	count := func(segs []Segment) {
+		for _, s := range segs {
+			if s.Src == p.Remote && isPureAck(s) && s.Ack == hole {
+				dups++
+			}
+		}
+	}
+	count(h.Collect(h.Prompt()))
+	// a duplicate ACK that a delayed timer holds is not the immediate one RFC 5681 3.2 asks for
+	immediate := dups
+	count(h.Collect(500 * time.Millisecond))
+	h.Measure("out-of-order-segments", ooo)
+	h.Measure("dupacks", immediate)
+	h.Measure("dupacks-with-delayed", dups)
+	h.Check("dupack-per-segment", immediate >= ooo, "RFC 5681 3.2: an immediate duplicate ACK for each of eight out-of-order segments sent back to back",
+		fmt.Sprintf("%d duplicate ACKs", immediate))
+	// the segment that fills the hole is acknowledged up to the end of the burst
+	end := hole + uint32(size)*(ooo+1)
+	p.SndNxt = hole
+	p.SendData(pattern(size, 0xd7))
+	p.SndNxt = end
+	last := hole
+	var span ackSpan
+	span.take(p, h.Collect(h.Prompt()), &last, size)
+	span.take(p, h.Collect(500*time.Millisecond), &last, size)
+	h.Check("hole-filled", last == end, "RFC 5681 4.2: the segment that fills the hole is acknowledged with everything the receiver holds",
+		yesNo(last == end, "all acknowledged", "not all acknowledged"))
+}

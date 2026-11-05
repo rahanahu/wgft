@@ -384,7 +384,7 @@ delivered delivered p.conn
 | `retransmit-rto`、`rto-after-burst` | Go に残す | 再送の間隔の列を数え、その数で確かめが変わる |
 | `newreno-recovery`、`sack-*`、`limited-transmit`、`limited-transmit-rack` | Go に残す | 受け手の模型と送り直しの見張りが DUT に応じて答え続ける |
 | `rack-reorder`、`tlp-tail-loss`、`thin-stream-loss`、`chained-recovery`、`reorder-wait-recovery` | Go に残す | 同上。`tlp-tail-loss` は実際の遅れで上限を広げる |
-| `window-scale`、`zero-window-probe`、`rfc2525-window-deflation`、`rfc2525-stretch-ack` | Go に残す | 窓に応じて送る量を変える繰り返しか、probe の数を数える繰り返しを持つ |
+| `window-scale`、`zero-window-probe`、`rfc2525-window-deflation`、`rfc2525-stretch-ack`、`rfc2525-stretch-ack-burst`、`rfc2525-stretch-ack-burst-ooo` | Go に残す | 窓に応じて送る量を変える繰り返しか、probe の数を数える繰り返しを持つ |
 | `rcv-overflow-*`、`rcv-window-pacing*` | Go に残す | 窓を埋めるまで送り続け、別の goroutine で読む |
 | `CongestionScenarios` (CUBIC と HyStart++) | Go に残す | 往復ごとに窓の模型と比べる |
 
