@@ -65,34 +65,34 @@ pub(crate) struct Tuple {
 }
 
 /// `b` を 16 bit の 1 の補数で足した値を `sum` に足して畳みます。結果の補数が checksum です。
-/// 1 の補数の和は語の幅によらないので、8 byte ずつ繰り上がりを回して足し、最後に 16 bit に畳みます
-/// (RFC 1071 2 節)。
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "the folded sum fits in 16 bits"
-)]
+/// 1 の補数の和は語の幅によらないので、長い入力は 32 byte ごとに 4 本の u128 の累算器へ u64 の語を足し
+/// (繰り上がりは u128 の上位が受けます)、最後に 16 bit に畳みます (RFC 1071 2 節)。語はリトルエンディアンで
+/// 読み、畳んだ後に byte を入れ替えます (1 の補数の和は語の byte 順によらず、入れ替えで合います)。
+/// header や擬似 header や ACK のように短い入力は、累算器の準備と畳みの費用が勝つので [`checksum_short`] を通します。
 pub(crate) fn checksum(sum: u32, b: &[u8]) -> u16 {
-    #[inline]
-    fn add(acc: u64, x: u64, carry: u64) -> (u64, u64) {
-        let (s, c1) = acc.overflowing_add(x);
-        let (s, c2) = s.overflowing_add(carry);
-        (s, u64::from(c1) + u64::from(c2))
+    if b.len() < WIDE_MIN {
+        return checksum_short(sum, b);
     }
-    let mut acc = u64::from(sum);
-    let mut carry = 0;
     let (blocks, rest) = b.as_chunks::<32>();
+    let mut a = [0u128; 4];
     for blk in blocks {
-        for w in blk.as_chunks::<8>().0 {
-            (acc, carry) = add(acc, u64::from_be_bytes(*w), carry);
+        for (acc, w) in a.iter_mut().zip(blk.as_chunks::<8>().0) {
+            *acc += u128::from(u64::from_le_bytes(*w));
         }
     }
     let (words, rest) = rest.as_chunks::<8>();
     for w in words {
-        (acc, carry) = add(acc, u64::from_be_bytes(*w), carry);
+        a[0] += u128::from(u64::from_le_bytes(*w));
     }
-    // 繰り上がりが残るとき acc は 2^64 - 2 以下なので、足しても溢れません。
-    acc += carry;
-    acc = (acc >> 32) + (acc & 0xffff_ffff); // 33 bit 以下
+    // 溢れるのは 2^62 個以上の語を足した後で、slice の長さでは起こりません。
+    let t = a[0] + a[1] + a[2] + a[3];
+    // 2^64 ≡ 1 (mod 2^16 - 1) なので、上位を下位へ足して畳みます。
+    let m = u128::from(u64::MAX);
+    let t = (t >> 64) + (t & m);
+    let t = (t >> 64) + (t & m); // 高々 2^64
+    let t = (t >> 32) + (t & 0xffff_ffff); // 高々 2^33
+    let lanes = fold16(t).swap_bytes();
+    let mut acc = u64::from(sum) + u64::from(lanes);
     let (pairs, last) = rest.as_chunks::<2>();
     for p in pairs {
         acc += u64::from(u16::from_be_bytes(*p));
@@ -100,10 +100,44 @@ pub(crate) fn checksum(sum: u32, b: &[u8]) -> u16 {
     if let [last] = last {
         acc += u64::from(*last) << 8;
     }
+    fold16(u128::from(acc))
+}
+
+/// [`checksum`] が広い累算器を使い始める長さです。これ未満は [`checksum_short`] を通します。
+const WIDE_MIN: usize = 128;
+
+/// 16 bit に畳みます。`x` は 2^64 未満です。
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the folded sum fits in 16 bits"
+)]
+#[inline]
+fn fold16(x: u128) -> u16 {
+    let mut acc = x as u64;
     while acc >> 16 != 0 {
         acc = (acc & 0xffff) + (acc >> 16);
     }
     acc as u16
+}
+
+/// 短い入力の [`checksum`] です。8 byte の語を 32 bit ずつの 2 つに割って足すので、繰り上がりの鎖がありません。
+#[inline]
+fn checksum_short(sum: u32, b: &[u8]) -> u16 {
+    let (words, rest) = b.as_chunks::<8>();
+    // 語は WIDE_MIN 未満の長さ分しかないので、32 bit ずつの和は溢れません。
+    let mut acc = u64::from(sum);
+    for w in words {
+        let x = u64::from_be_bytes(*w);
+        acc += (x >> 32) + (x & 0xffff_ffff);
+    }
+    let (pairs, last) = rest.as_chunks::<2>();
+    for p in pairs {
+        acc += u64::from(u16::from_be_bytes(*p));
+    }
+    if let [last] = last {
+        acc += u64::from(*last) << 8;
+    }
+    fold16(u128::from(acc))
 }
 
 /// TCP と UDP の擬似 header の和です。

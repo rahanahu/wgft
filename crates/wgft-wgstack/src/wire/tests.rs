@@ -207,26 +207,100 @@ fn ipv4_rejects() {
     assert!(parse_ipv4(&b).unwrap().fragment);
 }
 
+/// 広い累算器に替える前の `checksum` の写しです。新しい版と全入力で同じ値を返すことを確かめる基準で、
+/// 製品の build には入りません。
+fn old_checksum(sum: u32, b: &[u8]) -> u16 {
+    #[inline]
+    fn add(acc: u64, x: u64, carry: u64) -> (u64, u64) {
+        let (s, c1) = acc.overflowing_add(x);
+        let (s, c2) = s.overflowing_add(carry);
+        (s, u64::from(c1) + u64::from(c2))
+    }
+    let mut acc = u64::from(sum);
+    let mut carry = 0;
+    let (blocks, rest) = b.as_chunks::<32>();
+    for blk in blocks {
+        for w in blk.as_chunks::<8>().0 {
+            (acc, carry) = add(acc, u64::from_be_bytes(*w), carry);
+        }
+    }
+    let (words, rest) = rest.as_chunks::<8>();
+    for w in words {
+        (acc, carry) = add(acc, u64::from_be_bytes(*w), carry);
+    }
+    acc += carry;
+    acc = (acc >> 32) + (acc & 0xffff_ffff);
+    let (pairs, last) = rest.as_chunks::<2>();
+    for p in pairs {
+        acc += u64::from(u16::from_be_bytes(*p));
+    }
+    if let [last] = last {
+        acc += u64::from(*last) << 8;
+    }
+    while acc >> 16 != 0 {
+        acc = (acc & 0xffff) + (acc >> 16);
+    }
+    acc as u16
+}
+
+/// 新旧と定義どおりの和が一致することを確かめます。
+fn check_all(sum: u32, b: &[u8], what: &str) {
+    let got = checksum(sum, b);
+    assert_eq!(
+        got,
+        old_checksum(sum, b),
+        "{what}: old, len {} sum {sum:#x}",
+        b.len()
+    );
+    assert_eq!(
+        got,
+        ref_checksum(sum, b),
+        "{what}: ref, len {} sum {sum:#x}",
+        b.len()
+    );
+}
+
 #[test]
 fn checksum_matches_definition() {
     let mut r = ChaCha8::new([1; 32]);
     let mut buf = [0u8; 2048];
-    let sums = [0, 1, 0xffff, 0x10000, 0x5fffa, 0xffff_ffff];
+    let sums = [
+        0,
+        1,
+        0xffff,
+        0x10000,
+        0x5fffa,
+        0x8000_0000,
+        0xffff_fffe,
+        0xffff_ffff,
+    ];
+    // 長さ 0..=300 のすべて × 内容 × 前置きの和。内容は乱数、全 0xff、全 0、0x80、0xff と 0x00 の交互 2 通りです。
     for n in 0..=300 {
-        for fill in 0..3 {
-            for x in &mut buf[..n] {
+        for fill in 0..6 {
+            for (i, x) in buf[..n].iter_mut().enumerate() {
                 *x = match fill {
                     0 => r.next_u64() as u8,
                     1 => 0xff,
-                    _ => 0,
+                    2 => 0,
+                    3 => 0x80,
+                    4 => {
+                        if i % 2 == 0 {
+                            0xff
+                        } else {
+                            0
+                        }
+                    }
+                    _ => {
+                        if i % 2 == 0 {
+                            0
+                        } else {
+                            0xff
+                        }
+                    }
                 };
             }
             for s in sums {
-                assert_eq!(
-                    checksum(s, &buf[..n]),
-                    ref_checksum(s, &buf[..n]),
-                    "len {n} fill {fill} sum {s:#x}"
-                );
+                check_all(s, &buf[..n], &format!("fill {fill}"));
             }
         }
     }
@@ -235,12 +309,90 @@ fn checksum_matches_definition() {
         for x in &mut buf[..n] {
             *x = r.next_u64() as u8;
         }
-        let s = r.next_u64() as u32;
+        check_all(r.next_u64() as u32, &buf[..n], "random");
+    }
+}
+
+/// 0x0000 と 0xffff の 2 つの表し方を、旧版と同じ側に倒すことを確かめます。
+#[test]
+fn checksum_zero_forms() {
+    // 全 0 で前置きが 0 の和は 0、それ以外で 1 の補数の和が 0 になる入力は 0xffff です。
+    for n in 0..200 {
+        assert_eq!(checksum(0, &vec![0; n]), 0, "len {n}");
+        assert_eq!(checksum(0xffff, &vec![0; n]), 0xffff, "len {n}");
         assert_eq!(
-            checksum(s, &buf[..n]),
-            ref_checksum(s, &buf[..n]),
-            "len {n} sum {s:#x}"
+            checksum(0xffff_ffff, &vec![0xff; n]),
+            old_checksum(0xffff_ffff, &vec![0xff; n])
         );
+        assert_eq!(checksum(0, &vec![0xff; n]), old_checksum(0, &vec![0xff; n]));
+    }
+    // 和が丁度 0xffff と 0x10000 になる入力です。
+    for n in 4..=70 {
+        for (prefix, w0, w1) in [
+            (0u32, 0xffffu16, 0u16),
+            (0, 0xffff, 1),
+            (0x8000, 0x7fff, 0),
+            (0x8000, 0x7fff, 1),
+        ] {
+            let mut b = vec![0u8; n];
+            b[0..2].copy_from_slice(&w0.to_be_bytes());
+            b[2..4].copy_from_slice(&w1.to_be_bytes());
+            check_all(prefix, &b, "exact sum");
+        }
+    }
+    // ICMP や IPv4 の検査と同じ使い方です。正しい header の和は 0xffff になります。
+    let mut h = [0u8; 20];
+    h[0] = 0x45;
+    h[8] = 64;
+    h[9] = 6;
+    h[12..16].copy_from_slice(&DUT.to_be_bytes());
+    h[16..20].copy_from_slice(&PEER.to_be_bytes());
+    let cs = !checksum(0, &h);
+    h[10..12].copy_from_slice(&cs.to_be_bytes());
+    assert_eq!(checksum(0, &h), 0xffff);
+}
+
+/// 前置きの和の全幅と、開始位置の 0 から 7 byte のずれ、1 MiB の境の前後の長い入力です。
+#[test]
+fn checksum_offsets_and_long_inputs() {
+    let mut r = ChaCha8::new([2; 32]);
+    let mut buf = vec![0u8; 70_000 + 8];
+    for x in &mut buf {
+        *x = r.next_u64() as u8;
+    }
+    for _ in 0..30_000 {
+        let off = r.below(8) as usize;
+        let n = if r.below(10) == 0 {
+            r.below(70_001) as usize
+        } else {
+            r.below(1601) as usize
+        };
+        let b = &mut buf[off..off + n];
+        match r.below(3) {
+            0 => {}
+            1 => b.fill(0xff),
+            _ => {
+                for x in b.iter_mut() {
+                    *x &= *x >> 3;
+                }
+            }
+        }
+        check_all(r.next_u64() as u32, &buf[off..off + n], "offset");
+        for x in &mut buf[off..off + n] {
+            *x = r.next_u64() as u8;
+        }
+    }
+    // 1 MiB の境の前後と 5 MiB の長さです。累算器は slice の長さでは溢れません。
+    let big: Vec<u8> = (0..5usize << 20).map(|_| r.next_u64() as u8).collect();
+    for n in [
+        (1 << 20) - 1,
+        1 << 20,
+        (1 << 20) + 1,
+        (1 << 20) + 33,
+        5 << 20,
+    ] {
+        check_all(0xffff_ffff, &vec![0xff; n], "0xff");
+        check_all(0x1234, &big[..n], "big random");
     }
 }
 
