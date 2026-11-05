@@ -20,6 +20,7 @@ The compatibility contract covers the Linux server and agent, plus the Windows a
 | What remains compatible after an upgrade? | [Compatibility](compatibility.md): names and meanings of public surfaces |
 | What does the move to v2 decide? | [v2: move to Rust](v2/README.md): motivation, order, what stays unchanged, distribution, and design constraints (Japanese body) |
 | What must a reimplementation of the agent or server follow? | [Boundary specification, wire version 1](spec/README.md): the Go v1 wire, agent.json, control socket, CLI and configuration, and tunnel promises, written language-neutral with fixtures |
+| What is proposed for a multi-core packet engine? | [Parallel packet engine proposal](proposals/parallel-engine/README.md): an unadopted proposal covering the architecture comparison, ownership and synchronisation, memory bound, performance model, API boundary, and verification plan (Japanese body) |
 | What remains unsupported or proposed? | [Limitations and proposals](roadmap.md): current limitations, unverified behavior, and unimplemented designs |
 
 ## Previous links
