@@ -14,20 +14,39 @@ pub(crate) struct AllowedIps<V> {
     tables: [HashMap<u32, V>; 33],
     /// 空でない表の prefix の長さ。長い順。
     lens: Vec<u8>,
+    /// prefix が `SMALL_MAX` 個以下のあいだの同じ内容 (長い順、prefix の長さ、網の値、持ち主)。
+    /// agent のようにピアが 1 つで prefix が少ないとき、hash を引かずに直接比べる。
+    /// 超えたら `None` にして、表だけを使う。`insert` のときに作り、引きでは作らない。
+    small: Option<Vec<(u8, u32, V)>>,
 }
+
+/// 近道の prefix の数の上限。
+const SMALL_MAX: usize = 4;
 
 impl<V: Copy + Eq> AllowedIps<V> {
     pub(crate) fn new() -> Self {
         Self {
             tables: std::array::from_fn(|_| HashMap::new()),
             lens: Vec::new(),
+            small: Some(Vec::new()),
         }
     }
 
     /// `prefix` を `owner` に割り当てる。ほかのピアが持っていた同じ prefix は移る (WireGuard と同じ)。
     pub(crate) fn insert(&mut self, prefix: Ipv4Prefix, owner: V) {
         let len = prefix.len();
-        self.tables[usize::from(len)].insert(u32::from(prefix.addr()), owner);
+        let key = u32::from(prefix.addr());
+        self.tables[usize::from(len)].insert(key, owner);
+        if let Some(small) = &mut self.small {
+            if let Some(e) = small.iter_mut().find(|e| e.0 == len && e.1 == key) {
+                e.2 = owner;
+            } else if small.len() < SMALL_MAX {
+                let at = small.partition_point(|e| e.0 > len);
+                small.insert(at, (len, key, owner));
+            } else {
+                self.small = None;
+            }
+        }
         if let Err(at) = self.lens.binary_search_by(|l| len.cmp(l)) {
             self.lens.insert(at, len);
         }
@@ -35,6 +54,12 @@ impl<V: Copy + Eq> AllowedIps<V> {
 
     pub(crate) fn lookup(&self, ip: Ipv4Addr) -> Option<V> {
         let bits = u32::from(ip);
+        if let Some(small) = &self.small {
+            return small
+                .iter()
+                .find(|&&(len, key, _)| bits & mask(len) == key)
+                .map(|&(_, _, owner)| owner);
+        }
         self.lens
             .iter()
             .find_map(|&len| self.tables[usize::from(len)].get(&(bits & mask(len))))
@@ -103,6 +128,54 @@ mod tests {
         t.insert(p(10, 200, 0, 1, 32), 1);
         t.insert(p(10, 200, 0, 1, 32), 2);
         assert_eq!(t.lookup(ip(10, 200, 0, 1)), Some(2));
+    }
+
+    // 近道は表の引きと同じ答えを返す。近道の上限をまたぐ個数、重なる prefix、0.0.0.0/0、
+    // 同じ prefix の再割り当てを含む。
+    fn full_lookup<V: Copy + Eq>(t: &AllowedIps<V>, ip: Ipv4Addr) -> Option<V> {
+        let bits = u32::from(ip);
+        t.lens
+            .iter()
+            .find_map(|&len| t.tables[usize::from(len)].get(&(bits & mask(len))))
+            .copied()
+    }
+
+    #[test]
+    fn fast_path_edge_cases() {
+        let mut t = AllowedIps::new();
+        assert_eq!(t.lookup(ip(1, 2, 3, 4)), None);
+        t.insert(p(0, 0, 0, 0, 0), 1u8);
+        assert!(t.small.is_some());
+        assert_eq!(t.lookup(ip(255, 255, 255, 255)), Some(1));
+        t.insert(p(10, 0, 0, 0, 8), 2);
+        assert_eq!(t.lookup(ip(10, 1, 1, 1)), Some(2));
+        assert_eq!(t.lookup(ip(11, 1, 1, 1)), Some(1));
+        t.insert(p(10, 0, 0, 0, 8), 3);
+        assert_eq!(t.lookup(ip(10, 1, 1, 1)), Some(3));
+    }
+
+    proptest! {
+        #[test]
+        fn fast_path_matches_full_lookup(
+            entries in proptest::collection::vec((any::<u32>(), 0u8..=32, 0u8..3), 0..8),
+            probes in proptest::collection::vec(any::<u32>(), 1..64),
+        ) {
+            let mut t = AllowedIps::new();
+            let mut seen: Vec<u32> = Vec::new();
+            for (addr, len, owner) in entries {
+                // 近い値を多く出して重なりを増やす。
+                let addr = addr & 0x0f0f_00ff | 0x0a00_0000;
+                t.insert(Ipv4Prefix::new(Ipv4Addr::from_bits(addr), len).unwrap(), owner);
+                seen.push(addr);
+                let mut ps: Vec<u32> = probes.iter().map(|p| p & 0x0f0f_00ff | 0x0a00_0000).collect();
+                ps.extend(probes.iter().copied());
+                ps.extend(seen.iter().copied());
+                for q in ps {
+                    let q = Ipv4Addr::from_bits(q);
+                    prop_assert_eq!(t.lookup(q), full_lookup(&t, q));
+                }
+            }
+        }
     }
 
     proptest! {

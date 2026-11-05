@@ -151,7 +151,7 @@ device の層は次のように果たします。
 
 | 責任 | 果たし方 | 置き場所 |
 | --- | --- | --- |
-| 暗号鍵の経路表 | 送信は宛先の最長一致でピアを選びます。受信は復号した packet の送信元を引き、送ってきたピアと一致しないものを捨てます | `device.rs`、`allowed_ips.rs` |
+| 暗号鍵の経路表 | 送信は宛先の最長一致でピアを選びます。受信は復号した packet の送信元を引き、送ってきたピアと一致しないものを捨てます。prefix が少ないとき (agent のピアは 1 つ) は、割り当ての時に作った小さな一覧を長い順に直接比べ、hash を引きません。答えは表の最長一致と同じです | `device.rs`、`allowed_ips.rs` |
 | ハンドシェイクの振り分け | 開始の message の静的公開鍵が設定したピアのものでなければ捨てます。知らない鍵のためにトンネルを作りません | `protocol.rs` |
 | endpoint の更新 | 認証した message の後だけ、その datagram の送信元に移します。どの message で移すかはピアの `Roaming` が決めます (下の節) | `device.rs` |
 | キューの上界 | 持つものすべてに件数とバイト数の上限を置きます (次節) | `queue.rs`、`device.rs` |
@@ -343,7 +343,7 @@ device の層の試験 `a_restarted_server_is_reached_again_by_traffic` は、�
 
 ## 試験
 
-- 単体の試験:鍵、prefix、経路表、IPv4 の検査、キュー。経路表は wireguard-go の `TestTrieIPv4` (Linux の `selftest/allowedips.h` から移したもの) の場合を写し、素朴な最長一致の模型との一致を proptest で確かめます。
+- 単体の試験:鍵、prefix、経路表、IPv4 の検査、キュー。経路表は wireguard-go の `TestTrieIPv4` (Linux の `selftest/allowedips.h` から移したもの) の場合を写し、素朴な最長一致の模型との一致と、近道と表の引きの一致を proptest で確かめます。
 - device の試験:2 つの `Device` を偽の時計と手で運ぶネットワークで向かい合わせます。
   ハンドシェイク、双方向のデータ、詰め物の除去、AllowedIPs の外の送信元、経路の無い宛先、MTU、IPv4 でない中身、誤りに返事をしないこと、再送された datagram、ハンドシェイクの開始、応答で endpoint が動かず返事もしないこと、roaming、知らない鍵、詰め物の長い packet の保持量、待つ packet の上界と順序、キューの上界、鍵の更新、persistent keepalive、応答の側で待つ間の keepalive の規則、期限切れと再試行、一度も使わなかったトンネルの期限切れ、timer の短縮、両側の再起動、時刻の戻り、決定性、設定の誤りと範囲の外の値を確かめます。
 - fuzz:`crates/wgft-wireguard/fuzz` の `inbound` です。
