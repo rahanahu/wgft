@@ -1257,9 +1257,11 @@ check_pin() {
   echo "INFO  home routes before: $(echo "$routes" | tr '\n' ';')"
 
   # a. another band
-  n=$(grep -c "refused the wg configuration" "$ALOG")
+  # wait for the refusal that names the new band: the 30-second check also logs a status line with
+  # "refused the wg configuration" and the previous band, so counting that phrase can pass before the
+  # agent has reconnected to the moved server
   move_server 10.201.0.1/24 10.201.0.2
-  wait_until 60 count_above "refused the wg configuration" "$n"
+  wait_until 60 grep -q "the server sent the tunnel address 10.201.0.2/24" "$ALOG"
   check "another band is refused" "the server sent the tunnel address 10.201.0.2/24, but agent.json records 10.200.0.2/24" "$(grep -m1 "10.201.0.2/24" "$ALOG")"
   check "wgft0 keeps its address after another band" "$addr" "$(home ip -4 -br addr show wgft0)"
   okcheck "the home routes stay after another band" "$([ "$(home_routes)" = "$routes" ] && echo 1 || echo 0)"
@@ -1275,9 +1277,8 @@ check_pin() {
   check "the table is repaired while refusing" "chain nat_pre" "$(home nft list table inet wgft_agent 2>&1)"
 
   # b. a /25 that covers half of the home LAN 192.168.50.0/24
-  n=$(grep -c "refused the wg configuration" "$ALOG")
   move_server 192.168.50.129/25 192.168.50.130
-  wait_until 60 count_above "refused the wg configuration" "$n"
+  wait_until 60 grep -q "the server sent the tunnel address 192.168.50.130/25" "$ALOG"
   check "a band inside the LAN is refused" "the server sent the tunnel address 192.168.50.130/25" "$(grep -m1 "192.168.50.130/25" "$ALOG")"
   check "wgft0 keeps its address after the LAN band" "$addr" "$(home ip -4 -br addr show wgft0)"
   okcheck "the home routes stay after the LAN band" "$([ "$(home_routes)" = "$routes" ] && echo 1 || echo 0)"
