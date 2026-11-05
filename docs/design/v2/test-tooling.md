@@ -992,7 +992,7 @@ Rust の製品は RFC 3465 2.3 の L = 1 で、この違いは一覧に載せず
 切り替えは feature `harness` の build だけにあり、製品の build にありません。
 そのため、RTO の後の ACK で Go の応答を最後まで照らせます。
 一方で、照合は製品の RTO の後の経路 (L = 1) を通りません。
-製品の L = 1 は、`cc_tests::rto_slow_start_limit`、`rto_l1_tests`、および packet 列の試験が守ります。
+製品の L = 1 は、`cc_tests::rto_slow_start_limit`、`rto_l1_tests`、および `rto_wire_tests` (packet の入出力だけで窓を見る試験) が守ります。
 Go の `TestDivergencesList` が、どの行も git の記録を指し、番号が記録の中にあり、応答が 1 つの応答の frame で、理由を持つことを確かめます。
 
 手元の cache の大きな記録の集まり (完全な集まり) で Go と違う記録は、別の一覧 `testdata/wgstack-rec/divergences-full.json` に書きます。

@@ -93,6 +93,8 @@ mod rack_tests;
 #[cfg(test)]
 mod rto_l1_tests;
 #[cfg(test)]
+mod rto_wire_tests;
+#[cfg(test)]
 mod sack_tests;
 #[cfg(test)]
 mod sackpeer_tests;
