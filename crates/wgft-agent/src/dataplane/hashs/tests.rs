@@ -121,6 +121,31 @@ fn icmp(src: Ipv4Addr, dst: Ipv4Addr, ty: u8, code: u8, quoted: &[u8]) -> Vec<u8
 }
 
 #[test]
+fn the_no_tcp_on_zero_arm_keeps_tcp_off_partition_0() {
+    let steer = Steer::new(4, AGENT).without_tcp_on_zero();
+    let mut used = [0usize; 4];
+    for i in 0..3000u32 {
+        let remote = SocketAddrV4::new(Ipv4Addr::from(0x0a00_0000 + i * 31), 1024 + i as u16);
+        let local = SocketAddrV4::new(AGENT, 80);
+        let Route::Part(k) = steer.inbound(0, &tcp(remote, local, i, 0, SYN, &[])) else {
+            panic!("routed");
+        };
+        used[k] += 1;
+        assert_eq!(steer.outbound(0, &tcp(local, remote, 1, i, ACK, &[])), k);
+        assert_eq!(steer.inbound(0, &udp(remote, local, 0)), Route::Part(0));
+    }
+    assert_eq!(used[0], 0);
+    assert!(used[1..].iter().all(|&n| n > 800), "{used:?}");
+    // P = 2 では外さない (TCP の区画が 1 つになる)
+    let two = Steer::new(2, AGENT).without_tcp_on_zero();
+    let zero = (0..200u16).any(|p| {
+        two.inbound(0, &tcp(SocketAddrV4::new(REMOTE, 2000 + p), SocketAddrV4::new(AGENT, 80), 0, 0, SYN, &[]))
+            == Route::Part(0)
+    });
+    assert!(zero);
+}
+
+#[test]
 fn both_directions_of_every_flow_reach_the_same_partition() {
     let steer = Steer::new(4, AGENT);
     let mut used = [0usize; 4];
@@ -603,24 +628,86 @@ fn the_check_before_sendmmsg_reseals_lagging_datagrams() {
     assert_eq!(l.replayed(), 0);
 }
 
+/// 相手 (B) の TCP の segment を A に届ける。`payload` 0 は中身の無い ACK。復号した packet を返す。
+fn from_server(t: &mut Bench, now: Instant, payload: usize) -> Vec<u8> {
+    let mut p = packet(SERVER_IP, AGENT_IP, 0);
+    p.resize(40 + payload, 0);
+    let len = p.len() as u16;
+    p[2..4].copy_from_slice(&len.to_be_bytes());
+    p[9] = 6;
+    p[32] = 5 << 4;
+    p[33] = ACK;
+    let mut sealed = vec![0u8; t.b.max_transmit_len()];
+    let out = t.b.handle_packet(now, &p, &mut sealed).unwrap();
+    let mut plain = vec![0u8; 2048];
+    let n = t
+        .a
+        .handle_datagram(now, B_ADDR.parse().unwrap(), &sealed[..out.len], &mut plain)
+        .unwrap();
+    plain[..n].to_vec()
+}
+
+/// 相手が黙った後に A が最初に出す datagram の時刻 (`t0` からの時間、100 ms 刻み) と長さ。
+fn first_emission(t: &mut Bench, t0: Instant) -> (Duration, usize) {
+    while t.a.poll_transmit().is_some() {}
+    for step in 1..=600u32 {
+        let now = t0 + Duration::from_millis(100) * step;
+        t.a.handle_timeout(now);
+        if let Some(x) = t.a.poll_transmit() {
+            return (now - t0, x.payload.len());
+        }
+    }
+    panic!("nothing within 60 s");
+}
+
+/// I8:相手の中身の無い ACK を受けて agent が何も送らない時 (送る向きの大きな送りの終わり)、Inline は 10 秒後に
+/// passive keepalive を送る。Hash S は中身の無い ACK に相乗りの在庫を付けないので、同じ時機に送る。中身のある
+/// segment には在庫を付けるが、核は答えの ACK を送るので、Inline と同じく送ったことになる。
 #[test]
-fn unused_piggybacked_stock_keeps_the_handshake_timing_of_inline() {
-    // Inline:相手のデータに ACK を 1 つ返し、相手が黙る
+fn piggybacked_stock_keeps_the_keepalive_and_handshake_timing_of_inline() {
     let inline = {
         let mut t = Bench::new(0);
         t.connected();
         let t0 = clock::now();
-        let mut out = vec![0u8; t.a.max_transmit_len()];
-        assert!(t.a.handle_packet(t0, &tcp_packet(1, 60), &mut out).is_some());
-        first_initiation(&mut t, t0)
+        from_server(&mut t, t0, 0);
+        first_emission(&mut t, t0)
     };
-    // Hash S:相手のデータ 8 packet のバッチに相乗りで 8 つの在庫が付き、区画は ACK を 1 つだけ送って残りを捨てる
+    assert_eq!(inline.1, 32, "Inline sends a passive keepalive: {inline:?}");
     let hashs = {
         let mut l = Lanes::new(2);
         let (mut p1, local1) = l.part(1);
         let t0 = clock::now();
-        for i in 0..8 {
-            l.front.stage(1, &packet(SERVER_IP, AGENT_IP, i), &mut l.t.a, t0);
+        let ack = from_server(&mut l.t, t0, 0);
+        l.front.stage(1, &ack, &mut l.t.a, t0);
+        l.front.ship_all(&mut l.t.a, t0);
+        take_lane(&local1, &mut p1, t0);
+        assert_eq!(p1.stock.len(), 0, "no stock rides on a bare ACK");
+        first_emission(&mut l.t, t0)
+    };
+    assert_eq!(hashs.1, 32);
+    assert!(
+        inline.0.abs_diff(hashs.0) <= Duration::from_millis(100),
+        "the keepalive leaves at {:?} with Hash S, {:?} with Inline",
+        hashs.0,
+        inline.0
+    );
+    // 中身のある segment:在庫が付き、核の ACK に使う。残りは捨てる。送った時機は Inline の ACK と同じ
+    let inline = {
+        let mut t = Bench::new(0);
+        t.connected();
+        let t0 = clock::now();
+        from_server(&mut t, t0, 100);
+        let mut out = vec![0u8; t.a.max_transmit_len()];
+        assert!(t.a.handle_packet(t0, &tcp_packet(1, 40), &mut out).is_some());
+        first_emission(&mut t, t0)
+    };
+    let hashs = {
+        let mut l = Lanes::new(2);
+        let (mut p1, local1) = l.part(1);
+        let t0 = clock::now();
+        for _ in 0..8 {
+            let data = from_server(&mut l.t, t0, 100);
+            l.front.stage(1, &data, &mut l.t.a, t0);
         }
         l.front.ship_all(&mut l.t.a, t0);
         take_lane(&local1, &mut p1, t0);
@@ -630,28 +717,31 @@ fn unused_piggybacked_stock_keeps_the_handshake_timing_of_inline() {
         local1.with(|s| p1.send_batch(s, &mut sink, t0, 64));
         assert_eq!(sink.sent.len(), 1);
         p1.stock.clear();
-        first_initiation(&mut l.t, t0)
+        first_emission(&mut l.t, t0)
     };
-    let diff = inline.abs_diff(hashs);
+    // sanstun はハンドシェイクの開始に 0 から 333 ms の揺らぎを足す
+    assert_eq!(inline.1, hashs.1);
     assert!(
-        diff <= Duration::from_millis(100),
-        "the handshake starts {hashs:?} after the last data with Hash S, {inline:?} with Inline"
+        inline.0.abs_diff(hashs.0) <= Duration::from_millis(450),
+        "the first datagram after silence leaves at {:?} with Hash S, {:?} with Inline",
+        hashs.0,
+        inline.0
     );
 }
 
-/// 相手が黙った後に device が最初にハンドシェイクを始める時刻を `t0` からの時間で返す (100 ms 刻み)。
-fn first_initiation(t: &mut Bench, t0: Instant) -> Duration {
-    while t.a.poll_transmit().is_some() {}
-    for step in 1..=600u32 {
-        let now = t0 + Duration::from_millis(100) * step;
-        t.a.handle_timeout(now);
-        while let Some(x) = t.a.poll_transmit() {
-            if x.payload.len() == 148 {
-                return now - t0;
-            }
-        }
-    }
-    panic!("no handshake within 60 s");
+#[test]
+fn the_timing_test_detects_an_unused_reservation() {
+    // 検出力:中身の無い ACK に在庫を付けて使わなければ、passive keepalive が消える (I8 の穴)
+    let mut l = Lanes::new(2);
+    let t0 = clock::now();
+    from_server(&mut l.t, t0, 0);
+    let unused = l.front.reserve(&mut l.t.a, t0);
+    assert!(unused.is_some());
+    let (at, len) = first_emission(&mut l.t, t0);
+    assert!(
+        len != 32 || at > Duration::from_millis(10_500),
+        "an unused reservation suppresses the keepalive: {len} bytes at {at:?}"
+    );
 }
 
 #[test]
@@ -662,6 +752,4 @@ fn the_bound_counts_partitions() {
     let two = crate::memory::MemoryBound::for_partitions(caps, Batching::default(), 2);
     let eight = crate::memory::MemoryBound::for_partitions(caps, Batching::default(), 8);
     assert!(two.total > one.total && eight.total > two.total);
-    // 起動の時に作る値は上界の中:区画の核の和
-    let _ = B_ADDR;
 }

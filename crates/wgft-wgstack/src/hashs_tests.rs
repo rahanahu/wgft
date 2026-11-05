@@ -143,7 +143,6 @@ fn a_new_flow_in_another_partition_gets_a_slot_from_idle_holders() {
     // 閉じた後、区画の Budget を集まりに返すと 1 つの Budget に戻る
     let ca = a.s.close(a.now);
     let cb = b.s.close(b.now);
-    drop((a, b));
     pool.put_back(ca.budget);
     pool.put_back(cb.budget);
     let pool = Arc::try_unwrap(pool).unwrap();
