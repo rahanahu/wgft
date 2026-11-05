@@ -687,7 +687,11 @@ Go の測った値 (c_conn、記録 1 件、区間 1 つ) は Rust の型の大�
   試験の module も同じ `#[expect]` で例外にします
 - 伸びる API の禁止:`Vec::push`、`Vec::extend`、`Vec::insert`、`Vec::resize`、`vec!`、`VecDeque`、`HashMap`、`BTreeMap`、`String` への追加のように容量を自動で伸ばす API を、[依存と隔離の検査](#依存と隔離の検査)の禁止の一覧に入れます
 - 0 で埋める:置き場に返す chunk は 0 で埋めます ([使い回しと古い byte](../userspace/wgstack-buffers.md#使い回しと古い-byte))。
-  目印の build (`--cfg wgstack_sentinel`) は 0xa5 で埋めます
+  目印の build (`--cfg wgstack_sentinel`) は 0xa5 で埋めます。
+  埋める関数 `fill_chunk` は、musl の build (製品の Linux の agent) だけ `black_box` で値を隠した 8 byte ずつの書き込みにします。
+  zigbuild の musl の `memset` が 1 byte の store の loop で、16 KiB の埋めが約 8.8 GB/s にとどまるためです。
+  musl 以外は `fill` のままです (glibc の `memset` の方が速い)。
+  `scripts/check-musl-fill.sh` が製品の musl の build で `fill_chunk` に `memset` の呼び出しが無いことを確かめます。
 - chunk の確保:chunk は 16 KiB の配列の `Box` で、輪は Go と同じく枠ごとに chunk への pointer の配列を持ちます。
   `Box::new` は失敗するとプロセスを止めるので、`FixedVec` の module の関数が `try_reserve_exact` で取り、容量がちょうど 16 KiB のときだけ `into_boxed_slice` で `Box` にします。
   容量が違えば確保の失敗として扱います

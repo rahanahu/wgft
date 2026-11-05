@@ -18,6 +18,38 @@ pub(crate) const FILL: u8 = 0;
 #[cfg(wgstack_sentinel)]
 pub(crate) const FILL: u8 = 0xa5;
 
+/// 8 byte ずつ書く埋めは、chunk の大きさが 8 の倍数でないと端を黙って残します。埋めは守りの性質なので build で止めます。
+const _: () = assert!(CHUNK_SIZE.is_multiple_of(8));
+
+/// chunk を [`FILL`] で埋めます。
+///
+/// 製品の Linux の build は zigbuild の musl で、その `memset` は zig の compiler_rt の実装です。1 byte の
+/// store を並べた loop で遅いため、musl では値を `black_box` で隠した 8 byte ずつの書き込みにします。
+/// LLVM はこれを `memset` の呼び出しに畳まず、SSE2 の 16 byte の store の loop にします。glibc の `memset` は
+/// 速く、同じ書き方が勝てないので、musl 以外は `fill` のままにします。測った倍率は PR に残します。
+/// chunk の先頭の整列は確保器の返す値で、`Box<[u8; N]>` の型は 1 byte 整列しか約束しません。musl の
+/// 確保器は 16 byte 整列を返すため 8 byte の store は整列しますが、整列は正しさの条件ではありません。
+/// 16 KiB の埋めに対して呼び出しの費用は無視できます。`inline(never)` にするのは、`scripts/check-musl-fill.sh` が
+/// この関数の機械語に `memset` の呼び出しが無いことを確かめるためです (inline されると `put` の中に埋もれます)。
+#[inline(never)]
+pub(crate) fn fill_chunk(c: &mut [u8; CHUNK_SIZE]) {
+    #[cfg(target_env = "musl")]
+    fill_wide(c, FILL);
+    #[cfg(not(target_env = "musl"))]
+    c.fill(FILL);
+}
+
+/// 8 byte ずつの書き込みで埋めます。`unsafe` を使わず、`black_box` で値を隠して `memset` への畳み込みを
+/// 避けます。musl 以外では試験だけが使います。
+#[cfg(any(test, target_env = "musl"))]
+#[inline]
+fn fill_wide(c: &mut [u8; CHUNK_SIZE], v: u8) {
+    let w = core::hint::black_box(u64::from_ne_bytes([v; 8])).to_ne_bytes();
+    for x in c.as_chunks_mut::<8>().0 {
+        *x = w;
+    }
+}
+
 /// バッファの中身の 16 KiB です。
 pub(crate) type Chunk = BoxedBytes<CHUNK_SIZE>;
 
@@ -95,7 +127,7 @@ impl ChunkPool {
 
     /// chunk を返します。次に使う接続に前の中身を残さないよう、埋めてから置き場に置きます。
     pub(crate) fn put(&mut self, mut c: Chunk) {
-        c.fill(FILL);
+        fill_chunk(&mut c);
         self.held -= 1;
         // 置き場が満杯なら c はここで解放されます。
         let _ = self.free.try_push(c);
@@ -120,6 +152,35 @@ impl ChunkPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fill_chunk_overwrites_full_and_partial_chunks() {
+        let mut c = try_boxed_bytes::<CHUNK_SIZE>().unwrap();
+        // 全体が 0 以外の chunk と、先頭だけ・末尾だけ・途中だけ書かれた chunk のどれも FILL になる。
+        c.fill(0x5c);
+        fill_chunk(&mut c);
+        assert!(c.iter().all(|&b| b == FILL));
+        for (lo, hi) in [
+            (0, 1),
+            (CHUNK_SIZE - 1, CHUNK_SIZE),
+            (3, 1499),
+            (4093, 9001),
+        ] {
+            c[lo..hi].fill(0xff);
+            fill_chunk(&mut c);
+            assert!(c.iter().all(|&b| b == FILL), "range {lo}..{hi}");
+        }
+    }
+
+    #[test]
+    fn wide_fill_writes_every_byte_for_zero_and_the_sentinel() {
+        for v in [0u8, 0xa5, 0xff] {
+            let mut c = try_boxed_bytes::<CHUNK_SIZE>().unwrap();
+            c.fill(!v);
+            fill_wide(&mut c, v);
+            assert!(c.iter().all(|&b| b == v), "value {v:#x}");
+        }
+    }
 
     #[test]
     fn reuses_up_to_the_limit_and_fills() {
