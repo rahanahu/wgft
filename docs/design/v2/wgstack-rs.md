@@ -149,7 +149,7 @@ Go の `internal/dataplane/deps_test.go` の `TestWgstackImports` に当たる�
   clippy が見ない cfg (`fuzzing` と故障の注入) の中のコードを確かめ、clippy の一覧から項目が消えていないことも確かめます。
   文字列の照合なので、注釈と試験の module は見ません
 - unsafe:`wgft-wgstack` は `#![forbid(unsafe_code)]` にします。
-  checksum も `as_chunks` と `u64::from_be_bytes` の安全なコードで書きます
+  checksum も `as_chunks` と `u64::from_le_bytes` と `u128` の足し算の安全なコードで書きます
 - 製品の木:CI の `cargo tree` の検査が、`wgft` のバイナリの依存の木に `wgft-tcpharness` と `wgft-wgstack-dut` が無いこと、測定用の feature が有効でないことを確かめます。
   今の `rust-check` は crate の検査を、すべての target と feature を有効にした依存の木で行います。
   feature の検査は、測定用の feature を足すときに足します
