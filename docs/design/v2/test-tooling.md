@@ -985,8 +985,14 @@ Go の不具合を Rust で直したときのように、意図して出力を�
 位置か応答が一覧と違えば落とします。
 Rust の試験は一覧を読む時に、要求 0 (`HELLO`) を指す行、空の応答の行、同じ記録の 2 つ目の行を断り、照らす時に、記録の Go の応答そのものを指す行を断ります。
 行を足せるのは、期待した差の一覧と同じく試験の担当と所有者だけです。
-今の行は、どれも[RTO の後の slow start の増分](wgstack-rs.md#回復と輻輳の制御と-boost-で決めたこと)による違いです。
-Rust の wgstack が Go と意図して違う他の所 ([待ち受けの守り](wgstack-rs.md#待ち受けの守り)と[相手の窓の更新](wgstack-rs.md#相手の窓の更新)) は、git の記録の出力を変えません。
+今の一覧は空です。
+Rust の wgstack が Go と意図して違う所 ([待ち受けの守り](wgstack-rs.md#待ち受けの守り)と[相手の窓の更新](wgstack-rs.md#相手の窓の更新)) は、どれも git の記録の出力を変えないためです。
+Rust の照合の核 (`WgstackDut::for_replay`) は、[RTO の後の slow start の増分](wgstack-rs.md#回復と輻輳の制御と-boost-で決めたこと)だけを、照合用の切り替え (`set_go_compat_rto_l2`) で凍結した Go と同じ L = 2 に戻します。
+Rust の製品は RFC 3465 2.3 の L = 1 で、この違いは一覧に載せず、切り替えで照合の上から消します。
+切り替えは feature `harness` の build だけにあり、製品の build にありません。
+そのため、RTO の後の ACK で Go の応答を最後まで照らせます。
+一方で、照合は製品の RTO の後の経路 (L = 1) を通りません。
+製品の L = 1 は、`cc_tests::rto_slow_start_limit`、`rto_l1_tests`、および packet 列の試験が守ります。
 Go の `TestDivergencesList` が、どの行も git の記録を指し、番号が記録の中にあり、応答が 1 つの応答の frame で、理由を持つことを確かめます。
 
 手元の cache の大きな記録の集まり (完全な集まり) で Go と違う記録は、別の一覧 `testdata/wgstack-rec/divergences-full.json` に書きます。
@@ -1024,7 +1030,7 @@ Rust の応答の frame は packet を運ぶので大きく、16 進で持つと
 Rust の試験は一覧を読む時に、git の一覧と同じ規則 (理由、要求 0、空の応答) に加えて、`fuzzcore/cache-*` の行が `sha256` を持つことと、ほかの行が持たないこと、hash が 64 桁の小文字の 16 進であること、同じ名前と同じ hash の 2 つ目の行を断ります。
 git の一覧の行は応答を 16 進で持ち、hash を持てません。
 行を足せるのは、git の一覧と同じく試験の担当と所有者だけです。
-今の行は、[相手の窓の更新](wgstack-rs.md#相手の窓の更新)による違いと、[RTO の後の slow start の増分](wgstack-rs.md#回復と輻輳の制御と-boost-で決めたこと)による違いです。
+今の行は、どれも[相手の窓の更新](wgstack-rs.md#相手の窓の更新)による違いです。
 
 照合は一覧を読んだ時に、hash で引く行のうち記録が手元に無い行の数を出します (`replay: ... rows found by frames hash have no recording in ...`)。
 数えるのは shard に分ける前のすべての記録なので、どの shard でも同じ数です。

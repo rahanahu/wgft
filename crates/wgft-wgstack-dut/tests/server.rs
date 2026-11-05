@@ -451,3 +451,50 @@ fn limits_only_for_replay() {
     assert!(matches!(resps.as_slice(), [Msg::Error { .. }]), "{resps:?}");
     assert_eq!(code, Some(2));
 }
+
+/// 全部が未確認の 30 segment を書いて最初の RTO まで進め、再送の segment が 1 つだけ出たことを確かめます。
+fn until_rto(d: &mut WgstackDut) -> (Handle, Peer) {
+    let (_, c, p) = connect(d);
+    let data = vec![0u8; 30 * 1380];
+    assert!(matches!(d.write(c, &data), Op::Ready(n) if n > 0));
+    d.poll(usize::MAX).expect("poll"); // 最初の窓
+    for _ in 0..100 {
+        d.advance(std::time::Duration::from_millis(100))
+            .expect("advance");
+        let out = d.poll(usize::MAX).expect("poll");
+        if !out.is_empty() {
+            assert_eq!(out.len(), 1, "the window is 1 SMSS after the RTO");
+            return (c, p);
+        }
+    }
+    panic!("no retransmission timeout");
+}
+
+/// 再送の後に 2 segment を確認する ACK を入れ、DUT が続けて出す segment の数を返します。
+fn burst_after_ack(d: &mut WgstackDut, mut p: Peer) -> usize {
+    p.rcv = p.rcv.wrapping_add(2 * 1380);
+    d.inject(&[&p.seg(ACK, &[])]).expect("inject");
+    d.poll(usize::MAX).expect("poll").len()
+}
+
+#[test]
+fn go_compat_switch_is_per_core_and_restored() {
+    assert!(!wgft_wgstack::go_compat_rto_l2());
+    let mut replay = WgstackDut::for_replay(&hello()).expect("HELLO");
+    let mut product = WgstackDut::new(&hello()).expect("HELLO");
+    // 2 つの核を同じ thread で交互に駆動する
+    let (_, rp) = until_rto(&mut replay);
+    assert!(!wgft_wgstack::go_compat_rto_l2(), "restored after a call");
+    let (_, pp) = until_rto(&mut product);
+    let replay_burst = burst_after_ack(&mut replay, rp);
+    assert!(!wgft_wgstack::go_compat_rto_l2(), "restored after a call");
+    let product_burst = burst_after_ack(&mut product, pp);
+    // 後の RTO の slow start の増分は、replay の核が 2 SMSS、製品の核が 1 SMSS で、1 segment 違う
+    assert_eq!(
+        replay_burst,
+        product_burst + 1,
+        "replay {replay_burst}, product {product_burst}"
+    );
+    // replay の核を駆動した後も、thread の値は偽なので、直接駆動する核は製品と同じ L = 1 になる
+    assert!(!wgft_wgstack::go_compat_rto_l2());
+}

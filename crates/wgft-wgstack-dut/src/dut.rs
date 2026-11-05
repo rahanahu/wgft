@@ -19,7 +19,7 @@ use wgft_tcpharness::dut::{Accepted, ClockedDut, Datagram, DutError, Op};
 use wgft_tcpharness::frame::{self, BoostEvent, Clock, ErrKind, Handle, Hello, MAX_FRAME, VERSION};
 use wgft_wgstack::{
     BoostPolicy, Budget, Closed, Config, Congestion, ConnId, Error, Held, Hook, Limits, ListenerId,
-    PingId, Spare, Stack, Time, TouchedCheck, UdpId,
+    PingId, Spare, Stack, Time, TouchedCheck, UdpId, go_compat_rto_l2, set_go_compat_rto_l2,
 };
 
 /// `HELLO_OK` が返す engine の名前です。
@@ -145,6 +145,15 @@ pub fn limits_from_hello(ls: &[frame::Limit]) -> Result<Limits, HelloError> {
     })
 }
 
+/// [`WgstackDut::sync_go_compat`] が返す値です。捨てると、照合用の切り替えを呼びの前の値に戻します。
+struct CompatGuard(bool);
+
+impl Drop for CompatGuard {
+    fn drop(&mut self) {
+        set_go_compat_rto_l2(self.0);
+    }
+}
+
 /// 手で進める時計の Rust の wgstack です。1 つの `HELLO` から作ります。
 pub struct WgstackDut {
     stack: Stack<DutHook>,
@@ -154,6 +163,8 @@ pub struct WgstackDut {
     addr: Ipv4Addr,
     objs: Vec<Obj>,
     buf: Vec<u8>,
+    /// 照合用の切り替え ([`set_go_compat_rto_l2`]) をこの核に使うか。核を駆動する前に thread の値をこれに合わせる
+    go_compat: bool,
 }
 
 impl fmt::Debug for WgstackDut {
@@ -198,6 +209,7 @@ impl WgstackDut {
 
     /// 核を閉じ、`Budget` と最後の会計を返します。
     pub fn close_stack(self) -> Closed {
+        let _compat = self.sync_go_compat();
         let now = self.time();
         self.stack.close(now)
     }
@@ -205,6 +217,7 @@ impl WgstackDut {
     /// 核を閉じ、`Budget` と最後の会計と、作成の時の値に戻したポートの数の行を持つ表を返します
     /// ([`Stack::close_keeping`])。
     pub fn close_stack_keeping(self) -> (Closed, Spare) {
+        let _compat = self.sync_go_compat();
         let now = self.time();
         self.stack.close_keeping(now)
     }
@@ -247,7 +260,16 @@ impl WgstackDut {
             addr,
             objs: Vec::new(),
             buf: vec![0; 65536],
+            go_compat: false,
         }
+    }
+
+    /// 核を駆動する間だけ、thread の照合用の切り替えをこの核の値にします。返した値を捨てると元の値に戻るので、
+    /// 呼びの外の thread は偽のままで、直接 `Stack` を駆動する核は製品と同じ L = 1 です
+    fn sync_go_compat(&self) -> CompatGuard {
+        let prev = go_compat_rto_l2();
+        set_go_compat_rto_l2(self.go_compat);
+        CompatGuard(prev)
     }
 
     fn build(h: &Hello, replay: bool) -> Result<Self, HelloError> {
@@ -268,12 +290,15 @@ impl WgstackDut {
                 h.limits.len()
             )));
         }
+        // 凍結した Go の記録は RTO の後も L = 2 なので、照合の核だけ Go と同じにする。それ以外の核は製品と同じ L = 1
         let config = Self::config(h, limits_from_hello(&h.limits)?);
         let budget = Budget::new().map_err(|e| HelloError(format!("wgstack: {e}")))?;
         let hook = DutHook::default();
         let stack = Stack::new(config, budget, &h.seed, hook.clone())
             .map_err(|e| HelloError(format!("wgstack: {e}")))?;
-        Ok(Self::with_stack(stack, hook, h.addr))
+        let mut dut = Self::with_stack(stack, hook, h.addr);
+        dut.go_compat = replay;
+        Ok(dut)
     }
 
     /// 核の不変条件を確かめます。
@@ -391,10 +416,12 @@ pub(crate) fn key_values(debug: &str) -> String {
 
 impl ClockedDut for WgstackDut {
     fn now(&mut self) -> Result<Duration, DutError> {
+        let _compat = self.sync_go_compat();
         Ok(Duration::from_nanos(self.now))
     }
 
     fn advance(&mut self, d: Duration) -> Result<Duration, DutError> {
+        let _compat = self.sync_go_compat();
         // Go の ManualClock.Advance の後の 1 回の Tick と同じく、時間 0 でもタイマーを動かす
         self.now = self
             .now
@@ -404,6 +431,7 @@ impl ClockedDut for WgstackDut {
     }
 
     fn inject(&mut self, batch: &[&[u8]]) -> Result<(), DutError> {
+        let _compat = self.sync_go_compat();
         let t = self.time();
         for p in batch {
             self.stack.handle_packet(t, p);
@@ -412,6 +440,7 @@ impl ClockedDut for WgstackDut {
     }
 
     fn poll(&mut self, max: usize) -> Result<Vec<Vec<u8>>, DutError> {
+        let _compat = self.sync_go_compat();
         let t = self.time();
         let mut out = Vec::new();
         while out.len() < max {
@@ -424,6 +453,7 @@ impl ClockedDut for WgstackDut {
     }
 
     fn tcp_listen(&mut self, port: u16) -> Result<Handle, DutError> {
+        let _compat = self.sync_go_compat();
         let addr = SocketAddrV4::new(self.addr, port);
         let l = self
             .stack
@@ -433,6 +463,7 @@ impl ClockedDut for WgstackDut {
     }
 
     fn udp_listen(&mut self, port: u16) -> Result<Handle, DutError> {
+        let _compat = self.sync_go_compat();
         let addr = SocketAddrV4::new(self.addr, port);
         let id = self.stack.bind_udp(self.time(), addr).map_err(|e| {
             let why = udp_reason(&self.stack, e);
@@ -442,6 +473,7 @@ impl ClockedDut for WgstackDut {
     }
 
     fn accept(&mut self, listener: Handle) -> Op<Accepted> {
+        let _compat = self.sync_go_compat();
         let l = match self.listener(listener) {
             Ok(l) => l,
             Err(e) => return Op::Failed(e),
@@ -474,6 +506,7 @@ impl ClockedDut for WgstackDut {
     }
 
     fn read(&mut self, conn: Handle, max: usize) -> Op<Vec<u8>> {
+        let _compat = self.sync_go_compat();
         let (id, local, remote) = match self.conn(conn) {
             Ok(c) => c,
             Err(e) => return Op::Failed(e),
@@ -498,6 +531,7 @@ impl ClockedDut for WgstackDut {
     }
 
     fn write(&mut self, conn: Handle, data: &[u8]) -> Op<usize> {
+        let _compat = self.sync_go_compat();
         let (id, local, remote) = match self.conn(conn) {
             Ok(c) => c,
             Err(e) => return Op::Failed(e),
@@ -519,6 +553,7 @@ impl ClockedDut for WgstackDut {
     }
 
     fn close(&mut self, h: Handle) -> Result<(), DutError> {
+        let _compat = self.sync_go_compat();
         let t = self.time();
         match self.obj(h)? {
             Obj::Listener(l) => self.stack.close_listener(t, l),
@@ -534,6 +569,7 @@ impl ClockedDut for WgstackDut {
     }
 
     fn close_write(&mut self, conn: Handle) -> Result<(), DutError> {
+        let _compat = self.sync_go_compat();
         let (id, local, remote) = self.conn(conn)?;
         self.stack
             .close_write(self.time(), id)
@@ -541,23 +577,27 @@ impl ClockedDut for WgstackDut {
     }
 
     fn abort(&mut self, conn: Handle) -> Result<(), DutError> {
+        let _compat = self.sync_go_compat();
         let (id, ..) = self.conn(conn)?;
         self.stack.abort(self.time(), id);
         Ok(())
     }
 
     fn close_for_delivery(&mut self, conn: Handle) -> Result<(), DutError> {
+        let _compat = self.sync_go_compat();
         let (id, ..) = self.conn(conn)?;
         self.stack.close_for_delivery(self.time(), id);
         Ok(())
     }
 
     fn delivered(&mut self, conn: Handle) -> Result<bool, DutError> {
+        let _compat = self.sync_go_compat();
         let (id, ..) = self.conn(conn)?;
         Ok(self.stack.delivered(id))
     }
 
     fn boost_policy(&mut self, conn: Handle, floor: bool) -> Result<bool, DutError> {
+        let _compat = self.sync_go_compat();
         let (id, ..) = self.conn(conn)?;
         // 古い handle では Go の OnBoost は関数を登録せず、f(false) を 1 回呼ぶだけ
         if self.stack.peer_addr(id).is_none() {
@@ -569,10 +609,12 @@ impl ClockedDut for WgstackDut {
     }
 
     fn events(&mut self) -> Result<Vec<BoostEvent>, DutError> {
+        let _compat = self.sync_go_compat();
         Ok(std::mem::take(&mut self.hook.0.borrow_mut().events))
     }
 
     fn udp_recv(&mut self, sock: Handle, max: usize) -> Op<Datagram> {
+        let _compat = self.sync_go_compat();
         let (id, _local) = match self.obj(sock) {
             Ok(Obj::Udp(id, l)) => (id, l),
             Ok(_) => {
@@ -601,6 +643,7 @@ impl ClockedDut for WgstackDut {
     }
 
     fn udp_send(&mut self, sock: Handle, to: SocketAddrV4, data: &[u8]) -> Op<()> {
+        let _compat = self.sync_go_compat();
         let (id, local) = match self.obj(sock) {
             Ok(Obj::Udp(id, l)) => (id, l),
             Ok(_) => {
@@ -629,6 +672,7 @@ impl ClockedDut for WgstackDut {
     }
 
     fn ping_open(&mut self, to: Ipv4Addr) -> Result<Handle, DutError> {
+        let _compat = self.sync_go_compat();
         let id = self
             .stack
             .open_ping(self.time(), to)
@@ -637,6 +681,7 @@ impl ClockedDut for WgstackDut {
     }
 
     fn ping_send(&mut self, ep: Handle, data: &[u8]) -> Result<(), DutError> {
+        let _compat = self.sync_go_compat();
         let Obj::Ping(id, r) = self.obj(ep)? else {
             return Err(DutError::Broken(format!(
                 "handle {ep} is not an echo endpoint"
@@ -657,6 +702,7 @@ impl ClockedDut for WgstackDut {
     }
 
     fn ping_recv(&mut self, ep: Handle, max: usize) -> Op<Vec<u8>> {
+        let _compat = self.sync_go_compat();
         let (id, r) = match self.obj(ep) {
             Ok(Obj::Ping(id, r)) => (id, r),
             Ok(_) => {
@@ -686,6 +732,7 @@ impl ClockedDut for WgstackDut {
     }
 
     fn ping_close(&mut self, ep: Handle) -> Result<(), DutError> {
+        let _compat = self.sync_go_compat();
         let Obj::Ping(id, _) = self.obj(ep)? else {
             return Err(DutError::Broken(format!(
                 "handle {ep} is not an echo endpoint"
@@ -696,14 +743,17 @@ impl ClockedDut for WgstackDut {
     }
 
     fn stats(&mut self) -> Result<String, DutError> {
+        let _compat = self.sync_go_compat();
         Ok(key_values(&format!("{:?}", self.stack.stats())))
     }
 
     fn bound(&mut self) -> Result<String, DutError> {
+        let _compat = self.sync_go_compat();
         Ok(key_values(&format!("{:?}", self.stack.bound())))
     }
 
     fn held(&mut self) -> Result<String, DutError> {
+        let _compat = self.sync_go_compat();
         Ok(key_values(&format!("{:?}", self.stack.held())))
     }
 }

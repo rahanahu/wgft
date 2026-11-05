@@ -484,6 +484,20 @@ mod rto_slow_start_limit {
         c.t.cwnd - mss
     }
 
+    /// 凍結した Go との照合用の切り替え (feature `harness` だけ):RTO の後も `rto_slow_start` を立てず、増分は
+    /// 2 SMSS のままです。切り替えは既定で偽で、製品と同じ L = 1 です。
+    #[cfg(feature = "harness")]
+    #[test]
+    fn go_compat_switch_keeps_two_segments_after_rto() {
+        crate::set_go_compat_rto_l2(true);
+        let (mut n, id, _) = after_rto(Congestion::NewReno, true);
+        crate::set_go_compat_rto_l2(false);
+        let mut c = n.s.conn(id.slot);
+        let mss = c.seg_mss();
+        assert!(!c.t.rto_slow_start, "the switch leaves rto_slow_start down");
+        assert_eq!(grow_by_one_ack(&mut c, 2 * mss), 2 * mss);
+    }
+
     /// 損失の無い接続の最初の slow start:増分は 2 SMSS までです。
     #[test]
     fn initial_slow_start_keeps_two_segments() {

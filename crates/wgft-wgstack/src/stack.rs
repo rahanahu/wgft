@@ -52,6 +52,28 @@ pub trait Hook {
     fn boost_returned(&mut self, _conn: ConnId) {}
 }
 
+// 凍結した Go の記録との照合のためだけに、RTO の後の slow start を Go と同じ L = 2 に戻す切り替えです。feature `harness`
+// の build だけにあり、製品の build に切り替えも読み出しも書き込みもありません (wgstack-rs.md の「RTO の後の slow start の増分」)。
+// 値は thread ごとで、既定は偽 (RFC 3465 2.3 の L = 1) です。
+#[cfg(feature = "harness")]
+thread_local! {
+    static GO_COMPAT_RTO_L2: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 真にすると、この thread で駆動する核は RTO の後の slow start で `rto_slow_start` を立てず、L = 2 のままにします
+/// (凍結した Go と同じ)。核を駆動する前に呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使い、
+/// 核ごとの値は `WgstackDut` が持って駆動の前に合わせます。
+#[cfg(feature = "harness")]
+pub fn set_go_compat_rto_l2(on: bool) {
+    GO_COMPAT_RTO_L2.with(|c| c.set(on));
+}
+
+/// 今の thread の値です。`WgstackDut` の駆動の外で偽に戻っていることを試験が確かめます。
+#[cfg(feature = "harness")]
+pub fn go_compat_rto_l2() -> bool {
+    GO_COMPAT_RTO_L2.with(std::cell::Cell::get)
+}
+
 /// 何もしない hook です。boost の戻りを常に許します。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoHook;
