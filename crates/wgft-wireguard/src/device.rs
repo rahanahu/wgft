@@ -42,6 +42,28 @@ pub struct Transmit {
     pub payload: Vec<u8>,
 }
 
+/// A data message counter that [`Device::reserve_seal`] reserved, to seal one packet on any
+/// thread. Dropping it unused leaves a gap in the counters, which the peer's replay window
+/// accepts. Hash S prototype.
+pub struct Seal {
+    pending: crate::protocol::Pending,
+}
+
+impl fmt::Debug for Seal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Seal").finish_non_exhaustive()
+    }
+}
+
+impl Seal {
+    /// Seals `packet` into the start of `out`, which must hold [`Device::max_transmit_len`]
+    /// bytes, and returns the datagram's length; `None` when `out` is too short or `packet` is
+    /// empty.
+    pub fn seal(self, packet: &[u8], out: &mut [u8]) -> Option<usize> {
+        crate::protocol::seal(self.pending, packet, out)
+    }
+}
+
 /// A data datagram that [`Device::handle_packet`] encrypted into the caller's buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Outgoing {
@@ -462,6 +484,40 @@ impl Device {
         self.initiate(peer, now, true);
         self.flush_staged(peer, now);
         None
+    }
+
+    /// Reserves the next data message counter of the session with `peer`, for a packet that
+    /// another thread seals with [`Seal::seal`], and returns it with the peer's endpoint.
+    ///
+    /// The reservation counts as a send for the timers, as [`Device::handle_packet`] does. It
+    /// returns `None` without reserving when there is no session or endpoint, or when packets
+    /// wait for a handshake, so that the caller does not overtake them. Hash S prototype.
+    pub fn reserve_seal(&mut self, now: Instant, peer: &PublicKey) -> Option<(Seal, SocketAddr)> {
+        let now = self.clock(now);
+        let &id = self.by_key.get(peer)?;
+        let to = self.peers[id].endpoint?;
+        if !self.peers[id].staged.is_empty() {
+            return None;
+        }
+        match self.proto.reserve(id, now) {
+            Ok(Some(pending)) => {
+                self.count_sent(id, 0);
+                Some((Seal { pending }, to))
+            }
+            Ok(None) => None,
+            Err(reason) => {
+                self.drops.add(reason, 1);
+                None
+            }
+        }
+    }
+
+    /// Adds `bytes` sent with [`Seal`]s on other threads to the peer's transmitted bytes.
+    pub fn add_sent_bytes(&mut self, peer: &PublicKey, bytes: u64) {
+        if let Some(&id) = self.by_key.get(peer) {
+            let p = &mut self.peers[id];
+            p.tx_bytes = p.tx_bytes.saturating_add(bytes);
+        }
     }
 
     fn flush_staged(&mut self, peer: PeerId, now: Instant) {

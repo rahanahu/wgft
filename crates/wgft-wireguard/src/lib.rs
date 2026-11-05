@@ -45,7 +45,7 @@ pub use config::{
     MAX_LIMIT_BYTES, MAX_LIMIT_PACKETS, MAX_UNIX_TIME, MIN_MTU, PeerConfig, ProtocolTimers,
     Roaming,
 };
-pub use device::{Device, Event, Held, Outgoing, PeerStatus, Transmit};
+pub use device::{Device, Event, Held, Outgoing, PeerStatus, Seal, Transmit};
 /// The bytes a data message adds to the inner packet: the header and the tag.
 pub const DATA_OVERHEAD: usize = protocol::DATA_OVERHEAD;
 pub use drops::{DropReason, Drops};

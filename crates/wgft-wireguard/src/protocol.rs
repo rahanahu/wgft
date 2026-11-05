@@ -13,10 +13,19 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use sanstun::{
-    Committed, Error as SanstunError, Event as SanstunEvent, Interface, Received, ReceivedMessage,
-    StaticSecret, Tunnel, TunnelConfig, TunnelId,
+    Committed, Error as SanstunError, Event as SanstunEvent, Interface, PendingEncapsulate, Received,
+    ReceivedMessage, StaticSecret, Tunnel, TunnelConfig, TunnelId,
 };
 use zeroize::Zeroizing;
+
+/// 予約した送る番号 ([`Protocol::reserve`])。
+pub(crate) type Pending = PendingEncapsulate;
+
+/// 予約した番号で `packet` を `out` の先頭に暗号化し、長さを返す。`out` が短いか `packet` が空なら `None`。
+pub(crate) fn seal(pending: Pending, packet: &[u8], out: &mut [u8]) -> Option<usize> {
+    let out = out.get_mut(..Protocol::sealed_len(packet.len()))?;
+    pending.encrypt(packet, out).ok().map(|m| m.len())
+}
 
 use crate::config::{ConfigError, ProtocolTimers, REJECT_AFTER_TIME};
 use crate::drops::DropReason;
@@ -292,6 +301,24 @@ impl Protocol {
             .map_err(|e| map_error(&e))?
             .len();
         Ok(Some(len))
+    }
+
+    /// 送る番号を 1 つ予約する。暗号化は呼び手が [`Seal::seal`] で別のスレッドで行う (Hash S の番号の在庫、
+    /// 試作)。セッションが無ければ `Ok(None)`。予約は送ったものとして passive keepalive の印を進める。
+    pub(crate) fn reserve(
+        &mut self,
+        peer: PeerId,
+        now: Instant,
+    ) -> Result<Option<PendingEncapsulate>, DropReason> {
+        let p = &mut self.peers[peer];
+        match p.tunnel.begin_encapsulate(now) {
+            Ok(pending) => {
+                p.passive.on_send();
+                Ok(Some(pending))
+            }
+            Err(SanstunError::NoCurrentSession | SanstunError::ConnectionExpired) => Ok(None),
+            Err(e) => Err(map_error(&e)),
+        }
     }
 
     /// `packet` を新しい buffer に暗号化する。ハンドシェイクを待っていた packet を送るときの、
