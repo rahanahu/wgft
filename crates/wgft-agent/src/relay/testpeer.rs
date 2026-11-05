@@ -120,11 +120,20 @@ impl Peer {
             addr: AGENT_IP,
             limits: limits(),
         };
-        let agent = Dataplane::start(agent, settings, Carry::first(Duration::ZERO), move |init| {
-            make(stack, init)
-        })
-        .await
-        .unwrap();
+        // Hash S の試作:区画の数は製品と同じく使える CPU から決める (試験は WGFT_LAB_HASHS_P で上書きできる)
+        let parts =
+            crate::dataplane::hashs::part_count(settings.batching.running().is_on());
+        let agent = if parts > 1 {
+            Dataplane::start_hashs(agent, settings, Carry::first(Duration::ZERO), stack, parts)
+                .await
+                .unwrap()
+        } else {
+            Dataplane::start(agent, settings, Carry::first(Duration::ZERO), move |init| {
+                make(stack, init)
+            })
+            .await
+            .unwrap()
+        };
         self.agent = Some(agent);
     }
 

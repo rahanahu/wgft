@@ -1119,3 +1119,7 @@ fn an_interrupted_send_is_retried_and_a_send_of_nothing_keeps_the_batch() {
     assert_eq!(got, vec![3, 4]);
     assert_eq!(t.outbox.send_errors, 0);
 }
+
+/// Hash S の G0 の決定的な試験 (試作)。この module の試験の台を使う。
+#[path = "hashs/tests.rs"]
+mod hashs_g0;

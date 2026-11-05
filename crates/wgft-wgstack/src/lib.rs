@@ -83,6 +83,8 @@ mod cc_tests;
 #[cfg(test)]
 mod golden_tests;
 #[cfg(test)]
+mod hashs_tests;
+#[cfg(test)]
 mod icmp_tests;
 #[cfg(test)]
 mod lifecycle_tests;

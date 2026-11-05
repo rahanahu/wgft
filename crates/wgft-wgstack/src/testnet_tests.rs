@@ -53,6 +53,8 @@ pub(crate) struct TestHook {
     /// `(接続, 得たか)` の列です。`may_return` の問い合わせは `asked` に記録します。
     pub(crate) changes: Vec<(ConnId, bool)>,
     pub(crate) asked: Vec<ConnId>,
+    /// Hash S の区画の試験で、区画が分け合う boost の枠の集まりです。
+    pub(crate) pool: Option<std::sync::Arc<crate::BoostPool>>,
 }
 
 impl Default for TestHook {
@@ -61,6 +63,7 @@ impl Default for TestHook {
             allow_return: true,
             changes: Vec::new(),
             asked: Vec::new(),
+            pool: None,
         }
     }
 }
@@ -77,6 +80,10 @@ impl Hook for TestHook {
 
     fn boost_returned(&mut self, conn: ConnId) {
         self.changes.push((conn, false));
+    }
+
+    fn boost_pool(&self) -> Option<&crate::BoostPool> {
+        self.pool.as_deref()
     }
 }
 
