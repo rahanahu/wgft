@@ -50,12 +50,14 @@ flowchart LR
 
 積み残しは、この提案で 1 つの意味だけに使います。
 
-- 入る:front の起床が遅れの予算 (50 µs) を使い切り、その後にも外側のソケットにデータが残ることが、続けて 8 回起きた時です。
+- 入る:front の起床が遅れの予算 (50 µs) を使い切り、その後にも外側のソケットにデータが残ることが続けて 8 回起き、かつ下の「渡す」の条件を満たす unit (1 から H) がある時です。
+  渡せる unit が無い詰まり (unit 0、UDP、握手) では入りません。
   1 回の起床は予算を最大でバッチ 1 つ分超えるので、入るまで約 0.6 ms です(推定)
 - 渡す:積み残しの間、front は、自分の起床の時間の 10% 以上を使った unit を、重い順に起床ごとに 1 つずつ対の helper に渡します。
   front の起床が予算を使い切らなくなったら、渡すのを止めます。
   UDP や握手で front が詰まっている時は、渡す unit が無いので、TCP は front のままです
-- 戻す:各 helper は 1 回の実行の終わりに、直近の忙しさの割合を自分の atomic に書きます。
+- 戻す:各 helper は、直近の窓の中で unit に仕事が待っていた時間の割合 (忙しさの割合) を自分の atomic に書きます。
+  走った時間ではなく仕事が待っていた時間で数えるので、CPU を取られた helper は暇に見えません
   front は 100 ms ごとにそれを読み、front の忙しさと helper i の忙しさの和が 0.6 CPU を下回った unit i を 1 つ戻します
 - 出る:すべての unit が front に戻った時です
 
@@ -67,7 +69,8 @@ flowchart LR
 ### unit の epoll
 
 各 unit は自分の epoll を持ち、LAN の側のソケットをそこに登録します。
-executor の poller には unit の epoll の記述子だけを登録します。
+executor の poller には unit の epoll の記述子だけを level-triggered で登録します。
+起床の予算で unit の epoll を読み切らなくても、残った準備は次の起床で再び知らされます。
 
 - 受け渡しの費用:記述子 1 つの登録の付け替えで、ソケットの数によりません
 - 準備の知らせ:ソケットの準備は unit の epoll に溜まり、executor が替わっても失われません
@@ -93,6 +96,7 @@ executor の poller には unit の epoll の記述子だけを登録します�
 helper が CPU を取られると、対の unit の仕事はその間待ちます。
 front は unit の受け口の輪に載せ続け、平文の置き場の上限で unit の TCP の segment を捨てます([平文の置き場と unit の上限](memory.md#平文の置き場と-unit-の上限))。
 front、UDP、ほかの unit は止まりません。
+ただし、上限まで満ちた unit が同時に 3 つ以上になると、共有の分が尽き、それ以上の unit は自分の最低の分だけで動きます([平文の置き場と unit の上限](memory.md#平文の置き場と-unit-の上限))。
 止まった unit には新しい接続を置きません。
 止まった helper から unit を取り戻す手順は[未決の項目](verification.md#未決の項目)です。
 
@@ -107,7 +111,11 @@ front、UDP、ほかの unit は止まりません。
 
 - 重み:front は、受け口の輪に載せた packet の数を unit ごとに数え、100 ms ごとに半分にします
 - 選ぶ unit:重みの最も小さい unit を選びます。
-  同じなら生きている接続の少ない unit、それも同じなら番号の小さい unit です
+  同じなら生きている接続の少ない unit、それも同じなら番号の小さい unit で、unit 0 は最後です
+- unit 0 の重み:unit 0 の重みには、front が振り分けた全 packet の数を加えます。
+  unit 0 は front の CPU を復号、振り分け、UDP と分けるので、大きな flow を置きにくくするためです。
+  unit 0 は送る向きの仕事を CPU が 2 つの時に 2 つに分けるために残し、遅れに敏感な仕事だけには限りません。
+  作成の時に小さな flow を見分けられないためです
 - 外す unit:空きの枠が無い unit、平文の置き場の上限に達した unit、受け口の輪が空でないのに 10 ms 進んでいない unit を外します
 - すべて外れた時:最後の ACK を捨てて握手の途中の行を残します。
   unit 0 は front が実行するので止まらず、すべてが外れるのは、どの unit にも空きの枠が無いか、上限に達した時だけです
@@ -122,7 +130,8 @@ front、UDP、ほかの unit は止まりません。
 
 1. front は、最後の ACK (または cookie の ACK) を受け、今と同じく accept の待ち行列の空きを確かめます
 2. front は unit u と u の空きの枠 j を選びます。
-   経路を確かめるのはこの時の 1 回で、相手のアドレスは接続の間変わりません
+   経路を確かめるのはこの時の 1 回で、相手のアドレスは接続の間変わりません。
+   設定の変更で経路が外れた時は、front がその経路の接続を確かめ直して終わらせます (知らせの源の[未決の項目](verification.md#未決の項目))
 3. front は、交渉した値の組と最後の ACK の記述子を、作成の知らせとして u の知らせの輪に載せます
 4. front は、4 つ組の表の項を (u、j、世代) に替え、握手の途中の行を消し、accept の待ち行列に (u、j、世代) を入れます
 5. u は作成の知らせから接続を確立し、最後の ACK が運んだデータと FIN を今と同じく処理します
@@ -192,6 +201,7 @@ helper の暗号化には、front が `begin_encapsulate` で作る `PendingEnca
   タイマーで送る再送 (RTO、TLP) も同じ道を通るので、ほかの出来事を待ちません
 - 費用:front が眠っていた時の補充は、起床 2 回 (front と helper) で、64 datagram ごとに数 µs の CPU です(推定)
 - 古い counter:helper は暗号化の前に、front が補充ごとに公開する (受け手の index、最新の counter) と比べ、同じ index で 4,064 より遅れた counter を捨てて数えます。
+  受け手の index が今の送りのセッションと違う在庫も捨てます
   4,064 は相手の窓 8,128 の半分です([WireGuard の仕様との違い](../../v2/wireguard-device.md#wireguard-の仕様との違い))。
   暗号化した後の遅れは直さず、相手が捨てた分は TCP が再送します
 - endpoint:front は endpoint を変えるたびに世代を進め、helper は古い世代の在庫を捨てます
@@ -206,14 +216,12 @@ helper の暗号化には、front が `begin_encapsulate` で作る `PendingEnca
 ### UDP と helper の送り
 
 積み残しの間、helper の TCP の送りと front の UDP は同じ外側のソケットに送ります。
-UDP を TCP の大きな送りの後ろに並べない規則を、次の 2 つで守ります(設計判断)。
-
-- 先送りの印:front は UDP を送る前に印を立て、送った後に下ろします。
-  helper は `sendmmsg` の前に印を見て、立っている間は送りを待ちます
-- 送りの上限:front が直近 10 ms に UDP を送った間、helper の 1 回の `sendmmsg` の byte を B / H に抑えます。
-  B は Inline の 1 回の送りのバッチの最大の byte です
-
-この 2 つで、UDP の datagram の前に helper が出せる byte は Inline の 1 バッチ分 (B) までです。
+UDP を TCP の大きな送りの後ろに並べない規則を、送りの上限で守ります(設計判断)。
+積み残しの間ずっと、helper の 1 回の `sendmmsg` の byte を B / H に抑えます。
+B は Inline の 1 回の送りのバッチの最大の byte です。
+UDP の datagram の前に進行中の helper の呼び出しは H 本までで、合わせて B までです。
+その後に始まる呼び出しは、カーネルが message ごとにソケットを取るので、front の UDP と交互に並びます(推定)。
+このため、UDP の datagram の前に helper が出せる byte は Inline の 1 バッチ分 (B) までです。
 カーネルの送信の待ち行列にすでにある分は、Inline と同じく wgft の外です。
 費用 (system call の増え方) と UDP の遅れは、最大の送る負荷の試験で測ります。
 
@@ -230,7 +238,6 @@ UDP を TCP の大きな送りの後ろに並べない規則を、次の 2 つ�
 | counter の在庫と求めの印 | SPSC と atomic の印 | 64 datagram ごと |
 | 最新の counter と endpoint の世代 | front が書く atomic | 補充ごと |
 | 送った数 (helper ごと) | atomic の足し算 | 送りのバッチごと |
-| UDP の先送りの印 | front が書き、helper が `sendmmsg` の前に読みます | 送りごと |
 | challenge ACK の速さ | engine で 1 つの atomic の bucket。front が 1 秒ごとに足し、unit が送る時に引きます | 攻撃の時だけ |
 | 起こす知らせ | 相手の眠りの印を見て、眠っている時だけ起こします | 公開ごと |
 | 予算の credit | 全体の空きの数への CAS | 1 MiB の credit ごと |
@@ -290,7 +297,7 @@ U ではこれらを helper のスレッドも取るので、取る頻度は接�
 
 | 違い | 起きる時 |
 |---|---|
-| 平文の置き場の上限で TCP の segment を捨てます | helper が止まり、unit の上限に達した時 |
+| 平文の置き場の上限で TCP の segment を捨てます | helper が止まり、unit の上限に達した時。上限まで満ちた unit が 3 つ以上の時は、3 つ目からは最低の分で捨て始めます |
 | 戻しの輪が満ちたら SYN を捨てます | front が詰まり、戻す SYN が 64 を超えた時 |
 | 最後の ACK を捨てます | どの unit にも空きの枠が無いか、すべてが上限に達した時 |
 | 回収した予算を、求めた接続より先に別の unit の接続が取ることがあります | 全体の予算が尽きた時。需要で育つバッファの設計は直接渡すと決めています([需要で育つバッファ](../../userspace/wgstack-buffers.md#育つ条件)) |

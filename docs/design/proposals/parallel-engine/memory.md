@@ -37,7 +37,7 @@ M_proc = M_base + M_fix + N_c × (f_s + f_r + r_f + h_f) + G
 | 項 | 中身 | 今の式との関係 |
 |---|---|---|
 | M_base、M_fix、N_c × (…)、G、M_udp_rx、M_udp_tx、M_frag、N_ping × c_ping、M_ct、M_tx,front、M_dev、M_relay | 今の項。M_fix は front と unit に分けても和が同じで、G は[需要で育つバッファ](../../userspace/wgstack-buffers.md#予約と予算)の全体の予算です | 今と同じ |
-| M_pt | 平文の置き場:今の 1 バッチの平文の領域 W と、止まった unit のための共有の分 S | 今の `batch` の復号の行き先に S を加えます |
+| M_pt | 平文の置き場:今の 1 バッチの平文の領域 W と、helper の unit の分 S | 今の `batch` の復号の行き先に S を加えます |
 | M_unit,u | unit u の固定の値 | 新しい項 |
 | M_helper,h | helper h の固定の値 | 新しい項 |
 | M_ring | executor の間の捨てない輪 | 新しい項 |
@@ -68,8 +68,9 @@ helper のスレッドは tokio の実行環境を持たないので、実行環
 - 数え方:front は、作業の block に復号した packet を unit に渡す時に、その block への unit の参照を初めて持つなら unit の数を 1 つ増やし、unit が返した時に減らします
 - 置き場:M_pt = W + S です。
   W は front の 1 バッチと unit 0 の分で、今の平文の領域と同じです。
-  S は helper の unit が共有する分です
-- unit の上限:helper の unit 1 つが参照を持てる量を C_u にします
+  S = H × w + R で、w は helper の unit ごとに保証する最低の分、R は止まった unit が共有する分です
+- unit の上限:helper の unit 1 つが参照を持てる量を C_u にします。
+  unit はまず自分の w を使い、それを超える分を R から使います
 - 上限に達した時:その unit には packet を渡さずに捨てて数えます。
   復号は渡す先が分かる前に作業の block で行うので、捨てるのは参照を持たせないことです。
   front は W を常に使えるので、読みを止めません
@@ -77,11 +78,15 @@ helper のスレッドは tokio の実行環境を持たないので、実行環
 - 大きな datagram:組み立てた IPv4 の datagram (最大 65,535 byte) は、続く block にまたがって置きます
 - 変換の無い形:link が自分の枠を貸す link (AF_XDP の UMEM) は、スレッドをまたぐ前に block に写します
 
-C_u と S は、helper が止まっても捨てずに耐える時間 (止まりの許容) から決めます。
+C_u と R は、helper が止まっても捨てずに耐える時間 (止まりの許容) から決めます。
 
-| 止まりの許容 | C_u (10 Gbit/s で) | S | 区別 |
-|---|---|---|---|
-| 約 1.7 ms (案) | 2 MiB | 2 MiB × min(H, 2)。2 つの unit が同時に止まるまで耐えます | 設計判断の案 |
+| 止まりの許容 | C_u (10 Gbit/s で) | w | R | 区別 |
+|---|---|---|---|---|
+| 約 1.7 ms (案) | 2 MiB | 256 KiB | (C_u - w) × min(H, 2) | 設計判断の案 |
+
+R は、上限まで満ちた unit が同時に 2 つまでの時に耐えます。
+helper が上限を決める受ける向きの大きな flow では、unit は止まらなくても上限まで満ちることがあります。
+3 つ目からの満ちた unit は自分の w だけで動き、許容が短くなりますが、ほかの unit の w は使いません。
 
 今は同じ止まりを、カーネルの外側のソケットの受信のバッファ (最大 14 MiB、上界の外) が吸収します。
 U では止まった helper の unit の TCP の segment を engine の中で捨てるので、捨てる損失が新しく加わります。
@@ -93,10 +98,10 @@ U では止まった helper の unit の TCP の segment を engine の中で捨
 |---|---|---|
 | 1 | 0 | 0 |
 | 2 | 1 | 約 4.6 MiB |
-| 4 | 3 | 約 9.7 MiB |
-| 8 | 7 | 約 15.7 MiB |
+| 4 | 3 | 約 9.9 MiB |
+| 8 | 7 | 約 17.0 MiB |
 
-内訳は、unit ごとに約 0.96 MiB、helper ごとに約 0.55 MiB、輪の合計の約 1.1 MiB、共有の分 S です(推定)。
+内訳は、unit ごとに約 0.96 MiB、helper ごとに約 0.55 MiB、輪の合計の約 1.1 MiB、平文の分 S です(推定)。
 A+ は 8 vCPU で常駐のメモリを 8.4 MiB 増やしました (#808 から #810)。
 見込みには、poller の保持、核を作り直した後の型の大きさ、まだ数えていない知らせの源の輪 ([未決の項目](verification.md#未決の項目)) が残るので、メモリの線は P0 で測った後に決めます。
 残す chunk の数と送信の枠の数は、減らすと確保と system call が増えるので、P0 で CPU と比べて決めます。

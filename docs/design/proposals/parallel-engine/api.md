@@ -49,8 +49,9 @@ unit の核は、65,536 行のポートの表を持ちません。
   データプレーンの executor は tokio を使わず、executor ごとの poller で動きます([unit の epoll](ownership.md#unit-の-epoll))
 - 停止:engine を閉じると全 executor を止め、予算と置き場を返します。
   今の `close` と同じく、次の世代に予算を渡せます
-- データプレーン:推奨は、tokio を使わない executor のデータプレーンを全 OS で 1 つにする形です。
-  Windows と macOS と、利用できる CPU が 1 つの Linux は、front だけの executor で動きます。
+- データプレーン:tokio を使わない executor のデータプレーンを、最後には全 OS で 1 つにする形を目指します。
+  Windows と macOS は、実機の関門 ([PW](verification.md#pw-windows-と-macos)) を通るまで今の tokio のデータプレーンのままです。
+  1 つにした後は、Windows と macOS と、利用できる CPU が 1 つの Linux が、front だけの executor で動きます。
   front だけの時は unit の受け渡しが無いので、IOCP で poller を付け替えられないことが問題になりません。
   今の tokio のデータプレーンを残して 2 つを持ち続けるかは、所有者が決めます([所有者に決めてもらうこと](README.md#所有者に決めてもらうこと))
 - 複数の CPU:helper を使う経路は Linux だけで作ります

@@ -65,6 +65,7 @@ front が全 unit をその場で実行し、Inline と違うのは次の点だ�
 | tokio を使わない executor と中継 | 未測定 |
 
 1 packet の起床の Inline の仕事 (約 9.1 µs、推定) と比べると、CPU は 1.02 から 1.06 倍、遅れの増分は 1 µs 未満です(推定)。
+この幅は軽い負荷の線 (区間の上端 1.05) をまたぐので、最初の関門で線を超えることがありえます。
 最も大きな不確かさは executor と中継の作り直しの差で、P0 で本物の LAN の側のソケットを使って測ります([段階の試作](verification.md#段階の試作))。
 
 ### S の振る舞い (比べのため)
@@ -82,7 +83,11 @@ front が全 unit をその場で実行し、Inline と違うのは次の点だ�
 
 - 受ける 1 stream:front と helper の 2 段の pipeline です。
   遅い方の helper (0.6 から 0.8 ns/byte) が上限で、約 10 から 13 Gbit/s、Inline のスレッドの上限 (約 7.5 から 8 Gbit/s) の 1.3 から 1.7 倍です
-- 受ける多くの stream:front (0.44 から 0.58 ns/byte) が直列の上限で、約 14 から 18 Gbit/s です
+- 受ける多くの stream:front が直列の上限です。
+  front は読み、復号、振り分け (0.44 から 0.58 ns/byte) に加えて unit 0 も実行するので、unit 0 が流れの 1/M を持つと 1 byte あたり約 0.6 / M ns/byte が加わり、上限は M = 2 で約 9 から 11 Gbit/s、M = 4 で約 11 から 14 Gbit/s です。
+  unit 0 の重みに front の振り分けた全 packet を加えるので、unit 0 が持つ分は 1/M より小さくなると見込みます
+- unit 0 の大きな flow:unit 0 に置かれた大きな flow は helper に渡らないので伸びず、front の CPU を復号と振り分けと分けます。
+  この場合を受ける 1 stream と安定の関門で確かめます
 - 送る 1 stream:1 つのスレッドが Inline とほぼ同じ仕事をするので、Inline と同じ約 5.3 Gbit/s です
 - 送る多くの stream:front の unit 0 と H 本の helper で、最大 H + 1 倍まで伸び、CPU の総量かカーネルか相手が先に上限になります。
   2 vCPU では unit 0 と unit 1 の 2 つのスレッドに分かれ、agent の VM の CPU の残り (Inline の送る 4 stream で約 1.0 CPU が空いています) の分だけ伸びると見込みます
@@ -134,7 +139,7 @@ helper の数 H は n_cpu から決め、設定を持ちません。
 ### UDP の低い遅れ
 
 受ける向きでは、積み残しの間に front が重い unit を helper に渡すので、UDP の待ちは Inline より短くなると見込みます(推定)。
-送る向きでは、helper の送りの前に UDP を出す印と送りの上限で、UDP の前に並ぶ byte を Inline と同じ 1 バッチまでにします([UDP と helper の送り](ownership.md#udp-と-helper-の送り))。
+送る向きでは、積み残しの間ずっと helper の送りの上限を置き、UDP の前に並ぶ byte を Inline と同じ 1 バッチまでにします([UDP と helper の送り](ownership.md#udp-と-helper-の送り))。
 
 ### byte あたりの CPU
 
@@ -166,6 +171,7 @@ helper の数 H は n_cpu から決め、設定を持ちません。
 CPU が上限の時は、unit ごとの CPU が flow に分けられるので、次の場合に公平が崩れます。
 
 - unit ごとの大きな flow の数の偏り:速さの比が 0.5、0.5、1 の 3 本の Jain の指数は 0.89 です(計算)
+- unit 0 の flow:front の CPU を復号と振り分けと UDP と分けるので、CPU が上限の時は helper の unit の flow より少ない CPU を得ます
 - 後で重くなる接続:作成の時に重さが分からず、同じ unit に入った 2 本は 1 つのスレッドを分けます
 - 平文の置き場の上限での捨て:上限に達した unit の flow だけが損失を受けます
 
