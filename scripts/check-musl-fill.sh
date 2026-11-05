@@ -6,7 +6,7 @@
 # TARGET defaults to x86_64-unknown-linux-musl. The shipping Linux agent is built for musl with zigbuild,
 # whose memset is a byte-store loop, so the chunk fill (`fill_chunk` in wgft-wgstack) writes wide stores
 # itself. The script isolates the body of that one symbol and fails if it is missing or ambiguous, mentions
-# memset, memcpy or memmove, or has no vector store.
+# memset, memcpy or memmove, makes any call or indirect jump, or has no vector store.
 #
 # Two modes share the same body checks:
 #   default  builds `wgft` the way lab/lab does (cargo zigbuild --release --locked -p wgft) with the symbols
@@ -78,10 +78,20 @@ count=$(<"$awk_out")
 rm -f "$awk_out"
 [[ $count == 1 ]] || fail "expected exactly one fill_chunk in $where, found $count"
 [[ -n $body ]] || fail "fill_chunk has an empty body in $where"
-# Any mention counts: x86 call/jmp, arm64 bl/b, PLT and GOT forms, address loads.
+# A mention of memset, memcpy or memmove by name counts. That finds the asm mode's PLT and GOT forms and the
+# direct ones in a disassembly, but objdump prints a call through a GOT slot with the nearest data symbol, not
+# the callee, so the name alone is not enough there.
 if grep -Eq 'mem(set|cpy|move)' <<<"$body"; then
   echo "check-musl-fill: fill_chunk refers to memset, memcpy or memmove:" >&2
   grep -E 'mem(set|cpy|move)' <<<"$body" >&2
+  exit 1
+fi
+# fill_chunk is a leaf with no legitimate callee, so any call or indirect jump fails, whatever its target is
+# called: call, callq, bl, blr, br, and jmp through a pointer (`jmp *`, a GOT slot).
+callpat='^[[:space:]]*((call[lq]?|bl|blr|br)[[:space:]]|jmp[lq]?[[:space:]]+\*)'
+if grep -Eq "$callpat" <<<"$body"; then
+  echo "check-musl-fill: fill_chunk calls or jumps through a pointer:" >&2
+  grep -E "$callpat" <<<"$body" >&2
   exit 1
 fi
 # A vector store: SSE/AVX moves on x86_64, a 128-bit q register stored by stp, str or st1 on aarch64. The
