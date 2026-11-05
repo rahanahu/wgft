@@ -3,6 +3,8 @@
 //! 最長一致で IPv4 のアドレスからピアを引く。送信では宛先からピアを選び、受信では復号した
 //! packet の送信元を引いて、送ってきたピアと一致するものだけを通す。prefix の長さごとの表を
 //! 長い順に引くので、1 回の引きは高々 33 回の hash の引きで、ピアの数に依らない。
+//! prefix が `SMALL_MAX` 個以下のあいだは、同じ内容の小さな一覧を長い順に直接比べる近道を使う
+//! (答えは表と同じ)。
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -17,6 +19,8 @@ pub(crate) struct AllowedIps<V> {
     /// prefix が `SMALL_MAX` 個以下のあいだの同じ内容 (長い順、prefix の長さ、網の値、持ち主)。
     /// agent のようにピアが 1 つで prefix が少ないとき、hash を引かずに直接比べる。
     /// 超えたら `None` にして、表だけを使う。`insert` のときに作り、引きでは作らない。
+    /// 注意:表を変える操作 (削除や再設定の API など) を足すときは、この一覧も同じように直すか
+    /// `None` にすること。直さないと、外したピアの packet が受信の検査を通り、暗号鍵の経路の穴になる。
     small: Option<Vec<(u8, u32, V)>>,
 }
 
@@ -152,6 +156,25 @@ mod tests {
         assert_eq!(t.lookup(ip(11, 1, 1, 1)), Some(1));
         t.insert(p(10, 0, 0, 0, 8), 3);
         assert_eq!(t.lookup(ip(10, 1, 1, 1)), Some(3));
+    }
+
+    // 近道の一覧は、prefix が SMALL_MAX 個以下のあいだだけあり、超えると無くなる。
+    // 近道が黙って効かなくなるのを検出する。
+    #[test]
+    fn fast_path_exists_exactly_up_to_the_limit() {
+        let mut t = AllowedIps::new();
+        assert!(t.small.is_some());
+        for i in 0..SMALL_MAX {
+            let i = u8::try_from(i).unwrap();
+            t.insert(p(10, i, 0, 0, 16), 1u8);
+            assert!(t.small.is_some(), "{} prefixes", i + 1);
+        }
+        // 同じ prefix の再割り当ては数を増やさない。
+        t.insert(p(10, 0, 0, 0, 16), 2);
+        assert!(t.small.is_some());
+        t.insert(p(10, 9, 0, 0, 16), 1);
+        assert!(t.small.is_none());
+        assert_eq!(t.lookup(ip(10, 9, 1, 1)), Some(1));
     }
 
     proptest! {
