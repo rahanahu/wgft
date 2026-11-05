@@ -5,7 +5,10 @@
 //! - 誤り:片方の向きが読み書きの誤りで終われば、もう一方の向きも止めて誤りを返す。ハーフクローズとして
 //!   扱うと、黙ったままの相手を読み続けて中継が終わらないためである
 //! - バッファ:向きごとに小さいバッファを持ち、読みがそれを満たしたら大きいバッファを借りる。大きい
-//!   バッファは、データが [`BULK_WAIT`] の間途切れたら返す。開いたまま黙っている接続の費用を抑えるため
+//!   バッファは、データが [`BULK_WAIT`] の間途切れたら返す。開いたまま黙っている接続の費用を抑えるため。
+//!   どちらもデータプレーンのスレッドごとの置き場から借り、接続が終わったら返す。置き場から借りた
+//!   バッファは零で埋め直さない。接続が見られるのは、その接続が読みで書いた範囲 `[..n]` だけなので、
+//!   前の接続の内容は見えない (`Buf` の注釈)
 //!
 //! 2 つの向きは同じ task の中で交互に進み、トンネルの側の接続の借用は 1 回の poll の中だけで取る。
 
@@ -31,23 +34,29 @@ pub(crate) const BULK_BUF: usize = 32 << 10;
 pub(crate) const BULK_WAIT: Duration = Duration::from_millis(200);
 
 /// 1 つの向きのバッファ。
+///
+/// `idle` と `bulk` は置き場から借りるので、前の接続の内容を持つことがある。読みの経路は、読みが返した
+/// 長さ `n` の `space()[..n]` だけを使う (`tun_to_lan`、`lan_to_tun`)。読みは `&mut [u8]` に書くだけで
+/// 読まず、`n` を超えて返さないので、`[..n]` は今の接続が書いた byte だけである。`after_read` は長さ
+/// だけを見る。ほかに `idle` と `bulk` を読む経路は無い。
 struct Buf {
-    idle: [u8; IDLE_BUF],
+    idle: Option<Box<[u8]>>,
     bulk: Option<Box<[u8]>>,
 }
 
 impl Buf {
     fn new() -> Self {
         Self {
-            idle: [0; IDLE_BUF],
+            idle: Some(borrow_idle()),
             bulk: None,
         }
     }
 
     fn space(&mut self) -> &mut [u8] {
-        match &mut self.bulk {
-            Some(b) => b,
-            None => &mut self.idle,
+        match (&mut self.bulk, &mut self.idle) {
+            (Some(b), _) | (None, Some(b)) => b,
+            // `idle` は drop の時にだけ外す
+            (None, None) => &mut [],
         }
     }
 
@@ -69,8 +78,15 @@ impl Buf {
 impl Drop for Buf {
     fn drop(&mut self) {
         self.release();
+        if let Some(b) = self.idle.take() {
+            give_back_idle(b);
+        }
     }
 }
+
+/// The most idle buffers a data plane thread keeps for reuse; beyond it, returned buffers are
+/// freed. A connection holds two while it lives.
+pub(crate) const IDLE_KEEP: usize = 64;
 
 /// The most bulk buffers a data plane thread keeps for reuse; beyond it, returned buffers are
 /// freed.
@@ -85,6 +101,37 @@ thread_local! {
 #[cfg(test)]
 pub(super) static BULK_ALIVE: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+thread_local! {
+    /// スレッドごとの小さいバッファの置き場。接続の確立のたびに零埋めの確保をしないため。
+    static IDLE_FREE: std::cell::RefCell<Vec<Box<[u8]>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The idle buffers alive on all threads, lent or kept for reuse. The memory bound's test reads it.
+#[cfg(test)]
+pub(super) static IDLE_ALIVE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// 置き場から借りる。内容は前の借り手のままで、零埋めしない。新しく確保した時だけ零で始まる。
+fn borrow_idle() -> Box<[u8]> {
+    IDLE_FREE.with_borrow_mut(Vec::pop).unwrap_or_else(|| {
+        #[cfg(test)]
+        IDLE_ALIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        vec![0; IDLE_BUF].into_boxed_slice()
+    })
+}
+
+fn give_back_idle(b: Box<[u8]>) {
+    IDLE_FREE.with_borrow_mut(|free| {
+        if free.len() < IDLE_KEEP {
+            free.push(b);
+        } else {
+            drop(b);
+            #[cfg(test)]
+            IDLE_ALIVE.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+}
 
 fn borrow() -> Box<[u8]> {
     BULK_FREE.with_borrow_mut(Vec::pop).unwrap_or_else(|| {
@@ -218,4 +265,95 @@ async fn write_lan(lan: &LanStream, mut src: &[u8]) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    fn idle_free_len() -> usize {
+        IDLE_FREE.with_borrow(Vec::len)
+    }
+
+    fn bulk_free_len() -> usize {
+        BULK_FREE.with_borrow(Vec::len)
+    }
+
+    /// Fills both of the buffer's slices with `x` the way a previous connection's data would.
+    fn dirty(buf: &mut Buf, x: u8) {
+        buf.space().fill(x);
+        buf.bulk = Some(borrow());
+        buf.space().fill(x);
+    }
+
+    #[test]
+    fn a_new_buffer_reuses_the_returned_one() {
+        let mut a = Buf::new();
+        dirty(&mut a, 0xAA);
+        drop(a);
+        assert_eq!(idle_free_len(), 1);
+        assert_eq!(bulk_free_len(), 1);
+        let mut b = Buf::new();
+        assert_eq!(idle_free_len(), 0, "the buffer came from the free list");
+        assert_eq!(b.space().len(), IDLE_BUF);
+        // 零埋めしない: 前の内容が残っている。読みの経路が `[..n]` だけを使うことが漏れを防ぐ
+        assert!(b.space().iter().all(|&x| x == 0xAA));
+    }
+
+    #[tokio::test]
+    async fn a_read_exposes_only_what_it_wrote() {
+        // 前の接続の内容で汚れたバッファを借りても、読みが返す範囲は今の接続の byte だけである
+        let mut old = Buf::new();
+        dirty(&mut old, 0xAA);
+        drop(old);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        client.write_all(b"hello").await.unwrap();
+
+        let mut buf = Buf::new();
+        assert!(buf.space().iter().all(|&x| x == 0xAA));
+        let n = read_lan(&server, buf.space()).await.unwrap();
+        assert_eq!(&buf.space()[..n], b"hello");
+        assert!(n < IDLE_BUF);
+        // 小さいバッファを満たさない読みでは大きいバッファを借りない
+        buf.after_read(n);
+        assert!(buf.bulk.is_none());
+        // 大きいバッファへ移った後も、読みの範囲は今の接続の byte だけである
+        buf.bulk = Some(borrow());
+        client.write_all(b"world!").await.unwrap();
+        let n = read_lan(&server, buf.space()).await.unwrap();
+        assert_eq!(&buf.space()[..n], b"world!");
+    }
+
+    #[test]
+    fn the_idle_free_list_is_bounded() {
+        let bufs: Vec<Buf> = (0..IDLE_KEEP + 8).map(|_| Buf::new()).collect();
+        drop(bufs);
+        assert_eq!(idle_free_len(), IDLE_KEEP, "the rest were freed");
+        // 借りれば減り、返せば上限まで戻る
+        let held: Vec<Buf> = (0..10).map(|_| Buf::new()).collect();
+        assert_eq!(idle_free_len(), IDLE_KEEP - 10);
+        drop(held);
+        assert_eq!(idle_free_len(), IDLE_KEEP);
+    }
+
+    #[test]
+    fn the_bulk_free_list_stays_bounded_beside_the_idle_one() {
+        let bufs: Vec<Buf> = (0..BULK_KEEP + 4)
+            .map(|_| {
+                let mut b = Buf::new();
+                b.bulk = Some(borrow());
+                b
+            })
+            .collect();
+        drop(bufs);
+        assert_eq!(bulk_free_len(), BULK_KEEP);
+        assert_eq!(idle_free_len(), BULK_KEEP + 4);
+    }
 }

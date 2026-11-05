@@ -52,7 +52,7 @@ use crate::targets::{TargetError, Targets};
 use crate::tunnel::{Net, Stack};
 
 pub(crate) use lansock::LanConn;
-pub(crate) use pipe::{BULK_BUF, BULK_KEEP};
+pub(crate) use pipe::{BULK_BUF, BULK_KEEP, IDLE_BUF, IDLE_KEEP};
 pub(crate) use replies::{REPLY_SLOTS, UDP_BUF};
 #[cfg(test)]
 pub(crate) use udp::DEFAULT_UDP_IDLE;

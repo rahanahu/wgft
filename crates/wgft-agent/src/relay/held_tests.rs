@@ -33,12 +33,12 @@ use tokio::net::{TcpListener as LanListener, TcpStream as LanStream, UdpSocket a
 use wgft_alloc_count::live_bytes;
 use wgft_proto::Proto;
 
-use super::pipe::BULK_ALIVE;
 use super::pipe::BULK_WAIT;
+use super::pipe::{BULK_ALIVE, IDLE_ALIVE};
 use super::replies::{REPLIES, REPLY_SLOTS, UDP_BUF};
 use super::testpeer::{self, Outcome, Peer};
 use super::tests::{rule, targets, wait_for};
-use super::{BULK_BUF, BULK_KEEP, Kind, Manager, ProbeResults, ProbeRound};
+use super::{BULK_BUF, BULK_KEEP, IDLE_BUF, IDLE_KEEP, Kind, Manager, ProbeResults, ProbeRound};
 use crate::flowpool::Limits;
 use crate::memory::{LISTENER_TCP, LISTENER_UDP, MemoryBound, tcp_relay_conn, udp_session};
 use crate::targets::TargetError;
@@ -308,7 +308,7 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
         .saturating_sub(udp_closed)
         .saturating_sub(n_tcp * echo_conn)
         .saturating_sub(tcp_core);
-    let tcp_allowed = n_tcp * tcp_relay_conn() + bulk * BULK_BUF + SLACK;
+    let tcp_allowed = n_tcp * tcp_relay_conn() + bulk * BULK_BUF + IDLE_KEEP * IDLE_BUF + SLACK;
     let per_relay = tcp_growth.saturating_sub(bulk * BULK_BUF) / n_tcp.max(1);
     eprintln!(
         "tcp: {n_tcp} relays grew the relay by {tcp_growth} bytes with {bulk} bulk buffers alive against {tcp_allowed}, the core by {tcp_core}; the scripted clients and the echo connections held {tcp_test_side}"
@@ -322,6 +322,11 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
         bulk <= BULK_KEEP,
         "{bulk} bulk buffers are alive after the data stopped, above the {BULK_KEEP} kept for reuse"
     );
+    let idle = IDLE_ALIVE.load(Ordering::Relaxed);
+    assert!(
+        idle <= IDLE_KEEP,
+        "{idle} idle buffers are alive after every relay closed, above the {IDLE_KEEP} kept for reuse"
+    );
     assert!(
         tcp_growth <= tcp_allowed,
         "{n_tcp} TCP relays grew the relay by {tcp_growth} bytes, above {tcp_allowed}"
@@ -333,7 +338,7 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
     let left = closed
         .saturating_sub(setup)
         .saturating_sub(core_bytes(&peer).await);
-    let kept = REPLY_SLOTS * UDP_BUF + BULK_KEEP * BULK_BUF;
+    let kept = REPLY_SLOTS * UDP_BUF + BULK_KEEP * BULK_BUF + IDLE_KEEP * IDLE_BUF;
     eprintln!("closed: {left} bytes above setup besides the core's, against {kept} kept for reuse");
     assert!(
         left <= kept + SLACK,
