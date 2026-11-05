@@ -72,7 +72,7 @@ wgstack は受け身の open だけの IPv4 の TCP ですが、中継のため�
 | 2.10 | RTO を倍にしない | 当てはまる | `retransmit-rto` の `backoff` | 通る |
 | 2.11 | keepalive の間隔が短すぎる | 当てはまらない | なし | 2.9 と同じ |
 | 2.12 | 窓の probe の行き詰まり | 当てはまる | `zero-window-probe` | 通る |
-| 2.13 | 2 segment を超えてまとめて確認する | 当てはまる | `rfc2525-stretch-ack` | 3 つとも 1 つの ACK が確認するのは 2 segment 以下 |
+| 2.13 | 2 segment を超えてまとめて確認する | 当てはまる | `rfc2525-stretch-ack` | 台本は 1 回に 1 segment ずつ送るので、3 つとも 1 つの ACK が確認するのは 2 segment 以下。ただし wgstack は 1 回の起床で複数の segment を受けると 1 つの ACK で 2 segment を超えて確認する既知の違いを持ち、この台本はそれを検出しません([起床ごとの ACK の合わせ](../v2/wgstack-rs.md#起床ごとの-ack-の合わせ)) |
 | 2.14 | 再送で複数の packet を送る | 当てはまる | `rfc2525-rto-slow-start`(RTO の再送だけ。高速の再送の側は台本がありません) | 2.2 と同じ |
 | 2.15 | FIN をすぐ送らない | 当てはまる | `rfc2525-close-fin` | 3 つとも、確認されていないデータの後に `Close` ですぐ FIN を送る |
 | 2.16 | 半分の close の後に RST を送らない | 当てはまる | `rfc2525-data-after-close` | 3 つとも、FIN_WAIT_2 の接続へのデータに SND.NXT の RST を返す |
