@@ -172,6 +172,7 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - 'deny.toml'
+              # The musl chunk fill check that rust-check runs.
               - 'scripts/check-musl-fill.sh'
               # The scenario scripts and parser fixtures, which the Rust tests read as well.
               - 'internal/tcpharness/scripts/**'

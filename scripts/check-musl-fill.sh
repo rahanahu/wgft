@@ -71,10 +71,11 @@ body=$(want=$want labels=$labels endfn=$endfn awk -v asm="$asm" -v cnt="$awk_out
   $0 ~ want { on = 1; n++; next }
   on && asm && $0 ~ endfn { on = 0; next }
   on && !asm && $0 ~ labels { on = 0 }
-  on { print }
+  on { if (!asm) sub(/^ *[0-9a-f]+:[ \t]*/, ""); print }
   END { print n + 0 > cnt }
 ' <<<"$listing")
 count=$(<"$awk_out")
+rm -f "$awk_out"
 [[ $count == 1 ]] || fail "expected exactly one fill_chunk in $where, found $count"
 [[ -n $body ]] || fail "fill_chunk has an empty body in $where"
 # Any mention counts: x86 call/jmp, arm64 bl/b, PLT and GOT forms, address loads.
