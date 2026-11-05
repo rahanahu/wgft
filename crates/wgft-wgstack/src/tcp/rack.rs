@@ -348,6 +348,7 @@ impl Conn<'_> {
                 let t = &mut *self.t;
                 t.ssthresh = th;
                 t.cwnd = th;
+                t.rto_slow_start = false; // 窓が ssthresh に届いたので slow start は終わりです
                 (t.tlp_cut, t.tlp_cut_seq) = (true, t.snd_max);
                 self.s.stats.tlp_recoveries += 1;
             }

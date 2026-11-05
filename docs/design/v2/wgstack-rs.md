@@ -1364,6 +1364,21 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
 
 ### 回復と輻輳の制御と boost で決めたこと
 
+- RTO の後の slow start の増分:Rust は RTO の後の slow start で、1 ACK の窓の増分を 1 SMSS までにします。
+  RFC 3465 2.3 は次のように定めます。
+  「The exception to the above suggestion is during a slow start phase that follows a retransmission timeout (RTO). In this situation, a TCP MUST use L=1*SMSS as specified in RFC 2581 ...」
+  Go は RTO の後も L = 2 のままなので、意図して Go と違う所です。
+  RFC は slow start の終わりの条件を書かないので、窓が ssthresh に届いた時に終えるのは、この実装の読みです。
+  RTO で立てて、窓が ssthresh に届くか、高速の回復に入るかしたら下ろす印を接続の欄 (`rto_slow_start`) に置きます。
+  TLP の縮小は窓を ssthresh に揃えるので、その時にも下ろします。
+  取り消しは、印を窓と ssthresh と一緒に `init_undo` の時点の値 (`undo_rto_slow_start`) に戻します。
+  先の RTO の slow start の途中で起きた 2 回目の RTO や高速の回復を取り消しても、先の slow start の L = 1 が続くためです。
+  最初の slow start と、回復の後の slow start は L = 2 のままです。
+  SACK を交渉しない接続が回復の終わりに窓を ssthresh より小さくして slow start に戻る場合は、RTO の後ではないので L = 2 です。
+  RTO の再送の後に続けて RTO が起きたときは立てたままです。
+  黙った後の窓の戻し (RFC 5681 4.1) は印を変えず、RTO の後の slow start の途中なら L = 1 のままです。
+  SYN と SYN-ACK の再送の後の窓は 1 SMSS にしますが印は立てず、続く slow start は意図して L = 2 のままです。
+  RTO の後の slow start では ssthresh が有限になるので、HyStart++ は働きません
 - 欄の置き場所:RACK の状態、TLP の縮小の印、次の ACK に載せる D-SACK の block、CUBIC の状態は ACK ごとに触るので `Tcb` に置きました。
   D-SACK で倍率を上げた往復と倍率を保つ回復の数、D-SACK の累計、PRR、boost の需要と受信の段の印は、D-SACK と回復と boost の事象でだけ触るので `ConnCold` に置きました。
   並べ替えの窓の倍率は上限が 255 なので `u8` で持ちます
