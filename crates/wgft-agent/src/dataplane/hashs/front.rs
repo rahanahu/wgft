@@ -4,7 +4,8 @@
 //!
 //! - 受信の相:復号した packet のうち UDP を先に区画 0 の核に渡すのは Inline と同じ。残りは R0 の鍵で振り分け、
 //!   区画 0 の packet はその場で核に渡し、ほかの区画の packet はその区画のバッチに詰める。受信のバッチの終わりに
-//!   バッチを区画に渡し、渡した packet の数 (上限 [`PIGGYBACK_MAX`]) の在庫を相乗りで付ける
+//!   バッチを区画に渡し、答えを生む packet の数 (上限 [`PIGGYBACK_MAX`]) の在庫を相乗りで付ける。中身の無い ACK
+//!   には付けない ([`super::needs_reply`])
 //! - 在庫の求めに応える:区画が求めた数だけ予約し、輪で渡して起こす。セッションが無ければハンドシェイクを始める
 //! - 送信の相:区画 0 の核の出力を Inline と同じく device で暗号化して送る。予約の通し番号を引いた packet の数だけ
 //!   進め (1 つの packet は高々 1 つの番号を使う)、相の終わりに公開する
@@ -109,12 +110,13 @@ impl Front {
         }
     }
 
-    /// 区画 `k` の詰めている途中のバッチを渡して起こす。渡す packet の数 (上限 [`PIGGYBACK_MAX`]) の在庫を付ける。
+    /// 区画 `k` の詰めている途中のバッチを渡して起こす。答えを生む packet の数 (上限 [`PIGGYBACK_MAX`]) の在庫を
+    /// 付ける。
     fn ship(&mut self, k: usize, device: &mut Device, now: Instant) {
         let Some(mut b) = self.cur[k].take() else {
             return;
         };
-        let n = b.packets().min(PIGGYBACK_MAX).min(b.stock_room());
+        let n = b.replies().min(PIGGYBACK_MAX).min(b.stock_room());
         for _ in 0..n {
             let Some(it) = self.reserve(device, now) else {
                 break;

@@ -31,12 +31,15 @@ use super::Hub;
 
 type Stack<T> = Netstack<LanHook<T>>;
 
-/// 落ちる時に世代を終える。スレッドがどの理由で終わっても (panic を含む) 全員を起こす (L6)。
-struct EndGuard(Arc<Hub>);
+/// 落ちる時に世代を終える。スレッドがどの理由で終わっても (panic を含む) 全員を起こす (L6)。区画が止める命令で
+/// 終わった時だけは外し、front が区画の最後の送り出しに在庫を渡し続けられるようにする。
+struct EndGuard(Arc<Hub>, bool);
 
 impl Drop for EndGuard {
     fn drop(&mut self) {
-        self.0.end();
+        if self.1 {
+            self.0.end();
+        }
     }
 }
 
@@ -133,7 +136,10 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
             batching.slots() * max_datagram,
             clock::now(),
         ));
-        let steer = Steer::new(parts, stack.addr);
+        let mut steer = Steer::new(parts, stack.addr);
+        if super::no_tcp_on_zero() {
+            steer = steer.without_tcp_on_zero();
+        }
         let peer = device.peers().next();
         let high_water = Arc::new(AtomicU64::new(duration_to_nanos(device.unix_high_water())));
         let (commands, command_rx) = mpsc::channel(16);
@@ -277,7 +283,14 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
                 },
             });
         }
-        crate::logf!("tunnel: the data plane runs {parts} partitions (Hash S prototype)");
+        crate::logf!(
+            "tunnel: the data plane runs {parts} partitions (Hash S prototype){}",
+            if super::no_tcp_on_zero() && parts >= 3 {
+                "; no TCP on partition 0"
+            } else {
+                ""
+            }
+        );
         Ok(dp)
     }
 }
@@ -343,7 +356,7 @@ fn run_part<T: LanSocket + 'static>(
     commands: mpsc::Receiver<Command<Stack<T>>>,
     ready: Ready,
 ) -> Option<Budget> {
-    let _end = EndGuard(Arc::clone(&hub));
+    let mut end = EndGuard(Arc::clone(&hub), true);
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -392,16 +405,30 @@ fn run_part<T: LanSocket + 'static>(
         &runtime,
         super::part::drive(Local(Rc::clone(&shared)), &mut send, &mut sink, commands),
     );
-    if let Err(e) = ended {
-        crate::logf!("tunnel: data plane partition {k} stopped: {e}");
+    let clean = match ended {
+        Ok(()) => !hub.is_ending(),
+        Err(e) => {
+            crate::logf!("tunnel: data plane partition {k} stopped: {e}");
+            false
+        }
+    };
+    if !clean {
+        hub.end();
     }
-    hub.end();
-    // 中継の task を実行環境の中で落とす。落とした接続の RST は、front が止まった後は在庫が無いので送らない
-    // (試作の既知の違い)
+    // 中継の task を実行環境の中で落とす。task が持つ handle の `Drop` は中継の接続を切る RST を核に積む。止める
+    // 命令で終わった時は、front に在庫を求めてそれを送り出す (front は区画が止まるまで止まらない)
     {
         let _guard = runtime.enter();
         drop(tasks);
     }
+    if clean && !shared.poisoned.get() {
+        runtime.block_on(super::part::final_flush(
+            &Local(Rc::clone(&shared)),
+            &mut send,
+            &mut sink,
+        ));
+    }
+    end.1 = !clean;
     drop(runtime);
     drop(send);
     match Rc::try_unwrap(shared) {
@@ -431,7 +458,7 @@ fn run_front<T: LanSocket + 'static>(
     ready: Ready,
 ) -> Exit<Budget> {
     let hub = Arc::clone(&front.hub);
-    let _end = EndGuard(Arc::clone(&hub));
+    let _end = EndGuard(Arc::clone(&hub), true);
     let mut device = device;
     let unix_high_water = device.unix_high_water();
     let ready_cell = Cell::new(Some(ready));

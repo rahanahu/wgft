@@ -76,9 +76,29 @@ pub(crate) fn part_count(batched: bool) -> usize {
     {
         return p.clamp(1, MAX_PARTS);
     }
+    // 試験は値が無ければ今の Inline で流す。Hash S の道は `WGFT_LAB_HASHS_P=2` などで流す
+    if cfg!(test) {
+        return 1;
+    }
     std::thread::available_parallelism()
         .map_or(1, std::num::NonZero::get)
         .clamp(1, MAX_PARTS)
+}
+
+/// E2a' の比べの腕 (区画 0 に TCP を置かない) を選ぶか。ラボと試験の build だけが `WGFT_LAB_HASHS_TCP0=0` (実行の時の値か
+/// build の時の値) で選べる。製品の build は常に E2a (区画 0 にも TCP を振る)。
+pub(crate) fn no_tcp_on_zero() -> bool {
+    #[cfg(any(test, feature = "lab-observe"))]
+    {
+        std::env::var("WGFT_LAB_HASHS_TCP0")
+            .ok()
+            .or_else(|| option_env!("WGFT_LAB_HASHS_TCP0").map(str::to_owned))
+            .is_some_and(|v| v == "0")
+    }
+    #[cfg(not(any(test, feature = "lab-observe")))]
+    {
+        false
+    }
 }
 
 /// 区画 1 つが起動の時に確保する byte のうち、バッチの置き場の外のもの:front との受け渡しのバッチ、在庫の置き場、
@@ -87,6 +107,25 @@ pub(crate) fn part_bytes(batching: crate::batching::Batching) -> usize {
     LANE_BATCHES * Batch::bytes()
         + STOCK_CAP * size_of::<Item>()
         + batching.slots() * size_of::<(u64, Instant, usize)>()
+}
+
+/// 核が答えを返す TCP の segment か:中身を持つか、SYN か FIN を持つ。中身の無い ACK には核は答えないので、相乗りの
+/// 在庫を付けない。付けると使われない予約が passive keepalive を消し、相手が黙った後のハンドシェイクの時機を
+/// Inline からずらす (I8)。
+pub(crate) fn needs_reply(p: &[u8]) -> bool {
+    if p.len() < 20 || p[9] != 6 {
+        return false;
+    }
+    let ihl = usize::from(p[0] & 0x0f) * 4;
+    let total = usize::from(u16::from_be_bytes([p[2], p[3]])).min(p.len());
+    let Some(tcp) = p.get(ihl..total) else {
+        return false;
+    };
+    if tcp.len() < 20 {
+        return false;
+    }
+    let doff = usize::from(tcp[12] >> 4) * 4;
+    tcp.len() > doff || tcp[13] & 0x03 != 0
 }
 
 /// 予約した番号 1 つ。
@@ -109,6 +148,8 @@ pub(crate) struct Batch {
     data: Box<[u8]>,
     used: usize,
     lens: Vec<u16>,
+    /// 答えを生む packet (中身か SYN か FIN を持つ TCP) の数。相乗りの在庫はこの数までにする。
+    replies: usize,
     pub(crate) stock: Vec<Item>,
 }
 
@@ -118,6 +159,7 @@ impl Batch {
             data: vec![0; BATCH_BYTES].into_boxed_slice(),
             used: 0,
             lens: Vec::with_capacity(BATCH_PACKETS),
+            replies: 0,
             stock: Vec::with_capacity(BATCH_STOCK),
         }
     }
@@ -138,7 +180,15 @@ impl Batch {
         self.data[self.used..self.used + p.len()].copy_from_slice(p);
         self.used += p.len();
         self.lens.push(len);
+        if needs_reply(p) {
+            self.replies += 1;
+        }
         true
+    }
+
+    /// 答えを生む packet の数。
+    pub(crate) fn replies(&self) -> usize {
+        self.replies
     }
 
     /// 在庫を足す。入らなければ返す。
@@ -176,6 +226,7 @@ impl Batch {
     pub(crate) fn clear(&mut self) {
         self.used = 0;
         self.lens.clear();
+        self.replies = 0;
         self.stock.clear();
     }
 }

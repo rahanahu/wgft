@@ -19,7 +19,7 @@ use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::task::Waker;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
@@ -460,5 +460,56 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
             },
         }
         link.bell.awake();
+    }
+}
+
+/// 止める時の最後の送り出し:中継の task を落とした後に核に残った出力 (中継の接続を切る RST) を、front に在庫を
+/// 求めて送る。front は区画がすべて止まるまで止まらない。在庫かソケットを `FINAL_WAIT` より長く待てば諦める。
+pub(in crate::dataplane) async fn final_flush<U: Upper>(
+    local: &Local<U>,
+    send: &mut PartSend,
+    sink: &mut PartSocket,
+) {
+    const FINAL_WAIT: Duration = Duration::from_millis(500);
+    const FINAL_PACKETS: usize = 4096;
+    let hub = Arc::clone(&send.hub);
+    let k = send.k;
+    let deadline = tokio::time::Instant::now() + FINAL_WAIT;
+    let mut left = FINAL_PACKETS;
+    while left > 0 && !hub.is_ending() {
+        let now = clock::now();
+        take_lane(local, send, now);
+        let (pulled, state) = {
+            let mut guard = local.0.borrow();
+            let vlen = send.tx.slots();
+            send.send_batch(&mut *guard, sink, now, vlen)
+        };
+        left = left.saturating_sub(pulled);
+        match state {
+            PartSent::Full => {}
+            PartSent::Idle => return,
+            PartSent::Starved => {
+                let link = &hub.links[k];
+                link.bell.sleep();
+                if !link.to_part.has_items() {
+                    let woke =
+                        tokio::time::timeout_at(deadline, link.bell.notifier().0.notified()).await;
+                    if woke.is_err() {
+                        link.bell.awake();
+                        return;
+                    }
+                }
+                link.bell.awake();
+            }
+            PartSent::Blocked => {
+                match tokio::time::timeout_at(deadline, sink.0.writable()).await {
+                    Ok(Ok(mut g)) => {
+                        send.write_blocked = false;
+                        g.retain_ready();
+                    }
+                    _ => return,
+                }
+            }
+        }
     }
 }

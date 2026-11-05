@@ -32,6 +32,8 @@ pub(crate) enum Route {
 pub(crate) struct Steer {
     hasher: RandomState,
     parts: usize,
+    /// TCP を振る最初の区画。0 は E2a (区画 0 にも振る)、1 は E2a' (区画 0 に TCP を置かない、P ≥ 3 だけ)。
+    tcp_lo: usize,
     /// 自分のトンネルのアドレス (network の順の値)。
     addr: u32,
 }
@@ -42,8 +44,17 @@ impl Steer {
         Self {
             hasher: RandomState::new(),
             parts: parts.max(1),
+            tcp_lo: 0,
             addr: addr.to_bits(),
         }
+    }
+
+    /// E2a' の比べの腕:TCP を区画 1 から P - 1 にだけ振る。P が 3 未満なら何もしない (TCP の区画が 1 つになる)。
+    pub(crate) fn without_tcp_on_zero(mut self) -> Self {
+        if self.parts >= 3 {
+            self.tcp_lo = 1;
+        }
+        self
     }
 
     /// 区画の数。
@@ -58,7 +69,7 @@ impl Steer {
             .hasher
             .hash_one((tunnel, IPPROTO_TCP, lport, raddr, rport));
         // 掛けて上位を取る。剰余より偏りが小さい
-        ((u128::from(h) * self.parts as u128) >> 64) as usize
+        self.tcp_lo + ((u128::from(h) * (self.parts - self.tcp_lo) as u128) >> 64) as usize
     }
 
     /// トンネル `tunnel` から受けた復号済みの IPv4 の packet の行き先。

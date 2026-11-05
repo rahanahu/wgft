@@ -689,9 +689,10 @@ impl Manager {
                     .into_iter()
                     .map(|s| {
                         let key = s.key;
+                        let budget = Arc::clone(&s.budget);
                         let first = start(net, s);
                         match others.remove(&key) {
-                            Some(rest) => all_partitions(first, rest),
+                            Some(rest) => all_partitions(first, rest, &budget),
                             None => first,
                         }
                     })
@@ -908,6 +909,7 @@ fn start_tcp(net: &Net, s: Spec) -> Result<Running, String> {
 fn all_partitions(
     first: Result<Running, String>,
     rest: Vec<Result<Running, String>>,
+    budget: &flowpool::Listener,
 ) -> Result<Running, String> {
     let mut ok = Vec::new();
     let mut err = None;
@@ -920,6 +922,8 @@ fn all_partitions(
         }
     }
     if let Some(e) = err {
+        // 開けた区画が予算の枠を受け付けにしたので、開けなかった待ち受けと同じく受け付けない状態に戻す
+        budget.stop_accepting();
         for r in ok {
             let _ = r.stop.send(());
         }

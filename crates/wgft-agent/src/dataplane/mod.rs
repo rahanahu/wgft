@@ -579,15 +579,10 @@ impl<U: Upper> Dataplane<U> {
     /// Stops the runtime, joins the thread, closes the layer above and returns what the next
     /// generation needs. After a panic in the layer above, the carry has no budget.
     pub async fn stop(mut self) -> Carry<U::Budget> {
-        let _ = self.commands.send(Command::Stop).await;
+        // Hash S:区画を先に止める。区画は落とした中継の接続の RST を、front に在庫を求めて送ってから終わる
         for p in &self.parts {
             let _ = p.send(Command::Stop).await;
         }
-        let last = self.unix_high_water();
-        let exit = match self.thread.take() {
-            Some(t) => join(t).await,
-            None => None,
-        };
         let mut budgets = Vec::new();
         for t in self.part_threads.drain(..) {
             budgets.push(
@@ -597,6 +592,12 @@ impl<U: Upper> Dataplane<U> {
                     .flatten(),
             );
         }
+        let _ = self.commands.send(Command::Stop).await;
+        let last = self.unix_high_water();
+        let exit = match self.thread.take() {
+            Some(t) => join(t).await,
+            None => None,
+        };
         let exit = match (exit, self.rejoin.take()) {
             (Some(mut exit), Some(rejoin)) => {
                 budgets.insert(0, exit.budget.take());
