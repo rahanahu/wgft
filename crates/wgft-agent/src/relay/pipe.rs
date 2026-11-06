@@ -265,10 +265,48 @@ async fn sleep_until(deadline: Option<Instant>) {
 async fn read_lan(lan: &LanStream, dst: &mut [u8]) -> io::Result<usize> {
     loop {
         lan.readable().await?;
-        match lan.try_read(dst) {
+        match try_read_lan(lan, dst) {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
             r => return r,
         }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn try_read_lan(lan: &LanStream, dst: &mut [u8]) -> io::Result<usize> {
+    lan.try_read(dst)
+}
+
+/// 求めた長さより少なく読めたら、ソケットの待ち行列は空になった。それを `WouldBlock` として try_io に
+/// 返して準備の印を消させ、次の読みが EAGAIN になるのを避ける (driver.rs の UDP と同じ手)。
+/// ただし FIN や誤りが待ち行列の後ろに付いているときは、エッジ型の通知がもう済んでいて、印を消すと
+/// EOF や誤りを永久に待つ。閉包の中で今の準備を見て、読みの閉じか誤りの印があれば消さない。
+/// 見る準備は try_io が消す印の世代と同じかそれより新しいので、見落とした知らせは世代が新しく残る
+#[cfg(target_os = "linux")]
+fn try_read_lan(lan: &LanStream, dst: &mut [u8]) -> io::Result<usize> {
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+    let want = dst.len();
+    let mut short = None;
+    let got = lan.try_io(tokio::io::Interest::READABLE, || {
+        let n = lan.try_read(dst)?;
+        if n > 0 && n < want {
+            let mut cx = Context::from_waker(Waker::noop());
+            let mut ready = pin!(lan.ready(tokio::io::Interest::READABLE));
+            let closing = match ready.as_mut().poll(&mut cx) {
+                Poll::Ready(Ok(r)) => r.is_read_closed() || r.is_error(),
+                _ => false,
+            };
+            if !closing {
+                short = Some(n);
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+        }
+        Ok(n)
+    });
+    match (got, short) {
+        (_, Some(n)) => Ok(n),
+        (got, None) => got,
     }
 }
 
