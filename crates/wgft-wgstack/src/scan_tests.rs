@@ -4,7 +4,7 @@
 //! 主な検査は `clippy.toml` の禁止の一覧で、clippy は型と経路を解決して確かめます。
 //! この試験はその補いです。clippy の一覧から項目が消えていないこと、crate が依存を持たないこと、clippy が
 //! 見ない cfg (`fuzzing`、故障の注入) の中のコードも禁止の語を使わないことを確かめます。
-//! 文字列の照合なので、注釈と試験の module (`#[cfg(test)]` の行より後ろと `tests.rs`) は見ません。
+//! 文字列の照合なので、注釈と試験の module (`#[cfg(test)]` の行より後ろと `tests.rs`、`tests/` の下) は見ません。
 
 #![expect(
     clippy::disallowed_types,
@@ -148,7 +148,11 @@ fn product_source_uses_no_forbidden_names() {
     let mut bad = Vec::new();
     for f in &files {
         let name = f.file_name().unwrap().to_str().unwrap();
-        if name == "tests.rs" || name.ends_with("_tests.rs") {
+        let in_tests_dir = f
+            .parent()
+            .and_then(|d| d.file_name())
+            .is_some_and(|d| d == "tests");
+        if name == "tests.rs" || name.ends_with("_tests.rs") || in_tests_dir {
             continue;
         }
         let text = std::fs::read_to_string(f).unwrap();
