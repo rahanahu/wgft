@@ -807,3 +807,49 @@ fn fragmented_udp_ids_without_other_traffic() {
     assert!(b.iter().all(|p| ip_id(p) == ip_id(&b[0])));
     assert_ne!(ip_id(&a[0]), ip_id(&b[0]));
 }
+
+fn echo_reply_id(n: &mut TestNet) -> u16 {
+    n.write(&build_icmp(PEER, &[ECHO, 0, 0, 0, 0, 1, 0, 1, b'x']));
+    let r = n.drain_raw();
+    assert_eq!(r.len(), 1);
+    ip_id(&r[0])
+}
+
+/// 非 atomic の数えが 16 bit を一周するとき、UDP の datagram も echo の応答も 0xffff の次に 1 を使います。
+/// 0 は使いません (RFC 6864 の読み方は PR の説明に従います)。
+#[test]
+fn open_id_counter_wraps_past_zero() {
+    let mut n = TestNet::new(small_limits());
+    let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    n.s.s.ip_id_open = 0xfffe;
+    assert_eq!(ip_id(&send_udp_and_drain(&mut n, pc, 10)[0]), 0xffff);
+    assert_eq!(ip_id(&send_udp_and_drain(&mut n, pc, 10)[0]), 1);
+    n.s.s.ip_id_open = 0xfffe;
+    assert_eq!(echo_reply_id(&mut n), 0xffff);
+    assert_eq!(echo_reply_id(&mut n), 1);
+    n.s.s.ip_id_open = 0xfffe;
+    assert_eq!(echo_reply_id(&mut n), 0xffff);
+    assert_eq!(ip_id(&send_udp_and_drain(&mut n, pc, 10)[0]), 1);
+    assert_eq!(echo_reply_id(&mut n), 2);
+}
+
+/// 凍結した Go との照合の切り替えでは、数えを共有し、UDP は 0 を飛ばし、echo の応答は飛ばしません。
+#[cfg(feature = "harness")]
+#[test]
+fn go_compat_shared_id_wrap_skips_zero_for_udp_only() {
+    crate::stack::set_go_compat_shared_id(true);
+    let mut n = TestNet::new(small_limits());
+    let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    n.s.s.ip_id = 0xfffe;
+    assert_eq!(ip_id(&send_udp_and_drain(&mut n, pc, 10)[0]), 0xffff);
+    assert_eq!(
+        ip_id(&send_udp_and_drain(&mut n, pc, 10)[0]),
+        1,
+        "UDP skips 0"
+    );
+    n.s.s.ip_id = 0xfffe;
+    assert_eq!(echo_reply_id(&mut n), 0xffff);
+    assert_eq!(echo_reply_id(&mut n), 0, "an echo reply does not skip 0");
+    assert_eq!(echo_reply_id(&mut n), 1);
+    crate::stack::set_go_compat_shared_id(false);
+}
