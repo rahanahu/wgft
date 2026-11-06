@@ -485,6 +485,7 @@ fn assert_switches_off(when: &str) {
         "dsack_snd_una {when}"
     );
     assert!(!wgft_wgstack::go_compat_row_rst(), "row_rst {when}");
+    assert!(!wgft_wgstack::go_compat_synack_rto(), "synack_rto {when}");
 }
 
 #[test]

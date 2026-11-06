@@ -19,7 +19,7 @@ use super::syn::SynRow;
 use super::timewait::{TwRow, TwState};
 use super::{
     FIN_TIMEOUT, INITIAL_WINDOW_SEGS, IP_TCP_HEADERS, NUM_TIMERS32, RCV_WINDOW_SHIFT, RTO_INIT,
-    TS_OPTION_LEN, TW_TIMEOUT, listen,
+    RTO_SYNACK_RETX, TS_OPTION_LEN, TW_TIMEOUT, listen,
 };
 use crate::buf::{RECV_FLOOR, SEND_FLOOR};
 use crate::output::NIL;
@@ -169,16 +169,26 @@ impl Conn<'_> {
         let seed = self.s.random_below(1 << 62);
         self.b.rcv.restart(RECV_FLOOR, seed);
         self.b.recs.clear();
+        let mut sampled = false;
         if self.t.ts_ok
             && let Some((ts_val, ts_ecr)) = seg.opt.ts
         {
             (self.t.ts_recent, self.t.ts_recent_at) = (ts_val, now);
             // cookie の TSval は下位の bit に option を入れたので、RTT の標本にしません。
             if ts_ecr != 0 && !r.cookie {
-                self.ts_rtt_sample(ts_ecr, now);
+                sampled = self.ts_rtt_sample(ts_ecr, now) >= 0;
             }
         } else if !r.rtx && r.sent_at.as_nanos() != 0 {
             self.rtt_sample(now - crate::stack::ns(r.sent_at));
+            sampled = true;
+        }
+        // RFC 6298 5.7:SYN-ACK を再送して RTT の標本を取れなかった接続は、最初の RTO を 3 秒にします。
+        #[cfg(feature = "harness")]
+        let go_compat = crate::stack::go_compat_synack_rto(); // 凍結した Go の記録との照合用: 1 秒のまま
+        #[cfg(not(feature = "harness"))]
+        let go_compat = false;
+        if r.rtx && !sampled && !go_compat {
+            self.t.rto = RTO_SYNACK_RETX;
         }
         let mss = self.seg_mss();
         self.t.cwnd = if r.rtx {

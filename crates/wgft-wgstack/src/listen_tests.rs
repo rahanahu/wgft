@@ -905,3 +905,218 @@ fn resent_syns_before_a_poll_collapse_into_one_syn_ack() {
     );
     assert_eq!(n.s.held().syn_rows, 1);
 }
+
+// RFC 6298 5.7:SYN-ACK を再送して RTT の標本が取れなかった接続の最初の RTO は 3 秒
+
+/// 接続 `c` で 100 byte を送り、相手が何も確認しないまま最初の RTO が起きるまでの時間を 10 ms の刻みで返します。
+fn first_rto_delay(n: &mut TestNet, c: crate::ConnId) -> Duration {
+    assert_eq!(n.s.write(n.now, c, &[7u8; 100]), Ok(100));
+    n.drain();
+    let rtos = n.s.stats().rtos;
+    let mut waited = Duration::ZERO;
+    while n.s.stats().rtos == rtos {
+        assert!(waited < Duration::from_secs(30), "no RTO within 30 s");
+        n.advance(Duration::from_millis(10));
+        n.drain();
+        waited += Duration::from_millis(10);
+    }
+    waited
+}
+
+/// timestamp の無い接続の SYN-ACK を再送したなら、握手から RTT の標本を取れず、最初の RTO は 3 秒です。
+#[test]
+fn rfc6298_retransmitted_synack_without_timestamps_sets_rto_to_3s() {
+    let mut n = TestNet::new(small_limits());
+    n.advance(Duration::from_secs(5)); // 時刻 0 は「送っていない」を意味するので避けます
+    let l = n.listen(80);
+    let mut p = n.syn_sack(40000, 80, false, false, false);
+    n.advance(Duration::from_millis(1100));
+    let outs = n.drain();
+    assert!(
+        outs.len() == 1 && outs[0].flags == FLAG_SYN | FLAG_ACK,
+        "the SYN-ACK was not retransmitted: {}",
+        show(&outs)
+    );
+    n.peer_ack(&mut p, &[]);
+    let c = n.accept(l);
+    n.drain();
+    let d = first_rto_delay(&mut n, c);
+    assert!(
+        d >= Duration::from_secs(3) && d < Duration::from_millis(3200),
+        "the first RTO came after {d:?}, want 3 s"
+    );
+}
+
+/// 対照:SYN-ACK を再送しなかった接続は握手から標本を取るので、最初の RTO は 3 秒にはなりません。
+#[test]
+fn rfc6298_first_synack_without_timestamps_keeps_a_sampled_rto() {
+    let mut n = TestNet::new(small_limits());
+    n.advance(Duration::from_secs(5)); // 時刻 0 は「送っていない」を意味するので避けます
+    let l = n.listen(80);
+    let mut p = n.syn_sack(40000, 80, false, false, false);
+    n.advance(Duration::from_millis(50));
+    n.peer_ack(&mut p, &[]);
+    let c = n.accept(l);
+    n.drain();
+    let d = first_rto_delay(&mut n, c);
+    assert!(d < Duration::from_secs(1), "the first RTO came after {d:?}");
+}
+
+/// 再送した SYN-ACK を受けて確立する cookie の行も、標本を取れないので最初の RTO は 3 秒です。
+#[test]
+fn rfc6298_retransmitted_synack_of_a_cookie_row_sets_rto_to_3s() {
+    let (mut n, l) = flooded();
+    let mut p = cookie_then_full_queue(&mut n, 42000);
+    n.peer_ack(&mut p, &[]);
+    assert_eq!(n.s.stats().syn_cookies_deferred, 1);
+    n.advance(Duration::from_secs(1));
+    let outs = n.drain();
+    assert!(
+        outs.iter()
+            .any(|o| o.rport == 42000 && o.flags == FLAG_SYN | FLAG_ACK),
+        "the row did not retransmit its SYN-ACK: {}",
+        show(&outs)
+    );
+    let _ = n.accept(l);
+    n.peer_ack(&mut p, &[]);
+    let mut c = None;
+    while let Ok((id, from)) = n.s.accept(n.now, l) {
+        if from.port() == 42000 {
+            c = Some(id);
+        }
+    }
+    let c = c.expect("the row made a connection");
+    n.drain();
+    let d = first_rto_delay(&mut n, c);
+    assert!(
+        d >= Duration::from_secs(3) && d < Duration::from_millis(3200),
+        "the first RTO came after {d:?}, want 3 s"
+    );
+}
+
+/// 凍結した Go との照合用の切り替え (feature `harness` だけ):SYN-ACK を再送した接続の最初の RTO が、3 秒でなく
+/// 初期値の 1 秒のままになります。
+#[cfg(feature = "harness")]
+#[test]
+fn go_compat_switch_keeps_the_initial_rto_after_a_retransmitted_synack() {
+    crate::set_go_compat_synack_rto(true);
+    let mut n = TestNet::new(small_limits());
+    n.advance(Duration::from_secs(5));
+    let l = n.listen(80);
+    let mut p = n.syn_sack(40000, 80, false, false, false);
+    n.advance(Duration::from_millis(1100));
+    let outs = n.drain();
+    assert!(
+        outs.len() == 1 && outs[0].flags == FLAG_SYN | FLAG_ACK,
+        "the SYN-ACK was not retransmitted: {}",
+        show(&outs)
+    );
+    n.peer_ack(&mut p, &[]);
+    let c = n.accept(l);
+    n.drain();
+    let d = first_rto_delay(&mut n, c);
+    crate::set_go_compat_synack_rto(false);
+    assert!(
+        d >= Duration::from_secs(1) && d < Duration::from_millis(1200),
+        "the first RTO came after {d:?}, want 1 s"
+    );
+}
+
+// 波形の試験:RFC 6298 5.7。最初のデータの再送が wire に現れる時刻だけを見ます。
+//
+// TLP (RFC 8985 7) は、接続が RTT の標本を一度も取っていなければ arm しません (`tlp_sampled`)。標本の無い接続の最初の
+// 再送は RTO によるので、TLP を止める操作はいりません。この前提が崩れて TLP が先に再送すれば、下の試験は 3 秒より
+// 早い再送を見て落ちます。
+
+/// 接続 `c` で 100 byte を送り、相手が何も確認しないまま、その segment が再送されて wire に現れるまでの時間を 10 ms の
+/// 刻みで返します。
+fn first_data_retransmit_delay(n: &mut TestNet, c: crate::ConnId) -> Duration {
+    assert_eq!(n.s.write(n.now, c, &[7u8; 100]), Ok(100));
+    let sent = n.drain();
+    assert!(
+        sent.len() == 1 && sent[0].payload.len() == 100,
+        "{}",
+        show(&sent)
+    );
+    let mut waited = Duration::ZERO;
+    loop {
+        assert!(
+            waited < Duration::from_secs(30),
+            "no retransmission in 30 s"
+        );
+        n.advance(Duration::from_millis(10));
+        waited += Duration::from_millis(10);
+        if n.drain()
+            .iter()
+            .any(|o| o.seq == sent[0].seq && !o.payload.is_empty())
+        {
+            return waited;
+        }
+    }
+}
+
+fn in_3s(d: Duration) -> bool {
+    d >= Duration::from_secs(3) && d < Duration::from_millis(3200)
+}
+
+#[test]
+fn rfc6298_wire_data_retransmit_after_a_retransmitted_synack_comes_at_3s() {
+    let mut n = TestNet::new(small_limits());
+    n.advance(Duration::from_secs(5)); // 時刻 0 は避けます (別の試験で確かめます)
+    let l = n.listen(80);
+    let mut p = n.syn_sack(40000, 80, false, false, false);
+    n.advance(Duration::from_millis(1100));
+    let outs = n.drain();
+    assert!(
+        outs.len() == 1 && outs[0].flags == FLAG_SYN | FLAG_ACK,
+        "the SYN-ACK was not retransmitted: {}",
+        show(&outs)
+    );
+    n.peer_ack(&mut p, &[]);
+    let c = n.accept(l);
+    n.drain();
+    let d = first_data_retransmit_delay(&mut n, c);
+    assert!(in_3s(d), "the data was retransmitted after {d:?}, want 3 s");
+}
+
+#[test]
+fn rfc6298_wire_data_retransmit_of_a_cookie_row_comes_at_3s() {
+    let (mut n, l) = flooded();
+    let mut p = cookie_then_full_queue(&mut n, 42000);
+    n.peer_ack(&mut p, &[]);
+    n.advance(Duration::from_secs(1));
+    let outs = n.drain();
+    assert!(
+        outs.iter()
+            .any(|o| o.rport == 42000 && o.flags == FLAG_SYN | FLAG_ACK),
+        "the row did not retransmit its SYN-ACK: {}",
+        show(&outs)
+    );
+    let _ = n.accept(l);
+    n.peer_ack(&mut p, &[]);
+    let mut c = None;
+    while let Ok((id, from)) = n.s.accept(n.now, l) {
+        if from.port() == 42000 {
+            c = Some(id);
+        }
+    }
+    let c = c.expect("the row made a connection");
+    n.drain();
+    let d = first_data_retransmit_delay(&mut n, c);
+    assert!(in_3s(d), "the data was retransmitted after {d:?}, want 3 s");
+}
+
+/// 対照:SYN-ACK を再送しなかった接続は握手の標本で RTO を決めるので、3 秒より前に再送します。
+#[test]
+fn rfc6298_wire_data_retransmit_after_a_first_synack_comes_before_1s() {
+    let mut n = TestNet::new(small_limits());
+    n.advance(Duration::from_secs(5));
+    let l = n.listen(80);
+    let mut p = n.syn_sack(40000, 80, false, false, false);
+    n.advance(Duration::from_millis(50));
+    n.peer_ack(&mut p, &[]);
+    let c = n.accept(l);
+    n.drain();
+    let d = first_data_retransmit_delay(&mut n, c);
+    assert!(d < Duration::from_secs(1), "retransmitted after {d:?}");
+}

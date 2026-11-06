@@ -72,6 +72,10 @@ Go の文書と食い違う点は、この文書が理由と共に挙げたも�
   - RFC 8985 の「RFC 6675 をそのまま RACK-TLP と使わない」を、wgstack の変えた回復が満たすか
   - 1 回の起床で複数の segment を受けた時に、最初の SACK の block が ACK を起こした segment を含むか (RFC 2018 4 節の MUST)
   - MUST-23 が受け身の側の SYN-ACK に当てはまるか
+  - RFC 6298 5.7 の「SYN-ACK を再送したら確立の後の RTO を 3 秒に戻す」(MUST) は、握手が RTT の標本を与えなかった接続にだけ当てはめます。
+    付録 A が、timestamp があれば SYN-ACK の再送の後でも標本を取れるとし、標本を取れた接続の RTO は測った値で決まるためです。
+    標本を取れた接続にも 3 秒を求める読みなら、再送した接続はすべて 3 秒にします (RFC からの読みで、測っていません)。
+    相手が SYN を再送して核が SYN-ACK を送り直した場合も再送として扱い、3 秒は RFC 6298 2.1 が認める 1 秒を超える値です
 
 逸脱は次の 5 つに分けます。
 
@@ -210,7 +214,6 @@ SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表
 次の逸脱は別の PR で直すので、例外として記録しません。
 直しが入ったら行を消します。
 
-- RFC 6298 5.7:SYN-ACK を再送して RTT の標本の無い接続の RTO を、確立の後に 3 秒に戻しません
 - RFC 7323 5.3:TIME_WAIT の接続と行で PAWS を行いません
 - RFC 5681 3 節:HyStart++ (RFC 9406) の外の slow start でも 1 ACK の増分の上限 L を 2 にします
 - RFC 6864 4.3:IPv4 の ID の数えを核の全体で 1 つにし、DF を立てた TCP の segment も非 atomic の datagram と同じ数えを進めます
@@ -1236,6 +1239,7 @@ cookie の値の行は、行を作った時刻から普通の行と同じ予定�
 最初の SYN は cookie で応えたので、行には SYN からの再送の履歴が無く、回数は行を作った時から数えます。
 間隔は 1 秒以上で、確立した相手が SYN-ACK の写しに返す ACK の速さの制限 (Linux では 1 つの接続に 500 ms に 1 回) より長くなります。
 
+再送した SYN-ACK を受けて確立した接続は、cookie の値の行が RTT の標本を取らないので、最初の RTO を 3 秒にします (RFC 6298 5.7)。
 再送する SYN-ACK は cookie の ISN と、cookie から取り戻した option を繰り返します。
 行が持てるのは cookie が運ぶものだけです。
 MSS は表の値に丸め、窓の scale と SACK の許可は相手が timestamp を示した時だけ持ちます。
@@ -1425,6 +1429,7 @@ Go の記録との照合だけが、それぞれの照合用の切り替えで G
 | `set_go_compat_rto_l2` | RTO の後の slow start の増分を L = 2 のままにします | L = 1 にします (RFC 3465 2.3) | 2694 件の記録を、RTO より後の応答まで照らし続けるため | 14 / 2694 | `cc_tests::rto_slow_start_limit`、`rto_l1_tests`、`rto_wire_tests` |
 | `set_go_compat_dsack_snd_una` | D-SACK の判定で先頭の block を SND.UNA と比べます | 同じ packet の累積の ACK と比べます (RFC 2883 5 節) | 26 件の記録を、並べ替えられた古い ACK より後の応答まで照らし続けるため | 0 / 26 (adversarial) | `undo_tests::rfc2883_*` |
 | `set_go_compat_row_rst` | 握手の途中の行は窓の内のどの RST でも消え、受け入れの判定は窓の右端を含みます。TIME_WAIT の枠と行、FIN_WAIT_2 の行は窓の内で番号の合わない RST に challenge ACK を返しません | 番号が IRS + 1 か RCV.NXT に等しい RST だけが消え、窓の内の他の RST には challenge ACK を返します。受け入れの判定は右端を含みません (RFC 5961 3.2、RFC 9293 3.10.7.4) | 72 件の記録を、行の RST より後の応答まで照らし続けるため | 0 / 72 (fuzzcore) | `tcp_tests::rfc5961_*`、`rfc9293_syn_rcvd_*` |
+| `set_go_compat_synack_rto` | SYN-ACK を再送した接続の最初の RTO は 1 秒のままです | 握手が RTT の標本を与えなかった接続は、確立の時に RTO を 3 秒にします。cookie の値の行も含みます (RFC 6298 5.7) | 520 件の記録を、最初の RTO より後の応答まで照らし続けるため | 7 / 520 (fuzzcore) | `listen_tests::rfc6298_*` |
 
 ## 置き換えの判定
 

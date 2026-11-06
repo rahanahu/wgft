@@ -664,6 +664,7 @@ CLOSED の枠は 4 つ組の hash の表から外れ、送信の輪を返しま�
   200 ms は Linux の最小の RTO で、Linux と同じく RTTVAR の項の下限に置き、RTTVAR の小さな経路でも Linux より早く RTO を起こしません([RACK-TLP](wgstack-performance.md#rack-tlp)のタイマーの規則)。
   RFC 6298 2.4 は 1 秒未満の RTO を 1 秒に切り上げるよう求めます(SHOULD)。
   Linux に合わせた 200 ms の下限はこれから外れる意図した選択で、RTTVAR の項に掛けた分だけ RFC の値に近づきます。
+  Rust 版は、SYN-ACK を再送して握手から RTT の標本を取れなかった接続の最初の RTO を、確立の時に 3 秒にします(RFC 6298 5.7)。cookie の値の行から作った接続も含みます。凍結した Go は 1 秒のままです。
   RTO の値は、黙った後の輻輳の窓の戻し(RFC 5681 4.1)の閾値、窓の probe の間隔、黙った後に遅らせずに返す ACK(quickack)の閾値にも使います
 - RFC 7323:窓の scale、timestamp による RTT の測定、PAWS を持ちます。
   TS.Recent を 24 日を超えて更新していない接続は、PAWS で比べずに受け入れます(5.5 節)。
