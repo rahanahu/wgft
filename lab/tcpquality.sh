@@ -173,7 +173,8 @@
 # LAN host through a UDP rule (41802 to 192.168.50.3:25802) at that rate, from half a second after the
 # transfer starts for IPERF_S - 1 seconds, whatever the direction of the TCP transfer; the LAN host
 # discards and counts it (tcpquality.py usink). The datagrams reach the agent's receive path from the
-# server. The result line has udp_blast_sent, udp_blast_mbit (the rate the sender reached; a python
+# server. The result line has udp_blast_sent, udp_blast_send_err (sends the sender's own socket refused, which
+# are neither sent nor lost on the path), udp_blast_mbit (the rate the sender reached; a python
 # sender manages about 1 Gbit/s), udp_blast_recv and udp_blast_lost (sent - received).
 #
 # UDPPING=1 also stamps the echo's receive time when the echo runs in this VM (not with TARGET_LOCAL), so

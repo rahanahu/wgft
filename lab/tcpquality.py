@@ -117,7 +117,8 @@
 #   ublast <ip> <port> <mbit> <seconds> [size]
 #       sends UDP datagrams of <size> bytes (1200 by default, at least 16) at <mbit> Mbit/s for <seconds>,
 #       paced in 1 ms steps, each carrying a sequence number; prints udp_blast_sent, udp_blast_bytes and the
-#       rate it reached in udp_blast_mbit. A python sender reaches roughly 1 Gbit/s at 1200 bytes.
+#       rate it reached in udp_blast_mbit, all counting only the sends that succeeded; sends the local
+#       socket refused, such as ENOBUFS, are counted in udp_blast_send_err and take no sequence number. A python sender reaches roughly 1 Gbit/s at 1200 bytes.
 #   usink <ip> <port> <statsfile>
 #       the receiver of ublast: discards the datagrams and rewrites <statsfile> twice a second with
 #       "recv=<datagrams> bytes=<bytes> lost=<gaps in the sequence numbers>".
@@ -1249,26 +1250,30 @@ def ublast(ip, port, mbit, seconds, size="1200"):
     pad = bytes(size - 8)
     start = time.monotonic()
     stop = start + float(seconds)
-    seq = 0
+    seq = 0  # datagrams sent; also the next sequence number, so that a failed send leaves no gap for usink to count as lost
+    tried = 0  # send attempts, which pace the loop
+    err = 0  # sends the local socket refused, for example ENOBUFS; not path loss
     tick = start
     while True:
         now = time.monotonic()
         if now >= stop:
             break
         # the datagrams due by now, so that a late wake-up sends its share at once and the mean rate holds
-        due = (now - start) * 1000 * per_ms - seq
+        due = (now - start) * 1000 * per_ms - tried
         for _ in range(int(due)):
+            tried += 1
             try:
                 s.send(struct.pack("!Q", seq) + pad)
             except OSError:
-                pass
+                err += 1
+                continue
             seq += 1
         tick += 0.001
         wait = tick - time.monotonic()
         if wait > 0:
             time.sleep(wait)
     took = max(time.monotonic() - start, 1e-9)
-    print("udp_blast_sent=%d udp_blast_bytes=%d udp_blast_mbit=%.1f" % (seq, seq * size, seq * size * 8 / took / 1e6), flush=True)
+    print("udp_blast_sent=%d udp_blast_send_err=%d udp_blast_bytes=%d udp_blast_mbit=%.1f" % (seq, err, seq * size, seq * size * 8 / took / 1e6), flush=True)
     return 0
 
 

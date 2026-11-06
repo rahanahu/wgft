@@ -943,6 +943,15 @@ class RxQueueTools(unittest.TestCase):
         self.assertGreater(int(got["recv"]), 0.9 * int(out["udp_blast_sent"]))
         self.assertEqual(int(got["bytes"]), int(got["recv"]) * 1000)
 
+    def test_ublast_counts_a_refused_send_as_an_error_not_as_sent(self):
+        # nothing listens on the port, so the ICMP port unreachable makes later sends fail with ECONNREFUSED
+        port = self.free_port()
+        out = dict(kv.split("=") for kv in self.run_tq("ublast", "127.0.0.1", str(port), "40", "1", "1000").split())
+        sent, err = int(out["udp_blast_sent"]), int(out["udp_blast_send_err"])
+        self.assertGreater(err, 0)
+        self.assertAlmostEqual(sent + err, 5000, delta=300)
+        self.assertEqual(int(out["udp_blast_bytes"]), sent * 1000)
+
     IPERF = {"end": {"sum_received": {"bytes": 1000000, "seconds": 2.0, "bits_per_second": 4000000.0},
                      "sum_sent": {"bytes": 1000500, "retransmits": 3},
                      "streams": [{"receiver": {"bytes": 600000}}, {"receiver": {"bytes": 400000}}]},
