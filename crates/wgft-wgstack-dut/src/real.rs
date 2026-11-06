@@ -324,8 +324,9 @@ async fn relay_conn(mut tun: TcpStream<Ns>, unix: UnixStream, abort: oneshot::Re
     }
 }
 
-/// 両方の向きを写します。片方の向きの終わりは反対側の送る向きを閉じて伝え、誤りは両方を止めます。
-/// 製品の中継 (`wgft-agent` の `relay::pipe`) と同じ規則です。
+/// 両方の向きを写します。片方の向きの EOF は反対側の送る向きを閉じて伝え、誤りは両方の向きを止めます。
+/// ここまでは製品の中継 (`wgft-agent` の `relay::pipe`) と同じですが、止めた後は違います。製品は LAN の側の誤りの後も
+/// トンネルの側を FIN で終えます (Go の `PipeHold`)。呼び出し側の `relay_conn` は、誤りならトンネルの側を RST で終えます。
 ///
 /// # Errors
 ///
