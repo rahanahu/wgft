@@ -1606,7 +1606,6 @@ fn drop_with_window(
 /// RFC 5681 3.1 の比 (旧 segment size 対 新 segment size) で窓を縮めます。初期窓以外の窓でも切り捨ての比で、
 /// ssthresh は RFC が求めないので変えません。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn pmtu_decrease_scales_a_non_initial_cwnd_and_leaves_ssthresh() {
     for sack in [false, true] {
         let (before, after) = drop_with_window(sack, |_| (20_001, 15_000));
@@ -1619,7 +1618,6 @@ fn pmtu_decrease_scales_a_non_initial_cwnd_and_leaves_ssthresh() {
 
 /// 比で縮めた窓が 1 segment に満たないときは、新しい segment size 1 つ分にします (窓の下限)。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn pmtu_decrease_keeps_one_segment_of_cwnd() {
     for sack in [false, true] {
         let (before, after) = drop_with_window(sack, |old| (old - 1, 4 * old));
@@ -1631,7 +1629,6 @@ fn pmtu_decrease_keeps_one_segment_of_cwnd() {
 
 /// 窓が大きくても (4 MB 超) 比の計算が 32 bit であふれません。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn pmtu_decrease_scales_a_huge_cwnd_without_overflow() {
     for sack in [false, true] {
         let (before, after) = drop_with_window(sack, |_| (5_000_000, 6_000_000));
@@ -1661,7 +1658,6 @@ fn burst_after_drop(sack: bool) -> (u32, u32, Vec<usize>) {
 
 /// 引き下げの直後に出る塊は、10 x 新 MSS byte (初期窓の 10 segment) を超えません。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn burst_after_pmtu_decrease_fits_ten_new_segments() {
     for sack in [false, true] {
         let (old_mss, new_mss, lens) = burst_after_drop(sack);
