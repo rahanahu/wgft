@@ -1555,3 +1555,168 @@ fn go_compat_switch_restores_the_old_row_rst_handling() {
         show(&outs)
     );
 }
+
+// RFC 7323 5.3:TIME_WAIT の接続の枠と表の行の PAWS
+
+/// TIME_WAIT にある接続を作ります。`row` が偽なら接続の枠に、真なら表の行に残ります。
+fn paws_time_wait(row: bool) -> (TestNet, crate::ConnId, PeerConn) {
+    let mut n = net();
+    let (c, mut p) = n.accepted(true);
+    if row {
+        n.s.close_conn(n.now, c);
+    } else {
+        n.s.close_write(n.now, c).unwrap();
+    }
+    let outs = n.drain();
+    p.absorb(&outs);
+    n.peer_ack(&mut p, &[]);
+    n.peer_fin(&mut p);
+    n.drain();
+    if row {
+        assert_eq!(n.s.held().tw_rows, 1);
+    } else {
+        assert_eq!(n.s.conns.tcb(c.slot).state, State::TimeWait);
+    }
+    (n, c, p)
+}
+
+fn paws_tw_alive(n: &TestNet, c: crate::ConnId, row: bool) -> bool {
+    if row {
+        n.s.held().tw_rows == 1
+    } else {
+        n.s.conns.tcb(c.slot).state == State::TimeWait
+    }
+}
+
+/// 再送された FIN で、TSval が `ts_val` のものです。
+fn paws_old_fin(p: &mut PeerConn, ts_val: u32) -> TSeg {
+    let mut s = p.seg(FLAG_ACK | FLAG_FIN, &[]);
+    s.seq = p.snd - 1;
+    s.ts = Some((ts_val, p.dut_ts));
+    s
+}
+
+/// TIME_WAIT は、古い TSval の FIN の写しで期限を数え直しません。
+fn tw_paws_fin_does_not_restart_the_timer(row: bool) {
+    let (mut n, c, mut p) = paws_time_wait(row);
+    n.advance(Duration::from_secs(30));
+    let old = p.ts_val - 1000;
+    let s = paws_old_fin(&mut p, old);
+    n.inject(&s);
+    n.drain();
+    n.advance(Duration::from_secs(31));
+    n.drain();
+    assert!(
+        !paws_tw_alive(&n, c, row),
+        "a FIN copy with an older TSval restarted the TIME_WAIT timer (row {row})"
+    );
+}
+
+/// 対照:TSval が新しい FIN の写しは期限を数え直します。
+fn tw_newer_fin_restarts_the_timer(row: bool) {
+    let (mut n, c, mut p) = paws_time_wait(row);
+    n.advance(Duration::from_secs(30));
+    let newer = p.ts_val + 10;
+    let s = paws_old_fin(&mut p, newer);
+    n.inject(&s);
+    n.drain();
+    n.advance(Duration::from_secs(31));
+    n.drain();
+    assert!(
+        paws_tw_alive(&n, c, row),
+        "a FIN copy with a newer TSval did not restart the TIME_WAIT timer (row {row})"
+    );
+    n.advance(Duration::from_secs(30));
+    n.drain();
+    assert!(!paws_tw_alive(&n, c, row), "the timer never ran out");
+}
+
+#[test]
+#[ignore = "fixed by the next commit"]
+fn rfc7323_time_wait_slot_drops_a_fin_with_an_older_tsval() {
+    tw_paws_fin_does_not_restart_the_timer(false);
+}
+
+#[test]
+#[ignore = "fixed by the next commit"]
+fn rfc7323_time_wait_row_drops_a_fin_with_an_older_tsval() {
+    tw_paws_fin_does_not_restart_the_timer(true);
+}
+
+#[test]
+fn rfc7323_time_wait_slot_still_restarts_on_a_fin_with_a_newer_tsval() {
+    tw_newer_fin_restarts_the_timer(false);
+}
+
+#[test]
+fn rfc7323_time_wait_row_still_restarts_on_a_fin_with_a_newer_tsval() {
+    tw_newer_fin_restarts_the_timer(true);
+}
+
+/// 例外 1:RFC 7323 5.3 の PAWS は RST に適用しません。古い TSval でも、番号の合う RST は TIME_WAIT を閉じます。
+fn tw_paws_rst_exception(row: bool) {
+    let (mut n, c, mut p) = paws_time_wait(row);
+    let mut s = p.seg(FLAG_RST, &[]);
+    s.ts = Some((p.ts_val - 1000, p.dut_ts));
+    n.inject(&s);
+    n.drain();
+    assert!(
+        !paws_tw_alive(&n, c, row),
+        "an RST with an older TSval was dropped (row {row})"
+    );
+}
+
+#[test]
+fn rfc7323_time_wait_slot_accepts_an_rst_with_an_older_tsval() {
+    tw_paws_rst_exception(false);
+}
+
+#[test]
+fn rfc7323_time_wait_row_accepts_an_rst_with_an_older_tsval() {
+    tw_paws_rst_exception(true);
+}
+
+fn tw_syn(p: &PeerConn, ts_val: u32) -> TSeg {
+    TSeg {
+        sport: 40000,
+        dport: 80,
+        seq: p.snd + 100_000,
+        flags: FLAG_SYN,
+        wnd: 65535,
+        mss: 1380,
+        ws: Some(7),
+        ts: Some((ts_val, 0)),
+        ..TSeg::default()
+    }
+}
+
+/// 例外 2:RFC 6191 は TIME_WAIT の 4 つ組への SYN を TSval で決めます。古い TSval の SYN は握手を始めず、新しい
+/// TSval の SYN は始めます。
+fn tw_rfc6191_syn(row: bool) {
+    let (mut n, c, p) = paws_time_wait(row);
+    n.inject(&tw_syn(&p, p.ts_val - 1000));
+    let outs = n.drain();
+    assert!(
+        outs.iter().all(|o| !o.has(FLAG_SYN)) && n.s.held().syn_rows == 0,
+        "a SYN with an older TSval began a handshake (row {row}): {}",
+        show(&outs)
+    );
+    assert!(paws_tw_alive(&n, c, row));
+    n.inject(&tw_syn(&p, p.ts_val + 10));
+    let outs = n.drain();
+    assert!(
+        outs.len() == 1 && outs[0].flags == FLAG_SYN | FLAG_ACK,
+        "a SYN with a newer TSval did not begin a handshake (row {row}): {}",
+        show(&outs)
+    );
+}
+
+#[test]
+fn rfc7323_time_wait_slot_follows_rfc6191_for_a_syn() {
+    tw_rfc6191_syn(false);
+}
+
+#[test]
+fn rfc7323_time_wait_row_follows_rfc6191_for_a_syn() {
+    tw_rfc6191_syn(true);
+}
