@@ -661,7 +661,7 @@ fn fin_wait2_row_ignores_out_of_window_and_paws() {
 fn paws_forgets_ts_recent_after_24_days() {
     let mut n = net();
     let (c, mut p) = n.accepted(true);
-    n.now = n.now + Duration::from_hours(25 * 24);
+    n.now = n.now + Duration::from_secs(25 * 24 * 3600);
     let mut s = p.seg(FLAG_ACK, b"new");
     s.ts = Some((1, p.dut_ts)); // 相手の時計が一周した後の値
     n.inject(&s);
@@ -672,7 +672,7 @@ fn paws_forgets_ts_recent_after_24_days() {
 #[test]
 fn paws_applies_right_after_a_late_handshake() {
     let mut n = net();
-    n.now = n.now + Duration::from_hours(30 * 24);
+    n.now = n.now + Duration::from_secs(30 * 24 * 3600);
     let l = n.listen(80);
     let mut p = PeerConn {
         sport: 40000,

@@ -213,10 +213,16 @@ fn clippy_config_keeps_the_lists() {
 
 #[test]
 fn manifest_has_no_dependencies() {
+    // `cargo package` は manifest を書き直し (ワークスペースの値を写します)、元を `Cargo.toml.orig` に残します。
+    // 単独で試す時はその元を読みます。
+    let orig = crate_dir().join("Cargo.toml.orig");
+    let path = if orig.exists() {
+        orig
+    } else {
+        crate_dir().join("Cargo.toml")
+    };
     // Windows の checkout は改行を CRLF にしえます。
-    let text = std::fs::read_to_string(crate_dir().join("Cargo.toml"))
-        .unwrap()
-        .replace("\r\n", "\n");
+    let text = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
     let mut table = String::new();
     for line in text.lines().map(str::trim) {
         if line.starts_with('[') {

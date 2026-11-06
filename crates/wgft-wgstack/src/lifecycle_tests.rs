@@ -410,7 +410,7 @@ fn stress_with(seed: u64, steps: usize, quiesce: Option<bool>) {
                     2 => Duration::from_millis(r.below(5000)),
                     3 => Duration::from_secs(60),
                     4 => Duration::from_secs(r.below(300)),
-                    _ => Duration::from_hours(25 * 24),
+                    _ => Duration::from_secs(25 * 24 * 3600),
                 };
                 n.advance(d);
                 if let Some(t) = n.s.poll_timeout() {

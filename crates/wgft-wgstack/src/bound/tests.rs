@@ -79,10 +79,17 @@ fn table() -> String {
 
 /// 上界の表は `Bound` の計算から生成し、生成し直しの差分で検査します。`WGFT_UPDATE_GOLDEN=1` を付けたときだけ
 /// ファイルを書き直し、付けないときは差があれば失敗します。
+///
+/// 表は wgft のリポジトリの設計文書にあります。crate を単独で試す時 (`cargo package` の中身) はリポジトリの外を
+/// 読まないので、wgft のワークスペースの manifest が無ければ確かめません。
 #[test]
 fn bound_table_is_up_to_date() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/design/v2/wgstack-bound.md");
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if !in_wgft_repo(&repo) {
+        eprintln!("bound_table_is_up_to_date: not inside the wgft repository; skipped");
+        return;
+    }
+    let path = repo.join("docs/design/v2/wgstack-bound.md");
     let doc = std::fs::read_to_string(&path)
         .unwrap()
         .replace("\r\n", "\n");
@@ -98,6 +105,13 @@ fn bound_table_is_up_to_date() {
         "{} is out of date; run WGFT_UPDATE_GOLDEN=1 cargo nextest run -p wgft-wgstack bound_table",
         path.display()
     );
+}
+
+/// `repo` が wgft のリポジトリの root かを返します。ワークスペースの manifest がこの crate を依存の表に持つことで
+/// 見分けます。crate を単独で取り出した所の 2 つ上の directory を誤って読まないためです。
+fn in_wgft_repo(repo: &std::path::Path) -> bool {
+    std::fs::read_to_string(repo.join("Cargo.toml"))
+        .is_ok_and(|t| t.contains("wgft-wgstack = { path = \"crates/wgft-wgstack\" }"))
 }
 
 /// 上界の M_fix の項が、作った核の表が確保した配列の byte と一致することを確かめます。

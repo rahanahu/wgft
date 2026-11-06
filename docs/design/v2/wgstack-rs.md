@@ -556,6 +556,7 @@ Go の `internal/dataplane/deps_test.go` の `TestWgstackImports` に当たる�
 `no_std` で sans-IO を構造で強いる案は採りません。
 `alloc` を使うには `extern crate alloc;` の宣言が要るうえ、禁止の一覧で同じ効果を得られるためです。
 
+<<<<<<< HEAD
 ### 公開の文書
 
 核は Experimental として wgft の外の利用者に公開します (所有者の 2026-11-07 の決定)。
@@ -565,6 +566,37 @@ README は、範囲と既知の制限 (能動の open が無いこと、自分�
 `examples/echo.rs` は、手で書いた相手と TCP を一往復させる例で、CI の `wgstack example` の段が動かします。
 内部の注釈と、この設計文書は日本語のままです。
 `Stack<NoHook>` と `Budget` が `Send` であることは、crate の中の型の確かめが build で確かめます。
+=======
+### 単独の build
+
+核は wgft の外でも使える独立のライブラリとして Experimental で公開します (所有者の 2026-11-07 の決定)。
+配布は Git だけで、crates.io には出しません (`publish = false` のまま)。
+crate の名前は crates.io に初めて出す前に決めます。
+
+- package の中身:`cargo package` の中身だけで build と試験が通ります。
+  試験はリポジトリの外を読みません。
+  上界の表の試験は、ワークスペースの manifest が無ければ確かめません。
+  `parse` の fuzz の corpus の試験は、別の package の fuzz の directory が無ければ確かめません。
+  manifest の試験は、`cargo package` が残す元の manifest (`Cargo.toml.orig`) を読みます
+- 検査:CI の `wgstack standalone package` の段が `scripts/wgstack-package-test.sh` を流します。
+  package を作ってワークスペースの外に展開し、debug の profile と、既定の release の profile (桁あふれの検査が無い) で試験を流します
+- MSRV:`rust-version` は 1.88 です (edition 2024、let chains、`as_chunks`)。
+  CI の `wgstack MSRV` の段が、その版で lib と試験を build します。
+  ワークスペースの toolchain はそれより新しいので、核の source では新しい版で入った API を使いません
+- license:ワークスペースと同じ MIT です。
+  package に入るよう、crate の directory に LICENSE の写しを置きます
+
+桁あふれの検査はワークスペースの profile の設定で、利用者の build には効きません ([世代と予算の受け渡し](#世代と予算の受け渡し)の桁あふれの段落)。
+利用者の release の build では、検査が無ければ値は回り込みます。
+核は unsafe を使わず、添字は境界を確かめるので、回り込みはメモリの安全を壊しません。
+ただし、その `Stack` の状態と会計は誤りえます。
+公開の文書は、release の profile の全体に `overflow-checks = true` を付けることを勧めます (`[profile.release]`)。
+桁あふれの検査はコードを compile する crate の codegen の設定です。
+核の generic な部分 (`Stack<H>` のメソッド、`impl<H: Hook> Stack<H>`。`stack.rs`、`stack/api.rs`、`stack/boost.rs`、`udp.rs`、`icmp.rs`、`frag/entry.rs`) と、そこから inline される小さな関数は、`Stack<...>` を名指す crate で、その crate の profile で compile されます。
+このため `[profile.release.package.wgft-wgstack]` だけの設定では、そのコードに検査が付きません。
+設定を絞るなら、核と `Stack<...>` を名指す crate の両方に付けます。
+検査の無い build でも上界を保つには、相手が届く算術を明示の検査にする必要があり、0.x までの作業として残します。
+>>>>>>> 2fb4914e (chore(wgstack-rs): build and test the core crate on its own)
 
 ## sans-IO の API
 

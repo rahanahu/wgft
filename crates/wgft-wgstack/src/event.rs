@@ -80,7 +80,8 @@ impl EventList {
     pub(crate) fn pop(&mut self) -> Option<(u32, Bits)> {
         let t = self.order.front()?;
         let bits = self.bits[t as usize];
-        let bit = bits.isolate_lowest_one();
+        // 最も小さい立った bit です (`isolate_lowest_one` と同じ値で、MSRV の 1.88 にもある書き方です)。
+        let bit = bits & bits.wrapping_neg();
         self.set(t, bits & !bit);
         if bits & !bit == 0 {
             self.order.remove(t);

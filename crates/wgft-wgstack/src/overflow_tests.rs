@@ -123,7 +123,7 @@ fn clock_jump_of_days_keeps_the_rtt_estimate_in_range() {
     let mut n = net(Congestion::NewReno);
     let (c, mut p) = unmeasured_handshake(&mut n, false);
     send_and_ack(&mut n, c, &mut p);
-    n.advance(Duration::from_hours(25 * 24));
+    n.advance(Duration::from_secs(25 * 24 * 3600));
     for _ in 0..2 {
         send_and_ack(&mut n, c, &mut p);
         let t = &*n.s.conn(c.slot).t;
