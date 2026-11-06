@@ -45,7 +45,7 @@ fn icmp_echo() {
     );
     // echo の応答は DF を立てず、IPv4 の header の checksum は正しくあります。
     assert_eq!(pkts[0][6] & 0x40, 0, "DF set");
-    // 壊れた echo と、MTU を超える echo は捨てます。
+    // 壊れた echo は捨て、MTU を超える echo の応答は断片に分けて全部返します (RFC 1122 3.2.2.6)。
     let mut bad = build_icmp(PEER, &req);
     let last = bad.len() - 1;
     bad[last] ^= 1;
@@ -55,8 +55,11 @@ fn icmp_echo() {
     for f in split_ipv4(&build_icmp(PEER, &big), 1000, 5) {
         n.write(&f);
     }
-    assert_eq!(n.drain_raw().len(), 0);
-    assert_eq!(n.s.stats().icmp_dropped, 2);
+    let pkts = n.drain_raw();
+    assert_eq!(pkts.len(), 2);
+    let sizes: usize = pkts.iter().map(|p| p.len() - IP_HEADER_LEN).sum();
+    assert_eq!(sizes, TEST_MTU);
+    assert_eq!(n.s.stats().icmp_dropped, 1);
 }
 
 #[test]
@@ -985,8 +988,7 @@ fn no_icmp_error_is_sent_to_invalid_sources() {
 /// 要るのは、応答が出ること、MTU に収まること、data が request の data の先頭から続くことです。断片に分けて
 /// 全部を返す実装も許します。
 #[test]
-#[ignore = "fixed by the next commit"]
-fn oversized_echo_request_gets_a_reply_truncated_to_the_mtu() {
+fn oversized_echo_request_gets_a_fragmented_reply() {
     let mut n = TestNet::new(small_limits());
     let mut msg = vec![0u8; TEST_MTU];
     msg[0] = ECHO;

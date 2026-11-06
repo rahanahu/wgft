@@ -197,6 +197,27 @@ pub fn go_compat_shared_id() -> bool {
     GO_COMPAT_SHARED_ID.with(std::cell::Cell::get)
 }
 
+// MTU を超える echo の応答を、断片に分けずに捨てる切り替えです。凍結した Go はそう動くので、Go の記録との照合のためだけに
+// あります。feature `harness` の build だけにあり、製品の build には切り替えも読み出しもありません。値は thread ごとで、
+// 既定は偽 (RFC 1122 3.2.2.6 のとおり断片に分けて全部返す) です。
+#[cfg(feature = "harness")]
+thread_local! {
+    static GO_COMPAT_ECHO_DROP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 真にすると、この thread で駆動する核は MTU を超える echo の応答を捨てます (凍結した Go と同じ)。
+/// 核を駆動する前に呼びます。
+#[cfg(feature = "harness")]
+pub fn set_go_compat_echo_drop(on: bool) {
+    GO_COMPAT_ECHO_DROP.with(|c| c.set(on));
+}
+
+/// 今の thread の値です。
+#[cfg(feature = "harness")]
+pub fn go_compat_echo_drop() -> bool {
+    GO_COMPAT_ECHO_DROP.with(std::cell::Cell::get)
+}
+
 /// 何もしない hook です。boost の戻りを常に許します。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoHook;
@@ -671,6 +692,7 @@ impl<H: Hook> Stack<H> {
         s.tw.check()?;
         s.out.conns.check()?;
         s.out.rows.check()?;
+        s.out.ctl.check()?;
         events(&s.events)?;
         s.wheel.check()?;
         s.budget.check_scanning(budget_scan)?;

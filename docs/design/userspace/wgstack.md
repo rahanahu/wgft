@@ -481,6 +481,8 @@ accept の待ち行列は Device 全体で Q 本、待ち受け 1 つで Q の�
 洪水が制御の輪を埋めている間は、枠か行を返す RST も捨てられることがあります。
 この損失は受け入れます。
 枠か行はすでに返しているので、相手の次の segment はどの接続にも当たらない経路を通り、そこで RST を受けるためです。
+Rust の実装は、echo の応答が輪を使い切らないよう、echo の応答の断片が同時に持てる枠を `ctl_slots` の 4 分の 1 までにします。
+RST の洪水が輪を埋める限界は、この制限では変わりません([echo の応答の上限](../v2/wgstack-rs.md#udp-と-icmp-と断片で決めたこと))。
 行を追い出すときは、その行の順番の list の節も外します。
 `Read` で取り出した枠か行が何も作らなければ、その枠か行を list に入れ直しません。
 送るものが後でできれば、入力、タイマー、アプリケーションの書き込みが入れ直します。
@@ -875,9 +877,10 @@ ECN は交渉しません。
 - TIME_WAIT の 4 つ組の使い直し(閉じた):前の接続が timestamp を使い、SYN が timestamp を持つときは、timestamp が大きいことだけを求めます([RFC 6191](#time_wait-の表))。
   Linux は番号か timestamp のどちらかが大きければ受け入れると読めます。
   Linux で確かめた結果、台本の場合(timestamp が新しく番号が大きい、timestamp が新しく番号が小さい、どちらも古い)の応答は Linux と同じです(`timewait-reuse`)
-- MTU を超える echo request(理由を付けて受け入れる):断片で届いて組み立てた echo request の応答が MTU を超えるときは応答しません。
+- MTU を超える echo request(理由を付けて受け入れる):断片で届いて組み立てた echo request の応答が MTU を超えるときは、Go の wgstack は応答しません。
+  Rust の wgstack は応答を断片に分けて全部返します(RFC 1122 3.2.2.6)。
   Linux と gVisor は応答を断片に分けて返すと読めます。
-  wgstack は TCP と ICMP の packet を断片に分けないので(UDP の datagram は分けます)、適合の試験の wgstack の期待した差(`icmp-echo/oversized`)に入っています
+  Go の wgstack は TCP と ICMP の packet を断片に分けないので(UDP の datagram は分けます)、適合の試験の wgstack の期待した差(`icmp-echo/oversized`)に入っています
 - 送る UDP の DF(閉じた):wgstack は UDP の datagram に DF を立てません。
   Linux で確かめた結果、Linux の応答も DF を持ちません(`udp-datagram` の `reply.df-clear`)
 - FIN_WAIT_2 の行への窓の内側の SYN(理由を付けて受け入れる):challenge ACK を返します。

@@ -441,6 +441,7 @@ pub(crate) fn write_ipv4_header(
 }
 
 /// [`write_ipv4_header`] で書いた `b[..20]` の DF を下ろし、checksum を直します。
+#[cfg(test)]
 pub(crate) fn clear_df(b: &mut [u8]) {
     set_frag_field(b, be16(b, 6) & !0x4000);
 }
