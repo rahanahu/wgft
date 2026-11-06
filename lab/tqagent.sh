@@ -129,7 +129,9 @@ case "${1:-}" in
     ;;
   stat)
     adata=${2:?stat <adata> <log>} log=${3:?}
-    exec $Q agentstat "$(agent_pid "$adata")" "$log" "$HOME_NS"
+    # run inside home, so that agentstat needs no setns of its own (a setns from here failed with EPERM in the
+    # single-VM lab); the label names the keys
+    exec ip netns exec "$HOME_NS" $Q agentstat "$(agent_pid "$adata")" "$log" "" "$HOME_NS"
     ;;
   ctmax)
     n=${2:?ctmax <entries>}

@@ -79,7 +79,7 @@
 #       that tcpquality.sh starts together, past iperf3's 128 streams: their bytes and rates add up,
 #       the duration is the longest, and the fairness is over all their streams; one failed client
 #       fails the run.
-#   agentstat <pid> <log> <netns>
+#   agentstat <pid> <log> <netns> [label]
 #       the agent's memory and refusals at one moment, for runs with many connections: its VmRSS and
 #       VmHWM in MiB, the "memory bound: N MiB" of its start line, the latest count of each wgstack
 #       refusal and drop line ("...; N since the tunnel was built"), the number of the relays'
@@ -418,7 +418,7 @@ def agent_log_counts(text):
 TCP_STATES = {"01": "estab", "06": "timewait"}
 
 
-def agentstat(pid, log, ns=""):
+def agentstat(pid, log, ns="", label=""):
     # the socket and conntrack counts are read once, after the load has exited, so their keys end in
     # _after: they are not peaks, and no count is taken while the load runs
     out = {}
@@ -456,7 +456,7 @@ def agentstat(pid, log, ns=""):
             pass
         return n
     for k, v in in_netns(ns, sockets).items():
-        out["%s_%s_after" % (ns or "ns", k)] = v
+        out["%s_%s_after" % (label or ns or "ns", k)] = v
     print(" ".join("%s=%s" % kv for kv in out.items()))
     return 0
 
@@ -1142,6 +1142,15 @@ def latpaired(logfile):
 CLONE_NEWNET = 0x40000000
 
 
+def setns(fd, nstype):
+    # os.setns needs Python 3.12; the VMs of an older image have 3.11, so call libc's setns then
+    if hasattr(os, "setns"):
+        os.setns(fd, nstype)
+    elif ctypes.CDLL(None, use_errno=True).setns(fd, nstype) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+
+
 def read_netns(ns, paths):
     # the contents of /proc/thread-self/net/<path> in the network namespace ns ("" is the caller's),
     # read by this thread alone after setns, so that a threaded agentd is not disturbed
@@ -1152,7 +1161,7 @@ def read_netns(ns, paths):
             own = os.open("/proc/thread-self/ns/net", os.O_RDONLY)
             fd = os.open("/run/netns/" + ns, os.O_RDONLY)
             try:
-                os.setns(fd, CLONE_NEWNET)
+                setns(fd, CLONE_NEWNET)
             finally:
                 os.close(fd)
         for p in paths:
@@ -1163,7 +1172,7 @@ def read_netns(ns, paths):
                 out[p] = ""
     finally:
         if own is not None:
-            os.setns(own, CLONE_NEWNET)
+            setns(own, CLONE_NEWNET)
             os.close(own)
     return out
 
@@ -1176,13 +1185,13 @@ def in_netns(ns, fn):
             own = os.open("/proc/thread-self/ns/net", os.O_RDONLY)
             fd = os.open("/run/netns/" + ns, os.O_RDONLY)
             try:
-                os.setns(fd, CLONE_NEWNET)
+                setns(fd, CLONE_NEWNET)
             finally:
                 os.close(fd)
         return fn()
     finally:
         if own is not None:
-            os.setns(own, CLONE_NEWNET)
+            setns(own, CLONE_NEWNET)
             os.close(own)
 
 
