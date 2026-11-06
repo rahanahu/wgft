@@ -78,6 +78,8 @@ pub(crate) const RTO_MIN: i64 = 200 * MS;
 pub(crate) const RTO_MAX: i64 = 120 * SEC;
 /// 遅延 ACK の時間です。Linux の遅延 ACK の時間の最初の値と下限 (40 ms) と同じです。
 pub(crate) const DELACK_TIMEOUT: i64 = 40 * MS;
+/// 1 つの接続か行が速さを抑えた ACK を送ってから、次の ACK を許すまでの間隔です (RFC 5961 7 節)。
+pub(crate) const FLOW_ACK_INTERVAL: i64 = 500 * MS;
 /// TIME_WAIT の長さ (Linux と同じ) です。
 pub(crate) const TW_TIMEOUT: i64 = 60 * SEC;
 /// 閉じた後の FIN_WAIT_2 の長さ (Linux の tcp_fin_timeout) です。

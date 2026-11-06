@@ -80,6 +80,8 @@ pub(crate) struct SynRow {
     pub(crate) cookie: bool,
     pub(crate) used: bool,
     pub(crate) pending: RowSend,
+    /// 速さを抑えた ACK を次に許す時刻です。接続を確立したら接続の枠が受け継ぎます。
+    pub(crate) ack_until: Time,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -504,10 +506,17 @@ impl Shared {
         self.refused(LogKind::AcceptOverflow, now);
     }
 
-    /// 行から ACK を送ります。challenge ACK と同じ速さの制限を受けます。
+    /// 行から ACK を送ります。行ごとの速さの制限を受けます (RFC 5961 7 節)。
     fn row_ack(&mut self, id: u32, now: i64) {
-        if !self.challenge_allowed(now) {
-            return;
+        #[cfg(feature = "harness")]
+        let limited = !crate::stack::go_compat_core_challenge(); // 凍結した Go の記録との照合用
+        #[cfg(not(feature = "harness"))]
+        let limited = true;
+        if limited {
+            let Some(until) = self.flow_ack(ns(self.syn.row(id).ack_until), now) else {
+                return;
+            };
+            self.syn.row_mut(id).ack_until = time(until);
         }
         let row = self.syn.row_mut(id);
         if row.pending == RowSend::None {

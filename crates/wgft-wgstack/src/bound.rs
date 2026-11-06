@@ -24,6 +24,7 @@ use crate::tcp::conn;
 use crate::tcp::listen::{Listener, PortTable};
 use crate::tcp::syn::SynRow;
 use crate::tcp::timewait::TwRow;
+use crate::time::Time;
 use crate::udp::{self, Udp, UdpEp};
 
 /// 上界の式の値です。単位は byte です。
@@ -153,9 +154,11 @@ pub(crate) fn fix_parts(l: &Limits, mtu: usize, stack_size: usize) -> FixParts {
         conn_index: b(index::capacity_for(n) * (ent + size_of::<u64>())),
         syn: b(l.syn_rows * (size_of::<SynRow>() + size_of::<u32>())
             + index::capacity_for(l.syn_rows) * ent),
-        tw: b(l.tw_rows * (size_of::<TwRow>() + 3 * size_of::<u32>())
-            + index::capacity_for(l.tw_rows) * ent
-            + n * size_of::<u32>()),
+        tw: b(
+            l.tw_rows * (size_of::<TwRow>() + 3 * size_of::<u32>() + size_of::<Time>())
+                + index::capacity_for(l.tw_rows) * ent
+                + n * size_of::<u32>(),
+        ),
         listeners: b(PortTable::<Listener>::bytes()),
         udp_endpoints: b(PortTable::<UdpEp>::bytes()),
         wheel: b(

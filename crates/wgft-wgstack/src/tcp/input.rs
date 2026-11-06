@@ -6,7 +6,7 @@
 use super::conn::{State, TMR_CLOSE, TMR_DELACK};
 use super::ctx::{Conn, lo32};
 use super::timewait::{Reuse, rfc6191};
-use super::{DELACK_TIMEOUT, MS, PAWS_IDLE, RTX_PMTU, TW_TIMEOUT};
+use super::{DELACK_TIMEOUT, PAWS_IDLE, RTX_PMTU, TW_TIMEOUT};
 use crate::seq;
 use crate::stack::shared::LogKind;
 use crate::wire::{FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN, Segment};
@@ -28,14 +28,11 @@ impl Conn<'_> {
         }
     }
 
-    /// 受け入れられない segment に ACK を返します。Linux と同じく、中身のある segment には制限なく返し、
-    /// 中身の無い segment には接続ごとに 500 ms に 1 回まで返します。
+    /// 受け入れられない segment に ACK を返します。中身のある segment には制限なく返し、中身の無い segment には
+    /// challenge ACK と同じ接続ごとの速さの制限の内で返します。
     fn oow_ack(&mut self, seg: &Segment<'_>, now: i64) {
-        if seg.payload.is_empty() || seg.has(FLAG_SYN) {
-            if self.t.last_oow != 0 && now - self.t.last_oow < 500 * MS {
-                return;
-            }
-            self.t.last_oow = now;
+        if (seg.payload.is_empty() || seg.has(FLAG_SYN)) && !self.limited_ack(now) {
+            return;
         }
         // RCV.NXT より前にある重複の部分は、範囲を D-SACK で知らせます (RFC 2883、Linux と同じ)。
         let n = u32::try_from(seg.payload.len()).unwrap_or(0);
@@ -46,10 +43,31 @@ impl Conn<'_> {
         self.t.ack_now = true;
     }
 
-    /// RFC 5961 の challenge ACK を、核の全体の速さの制限の内側で送ります。
+    /// RFC 5961 の challenge ACK を、接続ごとの速さの制限の内で送ります。
     pub(crate) fn challenge_ack(&mut self, now: i64) {
-        if self.s.challenge_allowed(now) {
+        #[cfg(feature = "harness")]
+        if crate::stack::go_compat_core_challenge() {
+            self.t.ack_now = true; // 凍結した Go の記録との照合用: 接続ごとの制限を掛けない
+            return;
+        }
+        if self.limited_ack(now) {
             self.t.ack_now = true;
+        }
+    }
+
+    /// 接続の速さを抑えた ACK を 1 つ許すかを決めます。challenge ACK と中身の無い segment への ACK が 1 つの制限
+    /// を分け合います (RFC 5961 7 節)。
+    fn limited_ack(&mut self, now: i64) -> bool {
+        #[cfg(feature = "harness")]
+        if crate::stack::go_compat_core_challenge() && now == 0 {
+            return true; // 凍結した Go の記録との照合用: Go は時刻 0 の送信を「送っていない」の印と区別しない
+        }
+        match self.s.flow_ack(self.t.ack_until, now) {
+            Some(until) => {
+                self.t.ack_until = until;
+                true
+            }
+            None => false,
         }
     }
 

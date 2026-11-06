@@ -9,8 +9,7 @@
 //! 間隔を伸ばすと、多くの接続の下で正しい相手への返事が数十秒遅れます。間隔を伸ばしても、同時に求める N 個の
 //! 流れの山は N のままで、守りとしては大きすぎます。
 //!
-//! 直しが別の間隔を選ぶなら、[`PER_FLOW_INTERVAL`] を合わせます。直す前の核で落ちる試験は
-//! `fixed by the follow-up PR` の理由で ignore にしてあります。今も直しの後も通るべき試験は ignore にしていません。
+//! 直しが別の間隔を選ぶなら、[`PER_FLOW_INTERVAL`] を合わせます。
 
 #![expect(
     clippy::disallowed_macros,
@@ -116,7 +115,6 @@ fn an_exact_rst_resets_right_after_a_challenge_ack() {
 /// 1 つの接続の challenge ACK は `PER_FLOW_INTERVAL` に 1 回です。同じ時刻の RST と SYN と範囲の外の ACK の山には
 /// 1 つだけ返し、間隔の手前では返さず、間隔の後に再び 1 つ返します。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn challenge_acks_on_one_connection_follow_the_per_connection_rate() {
     let (mut n, _, v) = established(&[VICTIM]);
     let (_, p) = v[0];
@@ -153,7 +151,6 @@ fn challenge_acks_on_one_connection_follow_the_per_connection_rate() {
 
 /// TIME_WAIT の行の ACK (使い直しを拒んだ SYN と窓の内の RST への ACK) も行ごとに `PER_FLOW_INTERVAL` に 1 回です。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn time_wait_row_acks_follow_the_per_row_rate() {
     let (mut n, _, _, p, _) = time_wait(true, &[]);
     n.advance(Duration::from_secs(2));
@@ -170,7 +167,6 @@ fn time_wait_row_acks_follow_the_per_row_rate() {
 
 /// 握手の途中の行の ACK (別の番号の SYN と窓の外の segment への ACK) も行ごとに `PER_FLOW_INTERVAL` に 1 回です。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn half_open_row_acks_follow_the_per_row_rate() {
     let mut n = TestNet::new(crate::testnet_tests::small_limits());
     n.listen(80);
@@ -216,7 +212,6 @@ fn rst_probe(n: &mut TestNet, port: u16, rcv_nxt: u32) -> usize {
 /// 接続が TIME_WAIT の行に移っても、接続の速さの制限は行に受け継がれます。時刻 T の challenge ACK の後、行は
 /// T + 100 ms の RST に返さず、T + 500 ms の RST に返します。受け継がなければ、接続を閉じるだけで制限を外せます。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn the_limit_carries_from_a_connection_to_its_time_wait_row() {
     let (mut n, _, v) = established(&[VICTIM]);
     let (c, mut p) = v[0];
@@ -249,7 +244,6 @@ fn the_limit_carries_from_a_connection_to_its_time_wait_row() {
 
 /// 握手の途中の行が接続になっても、行の速さの制限は接続に受け継がれます。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn the_limit_carries_from_a_half_open_row_to_its_connection() {
     let mut n = TestNet::new(crate::testnet_tests::small_limits());
     let l = n.listen(80);
@@ -393,7 +387,6 @@ fn a_reused_connection_slot_does_not_inherit_the_previous_connections_limit() {
 /// 接続の中身の無い窓の外の segment への ACK は、challenge ACK と 1 つの速さの制限を分け合います。どちらを先に
 /// 返しても、もう一方は `PER_FLOW_INTERVAL` の間は返らず、その後に返ります。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn out_of_window_acks_share_the_limit_with_challenge_acks() {
     for challenge_first in [true, false] {
         let (mut n, _, v) = established(&[VICTIM]);
@@ -617,7 +610,6 @@ const START: Duration = Duration::from_secs(10);
 /// どうかは、第三者が自分の手元で数える ACK の数に現れてはいけません。全体の守りが、第三者が使い切って数えられる
 /// 1 つの決まった数えなら、被害者の接続が使った 1 つの差が現れてこの試験は落ちます。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn the_global_guard_does_not_reveal_another_connections_window() {
     let observe = |hit: bool| {
         let (mut n, victim, mut eps) = guard_net();
@@ -649,7 +641,6 @@ fn the_global_guard_does_not_reveal_another_connections_window() {
 /// 第三者が手元のすべてで全体の守りを働かせ続けても、しばらく challenge ACK を返していない被害者の接続は、再起動
 /// したクライアントの SYN に challenge ACK を返します。全体の守りが他人の接続の回復を止めてはいけません。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn the_global_guard_does_not_silence_an_idle_connection() {
     let (mut n, victim, mut eps) = guard_net();
     raw_advance_to(&mut n, START);
@@ -887,7 +878,6 @@ fn mass_requests_keep_the_ring_rules_and_never_amplify() {
 /// 大量の試しの下でも、1 つの流れは `PER_FLOW_INTERVAL` に ACK を 1 つまでしか返さず、他の流れの数に関わらず
 /// `PER_FLOW_INTERVAL` ごとに必ず 1 つ返します (0、5、10 … 刻み)。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn mass_requests_get_one_ack_per_flow_per_interval() {
     let m = mass_run();
     assert_eq!(m.interval_violations, 0, "ACKs inside a flow's interval");
@@ -920,7 +910,6 @@ fn victim_ack_ticks(others: bool) -> Vec<u32> {
 /// 1 つの流れの間隔は、他の流れが 0 でも、2000 を超える流れが同じ刻みに求めていても同じです。100 ms ごとの
 /// 試しで、ACK は 500 ms ごと (5 刻みごと) に返ります。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn one_flows_interval_does_not_depend_on_other_flows() {
     let per = (PER_FLOW_INTERVAL.as_millis() / TICK.as_millis()) as usize;
     let want: Vec<u32> = (0..MASS_TICKS).step_by(per).collect();

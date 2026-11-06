@@ -116,6 +116,28 @@ pub fn go_compat_row_rst() -> bool {
     GO_COMPAT_ROW_RST.with(std::cell::Cell::get)
 }
 
+// 凍結した Go の記録との照合のためだけに、challenge ACK と行の ACK に接続と行ごとの速さの制限を掛けない切り替えです
+// (Go は核の全体の予算だけで抑え、記録の速さでは尽きません。中身の無い窓の外の segment への ACK は Go も接続ごとに
+// 抑えますが、時刻 0 の送信を「送っていない」とみなします)。RFC 5961 7 節と Erratum 4772 の読みで、Rust の核は接続と
+// 行ごとに抑えます。feature `harness` の build だけにあり、値は thread ごとで、既定は偽です。
+#[cfg(feature = "harness")]
+thread_local! {
+    static GO_COMPAT_CORE_CHALLENGE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 真にすると、この thread で駆動する核は challenge ACK と行の ACK に接続と行ごとの速さの制限を掛けません (凍結した
+/// Go と同じ)。核を駆動する前に呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
+#[cfg(feature = "harness")]
+pub fn set_go_compat_core_challenge(on: bool) {
+    GO_COMPAT_CORE_CHALLENGE.with(|c| c.set(on));
+}
+
+/// 今の thread の値です。
+#[cfg(feature = "harness")]
+pub fn go_compat_core_challenge() -> bool {
+    GO_COMPAT_CORE_CHALLENGE.with(std::cell::Cell::get)
+}
+
 // 凍結した Go の記録との照合のためだけに、SYN-ACK を再送した接続の最初の RTO を Go と同じ 1 秒のままにする切り替えです
 // (RFC 6298 5.7 は 3 秒)。feature `harness` の build だけにあり、値は thread ごとで、既定は偽です。
 #[cfg(feature = "harness")]
@@ -599,8 +621,6 @@ impl<H: Hook> Stack<H> {
                     icmp_sec: -1,
                     icmp_count: 0,
                     budget,
-                    ch_sec: -1,
-                    ch_count: 0,
                     stats: Stats::default(),
                     gates: shared::Gates::default(),
                 },

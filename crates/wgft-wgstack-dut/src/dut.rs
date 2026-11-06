@@ -163,6 +163,7 @@ struct Compat {
     shared_id: bool,
     echo_drop: bool,
     pmtu_keep_cwnd: bool,
+    core_challenge: bool,
 }
 
 impl Compat {
@@ -180,6 +181,7 @@ impl Compat {
             shared_id: wgft_wgstack::go_compat_shared_id(),
             echo_drop: wgft_wgstack::go_compat_echo_drop(),
             pmtu_keep_cwnd: wgft_wgstack::go_compat_pmtu_keep_cwnd(),
+            core_challenge: wgft_wgstack::go_compat_core_challenge(),
         }
     }
 
@@ -197,6 +199,7 @@ impl Compat {
             shared_id: on,
             echo_drop: on,
             pmtu_keep_cwnd: on,
+            core_challenge: on,
         }
     }
 
@@ -213,6 +216,7 @@ impl Compat {
         wgft_wgstack::set_go_compat_shared_id(self.shared_id);
         wgft_wgstack::set_go_compat_echo_drop(self.echo_drop);
         wgft_wgstack::set_go_compat_pmtu_keep_cwnd(self.pmtu_keep_cwnd);
+        wgft_wgstack::set_go_compat_core_challenge(self.core_challenge);
     }
 }
 
