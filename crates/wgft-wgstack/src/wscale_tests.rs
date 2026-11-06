@@ -11,8 +11,6 @@
 //!
 //! 核は待ち受け側しか持たず、能動的な接続 (SYN-ACK の受信) の経路はありません。
 //!
-//! 修正の前に落ちる試験は `#[ignore]` を付けています。クランプの試験と、記録が増えないことの対照は今の main で
-//! 通ります。
 
 #![expect(
     clippy::disallowed_macros,
@@ -167,7 +165,6 @@ fn wscale_up_to_14_adds_no_log_and_no_count_on_the_cookie_path() {
 // SHOULD:14 を超える scale は数え、1 分に 1 回の門を通して記録します。修正の前に落ちます。
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn wscale_above_14_is_counted_and_logged_on_a_listener_row() {
     let mut n0 = TestNet::new(small_limits());
     let l0 = n0.listen(80);
@@ -189,7 +186,6 @@ fn wscale_above_14_is_counted_and_logged_on_a_listener_row() {
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn wscale_above_14_is_counted_and_logged_on_the_cookie_path() {
     let (mut base_net, _) = flooded();
     logs(&mut base_net);
@@ -215,7 +211,6 @@ fn wscale_above_14_is_counted_and_logged_on_the_cookie_path() {
 /// 門は 1 分に 1 回です。1 分の内の 2 つ目は数えるだけで行を足さず、1 分の後の次の SYN で、核を作ってからの数を
 /// 持つ行が出ます。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn wscale_log_passes_the_once_a_minute_gate_and_keeps_the_count() {
     let mut n = TestNet::new(small_limits());
     n.listen(80);

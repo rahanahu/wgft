@@ -221,11 +221,16 @@ pub(crate) struct SackBlock {
     pub(crate) right: u32,
 }
 
+/// 窓の scale の上限です (RFC 7323 2.3)。
+const MAX_WSCALE: u8 = 14;
+
 /// 解釈した TCP の option です。MSS、窓の scale、SACK の許可は SYN でだけ読みます。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TcpOptions {
     pub(crate) mss: Option<u16>,
     pub(crate) wscale: Option<u8>,
+    /// 窓の scale が 14 を超えていて、14 に切り下げたことを表します (RFC 7323 2.3)。
+    pub(crate) wscale_clamped: bool,
     pub(crate) sack_ok: bool,
     /// timestamp の option の TSval と TSecr です。
     pub(crate) ts: Option<(u32, u32)>,
@@ -267,7 +272,11 @@ pub(crate) fn parse_options(mut b: &[u8], syn: bool) -> TcpOptions {
         let body = &b[2..size];
         match kind {
             2 if size == 4 && syn => o.mss = Some(be16(body, 0)),
-            3 if size == 3 && syn => o.wscale = Some(body[0].min(14)), // RFC 7323 2.3
+            3 if size == 3 && syn => {
+                // RFC 7323 2.3:14 を超える値は 14 で扱い (MUST)、記録します (SHOULD)。
+                o.wscale = Some(body[0].min(MAX_WSCALE));
+                o.wscale_clamped = body[0] > MAX_WSCALE;
+            }
             4 if size == 2 && syn => o.sack_ok = true,
             5 if (size - 2).is_multiple_of(8) && !syn => {
                 // Go と同じく、続く SACK の option も 4 つの枠が埋まるまで足します。
