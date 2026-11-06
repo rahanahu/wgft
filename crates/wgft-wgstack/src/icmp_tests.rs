@@ -351,29 +351,22 @@ fn frag_with_options(offset: usize, more: bool, opts: &[u8], data: &[u8]) -> Vec
     p
 }
 
-/// 不正な option を持つ断片に、最初の断片でも後の断片でも Parameter Problem を返し、pointer は option の位置を
-/// 指します (Go の `TestParamProblemForFragmentOptions`)。
+/// 不正な option を持つ最初の断片に Parameter Problem を返し、pointer は option の位置を指します (Go の
+/// `TestParamProblemForFragmentOptions`)。先頭でない断片への組は RFC 1122 3.2.2 に合わせて外しました。
 #[test]
 fn param_problem_for_fragment_options() {
-    for (offset, more) in [(0, true), (8, false)] {
-        let mut n = TestNet::new(small_limits());
-        n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
-        n.write(&frag_with_options(
-            offset,
-            more,
-            &[0x82, 1, 0, 0],
-            b"abcdefgh",
-        ));
-        let pkts = n.drain_raw();
-        assert_eq!(pkts.len(), 1, "offset {offset}: {:?}", n.s.stats());
-        let ip = parse_ipv4(&pkts[0]).unwrap();
-        let m = ip.payload();
-        assert!(
-            ip.proto == PROTO_ICMP && m[0] == PARAM_PROBLEM && m[4] == 20,
-            "offset {offset}: {:x?}",
-            pkts[0]
-        );
-    }
+    let mut n = TestNet::new(small_limits());
+    n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    n.write(&frag_with_options(0, true, &[0x82, 1, 0, 0], b"abcdefgh"));
+    let pkts = n.drain_raw();
+    assert_eq!(pkts.len(), 1, "{:?}", n.s.stats());
+    let ip = parse_ipv4(&pkts[0]).unwrap();
+    let m = ip.payload();
+    assert!(
+        ip.proto == PROTO_ICMP && m[0] == PARAM_PROBLEM && m[4] == 20,
+        "{:x?}",
+        pkts[0]
+    );
 }
 
 /// 断片の洪水でも再組み立ての表は上限の内側に留まり、寿命の後に空になります (Go の `TestBoundFragmentFlood`)。
@@ -858,7 +851,6 @@ fn go_compat_shared_id_wrap_skips_zero_for_udp_only() {
 /// 先頭でない断片への ICMP の誤りは MUST NOT)。上の `param_problem_for_fragment_options` の offset 8 の組は
 /// 現行の挙動を固定しているので、直す時にその組を外します。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn non_initial_fragment_with_bad_options_gets_no_icmp() {
     for (offset, more) in [(8, false), (8, true), (1400, false)] {
         for opts in [[0x82u8, 1, 0, 0], [0x07, 0x40, 0, 0]] {

@@ -17,37 +17,27 @@ impl Shared {
     /// 表の知らせに ICMP の誤りを返します。期限には Time Exceeded を、option の誤りには Parameter Problem を
     /// 返します。`offending` は誤りを起こした断片で、期限の知らせには空を渡します。
     pub(crate) fn frag_notice(&mut self, n: &Notice, offending: &[u8], now: i64) {
-        // Go と同じ条件です。期限の知らせは最初の断片の引用を持つときだけ、option の誤りはいつも対象にします。
+        // 期限の知らせは最初の断片の引用を持つときだけ対象にします。option の誤りは、最初の断片のものだけを
+        // 対象にします (下)。
         let expired = n.reason == Reason::Expired;
         if !(expired && n.has_first || n.reason == Reason::Options) {
             return;
         }
-        // 保存した最初の引用は、後から届いた不正な断片を対象にしません。
-        if n.reason == Reason::Options
-            && n.has_first
-            && offending.len() >= 8
-            && be16(offending, 6) & 0x1fff != 0
-        {
+        // 先頭でない断片には ICMP の誤りを返しません (RFC 1122 3.2.2)。option の誤りも黙って捨てます。
+        if n.reason == Reason::Options && be16(offending, 6) & 0x1fff != 0 {
             return;
         }
         let local = self.addr.to_be_bytes();
         if n.reason == Reason::Expired {
             if let Some(quote) = n.timeout_quote(local) {
-                self.send_icmp_error_raw(quote, TIME_EXCEEDED, 1, 0, now, false);
+                self.send_icmp_error_raw(quote, TIME_EXCEEDED, 1, 0, now);
             }
             return;
         }
         if n.param_problem_ok(offending, local).is_none() {
             return;
         }
-        self.send_icmp_error_raw(
-            offending,
-            PARAM_PROBLEM,
-            0,
-            u32::from(n.pointer) << 24,
-            now,
-            true,
-        );
+        self.send_icmp_error_raw(offending, PARAM_PROBLEM, 0, u32::from(n.pointer) << 24, now);
     }
 
     /// 断片を保持した後に、次の掃除の期限を決めます。期限が過ぎていれば今から 1 秒後にします。

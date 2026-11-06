@@ -182,7 +182,7 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
 | rescue の再送 (RFC 6675 4 節の NextSeg の規則 4):使いません | 理由が無いため、直す候補です (TLP が回復の末尾の損失を扱うと読めますが、確かめていません) | ありません | 直す時 |
 | TIME_WAIT を使い直す SYN (RFC 6191 2 節):受けない SYN を黙って捨てず、速さを抑えた ACK を返します。加えて次の 3 つの比べが RFC より厳しい形です:前の接続が timestamp を使えば TSval が厳密に大きい時だけ受け、等しい TSval で番号が大きい SYN を受けません。前の接続が timestamp を使わず新しい SYN が timestamp を持つ時も番号で比べます。番号の比べは `SEG.SEQ > RCV.NXT` で、RFC より 1 つ厳しい形です | ACK を返すのは、RFC 5961 4.2 と RFC 9293 の TIME-WAIT の SYN の扱いに沿います。3 つの比べは、理由が無いため、直す候補です | ありません | 直す時、または dial の側の TIME_WAIT の使い直しを決める時 |
 | Protocol Unreachable (RFC 1122 3.2.2.1):知らない protocol の datagram を数えて黙って捨てます | トンネルの相手は server だけで、server は TCP、UDP、ICMP のほかを送りません | ありません | ほかの protocol を運ぶ要望が出た時 |
-| Parameter Problem (RFC 1122 3.2.2.5):断片の option の誤りにだけ返し、断片でない packet の option は確かめず、長さの崩れた packet は黙って捨てます | 理由が無いため、直す候補です | ありません | 直す時 |
+| Parameter Problem (RFC 1122 3.2.2.5):最初の断片の option の誤りにだけ返し、断片でない packet の option は確かめず、長さの崩れた packet は黙って捨てます | 理由が無いため、直す候補です | ありません | 直す時 |
 | 受けた TOS の受け渡し (RFC 1122 3.2.1.6):TCP と UDP に渡しません | 中継は L4 で終端し、受けた TOS を LAN の側へ運ぶ手段を持たないので、受け渡す相手がありません | ありません | DSCP を運ぶ要望が出た時 |
 | 未完成の source route (RFC 1122 3.3.5):Destination Unreachable (code 5) を返さず、自分宛てとして受けます | トンネルの中に途中の hop が無く、source route を使う相手がありません。RFC 7126 は source route の packet を捨てることを勧めます | ありません | source route を使う相手を支える要望が出た時 |
 | echo の応答の Record Route と Timestamp (RFC 1122 3.2.2.6):応答に写しません | トンネルは 1 hop で、経路を記録する途中の hop がありません | ありません | echo の診断で経路の記録が要る要望が出た時 |
@@ -212,7 +212,6 @@ SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表
 直しが入ったら行を消します。
 
 - RFC 5681 3 節:HyStart++ (RFC 9406) の外の slow start でも 1 ACK の増分の上限 L を 2 にします
-- RFC 1122 3.2.2:先頭でない断片に ICMP の誤り (Parameter Problem) を返します
 - RFC 1122 3.2.1.3 と 3.2.2、RFC 9293 MUST-63:単一の host を表さない送信元の datagram を捨てず、そうした送信元に ICMP の誤りを送りえます (agent では送信元が server の 1 つのアドレスに限られるので起きません)
 - RFC 1122 3.2.2.6:MTU を超える echo の応答を、切らずに捨てます
 - RFC 6864 4.3 と RFC 1122 3.3.2:DF の立った断片を壊れた packet として捨てます (MUST からの逸脱でなく、相互運用の直しです)
@@ -1813,6 +1812,11 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   置き場所、スコープ、`WgstackDut` が持つ値は `set_go_compat_rto_l2` と同じで、切り替えが真の核は UDP と echo の応答の ID を DF を立てた packet と同じ数えから取ります。
   Go は UDP の送信では 0 を飛ばし、echo の応答では飛ばさないので、切り替えもその違いを写します。
   この意図した違いは、照合の上でだけ消えます
+- 先頭でない断片の option の誤り:ICMP の Parameter Problem を返さず、黙って捨てます。
+  RFC 1122 3.2.2 は、先頭でない断片への ICMP の誤りを MUST NOT とするためです。
+  先頭の断片の option の誤りには、今までどおり Parameter Problem を返します。
+  先頭でない断片の中身から ICMP の種類を読む所は無く、ICMP の誤りを作る入口が先頭でない断片を先に捨てます。
+  Go の記録の再生は変わりません
 
 ### handle の層で決めたこと
 
