@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use wgft_wgstack::{
     Budget, Closed, Config, Hook, LogKind, LogLine, MIN_MSS, NewErrorKind, NoHook, Stack, Time,
-    UDP_ENDPOINT_SHARE, UDP_RX_BYTES,
+    UDP_ENDPOINT_SHARE,
 };
 
 use crate::wakers::Wakers;
@@ -217,10 +217,11 @@ impl<H: Hook> Netstack<H> {
             LogKind::UdpDropped => {
                 let s = self.core.stats();
                 let datagrams = self.core.config().limits.udp_rx_datagrams;
+                let bytes = self.core.config().limits.udp_rx_bytes;
                 format!(
-                    "wgstack: dropped UDP datagrams because receiving sockets are not read fast enough; {} over the per-socket limit of {} bytes and {} datagrams, {} over the tunnel budget of {UDP_RX_BYTES} bytes and {datagrams} datagrams, since the tunnel was built",
+                    "wgstack: dropped UDP datagrams because receiving sockets are not read fast enough; {} over the per-socket limit of {} bytes and {} datagrams, {} over the tunnel budget of {bytes} bytes and {datagrams} datagrams, since the tunnel was built",
                     s.udp_endpoint_full,
-                    UDP_RX_BYTES / UDP_ENDPOINT_SHARE,
+                    bytes / UDP_ENDPOINT_SHARE,
                     datagrams / UDP_ENDPOINT_SHARE,
                     s.udp_stack_full,
                 )
@@ -260,7 +261,7 @@ mod tests {
         let config = Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420);
         Netstack::new(
             config,
-            Budget::new().unwrap(),
+            Budget::new(config.limits.boost_slots).unwrap(),
             &[1; 64],
             NoHook,
             Instant::now(),

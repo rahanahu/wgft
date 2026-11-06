@@ -601,7 +601,17 @@ impl<H: Hook> Stack<H> {
         hook: H,
         tables: impl FnOnce(&Config) -> Result<Tables, AllocError>,
     ) -> Result<Self, NewError> {
-        if let Err(e) = config.validate() {
+        let checked = config.validate().and_then(|()| {
+            if budget.slots() == config.limits.boost_slots {
+                Ok(())
+            } else {
+                Err(ConfigError::BudgetSlots {
+                    budget: budget.slots(),
+                    limits: config.limits.boost_slots,
+                })
+            }
+        });
+        if let Err(e) = checked {
             return Err(NewError {
                 kind: NewErrorKind::Config(e),
                 budget,
@@ -1434,11 +1444,7 @@ impl Tables {
         let l = &config.limits;
         let n = l.conns();
         let seeds = Seeds::new(seed);
-        let frag_limits = frag::Limits {
-            entries: l.frag_entries,
-            fragments: l.frag_pieces,
-            ..frag::LIMITS
-        };
+        let frag_limits = l.frag();
         Ok(Self {
             conns: ConnSlots::new(n)?,
             conn_free: new_free_list(n)?,
@@ -1453,7 +1459,7 @@ impl Tables {
             events,
             wheel: Wheel::new(n * NUM_TIMERS)?,
             fired: FixedVec::try_with_capacity(n * NUM_TIMERS)?,
-            chunks: ChunkPool::new()?,
+            chunks: ChunkPool::with_keep(l.pool_chunks)?,
             frag: frag::Table::new(frag_limits).map_err(|_| AllocError)?,
             udp: Udp::with_eps(l, eps)?,
             pings: Pings::new(config.mtu)?,

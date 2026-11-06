@@ -57,7 +57,8 @@ fn build<H: Hook>(addr: Ipv4Addr, hook: H, edit: impl FnOnce(&mut Config)) -> Lo
     };
     edit(&mut config);
     let seed = [addr.octets()[3]; 64];
-    let ns = Netstack::new(config, Budget::new().unwrap(), &seed, hook, clock(), clock).unwrap();
+    let budget = Budget::new(config.limits.boost_slots).unwrap();
+    let ns = Netstack::new(config, budget, &seed, hook, clock(), clock).unwrap();
     LocalNetstack::new(ns)
 }
 

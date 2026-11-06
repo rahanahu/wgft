@@ -214,7 +214,13 @@ fn new_reusing_remakes_a_table_of_another_size() {
     let s = Stack::new_reusing(other, closed.budget, spare, &[7; 64], TestHook::default()).unwrap();
     let mut n = TestNet::from_stack(s);
     scenario(&mut n);
-    let fresh = Stack::new(other, Budget::new().unwrap(), &[7; 64], TestHook::default()).unwrap();
+    let fresh = Stack::new(
+        other,
+        Budget::new(crate::buf::BOOST_SLOTS).unwrap(),
+        &[7; 64],
+        TestHook::default(),
+    )
+    .unwrap();
     assert_eq!(n.s.bound(), fresh.bound());
     assert_eq!(Spare::new().kept(), 0);
 }

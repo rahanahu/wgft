@@ -5,16 +5,15 @@
 //! (`docs/design/v2/wgstack-bound.md`)。
 
 use crate::budget::Budget;
-use crate::buf::chunk::{CHUNK_SIZE, Chunk, POOL_KEEP};
+use crate::buf::chunk::{CHUNK_SIZE, Chunk};
 use crate::buf::records::Record;
 use crate::buf::recv::Interval;
 use crate::buf::ring::BOOST_RING_SLOTS;
 use crate::buf::{
-    BOOST_INTERVALS, BOOST_RECORDS, BOOST_SIZE, BOOST_SLOTS, FLOOR_INTERVALS, FLOOR_RECORDS,
-    RECV_FLOOR, SEND_FLOOR,
+    BOOST_INTERVALS, BOOST_RECORDS, BOOST_SIZE, FLOOR_INTERVALS, FLOOR_RECORDS, RECV_FLOOR,
+    SEND_FLOOR,
 };
 use crate::config::Limits;
-use crate::frag;
 use crate::icmp::{PING_ENDPOINTS, Pings};
 use crate::index;
 use crate::output::Dlist;
@@ -25,7 +24,7 @@ use crate::tcp::listen::{Listener, PortTable};
 use crate::tcp::syn::SynRow;
 use crate::tcp::timewait::TwRow;
 use crate::time::Time;
-use crate::udp::{self, Udp, UdpEp};
+use crate::udp::{Udp, UdpEp};
 
 /// 上界の式の値です。単位は byte です。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -172,7 +171,7 @@ pub(crate) fn fix_parts(l: &Limits, mtu: usize, stack_size: usize) -> FixParts {
             let t = EventTargets::count(n);
             b(t) + dlist(t)
         },
-        chunk_pool: b(POOL_KEEP * (CHUNK_SIZE + size_of::<Chunk>())),
+        chunk_pool: b(l.pool_chunks * (CHUNK_SIZE + size_of::<Chunk>())),
     }
 }
 
@@ -186,11 +185,14 @@ impl Bound {
         let fix = fix_parts(l, mtu, stack_size).sum();
         let floor_conn = b(l.conns()) * floor_per_conn();
         let floor_arrays = b(l.conns()) * floor_arrays_per_conn();
-        let boost = b(BOOST_SLOTS) * boost_per_slot() + b(Budget::slot_bytes());
-        let frag = b(frag::LIMITS.bytes);
-        let ck = b(udp::CHUNKS * Udp::chunk_rec_size());
-        let udp_rx = b(udp::RX_BYTES) + b(l.udp_rx_datagrams * Udp::dgram_size()) + ck.div_ceil(2);
-        let udp_tx = b(udp::TX_BYTES) + b(l.udp_tx_datagrams * Udp::dgram_size()) + ck / 2;
+        let boost = b(l.boost_slots) * boost_per_slot() + b(Budget::slot_bytes(l.boost_slots));
+        let frag = b(l.frag_bytes);
+        // chunk の管理の配列は向きごとの予算の chunk の数の和で、項はそれぞれの向きの分を持ちます。
+        let ck = |bytes: usize| b(bytes / CHUNK_SIZE * Udp::chunk_rec_size());
+        let udp_rx =
+            b(l.udp_rx_bytes) + b(l.udp_rx_datagrams * Udp::dgram_size()) + ck(l.udp_rx_bytes);
+        let udp_tx =
+            b(l.udp_tx_bytes) + b(l.udp_tx_datagrams * Udp::dgram_size()) + ck(l.udp_tx_bytes);
         let ping = b(PING_ENDPOINTS * (mtu + Pings::ep_size()));
         Self {
             fix,

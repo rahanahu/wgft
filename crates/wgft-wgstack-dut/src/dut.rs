@@ -142,6 +142,7 @@ pub fn limits_from_hello(ls: &[frame::Limit]) -> Result<Limits, HelloError> {
         frag_pieces: or_default(vals[8], def.frag_pieces),
         udp_rx_datagrams: or_default(vals[5], def.udp_rx_datagrams),
         udp_tx_datagrams: or_default(vals[6], def.udp_tx_datagrams),
+        ..def
     })
 }
 
@@ -367,7 +368,8 @@ impl WgstackDut {
         }
         // 凍結した Go の記録は RTO の後も L = 2 なので、照合の核だけ Go と同じにする。それ以外の核は製品と同じ L = 1
         let config = Self::config(h, limits_from_hello(&h.limits)?);
-        let budget = Budget::new().map_err(|e| HelloError(format!("wgstack: {e}")))?;
+        let budget = Budget::new(config.limits.boost_slots)
+            .map_err(|e| HelloError(format!("wgstack: {e}")))?;
         let hook = DutHook::default();
         let stack = Stack::new(config, budget, &h.seed, hook.clone())
             .map_err(|e| HelloError(format!("wgstack: {e}")))?;

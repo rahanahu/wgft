@@ -22,7 +22,9 @@ pub const MAX_MTU: usize = 9216;
 pub struct Limits {
     /// The number K of connections that can be established at once.
     pub max_flows: usize,
-    /// accept の待ち行列の全体の数 Q です。接続の枠の数は K + Q です。
+    /// accept の待ち行列の全体の数 Q です。接続の枠の数は K + Q です。待ち受け 1 つはその半分までです。
+    /// 1 は待ち受けの分が 0 になり、どの接続も accept できないので設定の誤りにします。0 は待ち受けを持たない
+    /// 核 (能動の open だけの核) のための値で、受け付けますが、どの待ち受けも接続を受けられません。
     pub accept_queue: usize,
     /// 握手の途中の表の行の数 N_syn です。
     pub syn_rows: usize,
@@ -34,15 +36,34 @@ pub struct Limits {
     pub frag_entries: usize,
     /// 再組み立ての表の断片の枠の数です。
     pub frag_pieces: usize,
-    /// UDP の受信の datagram の数の予算です。endpoint 1 つの上限はその 4 分の 1 です。
+    /// UDP の受信の datagram の数の予算です。endpoint 1 つの上限はその 4 分の 1 です。endpoint の分が 0 に
+    /// ならないよう、[`UDP_ENDPOINT_SHARE`](crate::UDP_ENDPOINT_SHARE) から 65535 までです。
     pub udp_rx_datagrams: usize,
-    /// UDP の送信の datagram の数の予算です。endpoint 1 つの上限はその 4 分の 1 です。
+    /// UDP の送信の datagram の数の予算です。endpoint 1 つの上限はその 4 分の 1 です。範囲は
+    /// `udp_rx_datagrams` と同じです。
     pub udp_tx_datagrams: usize,
+    /// UDP の受信の byte の予算です。endpoint 1 つの上限はその 4 分の 1 です。chunk (16 KiB) の単位で数え、
+    /// 最も大きい datagram が endpoint 1 つの上限に収まるよう、[`Limits::MIN_UDP_BYTES`] 以上にします。
+    pub udp_rx_bytes: usize,
+    /// UDP の送信の byte の予算です。分け方と下限は `udp_rx_bytes` と同じです。
+    pub udp_tx_bytes: usize,
+    /// 再組み立ての表の保持の byte の上限です。固定の管理領域、保持する断片の写し、完成の写し 1 つを数えます。
+    pub frag_bytes: usize,
+    /// boost の枠の数 B です。[`Budget`](crate::Budget) は同じ数の枠で作ります。0 は boost を使いません。
+    /// [`Limits::MAX_BOOST_SLOTS`] までです。
+    pub boost_slots: usize,
+    /// 返った chunk (16 KiB) を次の確保のために残す数です。上界の固定の項に数えます。
+    pub pool_chunks: usize,
 }
 
 impl Limits {
     /// The value of K that [`Limits::with_max_flows`] uses for 0.
     pub const DEFAULT_MAX_FLOWS: usize = 2048;
+    /// [`Limits::boost_slots`] の上限です。空きの枠の印を 1 語に収めます。
+    pub const MAX_BOOST_SLOTS: usize = 64;
+    /// [`Limits::udp_rx_bytes`] と [`Limits::udp_tx_bytes`] の下限です。最も大きい datagram (4 chunk) が
+    /// endpoint 1 つの上限 (予算の 4 分の 1) に収まる大きさです。
+    pub const MIN_UDP_BYTES: usize = crate::udp::MIN_BYTES;
 
     /// K を `max_flows` にした本番の表の大きさです。0 は既定値です。
     pub const fn with_max_flows(max_flows: usize) -> Self {
@@ -60,6 +81,21 @@ impl Limits {
             frag_pieces: crate::frag::LIMITS.fragments,
             udp_rx_datagrams: crate::udp::RX_DATAGRAMS,
             udp_tx_datagrams: crate::udp::TX_DATAGRAMS,
+            udp_rx_bytes: crate::udp::RX_BYTES,
+            udp_tx_bytes: crate::udp::TX_BYTES,
+            frag_bytes: crate::frag::LIMITS.bytes,
+            boost_slots: crate::buf::BOOST_SLOTS,
+            pool_chunks: crate::buf::chunk::POOL_KEEP,
+        }
+    }
+
+    /// 再組み立ての表の上限です。
+    pub(crate) const fn frag(&self) -> crate::frag::Limits {
+        crate::frag::Limits {
+            entries: self.frag_entries,
+            fragments: self.frag_pieces,
+            bytes: self.frag_bytes,
+            ..crate::frag::LIMITS
         }
     }
 
@@ -127,11 +163,19 @@ impl Config {
 
 /// 設定の誤りです。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConfigError {
     /// MTU が範囲の外です。
     Mtu(usize),
     /// 表の大きさが範囲の外です。
     Limits,
+    /// [`Budget`](crate::Budget) の枠の数が [`Limits::boost_slots`] と違います。
+    BudgetSlots {
+        /// `Budget` の枠の数です。
+        budget: usize,
+        /// `Limits::boost_slots` です。
+        limits: usize,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -139,6 +183,10 @@ impl fmt::Display for ConfigError {
         match self {
             Self::Mtu(m) => write!(f, "MTU {m} is out of range {MIN_MTU} to {MAX_MTU}"),
             Self::Limits => f.write_str("the table sizes are out of range"),
+            Self::BudgetSlots { budget, limits } => write!(
+                f,
+                "the budget has {budget} boost slots but the limits ask for {limits}"
+            ),
         }
     }
 }
@@ -162,13 +210,14 @@ impl Config {
         };
         // 待ち受け 1 つの accept の待ち行列と握手の途中の行の数は、その半分までで、16 bit の欄に数えます。
         let per_listener = |n: usize| u16::try_from(n / 2).is_ok();
-        // UDP の datagram の番号は 16 bit の欄に入れ、u16::MAX を「無し」に使います。
-        let udp = |n: usize| (1..=usize::from(u16::MAX)).contains(&n);
-        let frag = crate::frag::Limits {
-            entries: l.frag_entries,
-            fragments: l.frag_pieces,
-            ..crate::frag::LIMITS
-        };
+        // UDP の datagram の番号は 16 bit の欄に入れ、u16::MAX を「無し」に使います。endpoint 1 つの上限
+        // (予算の 4 分の 1) が 0 だと、送信は WouldBlock のまま進まず、受信はすべて捨てるので、下限は 4 です。
+        let udp = |n: usize| (crate::udp::ENDPOINT_SHARE..=usize::from(u16::MAX)).contains(&n);
+        // UDP の chunk の番号も 16 bit の欄に入れます。
+        let udp_bytes = |n: usize| n >= crate::udp::MIN_BYTES;
+        let udp_chunks = (l.udp_rx_bytes / crate::buf::chunk::CHUNK_SIZE)
+            .checked_add(l.udp_tx_bytes / crate::buf::chunk::CHUNK_SIZE)
+            .is_some_and(|n| n < usize::from(u16::MAX));
         if l.max_flows == 0
             || l.tw_rows == 0
             || l.ctl_slots == 0
@@ -176,10 +225,16 @@ impl Config {
             || !fits(conns)
             || !fits(rows)
             || !per_listener(l.accept_queue)
+            || l.accept_queue == 1
             || !per_listener(l.syn_rows)
-            || frag.base_cost().is_err()
+            || l.frag().base_cost().is_err()
             || !udp(l.udp_rx_datagrams)
             || !udp(l.udp_tx_datagrams)
+            || !udp_bytes(l.udp_rx_bytes)
+            || !udp_bytes(l.udp_tx_bytes)
+            || !udp_chunks
+            || l.boost_slots > Limits::MAX_BOOST_SLOTS
+            || l.pool_chunks > 1 << 16
         {
             return Err(ConfigError::Limits);
         }
@@ -241,5 +296,59 @@ mod tests {
             Ok(()),
             "the dial side has no half-open rows and no accept queue"
         );
+    }
+
+    /// 予算の大きさの範囲:UDP の byte は下限から chunk の番号の 16 bit まで、boost の枠は 64 まで、再組み立ての
+    /// byte は固定の管理領域を覆う大きさです。
+    #[test]
+    fn validates_the_budget_sizes() {
+        let c = Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420);
+        let with = |f: &dyn Fn(&mut Limits)| {
+            let mut limits = c.limits;
+            f(&mut limits);
+            Config { limits, ..c }.validate()
+        };
+        let min = Limits::MIN_UDP_BYTES;
+        assert_eq!(min, 256 << 10);
+        assert_eq!(with(&|l| l.udp_rx_bytes = min), Ok(()));
+        assert_eq!(with(&|l| l.udp_tx_bytes = min), Ok(()));
+        assert_eq!(
+            with(&|l| l.udp_rx_bytes = min - 1),
+            Err(ConfigError::Limits)
+        );
+        assert_eq!(
+            with(&|l| l.udp_tx_bytes = min - 1),
+            Err(ConfigError::Limits)
+        );
+        let chunk = crate::buf::chunk::CHUNK_SIZE;
+        let most = (usize::from(u16::MAX) - 1) * chunk;
+        assert_eq!(
+            with(&|l| {
+                l.udp_rx_bytes = most - min;
+                l.udp_tx_bytes = min;
+            }),
+            Ok(())
+        );
+        assert_eq!(
+            with(&|l| {
+                l.udp_rx_bytes = most - min + chunk;
+                l.udp_tx_bytes = min;
+            }),
+            Err(ConfigError::Limits)
+        );
+        assert_eq!(with(&|l| l.udp_rx_datagrams = 4), Ok(()));
+        assert_eq!(with(&|l| l.udp_tx_datagrams = 4), Ok(()));
+        for n in 0..4 {
+            assert_eq!(with(&|l| l.udp_rx_datagrams = n), Err(ConfigError::Limits));
+            assert_eq!(with(&|l| l.udp_tx_datagrams = n), Err(ConfigError::Limits));
+        }
+        assert_eq!(with(&|l| l.accept_queue = 1), Err(ConfigError::Limits));
+        assert_eq!(with(&|l| l.accept_queue = 2), Ok(()));
+        assert_eq!(with(&|l| l.boost_slots = 0), Ok(()));
+        assert_eq!(with(&|l| l.boost_slots = 64), Ok(()));
+        assert_eq!(with(&|l| l.boost_slots = 65), Err(ConfigError::Limits));
+        assert_eq!(with(&|l| l.pool_chunks = 0), Ok(()));
+        assert_eq!(with(&|l| l.frag_bytes = 1 << 20), Ok(()));
+        assert_eq!(with(&|l| l.frag_bytes = 1024), Err(ConfigError::Limits));
     }
 }

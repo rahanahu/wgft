@@ -122,8 +122,13 @@ impl Rig {
             boost,
             ..Config::new(DUT, MTU)
         };
-        let stack =
-            Stack::new(config, Budget::new().expect("budget"), &[7; 64], NoHook).expect("stack");
+        let stack = Stack::new(
+            config,
+            Budget::new(limits.boost_slots).expect("budget"),
+            &[7; 64],
+            NoHook,
+        )
+        .expect("stack");
         let mut stack = stack;
         let l = stack
             .listen_tcp(Time::ZERO, SocketAddrV4::new(DUT, 80))
@@ -400,8 +405,13 @@ impl Rig {
 /// 既定の表の大きさの核を作って閉じます。核の作成の手間を測るのに使います。
 pub fn new_and_close() {
     let config = Config::new(DUT, MTU);
-    let stack =
-        Stack::new(config, Budget::new().expect("budget"), &[7; 64], NoHook).expect("stack");
+    let stack = Stack::new(
+        config,
+        Budget::new(config.limits.boost_slots).expect("budget"),
+        &[7; 64],
+        NoHook,
+    )
+    .expect("stack");
     core::hint::black_box(stack.close(Time::ZERO));
 }
 

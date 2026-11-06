@@ -198,7 +198,7 @@ pub fn replay(data: &[u8]) {
             Spare::new()
         }
     };
-    let mut budget = take_budget();
+    let mut budget = take_budget(fuzz_limits().boost_slots);
     let mut dut = match WgstackDut::for_fuzz(&hello, fuzz_limits(), budget, spare()) {
         Ok(d) => d,
         Err((_, b)) => {
