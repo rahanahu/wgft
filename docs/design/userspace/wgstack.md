@@ -394,8 +394,9 @@ RFC 6191 の条件を満たす新しい SYN を受けたら、行を外して待
 [行に移る条件](#行に移る条件)を満たさずに枠に残る TIME_WAIT の接続も、同じ SYN を同じ規則で扱います。
 このとき枠の接続は CLOSED になり、アプリケーションの読み取りには、それまでに受けたデータと `io.EOF` を返します。
 CLOSED になってアプリケーションがまだ閉じていない枠は、4 つ組の hash の表から外れるので、同じ 4 つ組の新しい SYN を妨げません。
+TIME_WAIT の行と枠は、窓の内で番号が RCV.NXT と合わない RST に challenge ACK を返します(RFC 5961 3.2)。Rust 版だけがこれを行い、凍結した Go は返しません。
 FIN_WAIT_2 の行にデータが届いたら、Linux と同じく RST を返して行を外します。
-その前に、行は確立した接続と同じく PAWS と受け入れの範囲を確かめ、PAWS で古い segment と、行に移した時に広告した窓の外の segment には、速さを抑えた ACK を返すだけにします(RFC 7323 5.3、RFC 9293 3.10.7.4)。
+その前に、行は確立した接続と同じく PAWS と受け入れの範囲を確かめ、窓の内で番号の合わない RST には challenge ACK を返し(Rust 版だけ)、PAWS で古い segment と、行に移した時に広告した窓の外の segment には、速さを抑えた ACK を返すだけにします(RFC 7323 5.3、RFC 9293 3.10.7.4)。
 窓の外の古いデータで行を外させないためで、行は広告した窓の scale を持ちます。
 
 #### 行に移る条件
@@ -466,7 +467,7 @@ accept の待ち行列は Device 全体で Q 本、待ち受け 1 つで Q の�
 
 - 接続の組:接続の枠が送る segment です。
   data、ACK、FIN、窓の probe、確立した接続の challenge ACK がこれに当たります
-- 行の組:握手の途中の行が送る SYN-ACK(最初の送信と再送)と、TIME_WAIT の行が送る ACK と challenge ACK です
+- 行の組:握手の途中の行が送る SYN-ACK(最初の送信と再送)と ACK(Rust 版は RST への challenge ACK も)と、TIME_WAIT の行が送る ACK と challenge ACK です
 - UDP の組:UDP の送信の予算に入った datagram とその断片です
 - 制御の組:どの接続にも行にも当たらない segment への RST、ICMP の誤り、echo の応答と、送った後に枠か行をその場で返す RST です。
   後者は `Abort`、再送の回数を使い切った接続、未読のデータを持った `Close`、待ち受けの `Close` が終える待ち行列の接続と握手の途中の行、データを受けた FIN_WAIT_2 の行、TIME_WAIT の行への `Abort` が送る RST です
@@ -674,6 +675,7 @@ CLOSED の枠は 4 つ組の hash の表から外れ、送信の輪を返しま�
   これは Linux との差です。
   適合の試験は、この差を期待した差の一覧に入れず、[受信のバッファの溢れ](wgstack-verification.md#受信のバッファの溢れ)の台本が単位の 1 つ未満の丸めを許して量を測ります
 - RFC 5961:窓の内側で番号が一致しない RST と確立後の SYN に challenge ACK を返し、ACK の受け入れの範囲を確かめます。
+  Rust 版は、握手の途中の行(番号が IRS + 1 に等しい RST だけが行を外す)、TIME_WAIT の枠と行、FIN_WAIT_2 の行にも同じ RST の扱いを適用します。凍結した Go は確立した接続だけです
   challenge ACK の速さは Device 全体の token bucket で抑えます
 - MSS:相手の MSS に従い、MSS の option の無い SYN では 536 を使います。
   入口の[MSS の下限](packet-validation.md#tcp-の-mss-の下限)と、Fragmentation Needed による PMTU の引き下げ(下限 552)を持ちます。

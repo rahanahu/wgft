@@ -94,6 +94,28 @@ pub fn go_compat_dsack_snd_una() -> bool {
     GO_COMPAT_DSACK_SND_UNA.with(std::cell::Cell::get)
 }
 
+// 凍結した Go の記録との照合のためだけに、握手の途中の行と TIME_WAIT の枠と行、FIN_WAIT_2 の行の RST と受け入れの判定を Go と
+// 同じにする切り替えです (窓の内のどの RST でも握手の途中の行を外し、TIME_WAIT と FIN_WAIT_2 では窓の内の合わない RST に
+// challenge ACK を返さず、握手の途中の行の受け入れの判定は窓の右端を含む)。RFC 5961 3.2 と RFC 9293 3.10.7.4 はこれと違います。
+// feature `harness` の build だけにあり、値は thread ごとで、既定は偽です。
+#[cfg(feature = "harness")]
+thread_local! {
+    static GO_COMPAT_ROW_RST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 真にすると、この thread で駆動する核は行と TIME_WAIT の枠の RST と受け入れの判定を凍結した Go と同じにします。核を駆動する前に
+/// 呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
+#[cfg(feature = "harness")]
+pub fn set_go_compat_row_rst(on: bool) {
+    GO_COMPAT_ROW_RST.with(|c| c.set(on));
+}
+
+/// 今の thread の値です。
+#[cfg(feature = "harness")]
+pub fn go_compat_row_rst() -> bool {
+    GO_COMPAT_ROW_RST.with(std::cell::Cell::get)
+}
+
 /// 何もしない hook です。boost の戻りを常に許します。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoHook;
