@@ -722,11 +722,12 @@ SACK の block の数と順、順序外の重複の D-SACK、穴を埋めた時�
 3. 穴がある間の ACK の数:Linux は rcv_ssthresh を広げる余地がある間はすべての順序外の segment に、余地が無くなると RCV.NXT ごとの最初の 3 つの後に約 2 segment に 1 つの ACK を返します。
    wgstack の核は、順序外の segment を受けるたびに ACK を返すと決めますが、実際に送る ACK は 1 回の起床で接続ごとに最大 1 つです。
    1 回の起床で複数の順序外の segment を受けると、重複した ACK は 1 つになります。
+   これは RFC 5681 3.2 の SHOULD から外れる既知の違いです。
+   segment ごとに ACK を返す実装を損失のある経路で測ると、agent の byte あたりの CPU が増え、速さの改善は確かめられませんでした。
+   このため、SACK の圧縮も segment ごとの ACK も入れず、この違いを受け入れた差とします。
    gVisor の送り手は ACK ごとに pipe で送る量を決めるので、ACK の数の差で送る量は変わらないと見込みます。
-   遅い回復の原因である見込みは低く、Linux との一致と ACK 1 つあたりの暗号化の CPU に関わります。
-   このため、SACK の圧縮は入れず、この違いを Linux との受け入れた差とします。
-   RFC 5681 3.2 は順序外の segment ごとにすぐ重複した ACK を返すことを SHOULD とし、wgstack は 1 回の起床で複数の segment を受けるとそこから外れます(既知の違い: [起床ごとの ACK の合わせ](../v2/wgstack-rs.md#起床ごとの-ack-の合わせ))。
-   順序外の segment への ACK の数を Linux と比べる台本は持ちません
+   測った値、仮説、見直す条件は[順序外の segment の ACK の合わせ](../v2/wgstack-rs.md#順序外の-segment-の-ack-の合わせ)にあります。
+   順序外の 8 segment への重複した ACK の数は、適合の台本 `rfc2525-stretch-ack-burst-ooo` が核、gVisor、Linux で測ります([RFC 2525 の既知の問題](wgstack-verification.md#rfc-2525-の既知の問題))
 4. rcv_ssthresh を広げる時の quickack:Linux は窓を開く間、広げた segment ごとに ACK を返します。
    ACK の数で窓を増やす送り手は slow start で速く育つので、この挙動は溢れを大きくする向きに効き、回復を速める向きには効きません。
    3 の SACK の圧縮が働くかもこの挙動で決まります
