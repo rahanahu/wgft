@@ -1917,7 +1917,6 @@ fn assert_r2_from_first_transmission(start: Duration) {
 
 /// 最初の送信が時刻 0 でも、R2 の断念は最初の送信から計ります (0 を「未設定」の印にしない)。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn r2_give_up_is_measured_from_a_first_transmission_at_time_zero() {
     assert_r2_from_first_transmission(Duration::ZERO);
 }
@@ -1967,7 +1966,6 @@ fn tw_fin_updates_ts_recent(row: bool) {
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc7323_time_wait_slot_updates_ts_recent_from_a_retransmitted_fin() {
     tw_fin_updates_ts_recent(false);
 }

@@ -158,7 +158,7 @@ pub(crate) struct Tcb {
     pub(crate) rttvar: i64,
     pub(crate) rto: i64,
     pub(crate) min_rtt: i64,
-    pub(crate) retrans_start: i64,
+    pub(crate) retrans_start: Option<i64>,
     pub(crate) last_send_at: i64,
     pub(crate) rto_at: i64,
     pub(crate) reo_at: i64,

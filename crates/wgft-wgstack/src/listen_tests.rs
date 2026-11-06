@@ -1139,7 +1139,7 @@ fn first_rto_after_write(n: &mut TestNet, c: crate::ConnId) -> Duration {
 }
 
 /// SYN-ACK を時刻 0 に送った接続でも、握手から RTT の標本を取り、最初の RTO は初期値の 1 秒より短くなります。
-/// 能動側 (dial) は核に無く、データの記録の `sent_at` は印として使っていないので、この 1 か所だけです。
+/// 能動側 (dial) は核に無く、データの記録の `sent_at` と再送の起点 (`retrans_start`) は 0 を印として使っていません。
 #[test]
 fn a_synack_sent_at_stack_time_zero_still_gives_an_rtt_sample() {
     let mut n = TestNet::new(small_limits());

@@ -28,7 +28,7 @@ impl Conn<'_> {
         self.clear_retrans_timers();
         self.cancel_tlp();
         self.t.persist = true;
-        self.t.retrans_start = 0;
+        self.t.retrans_start = None;
         self.t.backoff = 0;
         let at = now + self.cur_rto();
         self.arm(TMR_RETRANS, at);
@@ -78,10 +78,10 @@ impl Conn<'_> {
         if self.t.snd_una == self.t.snd_max || self.t.state == State::Closed {
             return;
         }
-        if self.t.retrans_start == 0 {
-            self.t.retrans_start = now - self.cur_rto();
-        }
-        if now - self.t.retrans_start >= RETRANSMIT_DEADLINE {
+        // 起点が無ければ、この RTO を起こした最初の送信の時刻に置きます。時刻 0 も有効な起点なので、0 を未設定の
+        // 印にしません。
+        let start = *self.t.retrans_start.get_or_insert(now - self.cur_rto());
+        if now - start >= RETRANSMIT_DEADLINE {
             self.s.stats.retransmit_aborts += 1;
             self.send_rst();
             self.abort_with(ConnError::TimedOut);
