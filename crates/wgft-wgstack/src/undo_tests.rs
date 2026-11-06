@@ -508,3 +508,76 @@ fn dsack_of_data_this_ack_acknowledges_is_not_counted() {
         "a D-SACK of data the same ACK acknowledges was counted"
     );
 }
+
+/// 4 個の segment が確認された接続を作ります。再送の累計と取り消しの印は D-SACK を受け入れる状態にし、
+/// `undo_retrans` は 1 で、`prior_una` は今の SND.UNA です。
+fn dsack_setup() -> (TestNet, crate::ConnId, SackPeer, Vec<Out>) {
+    let (mut n, c, mut q, outs) = rack_conn(10);
+    n.s.conn(c.slot).init_undo();
+    q.deliver(&mut n, &outs[..4]);
+    let cs = n.s.conn(c.slot);
+    cs.k.total_retrans = 1 << 20; // 再送の累計の上限には掛からない
+    cs.k.undo_retrans = 1;
+    cs.t.prior_una = cs.t.snd_una;
+    assert_eq!(
+        cs.t.snd_una, outs[4].seq,
+        "the first four segments are acked"
+    );
+    (n, c, q, outs)
+}
+
+/// 累積の確認 `ack` と SACK の block `b` を持つ ACK を相手から届けます。
+fn inject_ack_with_sack(n: &mut TestNet, q: &mut SackPeer, ack: u32, b: SackBlock) {
+    let mut s = q.p.seg(FLAG_ACK, &[]);
+    s.ack = ack;
+    s.sack = vec![b];
+    n.inject(&s);
+}
+
+/// RFC 2883 5 節:先頭の block が D-SACK かどうかは、同じ packet の累積の確認と比べて決めます。SND.UNA より低い
+/// 古い ACK の先頭の block が、その ACK の確認より上にあれば D-SACK ではありません。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn rfc2883_old_ack_block_above_its_own_ack_is_not_a_dsack() {
+    let (mut n, c, mut q, outs) = dsack_setup();
+    let mult = n.s.conn(c.slot).t.reo_wnd_mult;
+    // 並べ替えられた古い ACK:確認は outs[1] の先頭で SND.UNA より低く、block は outs[2] で、その確認より上
+    inject_ack_with_sack(&mut n, &mut q, outs[1].seq, blk(&outs[2]));
+    let cs = n.s.conn(c.slot);
+    let (m, ur, dd) = (cs.t.reo_wnd_mult, cs.k.undo_retrans, cs.k.dsack_dups);
+    let st = n.s.stats();
+    assert!(
+        st.dsacks_in == 0 && m == mult && ur == 1 && dd == 0,
+        "a block above the packet's own ACK was taken for a D-SACK: dsacks_in {} reo_wnd_mult {m} (was {mult}) undo_retrans {ur} (was 1) dsack_dups {dd}",
+        st.dsacks_in
+    );
+}
+
+/// 先頭の block が、同じ packet の累積の確認以下なら本物の D-SACK です。
+#[test]
+fn rfc2883_block_below_its_own_ack_is_a_dsack() {
+    let (mut n, c, mut q, outs) = dsack_setup();
+    let mult = n.s.conn(c.slot).t.reo_wnd_mult;
+    inject_ack_with_sack(&mut n, &mut q, outs[3].seq, blk(&outs[1]));
+    let cs = n.s.conn(c.slot);
+    let (m, ur) = (cs.t.reo_wnd_mult, cs.k.undo_retrans);
+    let st = n.s.stats();
+    assert!(
+        st.dsacks_in == 1 && m > mult && ur == 0,
+        "a block below the packet's own ACK was not taken for a D-SACK: dsacks_in {} reo_wnd_mult {m} (was {mult}) undo_retrans {ur} (want 0)",
+        st.dsacks_in
+    );
+}
+
+/// 古い ACK でなくても、先頭の block が現在の累積の確認以下なら D-SACK です。
+#[test]
+fn rfc2883_block_below_current_ack_is_a_dsack() {
+    let (mut n, c, mut q, outs) = dsack_setup();
+    let ack = n.s.conn(c.slot).t.snd_una;
+    inject_ack_with_sack(&mut n, &mut q, ack, blk(&outs[2]));
+    assert_eq!(
+        n.s.stats().dsacks_in,
+        1,
+        "a D-SACK below the cumulative ACK"
+    );
+}
