@@ -797,7 +797,8 @@ paired_build_base() {
     # install までを置き場の flock で 1 つにし、同時の --base の build が互いの binary を入れないようにする
     (
       flock 9
-      rust_build "$PAIRED_BASE_WT" "$target" "$REPO/bin/base/rust/wgft" "$tdir"
+      # LAB_RUST_FEATURES (lab-observe の診断の比べなど) は x の腕と同じく base にも付ける
+      rust_build "$PAIRED_BASE_WT" "$target" "$REPO/bin/base/rust/wgft" "$tdir" "${LAB_RUST_FEATURES:-}"
     ) 9>"$tdir.lock" || die "cannot build the Rust wgft of --base $ref for $target"
   fi
   git -C "$REPO" worktree remove --force "$PAIRED_BASE_WT" >/dev/null 2>&1 || true
