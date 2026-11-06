@@ -234,10 +234,12 @@ SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表
   4.3 節は、HyStart++ を最初の slow start だけに使い、残りは標準の slow start に戻すよう求めます (SHOULD)。
   長く黙った後に restart window を育てる時に HyStart++ を使うことは認めます (MAY)
 - 外れる slow start:HyStart++ の外で、RTO の後でもない slow start です。
-  コードからは次の 3 つと読めます。
+  コードからは次の経路と読めます。
   取り消しの後の経路は、試験で確かめていません
   - 黙った後の窓の戻し (RFC 5681 4.1):ssthresh を覚えた接続が RTO より長く黙ると、窓を IW 以下に戻し、L = 2 で育てます
-  - SACK を交渉しない接続の回復の終わり:窓を ssthresh より小さくして slow start に戻ると、L = 2 で育てます
+  - SACK を交渉しない接続の回復の終わり:窓を ssthresh より小さくして slow start に戻ると、L = 2 で育てます。
+    この slow start は回復の中でなく回復の後と読みます。
+    回復の中と読むなら、RFC 3465 3.2 節の「L MUST NOT be > 1*SMSS bytes in any slow start-based loss recovery」からも外れます
   - 取り消しの後:戻した窓が ssthresh より小さいと、L = 2 の slow start が続きます
 - 影響と危険:最初でない slow start は覚えた ssthresh で終わるので、L = 2 でも ssthresh を超えて窓が育つわけではありません。
   L = 2 では窓が ssthresh に早く着き、ACK ごとに送り出す量が大きくなります。
@@ -247,12 +249,14 @@ SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表
 - 直しの候補:
   - 1 つ目の候補:HyStart++ の外の slow start をすべて L = 1 にします。
     MUST を満たす最も単純な直しです
-  - 2 つ目の候補:黙った後の窓の戻しでも HyStart++ を動かし (RFC 9406 4.3 節の MAY)、残りの 2 つの経路を L = 1 にします
+  - 2 つ目の候補:黙った後の窓の戻しでも HyStart++ を動かし (RFC 9406 4.3 節の MAY)、残りの経路を L = 1 にします
 - 測定:ホストの qbench で、今の核と 2 つの候補を比べる測定を予定しています。
   間を置いて送る burst の完了時間、再送した byte、待ち行列で落ちた数を比べます。
   測った値はまだありません
 - 決め方:測った値は、2 つの候補から直し方を選ぶ材料です。
   RFC に従うかを性能だけで決めないので、どちらの候補が今の核より遅くても、それだけを理由に MUST の例外として残すことはしません
+
+直しが入ったら、この節も消すか書き換えます。
 
 ## Go から Rust への対応
 
