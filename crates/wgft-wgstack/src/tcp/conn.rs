@@ -367,6 +367,7 @@ impl ConnBufs {
         self.snd.release(pool);
         self.rcv.r.release(pool);
         self.rcv.clear_intervals();
+        let _ = self.rcv.take_fault();
         self.recs.clear();
         self.snd = Ring::new(SEND_FLOOR);
         self.rcv.r = Ring::new(RECV_FLOOR);

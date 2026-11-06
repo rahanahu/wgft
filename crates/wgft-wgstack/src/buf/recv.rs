@@ -146,6 +146,7 @@ impl RecvBuf {
         self.read_off = 0;
         self.nxt_off = 0;
         self.clear_intervals();
+        self.fault = false;
         self.seed = seed;
         self.ctr = 0;
     }
