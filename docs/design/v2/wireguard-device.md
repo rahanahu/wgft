@@ -59,6 +59,10 @@ sanstun を別の実装に替える必要が出た場合は、`protocol.rs` を�
 順を保つため、先に `poll_transmit()` が持つ datagram を送ります。
 取り出さない `poll_transmit()` の出力はキューの上限まで溜まり、溢れたものは捨てて数えます。
 
+`poll_timeout()` はデータプレーンの起床ごとに 2 回呼ばれ、呼ぶたびに全部のピアの期限を計算します。
+ピアごとの sanstun の期限を控える形は採りません。
+データとハンドシェイクの送受信はどれも sanstun の timer を動かすので、受けて返す起床では 2 回とも計算し直しになり、測っても利得がありませんでした (2026-11-06)。
+
 状態の読み出しは `peer_status` (endpoint、最後のハンドシェイクの時刻、送受信のバイト数)、`drops` (捨てた理由ごとの数)、`held` (キューが今持つ量) です。
 制御プレーンが endpoint を引き直したときは `set_endpoint` で渡します。
 
@@ -352,6 +356,9 @@ device の層の試験 `a_restarted_server_is_reached_again_by_traffic` は、�
   panic しないことと、持つものが `Limits` の中にあることを毎回確かめます。
   cargo-fuzz と nightly が要ります。
   `build-corpus` は、ハンドシェイクを済ませてデータを往復させる操作の列を種として書きます。
+- timer の時刻:2 つの `Device` を、どちらかの `poll_timeout` か台本の次の時刻へ偽の時計を飛ばして回し、timer の呼び出し、datagram、event、次の期限を記録します (`device_timer_tests.rs`)。
+  記録を `testdata/timer-trace.txt` と照らし、ハンドシェイク、鍵の更新、2 つの keepalive、roaming、endpoint の付け替え、再試行、打ち切り、期限切れの時刻が 1 ns も動かないことを確かめます。
+  記録はバイトの単位で比べるので、どの checkout でも LF の改行を保ちます (`.gitattributes`)
 
 ```sh
 cd crates/wgft-wireguard/fuzz
