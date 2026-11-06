@@ -1,9 +1,9 @@
-//! RTO の後の slow start の 1 ACK の増分 (L = 1、RFC 3465 2.3) の境界の試験です。
+//! HyStart++ の外の slow start の 1 ACK の増分 (L = 1、RFC 5681 3.1、RFC 3465 2.3) の境界の試験です。
 //!
-//! 実装の担当とは別の担当が、`docs/design/v2/wgstack-rs.md` の規則から書きました。印 (`rto_slow_start`) の
-//! 立つ所と下がる所を、本物の ACK と時計の進みで通ります。増分は、12 segment を 1 つの ACK で確認した時の窓の
-//! 増分 (1 SMSS なら L = 1、2 SMSS なら L = 2) で見ます。見る前に ssthresh を大きな値に書き込み、窓が ssthresh に
-//! 届いて印が下りる経路を、見る ACK の前に起こさないようにします。
+//! 実装の担当とは別の担当が、`docs/design/v2/wgstack-rs.md` の規則から書きました。HyStart++ の外の slow start
+//! (`flag` は窓が ssthresh より小さく HyStart++ が動かない間) に入る所と出る所を、本物の ACK と時計の進みで通ります。
+//! 増分は、12 segment を 1 つの ACK で確認した時の窓の増分 (1 SMSS なら L = 1、2 SMSS なら L = 2) で見ます。
+//! 見る前に ssthresh を大きな値に書き込み、窓が ssthresh に届く経路を、見る ACK の前に起こさないようにします。
 
 #![expect(
     clippy::disallowed_macros,
@@ -83,7 +83,8 @@ impl Rig {
     }
 
     fn flag(&mut self) -> bool {
-        self.n.s.conn(self.c.slot).t.rto_slow_start
+        let c = self.n.s.conn(self.c.slot);
+        c.t.cwnd < c.t.ssthresh && !c.hystart_on()
     }
 
     fn cwnd(&mut self) -> u32 {
@@ -188,7 +189,8 @@ impl Rig {
 
 // 1. ssthresh に届くと終わる
 
-/// 窓が ssthresh に届いた ACK で印が下り、その後の slow start は 2 SMSS に戻ります。
+/// 窓が ssthresh に届いた ACK で slow start が終わります。窓が ssthresh に届いて終えた後に ssthresh を書き込んで
+/// 作る slow start は、黙った後の再開ではなく HyStart++ の外なので、1 SMSS までです。
 #[test]
 fn reaching_ssthresh_ends_the_limit() {
     for cc in CCS {
@@ -200,18 +202,20 @@ fn reaching_ssthresh_ends_the_limit() {
         r.settle(); // 元の segment は届かず、再送だけが確認される
         assert!(r.cwnd() >= ss, "{cc:?}: the window reached ssthresh");
         assert!(!r.flag(), "{cc:?}: the mark is down at ssthresh");
-        // 黙って RTO を越え、後の slow start に置く。12 segment の ACK は 2 SMSS
+        // 黙って RTO を越え、後の slow start に置く。窓が ssthresh に届いていたので再開は HyStart++ を使わず、12 segment の
+        // ACK は 1 SMSS
         r.n.advance(Duration::from_secs(60));
         let mss = r.mss;
-        assert_eq!(r.probe(), 2 * mss, "{cc:?}");
+        assert_eq!(r.probe(), mss, "{cc:?}");
     }
 }
 
 // 2. 黙っても変わらない
 
-/// RTO の後の slow start の途中で黙って窓が IW に戻っても、印は立ったままで L = 1 です。
+/// RTO の後の slow start の途中で黙って窓が IW に戻ると、再開は HyStart++ の中で動き、L = 2 です
+/// (RFC 9406 4.3 の MAY)。
 #[test]
-fn idle_in_the_middle_keeps_the_limit() {
+fn idle_in_the_middle_restarts_under_hystart() {
     for cc in CCS {
         let mut r = Rig::new(cc, false, 10);
         r.first_rto_keep_slow_start();
@@ -219,9 +223,13 @@ fn idle_in_the_middle_keeps_the_limit() {
         assert!(r.flag(), "{cc:?}: still limited before the idle");
         r.n.advance(Duration::from_secs(60));
         assert_eq!(r.rtos(), 1, "{cc:?}: the idle raised no RTO");
-        assert!(r.flag(), "{cc:?}: idle does not change the mark");
+        assert!(r.flag(), "{cc:?}: idle alone does not change the mark");
         let mss = r.mss;
-        assert_eq!(r.probe(), mss, "{cc:?}: L = 1 after the idle restart");
+        assert_eq!(
+            r.probe(),
+            2 * mss,
+            "{cc:?}: HyStart++ after the idle restart"
+        );
     }
 }
 
@@ -264,7 +272,7 @@ fn spurious_rto_in_the_initial_slow_start_is_undone_to_l2() {
         assert!(!r.flag(), "{cc:?}: the undo restores the initial mark");
         assert_eq!(r.ssthresh(), u32::MAX, "{cc:?}: ssthresh restored");
         let mss = r.mss;
-        assert_eq!(r.probe(), 2 * mss, "{cc:?}");
+        assert_eq!(r.probe_with(false), 2 * mss, "{cc:?}");
     }
 }
 
@@ -284,7 +292,7 @@ fn spurious_single_segment_rto_is_undone_to_l2() {
         assert_eq!(r.n.s.stats().spurious_rtos, 1, "{cc:?}: undone");
         assert!(!r.flag(), "{cc:?}: the undo restores the initial mark");
         let mss = r.mss;
-        assert_eq!(r.probe(), 2 * mss, "{cc:?}");
+        assert_eq!(r.probe_with(false), 2 * mss, "{cc:?}");
     }
 }
 
@@ -315,17 +323,6 @@ fn spurious_rto_inside_the_limited_slow_start_keeps_l1() {
         r.n.advance(Duration::from_millis(1));
         r.q.deliver(&mut r.n, &flight);
         assert_eq!(r.n.s.stats().spurious_rtos, 1, "{cc:?}: undone");
-        {
-            let k = &*r.n.s.conn(r.c.slot).k;
-            let (snap, uc, us) = (k.undo_rto_slow_start, k.undo_cwnd, k.undo_ssthresh);
-            let st = r.n.s.stats();
-            let t = &*r.n.s.conn(r.c.slot).t;
-            assert!(
-                t.rto_slow_start,
-                "{cc:?}: the snapshot of the first episode is restored; snapshot {snap} cwnd {} ssthresh {} undo_cwnd {uc} undo_ssthresh {us} stats {:?}",
-                t.cwnd, t.ssthresh, st
-            );
-        }
         assert_eq!(r.probe(), mss, "{cc:?}: L = 1 goes on");
     }
 }
@@ -405,9 +402,9 @@ fn dsack_undo_of_a_recovery_in_the_limited_slow_start_restores_the_mark() {
 
 // 5. 高速の回復
 
-/// 後の slow start の途中で高速の回復に入ると印が下り、取り消さなければ回復の後の slow start は 2 SMSS です。
+/// 後の slow start の途中で高速の回復に入っても、取り消さなければ回復の後の slow start は HyStart++ の外で 1 SMSS です。
 #[test]
-fn fast_recovery_in_the_limited_slow_start_ends_the_limit() {
+fn fast_recovery_in_the_limited_slow_start_keeps_the_limit() {
     for cc in CCS {
         let mut r = Rig::new(cc, false, 10);
         r.first_rto_keep_slow_start();
@@ -430,7 +427,7 @@ fn fast_recovery_in_the_limited_slow_start_ends_the_limit() {
             resent.extend(r.take());
         }
         assert_eq!(r.n.s.stats().fast_recoveries, 1, "{cc:?}: entered");
-        assert!(!r.flag(), "{cc:?}: the entry lowers the mark");
+        assert!(r.n.s.conn(r.c.slot).t.in_recovery, "{cc:?}: in recovery");
         // 失った分を再送で届けて回復を終える
         r.q.deliver(&mut r.n, &resent);
         r.settle();
@@ -438,10 +435,8 @@ fn fast_recovery_in_the_limited_slow_start_ends_the_limit() {
             !r.n.s.conn(r.c.slot).t.in_recovery,
             "{cc:?}: recovery ended"
         );
-        assert!(!r.flag(), "{cc:?}: the mark stays down");
         assert_eq!(r.n.s.stats().spurious_undos, 0);
-        r.n.advance(Duration::from_secs(60));
-        assert_eq!(r.probe(), 2 * mss, "{cc:?}: L = 2 after the recovery");
+        assert_eq!(r.probe(), mss, "{cc:?}: L = 1 after the recovery");
     }
 }
 
@@ -453,7 +448,7 @@ fn tlp_cut_with_mark(cc: Congestion, by_hand: bool) {
     let mss = r.mss;
     if by_hand {
         r.deliver_originals();
-        r.n.s.conn(r.c.slot).t.rto_slow_start = true;
+        r.n.s.conn(r.c.slot).t.ssthresh = 100 * mss;
     } else {
         r.wait_rto(1);
         assert!(r.flag(), "{cc:?}: raised");
@@ -540,11 +535,12 @@ fn syn_ack_retransmission_keeps_l2() {
         let c = n.accept(l);
         n.drain();
         let mss = n.s.conn(c.slot).seg_mss();
-        let t = &*n.s.conn(c.slot).t;
+        let cv = n.s.conn(c.slot);
         assert!(
-            !t.rto_slow_start,
-            "{cc:?}: the SYN-ACK retransmission raises no mark"
+            cv.hystart_on(),
+            "{cc:?}: the SYN-ACK retransmission leaves the initial slow start"
         );
+        let t = &*cv.t;
         assert_eq!(t.cwnd, mss, "{cc:?}: one segment after the retransmission");
         let mut r = Rig {
             n,
@@ -553,7 +549,7 @@ fn syn_ack_retransmission_keeps_l2() {
             mss,
             outs: Vec::new(),
         };
-        assert_eq!(r.probe(), 2 * mss, "{cc:?}");
+        assert_eq!(r.probe_with(false), 2 * mss, "{cc:?}");
     }
 }
 

@@ -263,6 +263,13 @@ impl Conn<'_> {
             if now - self.t.last_send_at > self.cur_rto() {
                 let iw = INITIAL_WINDOW_SEGS * self.seg_mss();
                 self.t.cwnd = self.t.cwnd.min(iw);
+                // 覚えた ssthresh まで窓を育て直す slow start は HyStart++ の中で動かします (RFC 9406 4.3 節の MAY)。
+                if self.t.cwnd < self.t.ssthresh
+                    && self.t.ssthresh != u32::MAX
+                    && !self.t.in_recovery
+                {
+                    self.restart_hystart();
+                }
             }
             self.cc_on_idle(now - self.t.last_send_at, now);
         }

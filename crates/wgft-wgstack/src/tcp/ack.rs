@@ -283,7 +283,7 @@ impl Conn<'_> {
         }
         self.t.cwnd = self.t.cwnd.min(CWND_MAX);
         if self.t.cwnd >= self.t.ssthresh {
-            self.t.rto_slow_start = false; // RTO の後の slow start は窓が ssthresh に届いて終わります
+            self.t.idle_hs = false; // 黙った後の再開の slow start は窓が ssthresh に届いて終わります
         }
     }
 

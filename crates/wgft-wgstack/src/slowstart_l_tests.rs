@@ -6,7 +6,6 @@
 //! 増分を 1 SMSS までにすることです。最初の slow start は今までどおり HyStart++ の中です。
 //!
 //! 増分は、本物の ACK で 2 segment を確認した時の窓の増分で見ます (1 SMSS なら L = 1、2 SMSS なら L = 2)。
-//! 直す前の核で失敗する試験は `#[ignore]` を付けています。直す PR が外します。
 
 #![expect(
     clippy::disallowed_macros,
@@ -192,7 +191,6 @@ fn slow_start_after_rto_grows_one_smss_per_ack() {
 
 /// SACK を交渉しない接続の高速の回復の終わりに窓が ssthresh より小さくなる時、続く slow start も 1 SMSS までです。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn slow_start_at_the_end_of_recovery_without_sack_grows_one_smss_per_ack() {
     for cc in CCS {
         let mut r = Rig::new(cc, false, 40, 40);
@@ -220,7 +218,6 @@ fn slow_start_at_the_end_of_recovery_without_sack_grows_one_smss_per_ack() {
 
 /// 取り消しの後に戻した窓が ssthresh より小さい時、続く slow start も 1 SMSS までです。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn slow_start_after_an_undo_grows_one_smss_per_ack() {
     for cc in CCS {
         let mut r = Rig::new(cc, true, 20, 1);
@@ -373,7 +370,6 @@ fn rising_rtt(round: usize) -> Duration {
 /// RTT が上がると、黙った後の窓の育ちも CSS に入り、CSS の間の窓は 1 往復で 1 + 1 / CSS_GROWTH_DIVISOR 倍ほどです。
 /// RFC 9406 4.2 節: 往復の最小 RTT が前の往復より閾値以上増えると CSS に入ります。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn idle_restart_enters_css_when_rtt_rises() {
     for cc in CCS {
         let (mut r, outs) = idle_restart(cc, 40, 100_000);
@@ -393,7 +389,6 @@ fn idle_restart_enters_css_when_rtt_rises() {
 
 /// CSS に入って CSS_ROUNDS 往復を過ごすと、ssthresh を窓に揃えて CSS を終えます (RFC 9406 4.2 節)。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn idle_restart_leaves_css_after_five_rounds() {
     for cc in CCS {
         let (mut r, outs) = idle_restart(cc, 40, 100_000);
@@ -430,7 +425,6 @@ fn rto_after_an_idle_restart_ends_the_hystart_limit() {
 /// slow start は HyStart++ の外で、1 ACK の増分は 1 SMSS までです (RFC 5681 3.1 節)。再開で動かし始めた HyStart++
 /// が回復に入るときに終わらないと L = 2 に戻る。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn recovery_after_an_idle_restart_ends_the_hystart_limit() {
     for cc in CCS {
         let (mut r, outs) = idle_restart_with(
@@ -466,7 +460,6 @@ fn recovery_after_an_idle_restart_ends_the_hystart_limit() {
 /// 1 SMSS までです (RFC 5681 3.1 節)。回復の入口で ssthresh が決まり、窓は回復の出口で ssthresh より小さくなります。
 /// 窓は、RTO の後に落ち着いてから 1 度だけ開けて (送り出しを作るため)、回復の後は触りません。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn slow_start_after_an_rto_and_a_real_recovery_grows_one_smss_per_ack() {
     for cc in CCS {
         let mut r = Rig::new(cc, false, 40, 40);
