@@ -35,7 +35,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use wgft_wireguard::{
-    Device, DeviceConfig, Ipv4Prefix, Limits, PeerConfig, PrivateKey, ProtocolTimers, Roaming,
+    Device, DeviceConfig, DropReason, Ipv4Prefix, Limits, PeerConfig, PrivateKey, ProtocolTimers,
+    Roaming,
 };
 
 const AGENT_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 2);
@@ -176,9 +177,14 @@ fn receive(
     device.handle_datagram_with_ecn(now, from, outer_ecn, datagram, out)
 }
 
-/// 捨てた数の総和。今は専用の数が無いので、総和の増え方を見る。
+/// 捨てた数の総和。「ほかに何も数えない」ことの確認に使う。
 fn drops_total(device: &Device) -> u64 {
     device.drops().total()
+}
+
+/// 外側 CE と内側 Not-ECT の捨てた数。
+fn ce_on_not_ect(device: &Device) -> u64 {
+    device.drops().get(DropReason::CeOnNotEct)
 }
 
 struct Pair {
@@ -306,18 +312,21 @@ fn figure_4_all_sixteen_combinations() {
             seq += 1;
             let why = format!("inner {} outer {}", name(inner), name(outer));
             let sent = inner_packet(SERVER_IP, AGENT_IP, inner, 5, seq);
-            let before = drops_total(&pair.a);
+            let before = (drops_total(&pair.a), ce_on_not_ect(&pair.a));
             let got = pair.deliver(&sent, outer);
-            let dropped = drops_total(&pair.a) - before;
+            let dropped = drops_total(&pair.a) - before.0;
+            let named = ce_on_not_ect(&pair.a) - before.1;
             match figure_4(inner, outer) {
                 None => {
                     assert!(got.is_none(), "{why}: must be dropped, got {got:02x?}");
                     assert_eq!(dropped, 1, "{why}: the drop is counted once");
+                    assert_eq!(named, 1, "{why}: and counted as CeOnNotEct");
                 }
                 Some(want) => {
                     let got = got.unwrap_or_else(|| panic!("{why}: must be delivered"));
                     assert_only_ecn_changed(&sent, &got, want, &why);
                     assert_eq!(dropped, 0, "{why}: nothing is counted for a delivery");
+                    assert_eq!(named, 0, "{why}: CeOnNotEct is not counted");
                 }
             }
         }
@@ -353,7 +362,7 @@ fn each_datagram_uses_its_own_outer_ecn() {
         (NOT_ECT, CE),
         (ECT1, CE),
     ];
-    let before = drops_total(&pair.a);
+    let before = (drops_total(&pair.a), ce_on_not_ect(&pair.a));
     let mut want_drops = 0;
     for (i, (inner, outer)) in plan.into_iter().enumerate() {
         let sent = inner_packet(SERVER_IP, AGENT_IP, inner, 5, u32::try_from(i).unwrap());
@@ -370,9 +379,14 @@ fn each_datagram_uses_its_own_outer_ecn() {
     // 捨てる組 (内側 Not-ECT と外側 CE) は、隣り合わない 2 か所にある
     assert_eq!(want_drops, 2);
     assert_eq!(
-        drops_total(&pair.a) - before,
+        drops_total(&pair.a) - before.0,
         want_drops,
         "every dropped packet and nothing else is counted"
+    );
+    assert_eq!(
+        ce_on_not_ect(&pair.a) - before.1,
+        want_drops,
+        "and each is counted as CeOnNotEct"
     );
 }
 
