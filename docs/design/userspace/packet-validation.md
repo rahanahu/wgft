@@ -26,6 +26,7 @@
 <a id="断片の検査"></a>
 - 断片の検査:ヘッダーの checksum、長さ、flag、option の形を検査し、重なる断片と矛盾する断片はその datagram ごと捨てます。
   後続の断片は copy bit の立った option だけを持てる。
+  Go の実装は DF の立った断片を捨てます。Rust の wgstack は RFC 6864 4.3 に従い、DF の立った断片も再組み立てます。
   完成した datagram のヘッダーには最初の断片のヘッダーを使い、どれかの断片が CE なら ECN を CE にします
 <a id="断片に対する-icmp"></a>
 - 断片に対する ICMP:期限を過ぎた項目は、最初の断片を持ち、宛先がこの Device のアドレスであるときだけ、gVisor の `OnReassemblyTimeout` に渡して Time Exceeded を送る。

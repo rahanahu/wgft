@@ -407,7 +407,7 @@ Go 以外の実装も同じ規則で行います。
   表は未完成の datagram 128 件、断片 512 個、4 MiB を上限とし、未完成の datagram の期限は 30 秒で、1 秒ごとに期限切れを消します ([再組み立ての表](../userspace/packet-validation.md#再組み立ての表))
 - 表が満杯:同じ datagram 以外の最も古い未完成の項目を消して空きを作ります。
   1 つの datagram だけで満ちるときは、その断片を捨てます ([表が満杯のときの扱い](../userspace/packet-validation.md#表が満杯のときの扱い))
-- 断片の検査:ヘッダの checksum、長さ、flag、option の形を確かめ、重なる断片と矛盾する断片はその datagram ごと捨てます ([断片の検査](../userspace/packet-validation.md#断片の検査))
+- 断片の検査:ヘッダの checksum、長さ、flag、option の形を確かめ、重なる断片と矛盾する断片はその datagram ごと捨てます。Rust の wgstack は DF の立った断片も受け入れます (RFC 6864 4.3) ([断片の検査](../userspace/packet-validation.md#断片の検査))
 - 断片への ICMP:期限を過ぎた項目のうち、最初の断片を持ち自分宛てのものにだけ Time Exceeded を返します。
   option の不正な断片には Parameter Problem を返します。Rust の wgstack は、先頭でない断片には返さず黙って捨てます (RFC 1122 3.2.2) ([断片に対する ICMP](../userspace/packet-validation.md#断片に対する-icmp))
 - ICMP の誤りの送信元:ICMP の誤りは、外側の送信元が引用された datagram の宛先と一致するときだけ受け入れ、それ以外は黙って捨てます ([ICMP の誤りの入口](../userspace/packet-validation.md#icmp-の誤りの入口))

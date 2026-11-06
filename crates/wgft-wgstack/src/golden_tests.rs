@@ -325,6 +325,8 @@ fn describe_notice(n: &Notice, offending: &[u8]) -> String {
 /// Go の再組み立ての表に与えた断片と掃除の列を、Rust の表に同じ順で与えて照らします。
 #[test]
 fn reassembly_matches_go() {
+    // Go の再組み立ては DF の立った断片を捨てるので、golden の照合だけ Go と同じにします。
+    crate::stack::set_go_compat_df_frag(true);
     let limits = frag::Limits {
         entries: 4,
         fragments: 8,

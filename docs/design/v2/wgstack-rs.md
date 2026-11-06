@@ -213,7 +213,6 @@ SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表
 直しが入ったら行を消します。
 
 - RFC 5681 3 節:HyStart++ (RFC 9406) の外の slow start でも 1 ACK の増分の上限 L を 2 にします
-- RFC 6864 4.3 と RFC 1122 3.3.2:DF の立った断片を壊れた packet として捨てます (MUST からの逸脱でなく、相互運用の直しです)
 - RFC 1122 3.3.2:期限を過ぎた再組み立ての項目を追い出す時に Time Exceeded を送りません
 
 ## Go から Rust への対応
@@ -1430,6 +1429,7 @@ UDP と ICMP と断片の切り替えの行の件数は、git の集まり (348 
 | `set_go_compat_sent_at_zero` | 時刻 0 に作った SYN-ACK を「作っていない」とみなし、握手から RTT の標本を取りません | SYN-ACK の送った時刻を別の印 (`SynRow.sent`) で持つので、時刻 0 の握手からも標本を取ります (RFC 6298 2.2) | 1113 件の記録を、最初の RTO より後の応答まで照らし続けるため | 2 / 1113 (adversarial 626、fuzzcore 487) | `listen_tests::a_synack_sent_*`、`rtt_wire_*` |
 | `set_go_compat_shared_id` | UDP の datagram と echo の応答の IPv4 ID を、DF を立てた packet と同じ 1 つの数えから取ります (UDP は 0 を飛ばし、echo の応答は飛ばしません) | 別の数えから取り、0 を飛ばします (RFC 6864 4.3) | UDP と echo の応答の ID が TCP の segment と ICMP の誤りの数えで動くので、この記録を ID の違いより後の応答まで照らし続けるため | 15 / 15 (icmp-echo、udp-datagram、udp-large) | `icmp_tests::udp_ids_are_not_advanced_by_df_traffic`、`echo_replies_and_udp_share_a_counter_that_df_traffic_does_not_advance`、`open_id_counter_wraps_past_zero` |
 | `set_go_compat_echo_drop` | MTU を超える echo の応答を、断片に分けずに捨てて `icmp_dropped` に数えます | 断片に分けて全部返します (RFC 1122 3.2.2.6) | 5 件の記録を、大きな echo の応答より後の応答まで照らし続けるため | 5 / 5 (icmp-echo) | `icmp_tests::icmp_echo`、`oversized_echo_request_gets_a_fragmented_reply` |
+| `set_go_compat_df_frag` (試験の build だけ) | DF の立った断片を断片の誤りとして捨てます | 受け入れて再組み立てます (RFC 6864 4.3) | Go の再組み立ての golden を、DF の立った断片より後の手順まで照らし続けるため。記録の再生には当たる要求がありません | 0 / 0 (再組み立ての golden だけ。400 手順の 5 手目で食い違う) | `icmp_tests::fragments_with_df_set_are_reassembled`、`mixed_df_fragments_are_reassembled`、`frag::tests::accepts_dont_fragment_with_fragments` |
 
 ## 置き換えの判定
 
@@ -1847,6 +1847,13 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   凍結した Go は応答を捨てて `icmp_dropped` に数えるので、Go との照合だけ元に戻す照合用の切り替え (`set_go_compat_echo_drop`) があります。
   置き場所、スコープ、`WgstackDut` が持つ値は `set_go_compat_rto_l2` と同じです。
   この意図した違いは、照合の上でだけ消えます
+- DF の立った断片:Rust の核は、DF の立った断片も DF の無い断片と同じく再組み立てます。
+  RFC 6864 4.3 は、DF を立てた断片が、受けた断片をさらに分けることを防ぐと書き、DF を立てた断片を禁じません。
+  断片に分けた側 (送り手か途中の router) は、さらに分けられないように断片に DF を立てうるので、DF の立った断片は正当です。
+  凍結した Go は DF の立った断片を断片の誤りとして捨てます。
+  Go の再組み立ての golden (`golden_tests`) の照合だけ、試験の build の thread ごとの切り替え (`set_go_compat_df_frag`) で Go と同じにします。
+  Go の記録の再生に当たる要求は無く、`WgstackDut` に切り替えはありません。
+  製品と harness の build には切り替えも読み出しもありません
 
 ### handle の層で決めたこと
 
