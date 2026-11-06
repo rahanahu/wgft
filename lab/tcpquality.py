@@ -57,9 +57,15 @@
 #       iperf3 runs one thread per stream. When the runs carry vm_cpu_s_per_gb, the same analysis
 #       follows for the whole VM's CPU per byte, its lines prefixed with VM (VMCPU, VMRATIO and so
 #       on), with a warning when an arm keeps more than VM_BUSY_SHARE of the VM's vCPUs (from the
-#       PLAN line) busy. The
+#       PLAN line) busy. With --split (split=1) the same follows per VM: AGENTVMGUEST and PEERVMGUEST
+#       from the host-side guest-mode time of each VM's vCPU threads (host_<vm>_vcpu_guest_s from hostwin,
+#       per GB: agentvm_guest_s_per_gb, peervm_guest_s_per_gb), then AGENTVM and PEERVM from each guest's
+#       /proc/stat, then HOSTQEMU, HOSTAGENT and HOSTPEER from all qemu threads on the host.
+#       AGENTVMGUESTRATIO is the decision ratio for the agent VM's CPU per byte; AGENTVMRATIO and VMRATIO
+#       are reference values, since the guest's /proc/stat misses most softirq on an otherwise idle vCPU.
+#       A --split log without the host's guest time prints "AGENTVMGUEST unavailable". The
 #       kernel arm (by its name), whose agent process does no work, has no RATIO line but a line
-#       saying so, and is compared by VMRATIO only.
+#       saying so, and is compared by the VM ratios only.
 #   iperf <jsonfile>
 #       reads the output of `iperf3 -J` and prints received=<bytes the receiver read>,
 #       sent=<bytes the sender wrote>, the receiver's duration and rate in Mbit/s and the sender's TCP
@@ -334,32 +340,50 @@ def cpupaired(logfile):
 def cpupaired_ratios(data, logfile):
     # cpupaired's lines for every key: the agent process, the VMs and the host, then MBITRATIO
     rc = 0
+    plan = data[0]
+    split = plan.get("split") == "1"
     for arm in ("x", "y"):
         if kernel_arm(data[1].get(arm, arm)):
+            how = ("AGENTVMGUESTRATIO, the decision ratio (AGENTVMRATIO and VMRATIO are reference only)" if split else
+                   "VMRATIO, a reference value: the guest's /proc/stat misses softirq on idle vCPUs, and the decision "
+                   "ratio AGENTVMGUESTRATIO needs --split")
             print("RATIO unavailable: arm %s (%s) is the kernel-mode agent, whose work runs outside its process; "
-                  "compare the arms by VMRATIO" % (arm, data[1].get(arm, arm)))
+                  "compare the arms by %s" % (arm, data[1].get(arm, arm), how))
             break
     else:
         rc = cpupaired_key(data, "agent_cpu_s_per_gb", vm=False)
     with open(logfile) as f:
         text = f.read()
-    plan = data[0]
-    split = plan.get("split") == "1"
-    if " vm_cpu_s_per_gb=" in text:
+    def vm_lines():
         # with --split the VM line is both VMs together, so the busy share is checked against both
+        if " vm_cpu_s_per_gb=" not in text:
+            return 0
         vcpus = int(plan.get("vcpus", "4")) + (int(plan.get("peer_vcpus", "0")) if split else 0)
-        rc = cpupaired_key(data, "vm_cpu_s_per_gb", vm=True, vcpus=vcpus) or rc
+        return cpupaired_key(data, "vm_cpu_s_per_gb", vm=True, vcpus=vcpus)
+    if not split:
+        rc = vm_lines() or rc
     if split:
         # the agent VM alone: the agent's process and the kernel work of its NIC, or kernel WireGuard,
-        # on the agent's vCPUs only; then the peer VM, and the host's threads of both VMs
-        for key, pre, share, vcpus in (
-                ("agentvm_cpu_s_per_gb", "AGENTVM", "agentvm_cpu_share", int(plan.get("vcpus", "4"))),
-                ("peervm_cpu_s_per_gb", "PEERVM", "peervm_cpu_share", int(plan.get("peer_vcpus", "4"))),
-                ("host_qemu_s_per_gb", "HOSTQEMU", "host_qemu_share", None),
-                ("host_agent_s_per_gb", "HOSTAGENT", "host_qemu_share", None),
-                ("host_peer_s_per_gb", "HOSTPEER", "host_qemu_share", None)):
-            if " %s=" % key in text:
+        # on the agent's vCPUs only; then the peer VM, and the host's threads of both VMs. Each VM first by
+        # its vCPU threads' guest-mode time from the host (add_guest_keys; AGENTVMGUESTRATIO decides), then
+        # by the guest's /proc/stat (reference: it misses most softirq on idle vCPUs)
+        guest = lambda key: any(key in r for r in data[2].values())
+        for key, pre, share, vcpus, have in (
+                ("agentvm_guest_s_per_gb", "AGENTVMGUEST", "agentvm_guest_share", int(plan.get("vcpus", "4")), guest),
+                ("agentvm_cpu_s_per_gb", "AGENTVM", "agentvm_cpu_share", int(plan.get("vcpus", "4")), None),
+                ("peervm_guest_s_per_gb", "PEERVMGUEST", "peervm_guest_share", int(plan.get("peer_vcpus", "4")), guest),
+                ("peervm_cpu_s_per_gb", "PEERVM", "peervm_cpu_share", int(plan.get("peer_vcpus", "4")), None),
+                ("host_qemu_s_per_gb", "HOSTQEMU", "host_qemu_share", None, None),
+                ("host_agent_s_per_gb", "HOSTAGENT", "host_qemu_share", None, None),
+                ("host_peer_s_per_gb", "HOSTPEER", "host_qemu_share", None, None)):
+            if have(key) if have else " %s=" % key in text:
                 rc = cpupaired_key(data, key, vm=vcpus is not None, pre=pre, share_key=share, vcpus=vcpus) or rc
+            elif pre == "AGENTVMGUEST" and " agentvm_cpu_s_per_gb=" in text:
+                print("AGENTVMGUEST unavailable: the runs carry no host_agent_vcpu_guest_s (no host samples); "
+                      "AGENTVMRATIO is reference only")
+            if pre == "AGENTVMGUEST":
+                # the two VMs' /proc/stat together (VMRATIO), a reference value, after the decision lines
+                rc = vm_lines() or rc
     rc = paired_ratio(data, "overall_mbit", "MBITRATIO", sender_check=True) or rc
     return rc
 
@@ -426,8 +450,30 @@ def load_paired(logfile):
         if r.get("arm") not in ("x", "y") or r.get("vm") not in ("a", "b"):
             continue
         names[r["arm"]] = r.get("name", r["arm"])
+        add_guest_keys(r)
         runs[(int(r.get("round", 0)), int(r.get("run", 0)), r["arm"])] = r
     return plan, names, runs
+
+
+def add_guest_keys(r):
+    # with --split, each VM's CPU from the host's side: the time its vCPU threads spent in guest mode
+    # (host_<vm>_vcpu_guest_s, from hostwin), as <vm>vm_guest_s_per_gb and <vm>vm_guest_share. The guest's
+    # /proc/stat (agentvm_cpu_s_per_gb) misses most softirq and interrupt time that runs on an otherwise
+    # idle vCPU: its tick is stopped there, so that time counts as idle (on the NIC's otherwise idle vCPU,
+    # /proc/stat showed 0.04-0.11 CPU busy, perf in the agent VM 0.20 and the guest-mode time 0.25-0.31).
+    # The guest-mode time counts it, and leaves out KVM's halt polling and exits, qemu's and vhost's threads
+    # and the host's interrupts on the vCPU's CPU
+    try:
+        gb = float(r.get("bytes", "0") or 0) / 1e9
+        win = float(r.get("window_s", "0") or 0)
+    except ValueError:
+        return
+    for vm in ("agent", "peer"):
+        g = r.get("host_%s_vcpu_guest_s" % vm)
+        if g is None or gb <= 0 or win <= 0 or "%svm_guest_s_per_gb" % vm in r:
+            continue
+        r["%svm_guest_s_per_gb" % vm] = "%.3f" % (float(g) / gb)
+        r["%svm_guest_share" % vm] = "%.3f" % (float(g) / win)
 
 
 def planned_keys(plan, runs):
@@ -1945,6 +1991,14 @@ class HostSampler:
                     self.vhost_e[label] += dlt
             self.last[key] = vals
         parts = ["%s_pid=%s" % (label, pid)]
+        # each vCPU thread on its own, by the host CPU it is pinned to (pv<host CPU>): its run time (ns), guest
+        # time and system time (ticks), cumulative over the thread's life. Incus gives vCPU i the i-th CPU of
+        # limits.cpu, so hostwin numbers them in the order of the host CPUs
+        for tid, (comm, proc, allowed, vals) in sorted(threads.items()):
+            if self.kind.get((label, tid)) == "vcpu" and allowed.isdigit():
+                parts += ["%s_pv%s_run_ns=%d" % (label, allowed, vals["run"]),
+                          "%s_pv%s_guest=%d" % (label, allowed, vals["guest"]),
+                          "%s_pv%s_stime=%d" % (label, allowed, vals["stime"])]
         parts += ["%s_%s_ns=%d" % (label, c, tot[(c, "run")]) for c in ("vcpu", "vhost", "other")]
         parts += ["%s_vhostp_ns=%d" % (label, self.vhost_p[label]), "%s_vhoste_ns=%d" % (label, self.vhost_e[label])]
         for c in ("vcpu", "vhost", "other"):
@@ -2282,6 +2336,13 @@ def hostwin_line(r, rows, hz, pc, kvm=None):
             other = dl(lb + "_vcpucpu_busy") / hz - dl(lb + "_vcpu_ns") / 1e9
             add += ["host_%s_vcpucpu_irq_s=%.3f" % (lb, dl(lb + "_vcpucpu_irq") / hz),
                     "host_%s_vcpucpu_not_vcpu_s=%.3f" % (lb, other)]
+        pv = sorted(int(k[len(lb) + 3:-7]) for k in keys if k.startswith(lb + "_pv") and k.endswith("_run_ns"))
+        for i, n in enumerate(pv):
+            # per vCPU, in the order of the host CPUs: the thread's run time, its time in the guest and its time in
+            # KVM (exits, interrupt injection and halt polling), as shares of the window
+            add += ["host_%s_vcpu%d_run_share=%.3f" % (lb, i, dl("%s_pv%d_run_ns" % (lb, n)) / 1e9 / win),
+                    "host_%s_vcpu%d_guest_share=%.3f" % (lb, i, dl("%s_pv%d_guest" % (lb, n)) / hz / win),
+                    "host_%s_vcpu%d_kvm_share=%.3f" % (lb, i, dl("%s_pv%d_stime" % (lb, n)) / hz / win)]
         share = GUEST_SHARE.get(lb)
         if share and share in r and r.get("window_s"):
             # the vCPU threads' run time beyond what the guest counts as busy: halt polling, exits,
@@ -2315,6 +2376,12 @@ def hostwin(samples, logfile, kvmfile=""):
     # busy time; with <kvmfile> from kvmsample, the KVM statistics of each VM. host_qemu_s_per_gb and
     # host_qemu_share are all threads of all VMs, the cost of the guests on the host including the
     # threads Incus does not pin; host_vhost_pcore_frac is the share of vhost time on P-cores.
+    # host_<label>_vcpu_guest_s is the time the VM's vCPU threads ran guest code (guest_time, field 43 of
+    # /proc/<pid>/task/<tid>/stat, in clock ticks), from which cpupaired derives the decision ratio
+    # AGENTVMGUESTRATIO. Per vCPU thread, host_<label>_vcpu<N>_{run,guest,kvm}_share are its run time
+    # (schedstat), guest time and system (KVM) time as shares of the window; N numbers the vCPU threads in
+    # the order of the host CPUs they are pinned to, which assumes Incus pins vCPU i to the i-th CPU of
+    # limits.cpu. The window's ends are interpolated linearly between samples 0.5 s apart.
     rows = read_samples(samples)
     if len(rows) < 2:
         print("hostwin: fewer than two samples in %s" % samples, file=sys.stderr)

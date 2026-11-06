@@ -1222,7 +1222,11 @@ round ごとの実行の数でこの分の重みが変わり、2026-11-01 の同
 `tcpquality.sh` のモード `gvisor` と `wgstack` は、Go の agent をその netstack で動かします。
 モード `rust` は Rust の agent を動かし、netstack は Rust の wgstack だけです。
 server はどのモードでも Go の `wgft` のカーネルモードです。
-モード `kernel` (エージェントのカーネルモード) はエージェントのプロセスが WireGuard と TCP の仕事をしないので、`--tool iperf3` で流し、VM 全体の byte あたりの CPU (`VMRATIO`) だけで比べます。
+モード `kernel` (エージェントのカーネルモード) はエージェントのプロセスが WireGuard と TCP の仕事をしないので、`--tool iperf3` で流し、VM の byte あたりの CPU で比べます。
+1 台の VM の測定の `VMRATIO` はゲストの `/proc/stat` の値で、idle の vCPU で走る softirq をほとんど数えないので、参考の値です。
+カーネルモードとの判定は、agent を専用の VM に置く測定 (`--split`) の `AGENTVMGUESTRATIO` で行います。
+この値は vCPU のスレッドがゲストのモードで走った時間をホストで数えます。
+理由と、この値が数えないホストの費用は [agent を専用の VM に置く](../../../lab/README.md#agent-を専用の-vm-に置く---split) にあります (2026-11-07 の改訂)。
 [目標と制約](#目標と制約)の CPU の目標は、Go の agent の wgstack と gVisor の比として決めました。
 ユーザー空間モードの製品のエージェントは Rust の agent に替わったので、Rust の agent の速さを制限しない経路の目標は [速さを制限しない経路の agent の性能](../v2/agent-throughput.md#目標) で決めます。
 参照の表は、Rust の agent と Go の agent の gVisor の比も記録します。

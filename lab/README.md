@@ -375,15 +375,45 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus
   2 つの腕は同時に走らないので、始まりの同期と重なりの値はありません
 - 操作:相手の VM の `tcpquality.sh` が `AGENT_AT` を受け、agent の VM の `tcpquality.py agentd` を通して `lab/tqagent.sh` で agent を起動、停止します。
   agentd は incusbr0 の上の agent の VM のアドレスで待ち、ホストが 2 台に置いた token を持たない要求を断ります
-- 解析:`VM` の行は 2 台の和です。
-  `AGENTVM` の行は agent の VM だけの byte あたりの CPU で、Rust の agent ではプロセスとその NIC のカーネルの仕事、カーネルモードではカーネルの WireGuard の仕事です。
-  2 つの腕を同じ条件で比べる主な値です。
-  `PEERVM` の行は相手の VM、`HOSTQEMU` の行は 2 台の qemu の全スレッドのホストでの時間です。
+- 解析:VM ごとの byte あたりの CPU は 2 通りに数えます。
+  2 つの腕の判定に使うのは `AGENTVMGUEST` の行 (`AGENTVMGUESTRATIO`) です。
+  agent の VM の vCPU のスレッドがゲストのモードで走った時間 (`host_agent_vcpu_guest_s`) を、受け手が読んだ byte で割った値 (`agentvm_guest_s_per_gb`) の比です。
+  Rust の agent ではプロセスとその NIC のカーネルの仕事、カーネルモードではカーネルの WireGuard の仕事を含みます。
+  `AGENTVM` の行はゲストの `/proc/stat` から数えた同じ量 (`agentvm_cpu_s_per_gb`) で、参考の値です。
+  `PEERVMGUEST` と `PEERVM` の行は相手の VM の同じ 2 つの値です。
+  `VM` の行は 2 台の `/proc/stat` の和、`HOSTQEMU` の行は 2 台の qemu の全スレッドのホストでの時間です。
   ホストの値は `paired.log` の `host_*` にあり、`host_pcore_busy_s` は測定の外の P コアの負荷を示します
+- ゲストの `/proc/stat` で判定しない理由:ゲストのカーネルは idle の vCPU で tick を止めます。
+  そのため、idle の vCPU で走って idle に戻る割り込みと softirq の時間は、ほとんどが idle に数えられます。
+  `--placement apart` の Rust の agent は NIC の割り込みの vCPU (CPU 0) にほかの仕事を置かないので、その vCPU の受信の softirq が数えられません。
+  2 vCPU の送る向きの 4 stream では、CPU 0 の忙しさが `/proc/stat` で 0.11、ゲストの perf の標本で 0.20、ゲストのモードの時間で 0.31 でした (2026-11-06)。
+  2 から 8 vCPU の最大負荷の測定 (2026-11-05) では、ゲストのモードの時間は Rust の agent で `/proc/stat` の 1.11 から 1.35 倍、カーネルモードで 0.95 から 1.22 倍でした。
+  vCPU がほかの仕事で忙しいときは 2 つの値はほぼ一致します。
+  ゲストの perf の標本はゲストのモードの時間より小さく出ます。
+  割り込みを止めた区間の標本が idle の側に数えられるためと考えられます
+- `AGENTVMGUEST` が数えないもの:ゲストのモードの外のホストの費用です。
+  vCPU のスレッドのホストのカーネルの時間 (VM exit の処理、割り込みの注入、halt polling。`host_<vm>_vcpu_kvm_s`) と qemu のユーザー空間の時間 (`_vcpu_qemu_s`) を含みません。
+  vhost の worker と qemu のほかのスレッド (I/O の処理など。`host_<vm>_vhost_s`、`_other_s`)、vCPU を固定したホストの CPU の irq と softirq (`_vcpucpu_irq_s`)、ホストのブリッジと tap の処理、vCPU が実行を待った時間 (`_vcpu_wait_s`) も含みません。
+  これらは `HOSTAGENT` と `HOSTPEER` の行と `host_*` の値で別に見ます。
+  ゲストは VM exit とホストの割り込みの時間も自分の忙しさに数えるので、1 vCPU で埋まった VM では `AGENTVMGUEST` が `/proc/stat` より 5 から 11% 小さくなります。
+  2 つの腕で同じように小さくなるので、最大負荷の 1 vCPU の 9 組で比の動きは約 2.5% 以内でした (RTT 20 ms の送る向きの 4 stream の 1 組だけ 6%)。
+  最大の半分の固定負荷では 1 vCPU にも idle があり、比は 1 から 5% 動きました。
+  ゲストが idle の間に自分で polling する設定 (cpuidle の POLL の状態や haltpoll の driver) では、その polling もゲストのモードの時間に入ります。
+  今のラボのゲストは `cpuidle_driver=none` で、idle では HLT で止まります (`guestinfo.txt`)。
+  値は clock tick で数えるので、10 秒の窓で約 1% の粒度です。
+  窓の両端はホストの 0.5 秒ごとの標本の間を直線で補うので、10 秒の実行で最大約 2.5% の誤差が入りえます。
+  この誤差は 2 つの腕でほぼ打ち消し合います。
+  agent の VM のホストの halt polling を切っても、ゲストのモードの時間は変わりませんでした (2026-11-06、2 vCPU)
+- 改訂:2026-11-07 に、VM の byte あたりの CPU の判定を `AGENTVMRATIO` (ゲストの `/proc/stat`) から `AGENTVMGUESTRATIO` に替えました。
+  合否の線は変えていません。
+  `host_agent_vcpu_guest_s` を記録した前の測定は、今の `tcpquality.py cpupaired` で `paired.log` を解析し直すと両方の行が出ます
 - ホストでの時間の内訳:`host_<vm>_s_per_gb` は VM ごとの qemu の全スレッドの時間で、`HOSTAGENT` と `HOSTPEER` の行がその比です。
   vCPU のスレッドは、ゲストの中の時間 (`host_<vm>_vcpu_guest_s`)、ホストのカーネルの KVM の時間 (`_vcpu_kvm_s`、VM exit の処理、割り込みの注入、halt polling)、qemu のユーザー空間の時間 (`_vcpu_qemu_s`) に分けます。
   この 3 つは clock tick で数えるので、10 秒の窓で約 1 % の粒度です。
   `_vcpu_beyond_guest_s_per_gb` は vCPU のスレッドの時間からゲストが忙しいと数えた時間を引いた値で、ゲストから見えないホストの費用です。
+  vCPU ごとの値は `host_<vm>_vcpu<N>_run_share`、`_guest_share`、`_kvm_share` です。
+  `N` は vCPU のスレッドを固定先のホストの CPU の順に並べた番号です。
+  Incus が vCPU i を `limits.cpu` の i 番目の CPU に固定するという前提を置いていて、この前提は確かめていません。
   `_vcpu_blocks_per_s` は vCPU のスレッドが実際に眠った回数、`_vcpu_wait_s` は実行を待った時間、`_vcpucpu_irq_s` は vCPU を固定した CPU の irq と softirq の時間です。
   ホストの値は root の権限なしに qemu の `/proc` から読みます
 - ゲストの値:両方の VM の割り込み (virtio の vector、`LOC`、`RES`、`CAL` など) と softirq を秒あたりで、data の NIC の `ethtool -S` の packet と kick (ゲストからホストへの通知) を GB あたりで記録します。
@@ -453,7 +483,7 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
   負荷が実際に使った割合は `paired.log` の `AGENTLOAD` の行に残ります (`share` は 0 から 1 の割合で、`DUTY` は百分率です。round と腕つき)。
   負荷が眠りから戻る遅れと、ホストの steal でも `share` は `DUTY / 100` より低くなり (ホストでの試しは `DUTY` 50 で 0.48)、agent に CPU を取られた分だけではありません。
   agent に取られた量は、腕の間か、agent を動かさない基準の値と `share` を比べて読みます。
-  注意:agent の VM 全体の CPU の値には負荷が入ります (`agentvm_cpu_s_per_gb` と `AGENTVM`、`vm_cpu_s_per_gb` と `VMRATIO`、負荷の載った CPU の `agentvm_cpu<N>_busy`、LAT の `vm_busy`、`hostwin` の `host_agent_*`)。
+  注意:agent の VM 全体の CPU の値には負荷が入ります (`agentvm_guest_s_per_gb` と `AGENTVMGUEST`、`agentvm_cpu_s_per_gb` と `AGENTVM`、`vm_cpu_s_per_gb` と `VMRATIO`、負荷の載った CPU の `agentvm_cpu<N>_busy`、LAT の `vm_busy`、`hostwin` の `host_agent_*`)。
   遅い腕ほど 1 GB あたりに負荷の CPU を多く積むので、腕の間に偏りが出ます。
   agent のプロセスの cgroup の比と遅れ (UDP の p50、p99、jitter) は負荷に影響されません。
   カーネルモードの腕は VM 全体の値でしか比べられないので、`--agent-load` と一緒には使えません (拒否します)。
