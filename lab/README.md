@@ -375,15 +375,37 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus
   2 つの腕は同時に走らないので、始まりの同期と重なりの値はありません
 - 操作:相手の VM の `tcpquality.sh` が `AGENT_AT` を受け、agent の VM の `tcpquality.py agentd` を通して `lab/tqagent.sh` で agent を起動、停止します。
   agentd は incusbr0 の上の agent の VM のアドレスで待ち、ホストが 2 台に置いた token を持たない要求を断ります
-- 解析:`VM` の行は 2 台の和です。
-  `AGENTVM` の行は agent の VM だけの byte あたりの CPU で、Rust の agent ではプロセスとその NIC のカーネルの仕事、カーネルモードではカーネルの WireGuard の仕事です。
-  2 つの腕を同じ条件で比べる主な値です。
-  `PEERVM` の行は相手の VM、`HOSTQEMU` の行は 2 台の qemu の全スレッドのホストでの時間です。
+- 解析:VM ごとの byte あたりの CPU は 2 通りに数えます。
+  2 つの腕の判定に使うのは `AGENTVMGUEST` の行 (`AGENTVMGUESTRATIO`) です。
+  agent の VM の vCPU のスレッドがゲストのモードで走った時間 (`host_agent_vcpu_guest_s`) を、受け手が読んだ byte で割った値 (`agentvm_guest_s_per_gb`) の比です。
+  Rust の agent ではプロセスとその NIC のカーネルの仕事、カーネルモードではカーネルの WireGuard の仕事を含みます。
+  `AGENTVM` の行はゲストの `/proc/stat` から数えた同じ量 (`agentvm_cpu_s_per_gb`) で、参考の値です。
+  `PEERVMGUEST` と `PEERVM` の行は相手の VM の同じ 2 つの値です。
+  `VM` の行は 2 台の `/proc/stat` の和、`HOSTQEMU` の行は 2 台の qemu の全スレッドのホストでの時間です。
   ホストの値は `paired.log` の `host_*` にあり、`host_pcore_busy_s` は測定の外の P コアの負荷を示します
+- ゲストの `/proc/stat` で判定しない理由:ゲストのカーネルは idle の vCPU で tick を止めます。
+  そのため、idle の vCPU で走って idle に戻る割り込みと softirq の時間は、ほとんどが idle に数えられます。
+  `--placement apart` の Rust の agent は NIC の割り込みの vCPU (CPU 0) にほかの仕事を置かないので、その vCPU の受信の softirq が数えられません。
+  2 vCPU の送る向きの 4 stream では、CPU 0 の忙しさが `/proc/stat` で 0.11、ゲストの perf の標本で 0.20、ゲストのモードの時間で 0.31 でした (2026-11-06)。
+  2 から 8 vCPU の最大負荷の測定 (2026-11-05) では、ゲストのモードの時間は Rust の agent で `/proc/stat` の 1.11 から 1.35 倍、カーネルモードで 0.95 から 1.22 倍でした。
+  vCPU がほかの仕事で忙しいときは 2 つの値はほぼ一致します。
+  ゲストの perf の標本は割り込みを止めた区間を idle の側に数えるので、ゲストのモードの時間より小さく出ます
+- `AGENTVMGUEST` が数えないもの:ゲストのモードの外のホストの費用です。
+  vCPU のスレッドのホストのカーネルの時間 (VM exit の処理、割り込みの注入、halt polling。`host_<vm>_vcpu_kvm_s`) と qemu のユーザー空間の時間 (`_vcpu_qemu_s`) を含みません。
+  vhost の worker と qemu のほかのスレッド (I/O の処理など。`host_<vm>_vhost_s`、`_other_s`)、vCPU を固定したホストの CPU の irq と softirq (`_vcpucpu_irq_s`)、ホストのブリッジと tap の処理、vCPU が実行を待った時間 (`_vcpu_wait_s`) も含みません。
+  これらは `HOSTAGENT` と `HOSTPEER` の行と `host_*` の値で別に見ます。
+  ゲストは VM exit とホストの割り込みの時間も自分の忙しさに数えるので、1 vCPU で埋まった VM では `AGENTVMGUEST` が `/proc/stat` より 7 から 11% 小さくなります。
+  2 つの腕で同じように小さくなるので、比はほとんど動きません。
+  値は clock tick で数えるので、10 秒の窓で約 1% の粒度です。
+  agent の VM のホストの halt polling を切っても、ゲストのモードの時間は変わりませんでした (2026-11-06、2 vCPU)
+- 改訂:2026-11-07 に、VM の byte あたりの CPU の判定を `AGENTVMRATIO` (ゲストの `/proc/stat`) から `AGENTVMGUESTRATIO` に替えました。
+  合否の線は変えていません。
+  `host_agent_vcpu_guest_s` を記録した前の測定は、今の `tcpquality.py cpupaired` で `paired.log` を解析し直すと両方の行が出ます
 - ホストでの時間の内訳:`host_<vm>_s_per_gb` は VM ごとの qemu の全スレッドの時間で、`HOSTAGENT` と `HOSTPEER` の行がその比です。
   vCPU のスレッドは、ゲストの中の時間 (`host_<vm>_vcpu_guest_s`)、ホストのカーネルの KVM の時間 (`_vcpu_kvm_s`、VM exit の処理、割り込みの注入、halt polling)、qemu のユーザー空間の時間 (`_vcpu_qemu_s`) に分けます。
   この 3 つは clock tick で数えるので、10 秒の窓で約 1 % の粒度です。
   `_vcpu_beyond_guest_s_per_gb` は vCPU のスレッドの時間からゲストが忙しいと数えた時間を引いた値で、ゲストから見えないホストの費用です。
+  vCPU ごとの値は `host_<vm>_vcpu<N>_run_share`、`_guest_share`、`_kvm_share` で、`N` はホストの CPU の順の vCPU の番号です。
   `_vcpu_blocks_per_s` は vCPU のスレッドが実際に眠った回数、`_vcpu_wait_s` は実行を待った時間、`_vcpucpu_irq_s` は vCPU を固定した CPU の irq と softirq の時間です。
   ホストの値は root の権限なしに qemu の `/proc` から読みます
 - ゲストの値:両方の VM の割り込み (virtio の vector、`LOC`、`RES`、`CAL` など) と softirq を秒あたりで、data の NIC の `ethtool -S` の packet と kick (ゲストからホストへの通知) を GB あたりで記録します。
@@ -405,6 +427,11 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus
   CPU のモデルに `kvm-poll-control` が無いと止まります。
   腕の行には `hostpoll=` が付きます
 - KVM の統計:root が `python3 lab/tcpquality.py kvmsample <file> 0.5` を測定の間に動かし、`PAIRED_KVM_SAMPLES=<file>` を渡すと、VM ごとの exit の数と halt polling の時間 (`host_<vm>_kvm_*`) が加わります
+- ゲストのカーネルの引数 (診断用):`WGFT_LAB_GUEST_CMDLINE` (空白区切り) を指定すると、`lab suite` と `lab paired` が作る VM の GRUB にその引数を足し、起動し直して `/proc/cmdline` を確かめます。
+  複製元は変えません。
+  たとえば `nohz=off` では idle の vCPU でも tick が止まらないので、ゲストの `/proc/stat` が idle の vCPU の softirq を数えます。
+  ゲストの idle の処理が変わって測る量も変わるので、判定の測定には使いません。
+  VM の用意は約 15 秒長くなります
 
 `--target local` は転送先 (LAN のホストの役) を agent のマシンに置きます。
 LAN のホストのアドレス `192.168.50.3` を agent の VM の `home` の `lo` に付け、iperf3 のサーバと UDP の echo を `home` で動かします。
