@@ -1,6 +1,5 @@
 //! 境界の値と会計の誤用の試験です。panic を期待せず、安全側の結果 (断った、数えた、上限で止まった) を確かめるので、
-//! overflow-checks の有無の両方で同じ主張になります。`#[ignore]` の試験は、今の実装が検査なしで黙って回り込むか、
-//! 検査ありで panic するものです。
+//! overflow-checks の有無の両方で同じ主張になります。
 
 use super::*;
 
@@ -87,7 +86,6 @@ fn read_with_nothing_unread() {
 
 /// `renege` に limit 0 を渡しても、区間の表と会計は壊れません (呼び手は 1 以上を渡すが、前提は検査されない)。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn renege_with_limit_zero_is_refused() {
     let mut p = ChunkPool::new().unwrap();
     let mut b = RecvBuf::owning(BOOST_SIZE, table(16), 0);
@@ -104,7 +102,6 @@ fn renege_with_limit_zero_is_refused() {
 
 /// 読み取りの位置が受信の位置を超えた (会計の誤り) とき、未読は 0 で、`read` は何も写しません。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn read_ahead_of_nxt_reads_nothing() {
     let mut p = ChunkPool::new().unwrap();
     let mut b = RecvBuf::owning(RECV_FLOOR, table(4), 0);
@@ -118,7 +115,6 @@ fn read_ahead_of_nxt_reads_nothing() {
 
 /// 区間の数がずれた状態 (白箱で 0 にする) で穴を埋めても、数は表の容量を超えて回り込みません。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn skewed_interval_count_does_not_wrap_on_release() {
     let mut p = ChunkPool::new().unwrap();
     let mut b = RecvBuf::owning(RECV_FLOOR, table(8), 0);
@@ -136,7 +132,6 @@ fn skewed_interval_count_does_not_wrap_on_release() {
 /// 順序外の byte の合計がずれた状態 (白箱で 0 にする) で穴を埋めても、取り消しても、合計は受信の容量を超える値に
 /// 回り込みません。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn skewed_ooo_bytes_do_not_wrap() {
     for renege in [false, true] {
         let mut p = ChunkPool::new().unwrap();
@@ -159,7 +154,6 @@ fn skewed_ooo_bytes_do_not_wrap() {
 
 /// 窓の空き (W8):未読と順序外の和が回り込んでも、広告する右端は受信の上限を超えません。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn window_free_never_exceeds_the_clamp_when_counts_break() {
     use crate::testnet_tests::{TestNet, small_limits};
     let mut n = TestNet::new(small_limits());

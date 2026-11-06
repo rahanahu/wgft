@@ -90,9 +90,14 @@ impl<H: Hook> Stack<H> {
         if !self.hook.may_return(h) {
             return false;
         }
-        let c = self.conn(i);
+        let mut c = self.conn(i);
         let limit = c.b.rcv.read_off + RECV_FLOOR;
         let reneged = c.b.rcv.renege(limit, FLOOR_INTERVALS);
+        if c.b.rcv.take_fault() {
+            // 順序外の区間の会計が崩れていました。区間は空にしてあります。接続を閉じます。
+            c.accounting_fault(now);
+            return false;
+        }
         c.s.stats.boost_reneged_bytes += reneged;
         let (lo, hi) = (c.t.una_off, c.t.tail_off);
         let Ok(snd) =

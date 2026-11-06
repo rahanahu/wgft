@@ -193,7 +193,11 @@ impl Conn<'_> {
                 rtx_acked = true;
             }
             self.drop_head(now);
-            self.b.recs.pop();
+            // ループの先頭で len() > 0 を確かめたので、外せないことはない。輪は空の pop を断るので、崩れても状態を変えない。
+            if !self.b.recs.pop() {
+                debug_assert!(false, "the record ring was empty after a length check");
+                break;
+            }
             self.t.rec_base = self.t.rec_base.wrapping_add(1);
         }
         (sample, rtx_acked)

@@ -1979,6 +1979,12 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   PRR の欄と RecoverFS は SACK による回復の間だけ触るので `ConnCold` に置きました
 - 記録の輪の添字:記録の輪の容量は 2 の冪でないので、剰余を割り算の命令にしないよう、先頭からの位置を 1 回の引き算で折り返します。
   意味は変わりません
+- 記録の輪と受信のバッファの会計の誤用:記録の輪の `push_back` と `pop` は、満杯と空の前提を `debug_assert` でなく本当の検査にし、断ったら何も変えずに偽を返します。
+  呼び手は `accounting_fault` で接続を閉じます。
+  受信のバッファは、未読の量、区間の数、順序外の byte の合計の引き算を `checked_sub` で行い、足りなければ 0 にして印を立て、区間をすべて捨てます (RFC 2018 8 節の取り消しと同じで、相手が再送します)。
+  入力の経路、boost からの取り消し、`read` が印か位置の逆転を見て `accounting_fault` を呼ぶので、検査なしの build でも巨大な値になって動き続けません。
+  `renege` は limit 0 を渡されたら何も捨てません。窓の空きの `unread + ooo` は `saturating_add` で、崩れても空きを 0 にする側へ倒します。
+  どの検査も 1 回の比較で、packet ごとの手間は増えません
 - 試験:Go の `sack_test.go`、`scoreboard_test.go`、`prr_test.go`、`lostq_audit_test.go`、`dsack_test.go`、`cwndval_test.go`、`lazyegress_test.go`、`tlp_rto_test.go`、`rack_test.go`、`undo_test.go`、`cc_test.go`、`boost_test.go`、`rcvwin_test.go` に当たる試験を持ちます。
   Go の試験が大きさ 1 の枠の集まりを作る所は、Rust の `Budget` の枠の数が固定なので、ほかの枠を別の接続で埋めてから取り合いを起こします
   試験は毎回 `check_invariants` を呼ぶので、ワークスペースの `Cargo.toml` で `wgft-wgstack` を dev と test の build でも `opt-level = 2` で作ります。

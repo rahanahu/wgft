@@ -25,7 +25,7 @@ impl Conn<'_> {
 
     /// 窓の上限から保持するデータを引いた空きです。順序外のデータも空きを減らします。
     pub(crate) fn rcv_free(&self) -> u64 {
-        let held = self.b.rcv.unread() + self.b.rcv.ooo_bytes();
+        let held = self.b.rcv.unread().saturating_add(self.b.rcv.ooo_bytes());
         self.rcv_clamp().saturating_sub(held)
     }
 

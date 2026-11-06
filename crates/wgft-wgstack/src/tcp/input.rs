@@ -265,6 +265,11 @@ impl Conn<'_> {
             .b
             .rcv
             .insert(off, seg.payload, limit, &mut self.s.chunks);
+        if self.b.rcv.take_fault() {
+            // 受信のバッファの会計が崩れました。区間は空にしてあります。接続を閉じます。
+            self.accounting_fault(now);
+            return;
+        }
         if res.no_memory {
             // chunk を確保できなければ、segment を状態を変えずに捨てます。相手は再送します。
             self.s.stats.recv_no_memory += 1;

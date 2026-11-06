@@ -300,7 +300,7 @@ impl Conn<'_> {
         if t.frto == 2 && t.frto_new > 0 {
             t.frto_new -= 1;
         }
-        self.b.recs.push_back(Record {
+        let pushed = self.b.recs.push_back(Record {
             seq,
             length: u16::try_from(length).unwrap_or(u16::MAX),
             sent_at: time(now),
@@ -308,6 +308,11 @@ impl Conn<'_> {
             rtx_gen: self.t.rtx_gen,
             ..Record::default()
         });
+        if !pushed {
+            // next_new は満杯の輪を断るので届かないはずです。届いたら会計の不整合として接続を閉じます。
+            self.accounting_fault(now);
+            return 0;
+        }
         let last = self.b.recs.len() - 1;
         self.list_append(Which::T, last, REC_IN_T);
         self.t.snd_nxt = seq.wrapping_add(length);
