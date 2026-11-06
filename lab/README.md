@@ -626,6 +626,8 @@ churn の case は、毎秒の完了数、確立と往復の時間の p50 と p9
   結果の行に `iperf_groups` が付きます
 - `TOOL=churn`:`tools/churn` の `churn run` が、`CHURN_RATE` 本を毎秒、`CHURN_S` 秒 (既定 10) 開きます。
   前の接続の終わりを待たずに開くので、遅れても負荷は下がりません。
+  `churn_inflight_max` は client の側で dial を始めてから閉じ終えるまでの接続の最大の数です。
+  SYN の再送を待つ接続、agent の accept の待ち行列の接続、握手の後に RST で断られる途中の接続も数えるので、agent が中継に保持するフローの数 (上限 `WGFT_MAX_TCP_FLOWS` から予備の 4 を引いた数) を超えることがあります
   `CHURN_CLOSE=server` (既定) は LAN のホストが先に閉じ、agent の netstack が TIME_WAIT を持ちます。
   `received` は完了した接続の往復の byte で、GB あたりの CPU に `2 × CHURN_SIZE / 1e9` を掛けると接続あたりになります
 - 送り元のアドレスごとの上限:client の namespace はアドレスが 1 つなので、stream と制御の接続の和が 120 以上の場合と churn では、server を `WGFT_MAX_TCP_FLOWS_PER_SOURCE=0` で起動します。
