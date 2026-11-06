@@ -1865,3 +1865,115 @@ fn go_compat_switch_skips_paws_in_time_wait() {
         );
     }
 }
+
+// RFC 9293 3.8.3 の R2:再送の断念は、最初の送信からの時間で決めます。最初の送信が時刻 0 でも、最初の RTO が
+// ちょうど cur_rto で起きても、断念の時刻は変わりません。
+
+/// 時刻 `start` に 100 byte を送り、相手が何も確認しないまま接続が時間切れになるまで、核の次の期限へ時計を進めます。
+/// 最初の送信からの経過 (ns) を、数えた RTO ごとと、断念の時で返します。
+fn r2_give_up_timeline(start: Duration) -> (Vec<u64>, u64) {
+    let mut n = net();
+    let (c, _p) = n.accepted(true);
+    n.drain();
+    if !start.is_zero() {
+        n.advance(start);
+        n.drain();
+    }
+    let t0 = n.now.as_nanos();
+    n.s.write(n.now, c, &[7u8; 100]).unwrap();
+    n.drain();
+    let mut rtos = Vec::new();
+    let mut seen = n.s.stats().rtos;
+    for _ in 0..1000 {
+        let next = n.s.poll_timeout().expect("a retransmit timer is pending");
+        let d = Duration::from_nanos(next.as_nanos().saturating_sub(n.now.as_nanos()));
+        n.advance(d);
+        n.drain();
+        let now = n.s.stats().rtos;
+        if now != seen {
+            rtos.push(n.now.as_nanos() - t0);
+            seen = now;
+        }
+        if n.s.stats().retransmit_aborts == 1 {
+            return (rtos, n.now.as_nanos() - t0);
+        }
+    }
+    panic!("no R2 give-up after 1000 timer events");
+}
+
+fn assert_r2_from_first_transmission(start: Duration) {
+    let deadline = u64::try_from(crate::tcp::RETRANSMIT_DEADLINE).unwrap();
+    let (rtos, gave_up) = r2_give_up_timeline(start);
+    assert!(
+        gave_up >= deadline,
+        "gave up {gave_up} ns after the first transmission, before the R2 bound {deadline} ns"
+    );
+    // 断念は、最初の送信から R2 を過ぎて最初に起きる RTO です。それより遅れた RTO は再送を 1 つ余分に送ります。
+    assert!(
+        rtos.iter().all(|&t| t < deadline),
+        "an RTO retransmitted at or after the R2 bound {deadline} ns instead of giving up: {rtos:?}, gave up at {gave_up}"
+    );
+}
+
+/// 最初の送信が時刻 0 でも、R2 の断念は最初の送信から計ります (0 を「未設定」の印にしない)。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn r2_give_up_is_measured_from_a_first_transmission_at_time_zero() {
+    assert_r2_from_first_transmission(Duration::ZERO);
+}
+
+/// 対照:最初の送信が 0 でない時刻なら、今も R2 の断念は最初の送信から計ります。
+#[test]
+fn r2_give_up_is_measured_from_a_first_transmission_at_a_nonzero_time() {
+    assert_r2_from_first_transmission(Duration::from_secs(5));
+}
+
+// RFC 7323 4.3:TIME_WAIT で受け入れた再送の FIN の TSval で TS.Recent を更新します。更新後は、古い TS.Recent と新しい
+// TSval の間の TSval を持つ segment が PAWS で捨てられ、ACK の TSecr は更新後の TS.Recent になります。
+
+fn tw_fin_updates_ts_recent(row: bool) {
+    let (mut n, c, mut p) = paws_time_wait(row);
+    let old_recent = p.ts_val;
+    let newer = old_recent + 100;
+    let between = old_recent + 50;
+    let s = paws_old_fin(&mut p, newer);
+    n.inject(&s);
+    let outs = n.drain();
+    assert!(
+        outs.len() == 1 && outs[0].flags == FLAG_ACK && outs[0].ack == p.snd,
+        "the retransmitted FIN (row {row}): want one ACK, got {}",
+        show(&outs)
+    );
+    assert_eq!(
+        outs[0].ts.map(|t| t.1),
+        Some(newer),
+        "the ACK to the accepted FIN must echo its TSval (row {row})"
+    );
+    let mut s = p.seg(FLAG_ACK, b"x");
+    s.ts = Some((between, p.dut_ts));
+    n.inject(&s);
+    let outs = n.drain();
+    assert!(
+        outs.len() == 1 && outs[0].flags == FLAG_ACK && outs[0].ack == p.snd,
+        "a segment with a TSval below the updated TS.Recent (row {row}): want one PAWS ACK, got {}",
+        show(&outs)
+    );
+    assert_eq!(
+        outs[0].ts.map(|t| t.1),
+        Some(newer),
+        "the PAWS ACK's TSecr must be the TS.Recent the FIN set (row {row})"
+    );
+    assert!(paws_tw_alive(&n, c, row));
+}
+
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn rfc7323_time_wait_slot_updates_ts_recent_from_a_retransmitted_fin() {
+    tw_fin_updates_ts_recent(false);
+}
+
+/// 対照:表の TIME_WAIT の行は更新します。
+#[test]
+fn rfc7323_time_wait_row_updates_ts_recent_from_a_retransmitted_fin() {
+    tw_fin_updates_ts_recent(true);
+}
