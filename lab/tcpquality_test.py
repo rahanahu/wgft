@@ -849,5 +849,180 @@ class ManyConnections(unittest.TestCase):
         self.assertEqual((x["agentvm_guest_us_per_conn"], x["wg_tw_evicted"], x["client_tcp_synretrans"]), ("200.0", "9", "8"))
 
 
+class RxQueueTools(unittest.TestCase):
+    """The measurement tools for the receive-path benchmark: one-way UDP delays, a series by time, the heavy UDP
+    sender and its sink, the extra iperf3 flows and the parsed ss samples."""
+
+    def run_tq(self, *args):
+        p = subprocess.run([sys.executable, TQ, *args], capture_output=True, text=True, timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return p.stdout
+
+    @staticmethod
+    def free_port():
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        return port
+
+    def test_uping_one_way_delays_against_a_stamping_echo(self):
+        port = self.free_port()
+        echo = subprocess.Popen([sys.executable, TQ, "uecho", "127.0.0.1", str(port), "stamp"])
+        try:
+            import time
+            time.sleep(0.5)
+            with tempfile.TemporaryDirectory() as d:
+                samples = os.path.join(d, "s.txt")
+                out = self.run_tq("uping", "127.0.0.1", str(port), "0.5", "10", "u", samples)
+                got = dict(kv.split("=") for kv in out.split())
+                for k in ("u_p95_ms", "u_fwd_p50_ms", "u_fwd_p99_ms", "u_ret_p95_ms", "u_ret_max_ms"):
+                    self.assertIn(k, got)
+                self.assertEqual(got["u_lost"], "0")
+                start, rows = tq.read_usamples(samples)
+                self.assertGreater(start, 1e9)
+                self.assertEqual(len(rows), int(got["u_sent"]))
+                self.assertTrue(all(r[3] is not None and r[4] is not None for r in rows))
+                # the two halves of a ping are differences on the one clock, so they add up to its round trip
+                self.assertTrue(all(abs(r[3] + r[4] - r[2]) < 0.01 for r in rows))
+                series = self.run_tq("useries", samples, "0.25").splitlines()
+                self.assertTrue(series[0].startswith("USERIES start_epoch="))
+                self.assertGreaterEqual(len(series), 3)
+                self.assertIn("rtt_p95_ms=", series[1])
+        finally:
+            echo.kill()
+            echo.wait()
+
+    def test_uping_without_a_stamp_has_no_one_way_delays(self):
+        port = self.free_port()
+        echo = subprocess.Popen([sys.executable, TQ, "uecho", "127.0.0.1", str(port)])
+        try:
+            import time
+            time.sleep(0.5)
+            out = self.run_tq("uping", "127.0.0.1", str(port), "0.3", "10", "u")
+            self.assertIn("u_p95_ms=", out)
+            self.assertNotIn("_fwd_", out)
+        finally:
+            echo.kill()
+            echo.wait()
+
+    def test_ubuckets_split_by_send_time_and_count_losses(self):
+        rows = [(0, 0.1, 1.0, 0.4, 0.6), (1, 0.6, 3.0, 1.0, 2.0), (2, 1.2, None, None, None), (3, 1.4, 2.0, None, None),
+                (4, 2.5, 5.0, 2.0, 3.0)]
+        b = tq.ubuckets(rows, 1.0)
+        self.assertEqual([(d["t"], d["sent"], d["lost"]) for d in b], [(0, 2, 0), (1, 2, 1), (2, 1, 0)])
+        self.assertEqual(b[0]["rtt"], [1.0, 3.0, 3.0, 3.0])
+        self.assertEqual(b[0]["fwd"], [0.4, 1.0, 1.0, 1.0])
+        # the bucket with one echoed ping and no stamp has no one-way values
+        self.assertEqual(b[1]["rtt"], [2.0, 2.0, 2.0, 2.0])
+        self.assertIsNone(b[1]["fwd"])
+
+    def test_ublast_reaches_the_rate_and_the_sink_counts(self):
+        import time
+        port = self.free_port()
+        with tempfile.TemporaryDirectory() as d:
+            stats = os.path.join(d, "stats")
+            sink = subprocess.Popen([sys.executable, TQ, "usink", "127.0.0.1", str(port), stats])
+            try:
+                for _ in range(50):
+                    if os.path.exists(stats):
+                        break
+                    time.sleep(0.1)
+                out = dict(kv.split("=") for kv in self.run_tq("ublast", "127.0.0.1", str(port), "40", "1", "1000").split())
+                time.sleep(1.2)
+                with open(stats) as fh:
+                    got = dict(kv.split("=") for kv in fh.read().split())
+            finally:
+                sink.kill()
+                sink.wait()
+        # 40 Mbit/s of 1000-byte datagrams is 5000 a second
+        self.assertAlmostEqual(int(out["udp_blast_sent"]), 5000, delta=300)
+        self.assertAlmostEqual(float(out["udp_blast_mbit"]), 40, delta=3)
+        self.assertEqual(int(out["udp_blast_bytes"]), int(out["udp_blast_sent"]) * 1000)
+        self.assertGreater(int(got["recv"]), 0.9 * int(out["udp_blast_sent"]))
+        self.assertEqual(int(got["bytes"]), int(got["recv"]) * 1000)
+
+    IPERF = {"end": {"sum_received": {"bytes": 1000000, "seconds": 2.0, "bits_per_second": 4000000.0},
+                     "sum_sent": {"bytes": 1000500, "retransmits": 3},
+                     "streams": [{"receiver": {"bytes": 600000}}, {"receiver": {"bytes": 400000}}]},
+             "intervals": [{"sum": {"start": 0, "end": 1, "bits_per_second": 3e6, "retransmits": 1}},
+                           {"sum": {"start": 1, "end": 2, "bits_per_second": 5e6, "retransmits": 2}}]}
+    LATE = {"end": {"sum_received": {"bytes": 500000, "seconds": 1.0, "bits_per_second": 4000000.0},
+                    "sum_sent": {"bytes": 500100, "retransmits": 2}}}
+
+    @staticmethod
+    def write_json(d, name, obj):
+        import json
+        path = os.path.join(d, name)
+        with open(path, "w") as f:
+            json.dump(obj, f)
+        return path
+
+    def test_iperf_adds_the_late_flow_and_keeps_the_main_duration(self):
+        with tempfile.TemporaryDirectory() as d:
+            main = self.write_json(d, "m.json", self.IPERF)
+            late = self.write_json(d, "l.json", self.LATE)
+            alone = dict(kv.split("=") for kv in self.run_tq("iperf", main).split())
+            both = dict(kv.split("=") for kv in self.run_tq("iperf", "--late", late, main).split())
+            x = self.run_tq("iperfx", late, "late").split()
+            series = self.run_tq("iperfseries", main).splitlines()
+            missing = self.run_tq("iperfx", os.path.join(d, "none.json"), "cross")
+        self.assertEqual((alone["received"], alone["mbit"], alone["retransmits"]), ("1000000", "4.00", "3"))
+        self.assertEqual((both["received"], both["sent"], both["retransmits"], both["duration_s"]),
+                         ("1500000", "1500600", "5", "2.000"))
+        self.assertEqual(both["mbit"], "6.00")
+        # fairness is the main streams' alone
+        self.assertEqual(alone["stream_jain"], both["stream_jain"])
+        self.assertEqual(x, ["late_mbit=4.00", "late_bytes=500000", "late_retransmits=2"])
+        self.assertEqual(series, ["IPERFSERIES start_s=0.0 end_s=1.0 mbit=3.00 retransmits=1",
+                                  "IPERFSERIES start_s=1.0 end_s=2.0 mbit=5.00 retransmits=2"])
+        self.assertEqual(missing.split(), ["cross_mbit=0", "cross_bytes=0", "cross_retransmits=-"])
+
+    def test_iperf_merges_parallel_clients_and_a_late_flow(self):
+        # two parallel clients of the main streams, and a late flow: the semantics of #902 and #903 together
+        with tempfile.TemporaryDirectory() as d:
+            a = ManyConnections.iperf_json(d, "a.json", [1000000, 1000000])
+            b = ManyConnections.iperf_json(d, "b.json", [1000000, 0], seconds=9.5)
+            late = self.write_json(d, "l.json", self.LATE)
+            main_only = dict(kv.split("=") for kv in self.run_tq("iperf", a, b).split())
+            got = dict(kv.split("=") for kv in self.run_tq("iperf", "--late", late, a, b).split())
+            # the late file is left out when it is missing or unreadable, and a failed main client still fails the run
+            gone = dict(kv.split("=") for kv in self.run_tq("iperf", "--late", os.path.join(d, "none.json"), a, b).split())
+            failed = self.run_tq("iperf", "--late", late, a, os.path.join(d, "none.json"))
+        # bytes and retransmits add up over the clients and the late flow; the duration is the longest main one
+        self.assertEqual((got["received"], got["sent"], got["retransmits"], got["duration_s"]),
+                         ("3500000", "3500100", "8", "10.000"))
+        # the clients' rates add up; the late flow's bytes are over the main duration: 2.442 + 0.4 Mbit/s
+        self.assertEqual((main_only["mbit"], got["mbit"]), ("2.44", "2.84"))
+        # the fairness is over the four main streams alone
+        for k in ("stream_jain", "stream_min_over_max", "stream_zero", "stream_min_mbit", "stream_max_mbit"):
+            self.assertEqual(got[k], main_only[k], k)
+        self.assertEqual(gone, main_only)
+        self.assertTrue(failed.startswith("received=0 "), failed)
+
+    def test_ssparse_reads_samples_and_sums_connections(self):
+        text = (
+            "T 100.000000000\n"
+            "0 0 10.0.0.1:5001 10.0.0.2:40000\n"
+            "\t cubic wscale:7,7 rto:204 rtt:0.5/0.25 mss:1448 cwnd:10 snd_wnd:65536 retrans:0/0 rwnd_limited:5ms(1.0%)\n"
+            "0 0 10.0.0.1:5001 10.0.0.2:40002\n"
+            "\t cubic rtt:1.5/0.5 cwnd:20 retrans:0/1\n"
+            "T 100.200000000\n"
+            "0 0 10.0.0.1:5001 10.0.0.2:40000\n"
+            "\t cubic rtt:0.7/0.25 cwnd:40 retrans:1/4 rwnd_limited:15ms(3.0%)\n"
+            "0 0 10.0.0.1:5001 10.0.0.2:40002\n"
+            "\t cubic rtt:1.0/0.5 cwnd:30 retrans:0/2\n")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "ss.txt")
+            with open(path, "w") as f:
+                f.write(text)
+            out = self.run_tq("ssparse", path).splitlines()
+        self.assertEqual(len(out), 5)
+        self.assertIn("conn=10.0.0.1:5001>10.0.0.2:40000 cwnd=10 retrans=0 rtt=0.5 rwnd_limited=5 snd_wnd=65536", out[0])
+        # the last values per connection: cwnd 40 and 30 (the largest seen is 40), retransmits 4 + 2, rwnd_limited 15 + 0
+        self.assertEqual(out[-1], "SSSUM ss_samples=4 ss_conns=2 ss_cwnd_max=40 ss_retrans=6 ss_rwnd_limited_ms=15")
+
+
 if __name__ == "__main__":
     unittest.main()

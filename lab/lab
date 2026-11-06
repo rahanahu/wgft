@@ -867,7 +867,7 @@ paired_sync() {
 }
 
 # lab paired の使い方。lab help と引数の誤りの両方がこの 1 つの文字列を出す
-PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3|churn] [--streams N] [--churn-rate N [--churn-seconds S]] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local] [--placement apart|apart-mt] [--agent-load CPU:DUTY]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y, or with --split: paired --split [options] --cases FILE [--max-wall SECONDS] ARM_X ARM_Y"
+PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3|churn] [--streams N] [--churn-rate N [--churn-seconds S]] [--udp-ping] [--bulk-mbit N] [--iperf-s SECONDS] [--iperf-interval SECONDS] [--tcp-buf-max BYTES] [--client-tcp-timestamps off] [--late-start SECONDS] [--path-change AT_S:DELAY_MS] [--cross-tcp max|MBIT] [--udp-blast MBIT] [--record] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local] [--placement apart|apart-mt] [--agent-load CPU:DUTY]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y, or with --split: paired --split [options] --cases FILE [--max-wall SECONDS] ARM_X ARM_Y"
 
 # is_uint <値>:1 以上の整数か
 is_uint() { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
@@ -890,6 +890,15 @@ paired_parse_args() {
       --churn-seconds) churnsecs=${2:?--churn-seconds S}; shift 2 ;;
       --udp-ping) udpping=1; shift ;;
       --bulk-mbit) bulkmbit=${2:?--bulk-mbit N}; shift 2 ;;
+      --iperf-s) iperfs=${2:?--iperf-s SECONDS}; shift 2 ;;
+      --iperf-interval) iperfint=${2:?--iperf-interval SECONDS}; shift 2 ;;
+      --tcp-buf-max) tcpbufmax=${2:?--tcp-buf-max BYTES}; shift 2 ;;
+      --client-tcp-timestamps) clientts=${2:?--client-tcp-timestamps off}; shift 2 ;;
+      --late-start) latestart=${2:?--late-start SECONDS}; shift 2 ;;
+      --path-change) pathchange=${2:?--path-change AT_S:DELAY_MS}; shift 2 ;;
+      --cross-tcp) crosstcp=${2:?--cross-tcp max|MBIT}; shift 2 ;;
+      --udp-blast) udpblast=${2:?--udp-blast MBIT}; shift 2 ;;
+      --record) record=1; shift ;;
       --agent-gso) agentgso=${2:?--agent-gso on|off}; shift 2 ;;
       --kernel-rmem-max) rmemmax=${2:?--kernel-rmem-max BYTES}; shift 2 ;;
       --base) base=${2:?--base REF}; shift 2 ;;
@@ -915,6 +924,35 @@ paired_parse_args() {
     esac
   done
   rest=("$@")
+}
+
+# paired_validate_rxq:受信経路の測定用のオプション (--iperf-s から --record まで) を確かめる。すべて既定は無く、付けなければ何も変わらない
+paired_validate_rxq() {
+  local o
+  for o in "$iperfs" "$iperfint" "$latestart" "$pathchange" "$crosstcp" "$udpblast"; do
+    [[ -z $o || $tool == iperf3 ]] || die "--iperf-s, --iperf-interval, --late-start, --path-change, --cross-tcp and --udp-blast need --tool iperf3"
+  done
+  [[ -z $record || $tool == iperf3 ]] || die "--record needs --tool iperf3"
+  [[ -z $iperfs ]] || require_uint --iperf-s "$iperfs" "a whole number of seconds"
+  [[ -z $iperfint ]] || [[ $iperfint =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "--iperf-interval wants seconds, such as 0.1"
+  [[ -z $tcpbufmax ]] || { is_uint "$tcpbufmax" && ((tcpbufmax >= 65536)); } || die "--tcp-buf-max wants a whole number of bytes of 65536 or more"
+  [[ -z $clientts || $clientts == off ]] || die "--client-tcp-timestamps wants off"
+  if [[ -n $latestart ]]; then
+    require_uint --late-start "$latestart" "a whole number of seconds"
+    ((${streams:-1} >= 2)) || die "--late-start starts the last stream late, so --streams wants 2 or more"
+    ((latestart < ${iperfs:-10} - 1)) || die "--late-start wants a start at least a second before the end of the ${iperfs:-10}-second transfer"
+  fi
+  if [[ -n $pathchange ]]; then
+    [[ $pathchange =~ ^[1-9][0-9]*:[0-9]+$ ]] || die "--path-change wants AT_S:DELAY_MS, such as 5:25"
+    [[ $path == delay ]] || die "--path-change goes with the delay path"
+    ((${pathchange%%:*} < ${iperfs:-10})) || die "--path-change wants a time before the end of the ${iperfs:-10}-second transfer"
+  fi
+  if [[ -n $crosstcp ]]; then
+    [[ $crosstcp == max ]] || require_uint --cross-tcp "$crosstcp" "max or a whole number of Mbit/s"
+    [[ $path == delay ]] || die "--cross-tcp goes with the delay path"
+  fi
+  [[ -z $udpblast ]] || require_uint --udp-blast "$udpblast" "a whole number of Mbit/s"
+  [[ -z $udpblast ]] || ((${iperfs:-10} >= 2)) || die "--udp-blast wants --iperf-s of 2 or more"
 }
 
 # paired_validate <path> <arm x> <arm y>:オプションと腕を確かめ、path spec_x spec_y uses_base rust を決める
@@ -971,6 +1009,7 @@ paired_validate() {
   [[ $tool != churn || $target != local ]] || die "--tool churn needs the LAN host in the peer VM, not --target local"
   [[ -z $udpping || $tool == iperf3 || $tool == churn ]] || die "--udp-ping needs --tool iperf3 or churn"
   [[ -z $bulkmbit ]] || { is_uint "$bulkmbit" && [[ $tool == iperf3 ]]; } || die "--bulk-mbit wants a whole number of Mbit/s and --tool iperf3"
+  paired_validate_rxq
   [[ -z $agentgso || $agentgso == off || ( $agentgso == on && $path == fast ) ]] || die "--agent-gso wants off, or on with the fast path"
   [[ -z $rmemmax ]] || { is_uint "$rmemmax" && ((rmemmax >= 4096)); } || die "--kernel-rmem-max wants a whole number of bytes of 4096 or more"
   [[ -z $rmemmax || ${spec_x#base:} == kernel || ${spec_y#base:} == kernel ]] || die "--kernel-rmem-max sets the receiver of a kernel arm; neither arm is kernel"
@@ -1042,7 +1081,7 @@ paired_plan_pins() {
 
 # paired_plan_line [<追加の key=value>]:paired.log の先頭の PLAN の行。--cases では case ごとに case_index と cases が付く
 paired_plan_line() {
-  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${delayrate:+ delay_rate_mbit=$delayrate}${delayqueue:+ delay_queue_pkts=$delayqueue}${xagentenv:+ x_agent_env=${xagentenv// /,}}${yagentenv:+ y_agent_env=${yagentenv// /,}}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}${placement:+ placement=$placement}${agentload:+ agent_load=$agentload}${1:+ $1}"
+  echo "PLAN rounds=$rounds runs=$runs x=$spec_x y=$spec_y path=$path direction=$direction vcpus=$vcpus${delayms:+ delay_ms=$delayms}${delayrate:+ delay_rate_mbit=$delayrate}${delayqueue:+ delay_queue_pkts=$delayqueue}${xagentenv:+ x_agent_env=${xagentenv// /,}}${yagentenv:+ y_agent_env=${yagentenv// /,}}${iperfs:+ iperf_s=$iperfs}${tcpbufmax:+ tcp_buf_max=$tcpbufmax}${clientts:+ client_tcp_timestamps=$clientts}${latestart:+ late_start_s=$latestart}${pathchange:+ path_change=$pathchange}${crosstcp:+ cross_tcp=$crosstcp}${udpblast:+ udp_blast_mbit=$udpblast}${record:+ record=1}${split:+ split=1 peer_vcpus=${peervcpus:-8} target=${target:-lan}}${placement:+ placement=$placement}${agentload:+ agent_load=$agentload}${1:+ $1}"
 }
 
 # paired_provision:出力先を作り、build して VM を 2 台立て、header.txt を書く。t0 と names、vms を決める
@@ -1114,7 +1153,7 @@ paired_provision() {
 paired_header() {
   local kern=$PAIRED_KERN dirty=$PAIRED_DIRTY
   {
-    echo "lab paired: path $path, direction $direction, x=$spec_x y=$spec_y, $rounds rounds of $runs runs, tool ${tool:-tcpquality}, ${streams:-1} stream(s)${churnrate:+, $churnrate connections a second for ${churnsecs:-10} s}${bulkmbit:+, capped at $bulkmbit Mbit/s per stream}${agentgso:+, agent UDP GSO $agentgso}${rmemmax:+, kernel receiver tcp_rmem max $rmemmax}${udpping:+, UDP round trips}"
+    echo "lab paired: path $path, direction $direction, x=$spec_x y=$spec_y, $rounds rounds of $runs runs, tool ${tool:-tcpquality}, ${streams:-1} stream(s)${churnrate:+, $churnrate connections a second for ${churnsecs:-10} s}${bulkmbit:+, capped at $bulkmbit Mbit/s per stream}${agentgso:+, agent UDP GSO $agentgso}${rmemmax:+, kernel receiver tcp_rmem max $rmemmax}${udpping:+, UDP round trips}${iperfs:+, ${iperfs}-second transfers}${iperfint:+, iperf3 interval $iperfint s}${tcpbufmax:+, TCP buffers up to $tcpbufmax}${clientts:+, client TCP timestamps $clientts}${latestart:+, last stream ${latestart} s late}${pathchange:+, path change $pathchange}${crosstcp:+, TCP beside the tunnel ($crosstcp)}${udpblast:+, UDP blast $udpblast Mbit/s}${record:+, recorded}"
     echo "lab paired: head $(git -C "$REPO" rev-parse HEAD)$dirty${base:+, base $(git -C "$REPO" rev-parse "$base^{commit}") ($base)}${WGFT_LAB_RUST_TARGET:+, head Rust target $WGFT_LAB_RUST_TARGET}${PAIRED_BASE_RUST_TARGET:+, base Rust target $PAIRED_BASE_RUST_TARGET}"
     if [[ -n $split ]]; then
       echo "lab paired: split: forwarding target ${target:-lan} (lan: a host on the LAN in the peer VM; local: on the agent's machine, over loopback)"
@@ -1264,6 +1303,7 @@ paired_run_split_round() {
     wait $! || arm_rc=$?
     ((arm_rc == 0)) || rc=1
     paired_agentload_stop "$r" "${arms[k]}"
+    paired_pull_rec "$log" "${names[1]}" "$out/rec/round-$r-${arms[k]}"
     # --cases:時間切れ (timeout の 124、-k の 137) か agentd に届かなかった arm の後は、VM の組を確かめ直す
     if [[ -n $cases ]] && { ((arm_rc == 124 || arm_rc == 137)) || grep -q '^agentx: ' "$log"; }; then
       PAIRED_CASE_SUSPECT=1
@@ -1341,6 +1381,7 @@ paired_round_env() {
   [[ -z $udpping ]] || env+=(UDPPING=1)
   [[ -z $bulkmbit ]] || env+=(IPERF_MBIT="$bulkmbit")
   [[ -z $agentgso ]] || env+=(AGENT_GSO="$agentgso")
+  paired_rxq_env
   [[ -z $rmemmax || $mode != kernel ]] || env+=(KERNEL_RMEM_MAX="$rmemmax")
   [[ $spec != base:* ]] || env+=(WGFT_BIN_DIR=/usr/local/lib/wgft-base)
   # 遅れのある経路:netem の待ち行列は tcpquality.sh が遅れから決め、カーネルの TCP の端のバッファは 64 MiB まで許す
@@ -1351,6 +1392,30 @@ paired_round_env() {
   if [[ $cur_arm == x ]]; then extra=$xagentenv; else extra=$yagentenv; fi
   [[ -z ${extra// /} ]] || env+=(AGENT_EXTRA_ENV="${extra# }")
   [[ -z $delayqueue ]] || env+=(DELAY_QUEUE_PKTS="$delayqueue")
+  # --tcp-buf-max は遅れのある経路の既定 (PAIRED_TCP_BUF_MAX か 64 MiB) より後に足して、それを上書きする
+  [[ -z $tcpbufmax ]] || env+=(TCP_BUF_MAX="$tcpbufmax")
+}
+
+# paired_rxq_env:受信経路の測定用のオプションを tcpquality.sh の環境 (env) に足す
+paired_rxq_env() {
+  [[ -z $iperfs ]] || env+=(IPERF_S="$iperfs")
+  [[ -z $iperfint ]] || env+=(IPERF_INTERVAL="$iperfint")
+  [[ -z $clientts ]] || env+=(CLIENT_TCP_TIMESTAMPS=0)
+  [[ -z $latestart ]] || env+=(LATE_START_S="$latestart")
+  [[ -z $pathchange ]] || env+=(PATH_CHANGE_AT="${pathchange%%:*}" PATH_CHANGE_DELAY_MS="${pathchange##*:}")
+  [[ -z $crosstcp ]] || env+=(CROSS_TCP="$crosstcp")
+  [[ -z $udpblast ]] || env+=(UDP_BLAST_MBIT="$udpblast")
+  [[ -z $record ]] || env+=(RECORD=1)
+}
+
+# paired_pull_rec <log> <VM> <出力先>:RECORD=1 の腕の記録 (tcpquality.sh の "RECORD dir=" の行が指す、run ごとの dir の親) を VM から取る
+paired_pull_rec() {
+  local dir
+  [[ -n $record ]] || return 0
+  dir=$(sed -n 's/^RECORD dir=//p' "$1" | head -1)
+  [[ -n $dir ]] || { echo "lab paired: --record: no recording in $1"; return 0; }
+  mkdir -p "$3"
+  suite_timeout 300 inc file pull -r "$2$(dirname "$dir")" "$3/" >/dev/null 2>&1 || echo "lab paired: --record: could not pull $(dirname "$dir") from $2"
 }
 
 # paired_run_round <r>:round r を 2 台で同時に流し、結果の行を paired.log に足す。rc と fails と prev_offs を更新する
@@ -1380,6 +1445,7 @@ paired_run_round() {
   paired_sync "$runs" "${names[0]}" "${modes[0]}" "${logs[0]}" "${pids[0]}" "${offs[0]}" "${names[1]}" "${modes[1]}" "${logs[1]}" "${pids[1]}" "${offs[1]}"
   for side in 0 1; do
     wait "${pids[side]}" || rc=1
+    paired_pull_rec "${logs[side]}" "${names[side]}" "$out/rec/round-$r-${arms[side]}"
     if grep -q '^SYNC go .* wait_s=-' "${logs[side]}"; then
       echo "lab paired: warning: round $r VM ${vms[side]}: $(grep -c '^SYNC go .* wait_s=-' "${logs[side]}") runs got the start time after it had passed"
     fi
@@ -1400,6 +1466,8 @@ paired_run_round() {
 paired_run_timeout() {
   run_timeout=$(awk -v b="${bytes:-$([[ $path == rate ]] && echo 33554432 || echo 1073741824)}" -v r="$runs" \
     -v bps="$([[ $path == rate ]] && echo 20000000 || echo 100000000)" 'BEGIN { printf "%d", 300 + r * (b * 8 / bps + 60) }')
+  # --iperf-s:iperf3 の転送は時間で決まる。1 実行 = 転送の時間 + 待ち (UDP の往復の相は idle の 5 秒) + 余裕
+  [[ -z $iperfs ]] || run_timeout=$((run_timeout + runs * (iperfs + 30)))
 }
 
 # paired_report:paired.log を解析して result.txt を作り、表示する
@@ -1432,8 +1500,8 @@ paired_report() {
 # header.txt に使い回しの行を足す。case の前に両方の VM を splitcase.sh で戻し (残ったプロセス、netem、TCP の
 # バッファの sysctl)、--target の置き場所を合わせ、agentd と LAN の疎通を確かめる。失敗した case は次の case を
 # 止めず、VM の組が戻らないときだけ残りを流さない
-PAIRED_CASE_FLAGS="--direction --bytes --tool --streams --churn-rate --churn-seconds --udp-ping --bulk-mbit --agent-gso --kernel-rmem-max --delay-ms --delay-rate-mbit --delay-queue-pkts --target --rounds --runs"
-PAIRED_CASE_VARS="direction bytes tool streams churnrate churnsecs udpping bulkmbit agentgso rmemmax delayms delayrate delayqueue target rounds runs"
+PAIRED_CASE_FLAGS="--direction --bytes --tool --streams --churn-rate --churn-seconds --udp-ping --record --iperf-s --iperf-interval --tcp-buf-max --client-tcp-timestamps --late-start --path-change --cross-tcp --udp-blast --bulk-mbit --agent-gso --kernel-rmem-max --delay-ms --delay-rate-mbit --delay-queue-pkts --target --rounds --runs"
+PAIRED_CASE_VARS="direction bytes tool streams churnrate churnsecs udpping record iperfs iperfint tcpbufmax clientts latestart pathchange crosstcp udpblast bulkmbit agentgso rmemmax delayms delayrate delayqueue target rounds runs"
 
 # paired_cases_read:FILE を読み、case_names、case_paths、case_flags に入れる
 paired_cases_read() {
@@ -1465,6 +1533,10 @@ paired_case_load() {
       udpping=1 f=("${f[@]:1}")
       continue
     fi
+    if [[ ${f[0]} == --record ]]; then
+      record=1 f=("${f[@]:1}")
+      continue
+    fi
     [[ " $PAIRED_CASE_FLAGS " == *" ${f[0]} "* ]] \
       || die "$where: ${f[0]} is not a per-case flag; give it on the command line, the same for every case; the per-case flags are $PAIRED_CASE_FLAGS"
     ((${#f[@]} >= 2)) || die "$where: ${f[0]} wants a value"
@@ -1476,6 +1548,14 @@ paired_case_load() {
       --churn-rate) churnrate=${f[1]} ;;
       --churn-seconds) churnsecs=${f[1]} ;;
       --bulk-mbit) bulkmbit=${f[1]} ;;
+      --iperf-s) iperfs=${f[1]} ;;
+      --iperf-interval) iperfint=${f[1]} ;;
+      --tcp-buf-max) tcpbufmax=${f[1]} ;;
+      --client-tcp-timestamps) clientts=${f[1]} ;;
+      --late-start) latestart=${f[1]} ;;
+      --path-change) pathchange=${f[1]} ;;
+      --cross-tcp) crosstcp=${f[1]} ;;
+      --udp-blast) udpblast=${f[1]} ;;
       --agent-gso) agentgso=${f[1]} ;;
       --kernel-rmem-max) rmemmax=${f[1]} ;;
       --delay-ms) delayms=${f[1]} ;;
@@ -1613,6 +1693,7 @@ paired_cases_mark() {
 
 cmd_paired() {
   local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes="" tool="" streams="" churnrate="" churnsecs="" udpping="" bulkmbit="" agentgso="" rmemmax="" rtarget_flag=""
+  local record="" iperfs="" iperfint="" tcpbufmax="" clientts="" latestart="" pathchange="" crosstcp="" udpblast=""
   local split="" peervcpus="" delayms="" delayrate="" delayqueue="" target="" placement="" agentload="" SPLIT_AGENT_CPUS="" SPLIT_AGENT_DP_CPUS="" SPLIT_AGENT_WORKER_CPUS="" SPLIT_PEER_RPS="" xagentenv="" yagentenv="" SPLIT_HOSTPOLL="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
   local rest=() path spec_x spec_y uses_base rust pins=() names=() vms=() t0 run_timeout r
   local rc=0 fails=0 prev_offs=()

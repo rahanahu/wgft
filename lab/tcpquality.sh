@@ -142,6 +142,54 @@
 # namespaces' memory pressure counters when they move (tcp_prune, tcp_rcvpruned, tcp_ofopruned,
 # tcp_ofodrop, tcp_mempressures, tcp_abortonmem).
 #
+# The following options, for TOOL=iperf3 unless said otherwise, are for the receive-path measurements of
+# docs/design (lab/README.md has them in Japanese). None is on by default and none changes a run
+# without it.
+#
+# IPERF_INTERVAL=<seconds> passes iperf3 -i, so that the JSON has a rate per interval (0.1 for 100 ms);
+# IPERF_S, which already sets the transfer's time, may be set per case by `lab/lab paired --iperf-s`.
+#
+# CLIENT_TCP_TIMESTAMPS=0 turns net.ipv4.tcp_timestamps off in the client's namespace for the whole run
+# and puts it back at exit; connections the client opens then carry no TCP timestamp option. The
+# result line has client_tcp_ts=0.
+#
+# LATE_START_S=<seconds>, with STREAMS of 2 or more, starts the last stream that many seconds late, as
+# a second iperf3 client on a rule of its own (TCP 41803 to 192.168.50.3:25803), which ends with the
+# others. The main streams are STREAMS - 1; the result line has late_start_s and late_mbit, late_bytes
+# and late_retransmits of the late stream, and the run's bytes and rate include it.
+#
+# PATH_CHANGE_AT=<seconds> and PATH_CHANGE_DELAY_MS=<ms> change the netem delay of both directions that
+# many seconds after the transfer starts (netem replaces its queue, so what it holds is dropped). The
+# netem queue is sized for the larger of the two delays. The result line has path_change_at_s and
+# path_change_delay_ms. The path needs a netem delay (DELAY_MS above 0).
+#
+# CROSS_TCP=max|<Mbit/s> runs an iperf3 flow that does not go through the tunnel, in the transfer's
+# direction, from the homerouter namespace to the vps namespace (203.0.113.2 to 203.0.113.1, TCP
+# 25804) for IPERF_S seconds, so that it meets the tunnel's traffic in the same netem queue and rate.
+# The result line has cross_mbit, cross_bytes and cross_retransmits. It needs a netem delay; a
+# bottleneck rate (RATE_MBIT, `--delay-rate-mbit`) is what makes the two compete. Its CPU is in the VM's.
+#
+# UDP_BLAST_MBIT=<Mbit/s> sends UDP of UDP_BLAST_SIZE bytes (1200 by default) from the client to the
+# LAN host through a UDP rule (41802 to 192.168.50.3:25802) at that rate, from half a second after the
+# transfer starts for IPERF_S - 1 seconds, whatever the direction of the TCP transfer; the LAN host
+# discards and counts it (tcpquality.py usink). The datagrams reach the agent's receive path from the
+# server. The result line has udp_blast_sent, udp_blast_mbit (the rate the sender reached; a python
+# sender manages about 1 Gbit/s), udp_blast_recv and udp_blast_lost (sent - received).
+#
+# UDPPING=1 also stamps the echo's receive time when the echo runs in this VM (not with TARGET_LOCAL), so
+# that the result line has udp_idle_fwd_* and udp_idle_ret_* , udp_load_fwd_* and udp_load_ret_*, the
+# one-way delays client to LAN host and back (p50, p95, p99, max in ms), as well as the p95 of the
+# round trip (udp_*_p95_ms). The two directions share the VM's clock, so these are not skewed.
+#
+# RECORD=1 keeps, per run, in $W/wgft-tq-rec-<mode>/run-<n>/ (the line "RECORD dir=<path>" names it,
+# and `lab/lab paired` pulls it into <out>/rec/round-<r>-<arm>/): the iperf3 JSON of each flow
+# (iperf.json, iperf-late.json, iperf-cross.json) with its intervals as iperf-series.txt, `ss -tin` of
+# the client's namespace and of the LAN host's (ss-client.txt, ss-lan.txt; the LAN host's not with
+# TARGET_LOCAL) every 0.2 s with the time of each sample, their parsed forms (ss-*.parsed.txt) and, with
+# UDPPING, every ping's sample (udp-idle.samples, udp-load.samples) with its series by second
+# (udp-*.series.txt). The result line gets ss_cwnd_max, ss_retrans, ss_rwnd_limited_ms of the sender's
+# connections. The samplers cost a little CPU in the VM, so compare recorded runs with recorded ones.
+#
 # AGENT_AT=<ip>:<port> runs the agent in another VM, for `lab/lab paired --split`: this VM has the
 # client, vps, router and LAN host namespaces (lab/netns.sh up-split-peer) and the agent VM has
 # home (up-split-agent), with `tcpquality.py agentd` listening there; AGENT_TOKEN names the file
@@ -249,6 +297,15 @@ KERNEL_RMEM_MAX=${KERNEL_RMEM_MAX:-}
 NETEM_LIMIT=${NETEM_LIMIT:-}
 NETEM_MAX_MBIT=${NETEM_MAX_MBIT:-20000}
 TCP_BUF_MAX=${TCP_BUF_MAX:-}
+IPERF_INTERVAL=${IPERF_INTERVAL:-}
+CLIENT_TCP_TIMESTAMPS=${CLIENT_TCP_TIMESTAMPS:-}
+LATE_START_S=${LATE_START_S:-}
+PATH_CHANGE_AT=${PATH_CHANGE_AT:-}
+PATH_CHANGE_DELAY_MS=${PATH_CHANGE_DELAY_MS:-}
+CROSS_TCP=${CROSS_TCP:-}
+UDP_BLAST_MBIT=${UDP_BLAST_MBIT:-}
+UDP_BLAST_SIZE=${UDP_BLAST_SIZE:-1200}
+RECORD=${RECORD:-}
 AGENT_AT=${AGENT_AT:-}
 AGENT_TOKEN=${AGENT_TOKEN:-/run/wgft-agentd.token}
 AGENT_CPUS=${AGENT_CPUS:-}
@@ -275,7 +332,11 @@ DATA=$W/wgft-tq-server
 ADATA=$W/wgft-tq-agent
 TARGET=192.168.50.3:25800
 UDP_TARGET=192.168.50.3:25801
+LATE_TARGET=192.168.50.3:25803
+BLAST_TARGET=192.168.50.3:25802
 ALLOW=$TARGET,$UDP_TARGET
+[ -z "$LATE_START_S" ] || ALLOW=$ALLOW,$LATE_TARGET
+[ -z "$UDP_BLAST_MBIT" ] || ALLOW=$ALLOW,$BLAST_TARGET
 fail=0
 
 vps() { ip netns exec "$VPS_NS" "$@"; }
@@ -337,14 +398,20 @@ impair() { # the run's path: netem with the delay, loss and rate, or no qdisc on
   fi
   netem delay "${DELAY_MS}ms" loss "${LOSS_PCT}%"
 }
+# the larger of the delays a run uses, for sizing netem's queue; PATH_CHANGE_DELAY_MS is checked below
+MAX_DELAY_MS=$DELAY_MS
+case "$PATH_CHANGE_DELAY_MS" in
+  ''|*[!0-9]*) ;;
+  *) [ "$PATH_CHANGE_DELAY_MS" -le "$MAX_DELAY_MS" ] || MAX_DELAY_MS=$PATH_CHANGE_DELAY_MS ;;
+esac
 RATE_ARGS=()
 if [ -n "$RATE_MBIT" ]; then
   # netem's limit counts the packets the delay holds too: about rate x delay / 1500 bytes of them
-  RATE_ARGS=(rate "${RATE_MBIT}mbit" limit $((QUEUE_PKTS + (RATE_MBIT * 1000 * DELAY_MS + 11999) / 12000)))
-elif [ "$DELAY_MS" != 0 ]; then
+  RATE_ARGS=(rate "${RATE_MBIT}mbit" limit $((QUEUE_PKTS + (RATE_MBIT * 1000 * MAX_DELAY_MS + 11999) / 12000)))
+elif [ "$MAX_DELAY_MS" != 0 ]; then
   # twice the packets in flight over the delay at NETEM_MAX_MBIT, so that the queue never drops
   if [ -z "$NETEM_LIMIT" ]; then
-    NETEM_LIMIT=$((2 * (NETEM_MAX_MBIT * 1000 * DELAY_MS + 11199) / 11200))
+    NETEM_LIMIT=$((2 * (NETEM_MAX_MBIT * 1000 * MAX_DELAY_MS + 11199) / 11200))
     [ "$NETEM_LIMIT" -ge 1000 ] || NETEM_LIMIT=1000
   fi
   RATE_ARGS=(limit "$NETEM_LIMIT")
@@ -392,6 +459,19 @@ udp_or_lost() {
        echo "$1_sent=$n $1_lost=$n" ;;
   esac
 }
+# ss_loop <file> <namespace>: every 0.2 s, until kill_ss, the namespace's established TCP connections
+# with their counters (ss -tin), each sample after a line "T <epoch seconds>"
+SS_PIDS=()
+ss_loop() {
+  ip netns exec "$2" bash -c 'while :; do echo "T $(date +%s.%N)"; ss -tinH state established; sleep 0.2; done' > "$1" 2>/dev/null &
+  SS_PIDS+=($!)
+}
+kill_ss() {
+  [ "${#SS_PIDS[@]}" = 0 ] || { kill "${SS_PIDS[@]}" 2>/dev/null; wait "${SS_PIDS[@]}" 2>/dev/null; }
+  SS_PIDS=()
+}
+lan_port_listening() { lan ss -Htln "sport = :$1" | grep -q .; }
+tcp_rule_open() { ip netns exec "$CLIENT_NS" timeout 3 bash -c "exec 3<>/dev/tcp/198.51.100.1/$1"; }
 vm_cpu_us() { # the VM's busy CPU time so far over all CPUs, in microseconds: user, nice, system, irq, softirq
   awk -v hz="$CLK_TCK" '$1 == "cpu" { printf "%d\n", ($2 + $3 + $4 + $7 + $8) * 1000000 / hz; exit }' /proc/stat
 }
@@ -414,6 +494,7 @@ tq_pids() { # the tcpquality.py processes in the lab's namespaces; a bare pgrep 
 }
 none_running() { ! sandbox_any_named wgft iperf3 churn && [ -z "$(tq_pids)" ]; }
 cleanup() {
+  kill_ss
   sandbox_kill_named wgft iperf3 churn
   sandbox_kill_cmdline '/tcpquality.py '
   # the teardown below and the next mode's start want the killed processes gone, which takes well
@@ -477,9 +558,40 @@ if [ -n "$IPERF_MBIT" ]; then
   [ "$TOOL" = iperf3 ] || bad_config "IPERF_MBIT needs TOOL=iperf3"
 fi
 need_positive STREAMS "$STREAMS" "a whole number of 1 or more"
+case "$CLIENT_TCP_TIMESTAMPS" in ''|0|1) ;; *) bad_config "CLIENT_TCP_TIMESTAMPS is 0 or 1" ;; esac
+case "$RECORD" in ''|0) RECORD= ;; 1) ;; *) bad_config "RECORD is 1 or 0" ;; esac
+if [ -n "$IPERF_INTERVAL" ]; then
+  [ "$TOOL" = iperf3 ] || bad_config "IPERF_INTERVAL needs TOOL=iperf3"
+  case "$IPERF_INTERVAL" in *[!0-9.]*|.|*.*.*) bad_config "IPERF_INTERVAL is a number of seconds, such as 0.1" ;; esac
+fi
+if [ -n "$LATE_START_S" ]; then
+  [ "$TOOL" = iperf3 ] || bad_config "LATE_START_S needs TOOL=iperf3"
+  need_positive LATE_START_S "$LATE_START_S" "a whole number of seconds of 1 or more"
+  [ "$STREAMS" -ge 2 ] || bad_config "LATE_START_S needs STREAMS of 2 or more: the last stream starts late"
+  [ "$LATE_START_S" -lt "$((IPERF_S - 1))" ] || bad_config "LATE_START_S is at least a second before the end of the IPERF_S-second transfer"
+fi
+if [ -n "$PATH_CHANGE_AT$PATH_CHANGE_DELAY_MS" ]; then
+  [ "$TOOL" = iperf3 ] || bad_config "PATH_CHANGE_AT needs TOOL=iperf3"
+  need_positive PATH_CHANGE_AT "$PATH_CHANGE_AT" "a whole number of seconds of 1 or more, with PATH_CHANGE_DELAY_MS"
+  is_whole "$PATH_CHANGE_DELAY_MS" || bad_config "PATH_CHANGE_DELAY_MS is a whole number of ms, with PATH_CHANGE_AT"
+  [ "$DELAY_MS" != 0 ] || bad_config "PATH_CHANGE_AT needs a netem delay: DELAY_MS above 0"
+  [ "$PATH_CHANGE_AT" -lt "$IPERF_S" ] || bad_config "PATH_CHANGE_AT is before the end of the IPERF_S-second transfer"
+fi
+if [ -n "$CROSS_TCP" ]; then
+  [ "$TOOL" = iperf3 ] || bad_config "CROSS_TCP needs TOOL=iperf3"
+  [ "$CROSS_TCP" = max ] || need_positive CROSS_TCP "$CROSS_TCP" "max or a whole number of Mbit/s of 1 or more"
+  [ "$DELAY_MS" != 0 ] || bad_config "CROSS_TCP needs a netem delay: DELAY_MS above 0"
+fi
+if [ -n "$UDP_BLAST_MBIT" ]; then
+  [ "$TOOL" = iperf3 ] || bad_config "UDP_BLAST_MBIT needs TOOL=iperf3"
+  need_positive UDP_BLAST_MBIT "$UDP_BLAST_MBIT" "a whole number of Mbit/s of 1 or more"
+  is_whole "$UDP_BLAST_SIZE" && [ "$UDP_BLAST_SIZE" -ge 16 ] && [ "$UDP_BLAST_SIZE" -le 1472 ] || bad_config "UDP_BLAST_SIZE is a whole number of bytes from 16 to 1472"
+  [ "$IPERF_S" -ge 2 ] || bad_config "UDP_BLAST_MBIT needs IPERF_S of 2 or more"
+fi
 # iperf3 takes at most 128 streams: past that, one server, client and listen port per 128
 IPERF_GROUPS=$(( (STREAMS + 127) / 128 ))
 [ "$IPERF_GROUPS" = 1 ] || [ -z "$TARGET_LOCAL" ] || bad_config "STREAMS above 128 needs the LAN host in the lan namespace, without TARGET_LOCAL"
+[ -z "$LATE_START_S" ] || [ "$IPERF_GROUPS" = 1 ] || bad_config "LATE_START_S needs STREAMS of 128 or fewer: the late stream has one server and one rule"
 # the seconds the load runs, which the UDP pinger follows
 if [ "$TOOL" = churn ]; then LOAD_S=$CHURN_S; else LOAD_S=$IPERF_S; fi
 # the kernel-mode server's cap on one source address's TCP connections (128 by default) would
@@ -489,7 +601,7 @@ if [ "$TOOL" = churn ] || [ $((STREAMS + IPERF_GROUPS)) -ge 120 ]; then SERVER_E
 RULE_TCP=41800
 if [ "$IPERF_GROUPS" -gt 1 ]; then
   RULE_TCP=41800-$((41800 + IPERF_GROUPS - 1))
-  ALLOW=192.168.50.3:25800-$((25800 + IPERF_GROUPS - 1)),$UDP_TARGET
+  ALLOW=192.168.50.3:25800-$((25800 + IPERF_GROUPS - 1)),$UDP_TARGET${UDP_BLAST_MBIT:+,$BLAST_TARGET}
 fi
 if [ -n "$TARGET_LOCAL" ]; then
   [ -n "$AGENT_AT" ] && [ "$TOOL" = iperf3 ] || bad_config "TARGET_LOCAL needs AGENT_AT and TOOL=iperf3"
@@ -552,6 +664,18 @@ restore_rmem() {
   restore_or_fail "put tcp_rmem back to $rmem_was in the $READER_NS namespace" set_rmem $rmem_was || return 1
   rmem_set=
 }
+# the client's net.ipv4.tcp_timestamps for CLIENT_TCP_TIMESTAMPS=0: read once, set for the whole run, put back at exit
+ts_was=$(ip netns exec "$CLIENT_NS" sysctl -n net.ipv4.tcp_timestamps)
+ts_set=
+set_ts() { # set_ts <0|1>
+  ip netns exec "$CLIENT_NS" sysctl -qw net.ipv4.tcp_timestamps="$1" &&
+    [ "$(ip netns exec "$CLIENT_NS" sysctl -n net.ipv4.tcp_timestamps)" = "$1" ]
+}
+restore_ts() {
+  [ -n "$ts_set" ] || return 0
+  restore_or_fail "put tcp_timestamps back to $ts_was in the $CLIENT_NS namespace" set_ts "$ts_was" || return 1
+  ts_set=
+}
 # tcp_mem of the VMs holding a TCP end, raised for TCP_BUF_MAX and put back at exit
 tcpmem_sysctl() { # tcpmem_sysctl here|agent <sysctl args...>: sysctl in that VM's root namespace
   local where=$1
@@ -601,10 +725,16 @@ on_exit() {
   cleanup
   restore_gso || rc=1
   restore_rmem || rc=1
+  restore_ts || rc=1
   restore_tcpmem || rc=1
   exit "$rc"
 }
 trap on_exit EXIT
+if [ "$CLIENT_TCP_TIMESTAMPS" = 0 ]; then
+  ts_set=1
+  set_ts 0 || { echo "FAIL  cannot turn tcp_timestamps off in the $CLIENT_NS namespace"; exit 1; }
+  echo "   $CLIENT_NS tcp_timestamps: 0"
+fi
 if [ -n "$TCP_BUF_MAX" ]; then
   raise_tcpmem here || { echo "FAIL  cannot raise tcp_mem for TCP_BUF_MAX"; exit 1; }
   if [ -n "$TARGET_LOCAL" ]; then raise_tcpmem agent || { echo "FAIL  cannot raise tcp_mem in the agent VM for TCP_BUF_MAX"; exit 1; }; fi
@@ -692,14 +822,35 @@ for mode in $MODES; do
       lan_bg "$W/wgft-tq-serve-$mode${g/#0/}.log" iperf3 -s -B 192.168.50.3 -p $((25800 + g))
     done
     wait_until 10 lan_listening_all || { echo "FAIL  iperf3 did not listen"; fail=1; continue; }
+    if [ -n "$LATE_START_S" ]; then
+      # iperf3's server takes one test at a time, so the late stream has a server and a rule of its own
+      lan_bg "$W/wgft-tq-serve2-$mode.log" iperf3 -s -B 192.168.50.3 -p 25803
+      vps wgft rule add --agent home --tcp 41803 --to "$LATE_TARGET" --admin "$ADMIN" >/dev/null
+      wait_until 10 lan_port_listening 25803 && wait_until 30 tcp_rule_open 41803 \
+        || { echo "FAIL  the rule of the late stream does not forward"; fail=1; continue; }
+    fi
+    if [ -n "$CROSS_TCP" ]; then
+      vps setsid nohup iperf3 -s -B 203.0.113.1 -p 25804 > "$W/wgft-tq-serve3-$mode.log" 2>&1 < /dev/null &
+      disown
+      wait_until 10 sh -c "ip netns exec $VPS_NS ss -Htln 'sport = :25804' | grep -q ." \
+        || { echo "FAIL  the iperf3 server of the cross flow did not listen"; fail=1; continue; }
+    fi
   elif [ "$TOOL" = churn ]; then
     sandbox_kill_cmdline '/tcpquality.py '
     wait_until 10 lan_free
     lan_bg "$W/wgft-tq-serve-$mode.log" churn serve -bind 192.168.50.3 -port 25800 -size "$CHURN_SIZE" -close "$CHURN_CLOSE"
     wait_until 10 lan_listening || { echo "FAIL  churn serve did not listen"; fail=1; continue; }
   fi
+  if [ -n "$UDP_BLAST_MBIT" ]; then
+    blast_stats=$W/wgft-tq-usink-$mode.stats
+    lan_bg "$W/wgft-tq-usink-$mode.log" $Q usink 192.168.50.3 25802 "$blast_stats"
+    vps wgft rule add --agent home --udp 41802 --to "$BLAST_TARGET" --admin "$ADMIN" >/dev/null
+    wait_until 10 lan test -s "$blast_stats" || { echo "FAIL  the UDP sink did not start"; fail=1; continue; }
+    sleep 1
+  fi
   if [ -n "$UDPPING" ]; then
-    lan_bg "$W/wgft-tq-uecho-$mode.log" $Q uecho 192.168.50.3 25801
+    # the echo stamps its receive time for the one-way delays when it shares the pinger's clock
+    lan_bg "$W/wgft-tq-uecho-$mode.log" $Q uecho 192.168.50.3 25801 $([ -n "$TARGET_LOCAL" ] || echo stamp)
     vps wgft rule add --agent home --udp 41801 --to "$UDP_TARGET" --admin "$ADMIN" >/dev/null
     # the rule is up once a datagram comes back
     wait_until 30 sh -c "ip netns exec $CLIENT_NS $Q uping 198.51.100.1 41801 0.2 10 probe | grep -q 'probe_p50_ms='" \
@@ -777,9 +928,14 @@ for mode in $MODES; do
       fi
       rm -f "$go"
     fi
-    udp_idle= udp_load=
+    udp_idle= udp_load= extra_fields= rec= blast_pid= cross_pid= late_pid= change_pid=
+    if [ -n "$RECORD" ]; then
+      rec=$W/wgft-tq-rec-$mode/run-$run
+      rm -rf "$rec"
+      mkdir -p "$rec" && echo "RECORD dir=$rec"
+    fi
     if [ -n "$UDPPING" ]; then
-      udp_idle=$(ip netns exec "$CLIENT_NS" $Q uping 198.51.100.1 41801 "$UDPPING_IDLE_S" "$UDPPING_MS" udp_idle)
+      udp_idle=$(ip netns exec "$CLIENT_NS" $Q uping 198.51.100.1 41801 "$UDPPING_IDLE_S" "$UDPPING_MS" udp_idle ${rec:+"$rec/udp-idle.samples"})
       udp_idle=$(udp_or_lost udp_idle "$UDPPING_IDLE_S" "$udp_idle")
     fi
     if [ -n "$CPU" ]; then
@@ -817,6 +973,12 @@ for mode in $MODES; do
       client_cg=$CG_ROOT-client-$run
       mkdir -p "$client_cg" 2>/dev/null || client_cg=
       rev=; [ "$DIRECTION" = down ] && rev=-R
+      main_streams=$STREAMS
+      [ -z "$LATE_START_S" ] || main_streams=$((STREAMS - 1))
+      if [ -n "$RECORD" ]; then
+        ss_loop "$rec/ss-client.txt" "$CLIENT_NS"
+        [ -n "$TARGET_LOCAL" ] || ss_loop "$rec/ss-lan.txt" "$LAN_NS"
+      fi
       iperf_json=()
       if [ "$TOOL" = churn ]; then
         bash -c 'if [ -n "$1" ]; then echo $$ > "$1/cgroup.procs"; fi; shift; exec "$@"' _ "$client_cg" \
@@ -826,17 +988,43 @@ for mode in $MODES; do
       else
         # one client per 128 streams, 0.1 s apart, the streams shared out as evenly as they go
         for g in $(seq 0 $((IPERF_GROUPS - 1))); do
-          n=$((STREAMS / IPERF_GROUPS + (g < STREAMS % IPERF_GROUPS ? 1 : 0)))
+          n=$((main_streams / IPERF_GROUPS + (g < main_streams % IPERF_GROUPS ? 1 : 0)))
           [ "$g" = 0 ] || sleep 0.1
           iperf_json+=("$W/wgft-tq-iperf-$mode${g/#0/}.json")
           bash -c 'if [ -n "$1" ]; then echo $$ > "$1/cgroup.procs"; fi; shift; exec "$@"' _ "$client_cg" \
             ip netns exec "$CLIENT_NS" iperf3 -c 198.51.100.1 -p $((41800 + g)) -t "$IPERF_S" -P "$n" $rev -J \
-            ${IPERF_MBIT:+-b "${IPERF_MBIT}M"} > "${iperf_json[g]}" 2> "$W/wgft-tq-fetch-$mode${g/#0/}.log" &
+            ${IPERF_INTERVAL:+-i "$IPERF_INTERVAL"} ${IPERF_MBIT:+-b "${IPERF_MBIT}M"} > "${iperf_json[g]}" 2> "$W/wgft-tq-fetch-$mode${g/#0/}.log" &
           fetchers+=($!)
         done
       fi
+      if [ -n "$LATE_START_S" ]; then
+        # the late stream is another iperf3 client, on its own server and rule, in the same cgroup
+        bash -c 'sleep "$2"; if [ -n "$1" ]; then echo $$ > "$1/cgroup.procs"; fi; shift 2; exec "$@"' _ "$client_cg" "$LATE_START_S" \
+          ip netns exec "$CLIENT_NS" iperf3 -c 198.51.100.1 -p 41803 -t "$((IPERF_S - LATE_START_S))" -P 1 $rev -J \
+          ${IPERF_INTERVAL:+-i "$IPERF_INTERVAL"} ${IPERF_MBIT:+-b "${IPERF_MBIT}M"} > "$W/wgft-tq-iperf-late-$mode.json" 2> "$W/wgft-tq-fetch-late-$mode.log" &
+        late_pid=$!
+      fi
+      if [ -n "$PATH_CHANGE_AT" ]; then
+        (sleep "$PATH_CHANGE_AT"; netem delay "${PATH_CHANGE_DELAY_MS}ms" loss "${LOSS_PCT}%") &
+        change_pid=$!
+      fi
+      if [ -n "$CROSS_TCP" ]; then
+        # the same direction as the tunnel's data: the homerouter namespace sends towards the vps one, so
+        # that the flow queues in the same netem (the transfer's -R is the reverse)
+        cross_rev=; [ "$DIRECTION" = up ] && cross_rev=-R
+        cross_b=; [ "$CROSS_TCP" = max ] || cross_b=$CROSS_TCP
+        ip netns exec "$ROUTER_NS" iperf3 -c 203.0.113.1 -B 203.0.113.2 -p 25804 -t "$IPERF_S" $cross_rev -J \
+          ${IPERF_INTERVAL:+-i "$IPERF_INTERVAL"} ${cross_b:+-b "${cross_b}M"} > "$W/wgft-tq-iperf-cross-$mode.json" 2> "$W/wgft-tq-fetch-cross-$mode.log" &
+        cross_pid=$!
+      fi
+      if [ -n "$UDP_BLAST_MBIT" ]; then
+        blast_r0=$(field recv "$(lan cat "$blast_stats" 2>/dev/null)")
+        (sleep 0.5; exec ip netns exec "$CLIENT_NS" $Q ublast 198.51.100.1 41802 "$UDP_BLAST_MBIT" "$((IPERF_S - 1))" "$UDP_BLAST_SIZE") \
+          > "$W/wgft-tq-ublast-$mode.log" 2>&1 &
+        blast_pid=$!
+      fi
       if [ -n "$UDPPING" ]; then
-        (sleep 0.5; exec ip netns exec "$CLIENT_NS" $Q uping 198.51.100.1 41801 "$((LOAD_S - 1))" "$UDPPING_MS" udp_load) \
+        (sleep 0.5; exec ip netns exec "$CLIENT_NS" $Q uping 198.51.100.1 41801 "$((LOAD_S - 1))" "$UDPPING_MS" udp_load ${rec:+"$rec/udp-load.samples"}) \
           > "$W/wgft-tq-uping-$mode.log" 2>&1 &
         pinger=$!
       fi
@@ -866,6 +1054,9 @@ for mode in $MODES; do
       rc_f=$?
       [ "$tool_rc" != 0 ] || tool_rc=$rc_f
     done
+    if [ -n "$late_pid" ]; then
+      wait "$late_pid" || { [ "$tool_rc" != 0 ] || tool_rc=1; }
+    fi
     # the CPU window closes when the transfer ends; the pinger's last second of waiting for late
     # echoes is not part of it
     if [ -n "$CPU" ]; then
@@ -888,11 +1079,18 @@ for mode in $MODES; do
       wait "$pinger"
       udp_load=$(udp_or_lost udp_load "$((LOAD_S - 1))" "$(tail -1 "$W/wgft-tq-uping-$mode.log")")
     fi
+    # the flows that ran beside the transfer end with it (the blast and the cross flow run IPERF_S - 1 and IPERF_S seconds)
+    [ -z "$cross_pid" ] || wait "$cross_pid" 2>/dev/null
+    [ -z "$change_pid" ] || wait "$change_pid" 2>/dev/null
+    [ -z "$blast_pid" ] || wait "$blast_pid" 2>/dev/null
+    kill_ss
+    [ "$CLIENT_TCP_TIMESTAMPS" != 0 ] || extra_fields="client_tcp_ts=0"
     netem delay 0ms
 
     if [ "$TOOL" = iperf3 ]; then
       # one line with received=, sent=, the receiver's duration and rate, and the sender's retransmits
-      got=$($Q iperf "${iperf_json[@]}")
+      late_args=(); [ -z "$LATE_START_S" ] || late_args=(--late "$W/wgft-tq-iperf-late-$mode.json")
+      got=$($Q iperf ${late_args[@]+"${late_args[@]}"} "${iperf_json[@]}")
       sent=$got
       stats="undetermined=0 streams=$STREAMS duration_s=$(field duration_s "$got") overall_mbit=$(field mbit "$got") retransmits=$(field retransmits "$got")$(echo "$got" | grep -oE ' stream_[a-z_]+=[^ ]*' | tr -d '\n')"
       [ "$IPERF_GROUPS" = 1 ] || stats="$stats iperf_groups=$IPERF_GROUPS"
@@ -905,6 +1103,35 @@ for mode in $MODES; do
       stats="undetermined=0 streams=1 duration_s=$CHURN_S overall_mbit=$(awk -v b="$(field received "$got")" -v s="$CHURN_S" 'BEGIN { printf "%.3f", b * 8 / s / 1e6 }') churn_close=$CHURN_CLOSE$(echo " $got" | grep -oE ' churn_[a-z0-9_]+=[^ ]*' | tr -d '\n')"
       c_us=; [ -n "$client_cg" ] && c_us=$(awk '$1 == "usage_usec" { print $2 }' "$client_cg/cpu.stat" 2>/dev/null)
       rmdir "$client_cg" 2>/dev/null
+      [ -z "$LATE_START_S" ] || extra_fields="$extra_fields late_start_s=$LATE_START_S $($Q iperfx "$late_json" late)"
+      [ -z "$PATH_CHANGE_AT" ] || extra_fields="$extra_fields path_change_at_s=$PATH_CHANGE_AT path_change_delay_ms=$PATH_CHANGE_DELAY_MS"
+      [ -z "$CROSS_TCP" ] || extra_fields="$extra_fields $($Q iperfx "$W/wgft-tq-iperf-cross-$mode.json" cross)"
+      if [ -n "$UDP_BLAST_MBIT" ]; then
+        # the sink rewrites its counters twice a second; a second after the sender ends they are final
+        sleep 1
+        blast_r1=$(field recv "$(lan cat "$blast_stats" 2>/dev/null)")
+        blast_sent=$(field udp_blast_sent "$(cat "$W/wgft-tq-ublast-$mode.log" 2>/dev/null)")
+        if [ -n "$blast_r0" ] && [ -n "$blast_r1" ] && [ -n "$blast_sent" ]; then
+          extra_fields="$extra_fields $(cat "$W/wgft-tq-ublast-$mode.log") udp_blast_recv=$((blast_r1 - blast_r0)) udp_blast_lost=$((blast_sent - (blast_r1 - blast_r0)))"
+        else
+          echo "FAIL  agent $mode run $run: the UDP blast left no counts"; fail=1 run_pass=0
+        fi
+      fi
+      if [ -n "$RECORD" ]; then
+        cp "$W/wgft-tq-iperf-$mode.json" "$rec/iperf.json"
+        $Q iperfseries "$rec/iperf.json" > "$rec/iperf-series.txt"
+        [ -z "$late_json" ] || { cp "$late_json" "$rec/iperf-late.json"; $Q iperfseries "$rec/iperf-late.json" > "$rec/iperf-late-series.txt"; }
+        [ -z "$CROSS_TCP" ] || { cp "$W/wgft-tq-iperf-cross-$mode.json" "$rec/iperf-cross.json"; $Q iperfseries "$rec/iperf-cross.json" > "$rec/iperf-cross-series.txt"; }
+        for f in "$rec"/ss-*.txt; do
+          [ -s "$f" ] && $Q ssparse "$f" > "${f%.txt}.parsed.txt"
+        done
+        # the connections that send: the LAN host's on a download, the client's on an upload
+        ssf=$rec/ss-lan.parsed.txt; { [ "$DIRECTION" = down ] && [ -s "$ssf" ]; } || ssf=$rec/ss-client.parsed.txt
+        [ ! -s "$ssf" ] || extra_fields="$extra_fields $(grep '^SSSUM ' "$ssf" | sed 's/^SSSUM //')"
+        for u in idle load; do
+          [ ! -s "$rec/udp-$u.samples" ] || $Q useries "$rec/udp-$u.samples" 1 > "$rec/udp-$u.series.txt"
+        done
+      fi
     else
       got=$(tail -1 "$W/wgft-tq-fetch-$mode.log")
       wait_until 10 served "$mode" "$run"
@@ -972,7 +1199,7 @@ for mode in $MODES; do
     if [ "$(field undetermined "$stats")" = 1 ]; then
       echo "UNDETERMINED  agent $mode run $run: no reads on both sides of the outage; $stats"
     fi
-    echo "RESULT mode=$mode run=$run ${dir_field}${rmem_field}delay_ms=$DELAY_MS loss_pct=$LOSS_PCT ${RATE_MBIT:+rate_mbit=$RATE_MBIT }$stats bytes=$(field received "$got") pass=$run_pass sync=$sync_state${udp_idle:+ $udp_idle}${udp_load:+ $udp_load}"
+    echo "RESULT mode=$mode run=$run ${dir_field}${rmem_field}delay_ms=$DELAY_MS loss_pct=$LOSS_PCT ${RATE_MBIT:+rate_mbit=$RATE_MBIT }$stats bytes=$(field received "$got") pass=$run_pass sync=$sync_state${udp_idle:+ $udp_idle}${udp_load:+ $udp_load}${extra_fields:+ $extra_fields}"
     echo "$stats" >> "$results"
   done
   echo "MEDIAN mode=$mode $($Q median "$results")"
