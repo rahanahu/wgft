@@ -172,19 +172,19 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
 | Nagle (SHLD-7):持ちません (MUST-17 の無効にする口は満たします) | [小さな segment の送り方](#小さな-segment-の送り方) | ありません | 同じ節 |
 | 送り手の SWS の回避 (RFC 9293 3.8.6.2.1、RFC 1122 4.2.3.4):飛んでいるデータが無ければ、override timeout を待たずに窓に入る小さな segment をすぐ送ります | [小さな segment の送り方](#小さな-segment-の送り方) | ありません | 同じ節 |
 | R1 と R2 の間の配送の問題の知らせ (SHLD-9) | 中継は知らせを使いません | 要りません | 接続ごとの R2 の設定と同じ時 |
-| ECN (SHLD-8、RFC 3168):交渉しません | 理由が無いため、直す候補です | ありません | 直す時 |
+| ECN (SHLD-8、RFC 3168):交渉しません。核は輻輳を損失で知ります | 直す候補です。直す効果は server のモードとルールで違います ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))。ユーザー空間モードの server とカーネルモードのプロキシのルールでは、核の接続が通る区間で混みうるのはトンネルの外側の UDP の経路です。agent の device の層と UDP のソケットは、外側の IP の header の ECN の印を内側の packet に写さず、外側の packet に ECT も付けない (RFC 6040 の扱いを持たない) ので、核が ECN を交渉しても効果がありません。カーネルモードの DNAT のルールでは、内側の packet がクライアントと server の間のインターネットの経路を中身を変えずに渡ります。agent の device の層は内側の ECN の欄を変えず、外側が Not-ECT なら RFC 6040 の取り出しの規則も内側の欄を変えないので、その経路で付いた CE か、相手が返す ECE が核に届きえます (server の転送が内側の ECN の欄を保つかは確かめていません)。次の手順は、DNAT の経路で CE が保たれるかを確かめ、RFC 3168 の実装の提案と評価を行い、測ってから製品に採ることです | ありません | DNAT の経路で CE が保たれるかを確かめた時 |
 | 窓の右端 (SHLD-14):窓の欄を scale で切り下げるので、相手から見た右端が最大 2^scale - 1 byte 戻ります | 切り上げを繰り返すと右端が受信のバッファの外へ伸びるためです | ありません | 窓の縮みで送り手が止まる相手が見つかった時 |
 | PMTU の引き下げと輻輳の窓 (RFC 5681 3.1):引き下げで輻輳の窓を縮めません | 理由が無いため、直す候補です | ありません | 直す時 |
 | 最小の RTO (RFC 6298 2.4):RTO = SRTT + max(4 × RTTVAR, 200 ms) で、1 秒に切り上げません | Linux の最小の RTO に合わせます | ありません | 不要な RTO の数が性能の記録で目立った時 |
 | 窓の scale の記録 (RFC 7323 2.3):14 を超える scale を黙って 14 にします | 理由が無いため、直す候補です | ありません | 直す時 |
-| RST の timestamp (RFC 7323 3.2、5.2):RST に TSopt を付けません | 理由が無いため、直す候補です | ありません | 直す時 |
+| RST の timestamp (RFC 7323 3.2、5.2):RST に TSopt を付けません。TSecr で RST を厳しく確かめる相手では、核の RST が受けられない恐れがあります | RFC 7323 5.2 は、RST に TSopt を付けることを、議論の途中で研究を進めるための推奨としています。受け手が TSecr で RST を厳しく確かめるのは MAY で、TSopt の無い segment を捨てる規則 (3.2) は RST を除きます。同じ節によれば、RFC 1323 は RST に timestamp を付けないよう勧めていたので、TSopt の無い RST を受けない受け手は、RFC 1323 に従う送り手の RST も受けないことになります (RFC からの読みです)。核の RST の相手は、server の中継か、server のカーネルモードの DNAT のルールではクライアントの OS です ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))。どちらも TSecr で RST を確かめるかは確かめていません。得を測れないので、RST を作るすべての所に 12 byte の option を足す直しは採りません | ありません | TSecr で RST を確かめ、TSopt の無い RST を受けない相手が見つかった時 |
 | TSopt の無い segment (RFC 7323 3.2):timestamp を交渉した後の TSopt の無い segment を捨てず、PAWS を飛ばします | [TSopt の無い segment と timestamp を使わなかった前の接続](#tsopt-の無い-segment-と-timestamp-を使わなかった前の接続) | ありません | 同じ節 |
 | timestamp の offset (RFC 7323 7 節):接続ごとの乱数でなく、アドレスの組の鍵付きの hash の offset です | 同じ相手との接続をまたいで TSval が増え続け、相手の PAWS と RFC 6191 が効きます | 要りません | 接続の関係づけが問題になる利用が出た時 |
 | challenge ACK の速さの調整 (RFC 5961 7 節):核の全体で 1 秒に 500 から 1500 の固定で、管理者が変えられません | Device 全体の CPU と出力の費用を抑えます | ありません | 洪水の試験で正しい接続の回復が遅れた時 |
 | rescue の再送 (RFC 6675 4 節の NextSeg の規則 4):使いません | 理由が無いため、直す候補ですが、直すかは測ってから決めます。TLP は回復の間は張らない (`tcp/rack.rs` の `tlp_eligible`、RFC 8985 7.2 も fast recovery の間を除きます) ので、回復の中で末尾が失われると RTO まで待つ見込みです (コードと RFC からの読みで、試験はしていません) | ありません | 測った結果で直すか理由を記録する時 |
 | TIME_WAIT を使い直す SYN (RFC 6191 2 節):受けない SYN を黙って捨てず、速さを抑えた ACK を返します。加えて次の 3 つの比べが RFC より厳しい形です:前の接続が timestamp を使えば TSval が厳密に大きい時だけ受け、等しい TSval で番号が大きい SYN を受けません。前の接続が timestamp を使わず新しい SYN が timestamp を持つ時も番号で比べます。番号の比べは `SEG.SEQ > RCV.NXT` で、RFC より 1 つ厳しい形です | ACK を返すのは、RFC 5961 4.2 と RFC 9293 の TIME-WAIT の SYN の扱いに沿います。前の接続が timestamp を使わない時の比べは、TSopt の無い segment と組で残します ([TSopt の無い segment と timestamp を使わなかった前の接続](#tsopt-の無い-segment-と-timestamp-を使わなかった前の接続))。残りの 2 つの比べは、理由が無いため、直す候補です | ありません | 直す時、または dial の側の TIME_WAIT の使い直しを決める時 |
 | Protocol Unreachable (RFC 1122 3.2.2.1):知らない protocol の datagram を数えて黙って捨てます | トンネルの相手は server だけで、server は TCP、UDP、ICMP のほかを送りません | ありません | ほかの protocol を運ぶ要望が出た時 |
-| Parameter Problem (RFC 1122 3.2.2.5):最初の断片の option の誤りにだけ返し、断片でない packet の option は確かめず、長さの崩れた packet は黙って捨てます | 理由が無いため、直す候補です | ありません | 直す時 |
+| Parameter Problem (RFC 1122 3.2.2.5):最初の断片の option の誤りにだけ返し、断片でない packet の option は確かめず、長さの崩れた packet は黙って捨てます。送り手は誤りを知りません | RFC 1122 3.2.2.5 の DISCUSSION は、Parameter Problem を受けることを「generally indicates some local or remote implementation error」とし、受けた送り手に求める動きを定めません。核に届く packet の送り手は、server の中継か、DNAT のルールではクライアントの OS です ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))。server の中継は IP option を付けないと見込みます (確かめていません)。DNAT のルールで、server の転送がクライアントの IP option や長さの崩れた packet を落とすかは確かめていません。一方で、誤りを作る経路を増やすと、ICMP の誤りの禁止 (誤りへの誤り、無効な送信元、先頭でない断片、broadcast と multicast の宛先など) と速さの制限を守る面が増えます。崩れた packet の数は `Stats` の `malformed` で分かります | 要りません | dial の側を足す時、または `malformed` の数が目立った時 |
 | 受けた TOS の受け渡し (RFC 1122 3.2.1.6):TCP と UDP に渡しません | 中継は L4 で終端し、受けた TOS を LAN の側へ運ぶ手段を持たないので、受け渡す相手がありません | ありません | DSCP を運ぶ要望が出た時 |
 | 未完成の source route (RFC 1122 3.3.5):Destination Unreachable (code 5) を返さず、自分宛てとして受けます | トンネルの中に途中の hop が無く、source route を使う相手がありません。RFC 7126 は source route の packet を捨てることを勧めます | ありません | source route を使う相手を支える要望が出た時 |
 | echo の応答の Record Route と Timestamp (RFC 1122 3.2.2.6):応答に写しません | トンネルは 1 hop で、経路を記録する途中の hop がありません | ありません | echo の診断で経路の記録が要る要望が出た時 |
@@ -310,10 +310,8 @@ SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表
 - ECN (SHLD-8)
 - PMTU の引き下げと輻輳の窓 (RFC 5681 3.1)
 - 窓の scale の記録 (RFC 7323 2.3)
-- RST の timestamp (RFC 7323 3.2、5.2)
 - rescue の再送 (RFC 6675 4 節の規則 4)
 - TIME_WAIT を使い直す SYN の、等しい TSval の比べと番号の比べ (RFC 6191 2 節)
-- Parameter Problem (RFC 1122 3.2.2.5)
 
 ### 直しを準備中の逸脱
 
