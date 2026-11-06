@@ -1120,3 +1120,59 @@ fn rfc6298_wire_data_retransmit_after_a_first_synack_comes_before_1s() {
     let d = first_data_retransmit_delay(&mut n, c);
     assert!(d < Duration::from_secs(1), "retransmitted after {d:?}");
 }
+
+// 送った時刻 0 を「送っていない」の印にしない。RFC 6298 2.2 の最初の RTT の測定は、握手が時刻 0 でも取る。
+
+/// 100 byte を送り、相手が確認しないまま最初の RTO が起きるまでの時間を 10 ms の刻みで返します。
+fn first_rto_after_write(n: &mut TestNet, c: crate::ConnId) -> Duration {
+    assert_eq!(n.s.write(n.now, c, &[7u8; 100]), Ok(100));
+    n.drain();
+    let rtos = n.s.stats().rtos;
+    let mut waited = Duration::ZERO;
+    while n.s.stats().rtos == rtos {
+        assert!(waited < Duration::from_secs(30), "no RTO within 30 s");
+        n.advance(Duration::from_millis(10));
+        n.drain();
+        waited += Duration::from_millis(10);
+    }
+    waited
+}
+
+/// SYN-ACK を時刻 0 に送った接続でも、握手から RTT の標本を取り、最初の RTO は初期値の 1 秒より短くなります。
+/// 能動側 (dial) は核に無く、データの記録の `sent_at` は印として使っていないので、この 1 か所だけです。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn a_synack_sent_at_stack_time_zero_still_gives_an_rtt_sample() {
+    let mut n = TestNet::new(small_limits());
+    assert_eq!(
+        n.now.as_nanos(),
+        0,
+        "the test net no longer starts at time 0"
+    );
+    let l = n.listen(80);
+    let mut p = n.syn_sack(40000, 80, false, false, false);
+    n.advance(Duration::from_millis(50));
+    n.peer_ack(&mut p, &[]);
+    let c = n.accept(l);
+    n.drain();
+    let d = first_rto_after_write(&mut n, c);
+    assert!(
+        d < Duration::from_secs(1),
+        "no RTT sample from a handshake at time 0: the first RTO came after {d:?}"
+    );
+}
+
+/// 対照:時刻 0 でない握手は標本を取ります。
+#[test]
+fn a_synack_sent_after_time_zero_gives_an_rtt_sample() {
+    let mut n = TestNet::new(small_limits());
+    n.advance(Duration::from_millis(1));
+    let l = n.listen(80);
+    let mut p = n.syn_sack(40000, 80, false, false, false);
+    n.advance(Duration::from_millis(50));
+    n.peer_ack(&mut p, &[]);
+    let c = n.accept(l);
+    n.drain();
+    let d = first_rto_after_write(&mut n, c);
+    assert!(d < Duration::from_secs(1), "first RTO after {d:?}");
+}
