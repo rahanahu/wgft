@@ -15,7 +15,7 @@ use wgft_wgstack::{Bound, Limits as CoreLimits, MAX_MTU};
 
 use crate::batching::Batching;
 use crate::flowpool;
-use crate::relay::{BULK_BUF, BULK_KEEP, LanConn, REPLY_SLOTS, UDP_BUF};
+use crate::relay::{BULK_BUF, BULK_KEEP, IDLE_BUF, IDLE_KEEP, LanConn, REPLY_SLOTS, UDP_BUF};
 use crate::targets::resolve::{ENDPOINT_PERMITS, TARGET_PERMITS};
 use wgft_proto::{STATE_HELD_FACTOR, STREAM_READ_LIMIT};
 
@@ -42,8 +42,8 @@ const fn per_flow(bytes: usize) -> usize {
     bytes.next_multiple_of(64)
 }
 
-/// The future of one TCP relay task: two idle buffers inline and the state of both directions,
-/// read from the future's type.
+/// The future of one TCP relay task: the state of both directions, read from the future's type.
+/// The idle buffers are not in it; the pool lends them ([`tcp_relay_conn`]).
 #[must_use]
 pub fn tcp_relay_future() -> usize {
     per_flow(crate::relay::future_sizes().0)
@@ -78,10 +78,11 @@ pub const LISTENER_TCP: usize = 5 << 9;
 /// the buffer plus 2.9 KiB with a status read's rows.
 pub const LISTENER_UDP: usize = UDP_BUF + (4 << 10);
 
-/// One TCP relay's term without its bulk buffers: its task and its socket's registration.
+/// One TCP relay's term without its bulk buffers: its task, its socket's registration and the two
+/// idle buffers its directions borrow from the data plane thread's pool for as long as it lives.
 #[must_use]
 pub fn tcp_relay_conn() -> usize {
-    tcp_relay_future() + TASK_OVERHEAD + IO_OVERHEAD
+    tcp_relay_future() + 2 * IDLE_BUF + TASK_OVERHEAD + IO_OVERHEAD
 }
 
 /// One UDP session's term: its table entry, its socket's registration and its reply task.
@@ -145,8 +146,9 @@ pub struct MemoryBound {
     pub batch: usize,
     /// The TCP relay without its bulk buffers: per connection its task and socket.
     pub tcp: usize,
-    /// The TCP relay's bulk buffers: both directions' per connection, and the ones the data plane
-    /// thread keeps for reuse. A relay borrows them only while data flows.
+    /// The TCP relay's bulk buffers: both directions' per connection, and the bulk and idle buffers
+    /// the data plane thread keeps for reuse. A relay borrows its bulk buffers only while data
+    /// flows.
     pub tcp_bulk: usize,
     /// The UDP relay: the reply buffers and per session its entry, socket and reply task.
     pub udp: usize,
@@ -194,7 +196,7 @@ impl MemoryBound {
         let tcp_bulk = limits
             .tcp
             .saturating_mul(2 * BULK_BUF)
-            .saturating_add(BULK_KEEP * BULK_BUF);
+            .saturating_add(BULK_KEEP * BULK_BUF + IDLE_KEEP * IDLE_BUF);
         let udp = REPLY_SLOTS * UDP_BUF + limits.udp.saturating_mul(udp_session());
         let resolver = (TARGET_PERMITS + ENDPOINT_PERMITS) * RESOLVER_THREAD;
         let parts = [
