@@ -82,8 +82,8 @@ impl UdpId {
     }
 }
 
-/// UDP の会計が見つけた不変条件の違反です。最初の違反で核の UDP をすべて止めます
-/// (udp-accounting.md の会計の不整合)。`agent doctor` の `tunnel.udp_accounting` に使います。
+/// An invariant violation that UDP accounting found. The first violation stops all UDP in the stack
+/// ([`Error::UdpStopped`](crate::Error::UdpStopped)); [`Stack::udp_receive_fault`] returns it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UdpFault {
@@ -1019,10 +1019,10 @@ impl Shared {
                 match r {
                     Refused::Endpoint => self.stats.udp_endpoint_full += 1,
                     // 受信では chunk の確保の失敗も核の予算で断ったことにします。
-                    Refused::Tunnel | Refused::NoMemory => self.stats.udp_tunnel_full += 1,
+                    Refused::Tunnel | Refused::NoMemory => self.stats.udp_stack_full += 1,
                 }
                 self.stats.udp_dropped += 1;
-                let n = self.stats.udp_endpoint_full + self.stats.udp_tunnel_full;
+                let n = self.stats.udp_endpoint_full + self.stats.udp_stack_full;
                 self.gates.allow(LogKind::UdpDropped, now, n);
                 return;
             }
@@ -1097,7 +1097,7 @@ impl Shared {
 }
 
 impl<H: Hook> Stack<H> {
-    /// `addr` で UDP を待ち受ける、接続しない endpoint を開きます。アドレスはトンネルのアドレスです。
+    /// Opens an unconnected UDP endpoint bound to `addr`, whose address must be the stack's address.
     pub fn bind_udp(&mut self, now: Time, addr: SocketAddrV4) -> Result<UdpId, Error> {
         self.clock(now);
         if addr.ip().to_bits() != self.s.addr {
@@ -1156,6 +1156,7 @@ impl<H: Hook> Stack<H> {
     /// chunk を確保できなければ、待たずに [`Error::NoMemory`] を返します。
     /// MTU を超える datagram は、送る時に DF を立てない断片に分けます。
     #[cfg(any(test, feature = "harness"))]
+    #[doc(hidden)]
     pub fn send_to(
         &mut self,
         now: Time,
@@ -1270,8 +1271,8 @@ impl<H: Hook> Stack<H> {
         s.events.clear_bits(t, EV_UDP_READ | EV_UDP_WRITE);
     }
 
-    /// UDP の会計が不変条件の違反を見つけて核の UDP を止めていれば、最初の違反を返します。健全な間は `None`
-    /// です。`agent doctor` の `tunnel.udp_accounting` に使います。
+    /// Returns the first invariant violation if UDP accounting found one and stopped all UDP in the stack,
+    /// and `None` while UDP is healthy.
     pub fn udp_receive_fault(&self) -> Option<UdpFault> {
         self.s.udp.fault()
     }

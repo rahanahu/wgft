@@ -222,7 +222,7 @@ impl<H: Hook> Netstack<H> {
                     s.udp_endpoint_full,
                     UDP_RX_BYTES / UDP_ENDPOINT_SHARE,
                     datagrams / UDP_ENDPOINT_SHARE,
-                    s.udp_tunnel_full,
+                    s.udp_stack_full,
                 )
             }
             LogKind::UdpSendDropped => {

@@ -661,7 +661,8 @@ impl ClockedDut for WgstackDut {
     fn close_for_delivery(&mut self, conn: Handle) -> Result<(), DutError> {
         let _compat = self.sync_go_compat();
         let (id, ..) = self.conn(conn)?;
-        self.stack.close_for_delivery(self.time(), id);
+        // Go の CloseForDelivery は Close と同じ動作です。
+        self.stack.close_conn(self.time(), id);
         Ok(())
     }
 

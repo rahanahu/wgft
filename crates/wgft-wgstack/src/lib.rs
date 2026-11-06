@@ -46,8 +46,10 @@ pub use stack::{
     NewErrorKind, NoHook, Stack, Stats,
 };
 #[cfg(any(test, feature = "harness"))]
+#[doc(hidden)]
 pub use stack::{Spare, TouchedCheck};
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub use stack::{
     go_compat_core_challenge, go_compat_dsack_snd_una, go_compat_echo_drop,
     go_compat_pmtu_keep_cwnd, go_compat_row_rst, go_compat_rto_l2, go_compat_sent_at_zero,
@@ -78,6 +80,7 @@ pub const UDP_ENDPOINT_SHARE: usize = udp::ENDPOINT_SHARE;
 /// 核に本当に効いたかを判じる canary です。設定は crate ごとに効くので、呼び手の crate ではなく核の中で試します。
 /// panic は呼び手の hook を一時的に外して受けます。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 #[must_use]
 #[inline(never)]
 #[expect(

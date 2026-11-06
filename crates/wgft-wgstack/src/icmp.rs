@@ -402,7 +402,8 @@ impl<H: Hook> Stack<H> {
         }
     }
 
-    /// トンネルのアドレスから `raddr` への ICMP の echo の endpoint を作ります。表が満杯なら誤りを返します。
+    /// Opens an ICMP echo endpoint from the stack's address to `raddr`. Returns
+    /// [`Error::TableFull`](crate::Error::TableFull) when every ping endpoint is in use.
     pub fn open_ping(&mut self, now: Time, raddr: Ipv4Addr) -> Result<PingId, Error> {
         self.clock(now);
         let p = &mut self.s.pings;

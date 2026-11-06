@@ -1490,7 +1490,7 @@ adapter の側に核の故障の写しを作らないのは、公開の API の�
 | `frag_no_expiry` | 再組み立ての表の期限を外す | `holding` の `fragment_flood` (期限の後に表が空に戻る) |
 | `udp_no_endpoint_bytes_cap` | UDP の endpoint ごとの受信の byte の上限 (予算の 4 分の 1) を外す | `holding` の `udp_flood` (大きな datagram で保持が平らになる) |
 | `udp_no_endpoint_count_cap` | UDP の endpoint ごとの受信の datagram の数の上限 (予算の 4 分の 1) を外す | `holding` の `udp_flood` (小さな datagram で数の上限にちょうど止まる) |
-| `udp_no_tunnel_cap` | 核の全体の UDP の受信の予算を外す | `holding` の `udp_flood` (5 つ以上の endpoint で `udp_tunnel_full` を数える) |
+| `udp_no_tunnel_cap` | 核の全体の UDP の受信の予算を外す | `holding` の `udp_flood` (5 つ以上の endpoint で `udp_stack_full` を数える) |
 | `frag_byte_cap_ignored` | 再組み立ての表の byte の上限で追い出さない | `holding` の `fragment_flood` (大きな断片で byte の上限の内に止まる) |
 | `udp_recv_keeps_reservation` | `recv_from` が datagram の予約を返さない | `holding` の `udp_flood` (読むと予約が返る) |
 
