@@ -260,7 +260,18 @@ fn slow_start_after_an_undo_grows_one_smss_per_ack() {
 /// 覚えた ssthresh (`ssthresh` segment) と `window` segment の窓を持つ接続を RTO より長く黙らせ、窓を IW に戻して
 /// 再開させます。再開の最初の送り出しを返します。
 fn idle_restart(cc: Congestion, window: u32, ssthresh: u32) -> (Rig, Vec<Out>) {
-    let mut r = Rig::new(cc, true, window, 1);
+    idle_restart_with(cc, true, window, ssthresh, 400)
+}
+
+/// `idle_restart` と同じで、`sack` で SACK を交渉するかを選び、再開で書く量を `segs` segment にします。
+fn idle_restart_with(
+    cc: Congestion,
+    sack: bool,
+    window: u32,
+    ssthresh: u32,
+    segs: usize,
+) -> (Rig, Vec<Out>) {
+    let mut r = Rig::new(cc, sack, window, 1);
     let mss = r.mss;
     r.set_ssthresh(ssthresh * mss);
     r.ack_originals();
@@ -268,7 +279,7 @@ fn idle_restart(cc: Congestion, window: u32, ssthresh: u32) -> (Rig, Vec<Out>) {
     r.n.s.conn(r.c.slot).t.cwnd = window * mss;
     r.n.advance(Duration::from_secs(60));
     assert_eq!(r.rtos(), 0, "{cc:?}: the idle raised no RTO");
-    r.write(400 * mss as usize);
+    r.write(segs * mss as usize);
     let outs = r.take();
     assert_eq!(
         outs.len() as u32,
@@ -383,6 +394,121 @@ fn idle_restart_leaves_css_after_five_rounds() {
         // 入った往復の後、CSS_ROUNDS 往復で終える
         assert_eq!(w.len(), 1 + CSS_ROUNDS, "{cc:?}: windows {w:?}");
         assert_at_css_exit(&mut r, &w);
+    }
+}
+
+// 2b. 黙った後の再開で動かした HyStart++ は、RTO や回復で終わる (出来事を本物の送り出しと ACK で起こす)
+
+/// 黙った後の再開の送り出しをすべて失って RTO を起こすと、その後の slow start は HyStart++ の外で、1 ACK の増分は 1 SMSS
+/// までです (RFC 3465 2.3 節の MUST)。RTO の後に ssthresh を大きく上げて (1000 SMSS) 落ち着かせても、再開で動かし始めた
+/// HyStart++ が残って L = 2 に戻ってはいけません。
+#[test]
+fn rto_after_an_idle_restart_ends_the_hystart_limit() {
+    for cc in CCS {
+        let (mut r, lost) = idle_restart(cc, 40, 100_000);
+        assert!(!lost.is_empty());
+        // 再開の送り出しは届かない。RTO が起きる
+        r.wait_rto(1);
+        let mss = r.mss;
+        r.set_ssthresh(1000 * mss);
+        r.settle();
+        assert_eq!(r.two_segment_ack(), mss, "{cc:?}");
+    }
+}
+
+/// SACK を交渉しない接続が 60 s 黙った後、10 segment だけ送って先頭を失い、高速の回復が窓 < ssthresh で終わると、続く
+/// slow start は HyStart++ の外で、1 ACK の増分は 1 SMSS までです (RFC 5681 3.1 節)。再開で動かし始めた HyStart++
+/// が回復に入るときに終わらないと L = 2 に戻る。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn recovery_after_an_idle_restart_ends_the_hystart_limit() {
+    for cc in CCS {
+        let (mut r, outs) = idle_restart_with(
+            cc,
+            false,
+            40,
+            100_000,
+            crate::tcp::INITIAL_WINDOW_SEGS as usize,
+        );
+        let mss = r.mss;
+        assert_eq!(outs.len() as u32, crate::tcp::INITIAL_WINDOW_SEGS);
+        // 先頭を失う。後ろの重複 ACK で高速の回復に入る
+        r.q.deliver_with(&mut r.n, &outs, |i, _| i == 0);
+        let resent = r.take();
+        assert_eq!(r.n.s.stats().fast_recoveries, 1, "{cc:?}: entered");
+        assert!(r.in_recovery(), "{cc:?}: in recovery");
+        assert!(!resent.is_empty() && resent[0].seq == outs[0].seq);
+        r.n.advance(Duration::from_millis(1));
+        r.q.deliver(&mut r.n, &resent[..1]);
+        assert!(!r.in_recovery(), "{cc:?}: recovery ended");
+        let (cwnd, ssthresh) = (r.cwnd(), r.ssthresh());
+        assert!(
+            cwnd < ssthresh && ssthresh != u32::MAX,
+            "{cc:?}: slow start again; cwnd {cwnd} ssthresh {ssthresh}"
+        );
+        assert_eq!(r.two_segment_ack(), mss, "{cc:?}");
+    }
+}
+
+// 2c. 出来事で状態を作る (窓と ssthresh を書き換えて出来事の効果を消さない)
+
+/// 最初の slow start の RTO の後、本物の高速の回復が窓 < 有限の ssthresh で終わると、続く slow start は HyStart++ の外で
+/// 1 SMSS までです (RFC 5681 3.1 節)。回復の入口で ssthresh が決まり、窓は回復の出口で ssthresh より小さくなります。
+/// 窓は、RTO の後に落ち着いてから 1 度だけ開けて (送り出しを作るため)、回復の後は触りません。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn slow_start_after_an_rto_and_a_real_recovery_grows_one_smss_per_ack() {
+    for cc in CCS {
+        let mut r = Rig::new(cc, false, 40, 40);
+        let mss = r.mss;
+        // 元の 40 segment をすべて失って RTO を起こし、再送で落ち着く
+        r.wait_rto(1);
+        r.settle();
+        assert!(!r.in_recovery(), "{cc:?}: settled");
+        // RTO の recover を SND.UNA が越えるまで、新しいデータを 1 segment 送って確認させる (RFC 6582 3.2 節)
+        r.write(mss as usize);
+        r.settle();
+        // 窓を開けて 30 segment を送り、先頭を失って高速の回復に入る
+        r.n.s.conn(r.c.slot).t.cwnd = 40 * mss;
+        r.write(30 * mss as usize);
+        let outs = r.take();
+        assert!(outs.len() >= 20, "{cc:?}: {} segments", outs.len());
+        r.n.advance(RTT);
+        r.q.deliver_with(&mut r.n, &outs, |i, _| i == 0);
+        let resent = r.take();
+        assert_eq!(r.n.s.stats().fast_recoveries, 1, "{cc:?}: entered");
+        assert!(r.in_recovery(), "{cc:?}: in recovery");
+        assert!(!resent.is_empty() && resent[0].seq == outs[0].seq);
+        r.n.advance(Duration::from_millis(1));
+        r.q.deliver(&mut r.n, &resent[..1]);
+        assert!(!r.in_recovery(), "{cc:?}: recovery ended");
+        let (cwnd, ssthresh) = (r.cwnd(), r.ssthresh());
+        assert!(
+            cwnd < ssthresh && ssthresh != u32::MAX,
+            "{cc:?}: slow start again; cwnd {cwnd} ssthresh {ssthresh}"
+        );
+        assert_eq!(r.two_segment_ack(), mss, "{cc:?}");
+    }
+}
+
+/// 最初の slow start の不要な RTO が取り消されると、ssthresh は初期値に戻り (RFC 4015 の取り消し)、続く slow start は
+/// 最初の slow start なので HyStart++ の中で L = 2 です (RFC 9406 4.2 節)。RTO の後の窓の戻しと取り消しは本物の
+/// 再送と元の segment の確認で起こし、取り消しの後に窓も ssthresh も書き換えません。
+#[test]
+fn slow_start_after_a_spurious_rto_undo_in_the_initial_slow_start_keeps_l2() {
+    for cc in CCS {
+        let mut r = Rig::new(cc, true, 10, 10);
+        let mss = r.mss;
+        assert_eq!(r.ssthresh(), u32::MAX, "{cc:?}: the initial slow start");
+        r.wait_rto(1);
+        r.take(); // 再送
+        // 遅れた元の segment が届いて確認される。RTO は不要だった
+        r.ack_originals();
+        assert_eq!(r.n.s.stats().spurious_rtos, 1, "{cc:?}: undone");
+        assert_eq!(r.ssthresh(), u32::MAX, "{cc:?}: ssthresh restored");
+        r.settle();
+        assert!(!r.in_recovery());
+        assert_eq!(r.two_segment_ack(), 2 * mss, "{cc:?}");
     }
 }
 
