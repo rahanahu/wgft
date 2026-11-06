@@ -1300,3 +1300,96 @@ fn mixed_df_fragments_are_reassembled() {
             .unwrap_or_else(|e| panic!("{e:?}: {:?}", n.s.stats()));
     assert_eq!(&b[..k], &msg[..]);
 }
+
+// RFC 1122 3.3.2 と RFC 792: 最初の断片を受けた再組み立ての項目が期限切れになったら Time Exceeded (code 1) を
+// 送ります。期限を過ぎて掃除を待つ項目を表の追い出しが外した場合も同じです。
+
+/// 表が満ちて最も古い項目が追い出されるまで、別の datagram の最初の断片を送ります。追い出しの数を返します。
+fn flood_until_eviction(n: &mut TestNet) -> u64 {
+    let before = n.s.s.frag.evicted();
+    for i in 0..(crate::frag::LIMITS.entries + 8) as u16 {
+        let frags = split_ipv4(&build_udp(PEER_UDP, 53, &[0; 3000]), 1000, 6000 + i);
+        n.s.handle_packet(n.now, &frags[0]);
+        if n.s.s.frag.evicted() > before {
+            return n.s.s.frag.evicted() - before;
+        }
+    }
+    panic!("the table never evicted an entry");
+}
+
+fn assert_time_exceeded_for(pkts: &[Vec<u8>], first_fragment: &[u8]) {
+    assert_eq!(pkts.len(), 1, "packets after the eviction: {pkts:x?}");
+    let ip = parse_ipv4(&pkts[0]).unwrap();
+    let m = ip.payload();
+    assert!(
+        ip.proto == PROTO_ICMP
+            && ip.dst == PEER.to_bits()
+            && m[0] == TIME_EXCEEDED
+            && m[1] == 1
+            && m[8..36] == first_fragment[..28],
+        "Time Exceeded {:x?}",
+        pkts[0]
+    );
+}
+
+/// 期限を過ぎた項目が、掃除より先に表の追い出しで外れたとき、Time Exceeded を送ります。
+#[test]
+fn evicting_an_expired_entry_sends_time_exceeded() {
+    let mut n = TestNet::new(small_limits());
+    n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    let frags = split_ipv4(&build_udp(PEER_UDP, 53, &[0; 3000]), 1000, 5000);
+    n.write(&frags[0]);
+    // 掃除 (handle_timeout) を呼ばずに、寿命の 30 秒を過ぎさせます。
+    n.now = n.now + Duration::from_secs(31);
+    assert_eq!(flood_until_eviction(&mut n), 1);
+    assert_time_exceeded_for(&n.drain_raw(), &frags[0]);
+}
+
+/// 期限前の項目を追い出しても何も送りません (RFC の Time Exceeded は期限切れの知らせです)。
+#[test]
+fn evicting_a_live_entry_sends_nothing() {
+    let mut n = TestNet::new(small_limits());
+    n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    let frags = split_ipv4(&build_udp(PEER_UDP, 53, &[0; 3000]), 1000, 5000);
+    n.write(&frags[0]);
+    n.now = n.now + Duration::from_secs(5);
+    assert_eq!(flood_until_eviction(&mut n), 1);
+    assert!(n.drain_raw().is_empty(), "ICMP for a live entry");
+}
+
+/// 最初の断片を受けていない項目は、期限が切れても追い出されても何も送りません (RFC 1122 3.3.2)。
+#[test]
+fn evicting_an_expired_entry_without_the_first_fragment_sends_nothing() {
+    let mut n = TestNet::new(small_limits());
+    n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    let frags = split_ipv4(&build_udp(PEER_UDP, 53, &[0; 3000]), 1000, 5000);
+    n.write(&frags[1]);
+    n.now = n.now + Duration::from_secs(31);
+    assert_eq!(flood_until_eviction(&mut n), 1);
+    assert!(n.drain_raw().is_empty(), "ICMP without the first fragment");
+}
+
+/// 追い出しの Time Exceeded も、掃除と同じ速さの制限 (1 秒に 1000 個) に従います。
+#[test]
+fn eviction_time_exceeded_shares_the_icmp_rate_limit() {
+    let mut n = TestNet::new(small_limits());
+    n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    let frags = split_ipv4(&build_udp(PEER_UDP, 53, &[0; 3000]), 1000, 5000);
+    n.write(&frags[0]);
+    n.now = n.now + Duration::from_secs(31);
+    // 同じ秒の枠を使い切ります。
+    let mut sent = 0;
+    for i in 0..1000u16 {
+        n.s.handle_packet(n.now, &build_udp(SocketAddrV4::new(PEER, i), 9, b"x"));
+        sent += n.drain_raw().len();
+    }
+    assert_eq!(sent, 1000);
+    let limited = n.s.stats().icmp_limited;
+    assert_eq!(flood_until_eviction(&mut n), 1);
+    assert!(n.drain_raw().is_empty(), "sent beyond the limit");
+    assert_eq!(
+        n.s.stats().icmp_limited,
+        limited + 1,
+        "the eviction's Time Exceeded did not go through the shared limiter"
+    );
+}

@@ -111,7 +111,8 @@ pub(crate) enum Outcome {
     Complete(FixedVec<u8>),
     /// 保持している断片と同じ断片です。
     Duplicate,
-    /// 断片を捨てました。項目を外した場合は、その項目の知らせを持ちます。
+    /// 断片を捨てました。項目を外した場合は、その項目の知らせを持ちます。理由が `Expired` のときは、期限を過ぎた
+    /// 項目を外しただけで、この断片は処理していません。呼び手は知らせを送ってから、同じ断片を処理し直します。
     Rejected(Notice),
     /// 上限のために断片を保持できません。
     Capacity,
@@ -185,6 +186,16 @@ pub(crate) struct Table {
     /// 使っている項目の数です。核が掃除の期限を毎回の待ちで調べるので、数えて持ちます。
     live: usize,
     evicted: u64,
+}
+
+/// `evict_oldest` の結果です。
+enum Evict {
+    /// 外せる項目が無い。
+    None,
+    /// 項目 `.0` を外した。
+    Done(usize),
+    /// 期限を過ぎた項目を外した。知らせを呼び手が送る。
+    Expired(Notice),
 }
 
 impl core::fmt::Debug for Table {
@@ -460,10 +471,11 @@ impl Table {
         self.entries[i] = Assembly::default();
     }
 
-    /// `keep` 以外で最も早い期限の項目を外し、その位置を返します。ほかに項目が無ければ `None` です。
+    /// `keep` 以外で最も早い期限の項目を外します。ほかに項目が無ければ `Evict::None` です。
     /// 期限はどれも受け入れの時刻と同じ寿命の和なので、最も早い期限が最も古い項目です。同じ期限なら小さい
-    /// 位置を外します。追い出しは知らせも ICMP も出しません。Time Exceeded を送るのはタイマーだけです。
-    fn evict_oldest(&mut self, keep: Option<usize>) -> Option<usize> {
+    /// 位置を外します。外した項目が `now` までに期限を過ぎていれば、Time Exceeded の知らせを `Evict::Expired`
+    /// で返します。期限前の項目の追い出しは知らせを出しません。
+    fn evict_oldest(&mut self, keep: Option<usize>, now: Time) -> Evict {
         let mut victim: Option<usize> = None;
         for (i, e) in self.entries.iter().enumerate() {
             if !e.used || Some(i) == keep {
@@ -473,10 +485,18 @@ impl Table {
                 victim = Some(i);
             }
         }
-        let v = victim?;
+        let Some(v) = victim else {
+            return Evict::None;
+        };
+        // 期限を過ぎて掃除を待つ項目は、外す前に Time Exceeded の知らせを返します (RFC 1122 3.3.2)。呼び手は
+        // 知らせを送った後、同じ断片を処理し直します。
+        let expired = now >= self.entries[v].deadline;
+        #[cfg(test)]
+        let expired = expired && !crate::stack::go_compat_evict_silent(); // 凍結した Go との照合用
+        let notice = expired.then(|| self.notice_entry(v, Reason::Expired));
         self.clear_entry(v);
         self.evicted += 1;
-        Some(v)
+        notice.map_or(Evict::Done(v), Evict::Expired)
     }
 
     fn notice_entry(&self, i: usize, reason: Reason) -> Notice {
@@ -601,8 +621,13 @@ impl Table {
             i
         } else {
             // 満杯の鍵の表には、追い出せるほかの項目が必ずあります。
-            let Some(i) = free.or_else(|| self.evict_oldest(None)) else {
-                return Outcome::Capacity;
+            let i = match free {
+                Some(i) => i,
+                None => match self.evict_oldest(None, now) {
+                    Evict::Done(i) => i,
+                    Evict::Expired(n) => return Outcome::Rejected(n),
+                    Evict::None => return Outcome::Capacity,
+                },
             };
             self.live += 1;
             self.entries[i] = Assembly {
@@ -686,8 +711,10 @@ impl Table {
             {
                 break p;
             }
-            if self.evict_oldest(Some(index)).is_none() {
-                return capacity(self);
+            match self.evict_oldest(Some(index), now) {
+                Evict::Done(_) => {}
+                Evict::Expired(n) => return Outcome::Rejected(n),
+                Evict::None => return capacity(self),
             }
         };
         // 完成した写しは、保持するすべての断片と並んで持てる必要があります。
@@ -699,8 +726,10 @@ impl Table {
         while completes
             && new_first_len + new_covered + self.used + payload.len() > self.limits.bytes
         {
-            if self.evict_oldest(Some(index)).is_none() {
-                return capacity(self);
+            match self.evict_oldest(Some(index), now) {
+                Evict::Done(_) => {}
+                Evict::Expired(n) => return Outcome::Rejected(n),
+                Evict::None => return capacity(self),
             }
         }
         // 確保は状態を変える前に済ませ、失敗を上限と同じ動作にします。

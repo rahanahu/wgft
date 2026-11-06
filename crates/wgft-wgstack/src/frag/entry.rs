@@ -70,10 +70,10 @@ impl<H: Hook> Stack<H> {
         let pkt = ip.packet;
         let s = &mut self.s;
         let mut res = s.frag.process(pkt, time(now));
-        if let Outcome::Rejected(n) = &res
+        // 期限を過ぎた項目を外すたびに知らせを送り、この断片を処理し直します。外した項目の数で必ず終わります。
+        while let Outcome::Rejected(n) = &res
             && n.reason == Reason::Expired
         {
-            // 前の項目の期限を知らせた後、この断片を空いた項目で処理し直します。
             let n = *n;
             s.frag_notice(&n, &[], now);
             res = s.frag.process(pkt, time(now));

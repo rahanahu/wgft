@@ -552,17 +552,25 @@ fn eviction_order() {
 }
 
 #[test]
-fn evicted_expired_entry_is_silent() {
+fn evicted_expired_entry_reports_time_exceeded() {
+    // 鍵 1 は期限を過ぎていますが、まだ掃除していません。鍵 2 のために追い出す前に、その知らせを返します
+    // (RFC 1122 3.3.2)。呼び手は知らせを送った後に、同じ断片を処理し直します。
     let mut t = table(1, 2, 4096);
     hold(&mut t, &pkt(17, 1, 0, true, 0, &[], b"aaaaaaaa"), at(0));
-    // 鍵 1 は期限を過ぎていますが、まだ掃除していません。鍵 2 のために追い出すと、Time Exceeded は出ません。
-    hold(
-        &mut t,
-        &pkt(17, 2, 0, true, 0, &[], b"bbbbbbbb"),
-        at(3 * SEC),
-    );
+    let second = pkt(17, 2, 0, true, 0, &[], b"bbbbbbbb");
+    let n = rejected(t.process(&second, at(3 * SEC)));
+    assert!(n.reason == Reason::Expired && n.has_first);
     assert_eq!(t.evicted(), 1);
+    hold(&mut t, &second, at(3 * SEC));
     assert!(t.sweep_next(at(3 * SEC)).is_none());
+    want_ids(&t, &[2]);
+    // 凍結した Go は黙って追い出します。
+    let mut t = table(1, 2, 4096);
+    crate::stack::set_go_compat_evict_silent(true);
+    hold(&mut t, &pkt(17, 1, 0, true, 0, &[], b"aaaaaaaa"), at(0));
+    hold(&mut t, &second, at(3 * SEC));
+    crate::stack::set_go_compat_evict_silent(false);
+    assert_eq!(t.evicted(), 1);
     want_ids(&t, &[2]);
 }
 
@@ -644,6 +652,16 @@ fn check_ledger(t: &Table, step: usize) {
     assert_eq!(t.usage(), (t.used, entries, pieces), "step {step}");
 }
 
+/// 追い出しが期限切れの項目の知らせを返したら、呼び手と同じく知らせを数え、同じ断片を処理し直します。
+fn process_again(t: &mut Table, p: &[u8], now: Time, again: &mut usize) -> Outcome {
+    loop {
+        match t.process(p, now) {
+            Outcome::Rejected(n) if n.reason == Reason::Expired => *again += 1,
+            o => return o,
+        }
+    }
+}
+
 #[test]
 fn eviction_ledger_invariant() {
     let mut rng = ChaCha8::new([0x26; 32]);
@@ -654,6 +672,7 @@ fn eviction_ledger_invariant() {
     let mut last_evicted = 0;
     let mut counts = std::collections::HashMap::<&str, usize>::new();
     let mut sent: Vec<Vec<u8>> = Vec::new();
+    let mut again = 0usize;
     let body = |n: &mut dyn FnMut(u64) -> usize, len: usize| -> Vec<u8> {
         (0..len).map(|_| u8::try_from(n(256)).unwrap()).collect()
     };
@@ -673,9 +692,9 @@ fn eviction_ledger_invariant() {
                 if n(2) == 0 {
                     core::mem::swap(&mut first, &mut last);
                 }
-                let o = t.process(&first, now);
+                let o = process_again(&mut t, &first, now, &mut again);
                 assert!(matches!(o, Outcome::Held), "step {step}: legit first {o:?}");
-                let out = complete(t.process(&last, now));
+                let out = complete(process_again(&mut t, &last, now, &mut again));
                 let mut want = payload.clone();
                 want.extend_from_slice(&tail);
                 assert_eq!(out[20..], want[..], "step {step}");
@@ -684,27 +703,35 @@ fn eviction_ledger_invariant() {
             2 => {
                 let len = 8 * (1 + n(6));
                 let p = pkt(17, id, 0, true, 0, &[], &body(&mut n, len));
-                *counts.entry(name(&t.process(&p, now))).or_default() += 1;
+                *counts
+                    .entry(name(&process_again(&mut t, &p, now, &mut again)))
+                    .or_default() += 1;
                 sent.push(p);
             }
             3 => {
                 let off = 8 * (1 + n(12));
                 let len = 8 * (1 + n(3));
                 let p = pkt(17, id, off, true, 0, &[], &body(&mut n, len));
-                *counts.entry(name(&t.process(&p, now))).or_default() += 1;
+                *counts
+                    .entry(name(&process_again(&mut t, &p, now, &mut again)))
+                    .or_default() += 1;
                 sent.push(p);
             }
             4 => {
                 if !sent.is_empty() {
                     let i = n(sent.len() as u64);
-                    *counts.entry(name(&t.process(&sent[i], now))).or_default() += 1;
+                    *counts
+                        .entry(name(&process_again(&mut t, &sent[i], now, &mut again)))
+                        .or_default() += 1;
                 }
             }
             5 => {
                 let off = 8 * n(14);
                 let len = 1 + n(20);
                 let p = pkt(17, id, off, false, 0, &[], &body(&mut n, len));
-                *counts.entry(name(&t.process(&p, now))).or_default() += 1;
+                *counts
+                    .entry(name(&process_again(&mut t, &p, now, &mut again)))
+                    .or_default() += 1;
                 sent.push(p);
             }
             6 => {
@@ -717,7 +744,9 @@ fn eviction_ledger_invariant() {
                 let off = 8 * n(2) * (120 + n(10));
                 let len = 8 * (20 + n(92));
                 let p = pkt(17, id, off, true, 0, &[], &body(&mut n, len));
-                *counts.entry(name(&t.process(&p, now))).or_default() += 1;
+                *counts
+                    .entry(name(&process_again(&mut t, &p, now, &mut again)))
+                    .or_default() += 1;
             }
         }
         check_ledger(&t, step);
@@ -728,6 +757,10 @@ fn eviction_ledger_invariant() {
         last_evicted = t.evicted();
     }
     assert!(last_evicted > 0, "no eviction: {counts:?}");
+    assert!(
+        again > 0,
+        "no eviction produced a Time Exceeded notice: {counts:?}"
+    );
     for k in ["complete", "expired", "rejected", "duplicate", "capacity"] {
         assert!(
             counts.get(k).copied().unwrap_or(0) > 0,
