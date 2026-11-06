@@ -18,6 +18,8 @@ use crate::buf::chunk::fail_chunks_after;
 use crate::rng::ChaCha8;
 use crate::seq;
 
+mod limits;
+
 fn table(n: usize) -> FixedVec<Interval> {
     FixedVec::try_filled(n, |_| Interval::default()).unwrap()
 }

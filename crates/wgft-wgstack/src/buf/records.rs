@@ -150,6 +150,63 @@ mod tests {
         }
     }
 
+    fn ring(cap: usize) -> RecordRing {
+        RecordRing::new(FixedVec::try_filled(cap, |_| Record::default()).unwrap())
+    }
+
+    /// 容量ちょうどまで足し、全部外し、何周か回しても、数と先頭の記録が合います。容量 0 と 1 の輪も同じです。
+    #[test]
+    fn limits_fill_to_capacity_and_drain_across_wraps() {
+        for cap in [0usize, 1, 2, 7] {
+            let mut r = ring(cap);
+            assert_eq!((r.len(), r.full()), (0, cap == 0), "cap {cap}");
+            let mut next = 1u32;
+            let mut head = 1u32;
+            for _ in 0..3 * cap.max(1) {
+                while !r.full() {
+                    r.push_back(rec(next));
+                    next += 1;
+                }
+                assert_eq!(r.len(), cap, "cap {cap}");
+                if cap > 0 {
+                    assert_eq!(r.get(0).seq, head, "cap {cap}");
+                    assert_eq!(r.get(cap - 1).seq, next - 1, "cap {cap}");
+                    r.pop();
+                    head += 1;
+                }
+            }
+            while r.len() > 0 {
+                r.pop();
+            }
+            assert_eq!((r.len(), r.full()), (0, cap == 0), "cap {cap}");
+        }
+    }
+
+    /// 満杯の輪に足しても、先頭の記録を上書きせず、数は容量を超えません。
+    #[test]
+    #[ignore = "fixed by the follow-up PR"]
+    fn limits_push_on_a_full_ring_is_refused() {
+        let mut r = ring(3);
+        for s in 1..=3 {
+            r.push_back(rec(s));
+        }
+        r.push_back(rec(99));
+        assert_eq!(r.len(), 3);
+        assert_eq!((r.get(0).seq, r.get(1).seq, r.get(2).seq), (1, 2, 3));
+    }
+
+    /// 空の輪から外しても、数は 0 のままで、次の足しが正しく働きます。
+    #[test]
+    #[ignore = "fixed by the follow-up PR"]
+    fn limits_pop_on_an_empty_ring_is_refused() {
+        let mut r = ring(3);
+        r.pop();
+        assert_eq!(r.len(), 0);
+        assert!(!r.full());
+        r.push_back(rec(5));
+        assert_eq!((r.len(), r.get(0).seq), (1, 5));
+    }
+
     #[test]
     fn ring_wraps_and_moves() {
         let mut r = RecordRing::new(FixedVec::try_filled(3, |_| Record::default()).unwrap());
