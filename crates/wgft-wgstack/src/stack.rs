@@ -176,6 +176,27 @@ pub fn go_compat_sent_at_zero() -> bool {
     GO_COMPAT_SENT_AT_ZERO.with(std::cell::Cell::get)
 }
 
+// 非 atomic の datagram (UDP と echo の応答) の IPv4 ID を、DF を立てた packet と同じ数えから取る切り替えです。
+// 凍結した Go は 1 つの数えを全部で使うので、Go の記録との照合のためだけにあります。feature `harness` の build
+// だけにあり、製品の build には切り替えも読み出しもありません。値は thread ごとで、既定は偽 (RFC 6864 4.3 の独立した数え) です。
+#[cfg(feature = "harness")]
+thread_local! {
+    static GO_COMPAT_SHARED_ID: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 真にすると、この thread で駆動する核は非 atomic の datagram の ID を DF を立てた packet と同じ数えから取ります
+/// (凍結した Go と同じ)。核を駆動する前に呼びます。
+#[cfg(feature = "harness")]
+pub fn set_go_compat_shared_id(on: bool) {
+    GO_COMPAT_SHARED_ID.with(|c| c.set(on));
+}
+
+/// 今の thread の値です。
+#[cfg(feature = "harness")]
+pub fn go_compat_shared_id() -> bool {
+    GO_COMPAT_SHARED_ID.with(std::cell::Cell::get)
+}
+
 /// 何もしない hook です。boost の戻りを常に許します。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoHook;
@@ -427,6 +448,7 @@ impl<H: Hook> Stack<H> {
                     cookie_key: t.seeds.cookie_key,
                     cookie_sent: None,
                     ip_id: t.seeds.ip_id,
+                    ip_id_open: t.seeds.ip_id_open,
                     rng: t.seeds.rng,
                     conn_free: t.conn_free,
                     qlinks: t.qlinks,

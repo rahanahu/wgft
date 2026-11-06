@@ -157,6 +157,8 @@ pub(crate) struct Seeds {
     pub(crate) ts_key: SipKey,
     /// IP の ID の始めの値。生成器の 3 つ目の値の下位 32 bit です。
     pub(crate) ip_id: u32,
+    /// DF を下ろした datagram の IP の ID の始めの値。ISN の鍵から用途の印で導くので、生成器から引かず、Go と同じ乱数の列を保ちます。
+    pub(crate) ip_id_open: u16,
     /// 残りの乱数 (challenge ACK の揺らぎ、区間の treap の優先度の種) を引く生成器です。
     pub(crate) rng: ChaCha8,
     /// SYN cookie の MAC の鍵。ISN の鍵から用途の印で導きます。生成器から引かないので、Go と同じ乱数の列を
@@ -167,6 +169,9 @@ pub(crate) struct Seeds {
 /// SYN cookie の鍵を ISN の鍵から導く時の用途の印です。2 語目の上位 32 bit に置きます。ISN の hash の 2 語目
 /// (ポートの組) の上位 32 bit は常に 0 なので、導いた鍵が ISN の hash の値と重なることはありません。
 const COOKIE_KEY_TAG: u64 = 0x6b6f_6f63 << 32; // "cook" の little endian
+
+/// 非 atomic の ID の始めの値を ISN の鍵から導く時の用途の印です。ISN の hash の 2 語目の上位 32 bit は常に 0 なので重なりません。
+const ID_OPEN_TAG: u64 = 0x6970_6f70 << 32; // "popi"
 
 impl Seeds {
     /// Go の `newStack` と同じ順で種を配分し、生成器から値を引きます。
@@ -193,6 +198,7 @@ impl Seeds {
             table_key: SipKey::from_le_bytes(table),
             ts_key,
             ip_id,
+            ip_id_open: isn_key.sum(2, ID_OPEN_TAG) as u16,
             rng,
             cookie_key: SipKey {
                 k0: isn_key.sum(0, COOKIE_KEY_TAG),

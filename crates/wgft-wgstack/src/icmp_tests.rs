@@ -769,7 +769,6 @@ fn echo_replies_and_udp_share_a_counter_that_df_traffic_does_not_advance() {
 /// 断片に分けた datagram の断片は 1 つの ID を共有し、次の datagram は次の ID を使います。間に DF を立てた
 /// packet があっても数えは進みません。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn fragmented_udp_shares_one_id_and_ignores_df_traffic() {
     let mut n = TestNet::new(small_limits());
     let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
