@@ -225,8 +225,11 @@ wgstack の dial と接続は、次の誤りを返します。
 
 ## 敵対的な入力の模型
 
-`vpsd` のユーザー空間モードでは、公開側のクライアントはホストのソケットに接続し、netstack の相手はエージェントだけです。
-netstack に任意の packet を入れられるのは、WireGuard の鍵を持つエージェントか、そのホストを奪った者だけです。
+この節の模型は、`vpsd` のユーザー空間モードの netstack だけに当てはまります。
+このモードには DNAT の経路が無く、公開側のクライアントはホストのソケットに接続し、netstack の相手はエージェントだけです。
+このモードの netstack に任意の packet を入れられるのは、WireGuard の鍵を持つエージェントか、そのホストを奪った者だけです。
+agent の側の netstack は違います。
+カーネルモードの server の DNAT のルールでは、インターネットのクライアントの packet が server の転送を通って agent の netstack に届き、クライアントのアドレスを偽った第三者の packet も届きえます ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))。
 
 公開側の入力は、次の形で間接に netstack に効きます。
 
