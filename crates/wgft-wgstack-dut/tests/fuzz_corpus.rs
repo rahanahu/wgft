@@ -155,6 +155,8 @@ fn env_u64(name: &str, default: u64) -> u64 {
 }
 
 fn main() {
+    // WGFT_FUZZ_OVERFLOW_CHECKS=on|off があれば、この build の検査の有無が期待と合うことを確かめる (canary)
+    fuzz::expect_overflow_checks();
     let args = Arguments::from_args();
     let root = fuzz_dir();
     let mut trials = Vec::new();

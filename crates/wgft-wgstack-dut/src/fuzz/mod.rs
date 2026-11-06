@@ -34,6 +34,27 @@ pub use peer::{PeerConn, SackPeer};
 pub use raw::{raw_adversary, raw_adversary_input, raw_adversary_seed};
 pub use replay::{replay, replay_seed};
 
+/// 環境変数 `WGFT_FUZZ_OVERFLOW_CHECKS` (`on` か `off`) が決める期待を、核 (`wgft-wgstack`) の中で溢れさせて確かめる
+/// [`wgft_wgstack::overflow_checks_enabled`] と照らします。設定は crate ごとに効くので、この crate ではなく核の
+/// 設定を見ます。
+/// 変数が無ければ何もしません。食い違えば、fuzz が意図した build でない流れを黙って続けないよう、panic します。
+pub fn expect_overflow_checks() {
+    let Ok(want) = std::env::var("WGFT_FUZZ_OVERFLOW_CHECKS") else {
+        return;
+    };
+    let want_on = match want.as_str() {
+        "on" => true,
+        "off" => false,
+        other => panic!("WGFT_FUZZ_OVERFLOW_CHECKS must be on or off, got {other:?}"),
+    };
+    assert_eq!(
+        wgft_wgstack::overflow_checks_enabled(),
+        want_on,
+        "this build has overflow checks {} but WGFT_FUZZ_OVERFLOW_CHECKS={want}",
+        if want_on { "off" } else { "on" }
+    );
+}
+
 /// 表を使い回す cargo-fuzz の target を宣言します。入力の間で核の表を使い回す選び方
 /// (`HarnessOptions::FUZZ`) をここだけに置き、target を足す時に付け忘れないようにします
 /// (docs/design/v2/wgstack-rs.md の「核の使い回し」)。呼び手の crate が `libfuzzer-sys` を持ちます。
@@ -42,6 +63,7 @@ macro_rules! fuzz_entry {
     ($body:path) => {
         ::libfuzzer_sys::fuzz_target!(
             init: {
+                $crate::fuzz::expect_overflow_checks();
                 $crate::fuzz::set_options($crate::fuzz::HarnessOptions::FUZZ);
             },
             |data: &[u8]| $body(data)
