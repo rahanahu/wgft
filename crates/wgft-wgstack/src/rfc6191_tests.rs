@@ -643,13 +643,11 @@ fn rfc6191_b_row_keeps_the_sequence_comparison() {
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_b_slot_accepts_a_syn_with_tsopt_at_rcv_nxt() {
     run_b(false, true);
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_b_row_accepts_a_syn_with_tsopt_at_rcv_nxt() {
     run_b(true, true);
 }
@@ -695,13 +693,11 @@ fn rfc6191_tsval_wraparound_row_follows_serial_order() {
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_tsval_wraparound_slot_accepts_equal_tsval() {
     run_tsval_wrap(false, true);
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_tsval_wraparound_row_accepts_equal_tsval() {
     run_tsval_wrap(true, true);
 }
@@ -889,7 +885,6 @@ fn rfc6191_stopped_clock_old_segments_do_not_enter_a_connection_reused_by_a_newe
 
 /// 等しい TSval で開き直した接続に、PAWS を通る古い segment が入らない (番号の検査だけが守る)。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_stopped_clock_old_segments_do_not_enter_a_connection_reused_by_an_equal_tsval() {
     mixing_const_all(true);
 }
