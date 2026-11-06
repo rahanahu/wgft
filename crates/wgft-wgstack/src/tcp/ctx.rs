@@ -178,7 +178,7 @@ impl Conn<'_> {
             if ts_ecr != 0 && !r.cookie {
                 sampled = self.ts_rtt_sample(ts_ecr, now) >= 0;
             }
-        } else if !r.rtx && r.sent_at.as_nanos() != 0 {
+        } else if !r.rtx && r.sent {
             self.rtt_sample(now - crate::stack::ns(r.sent_at));
             sampled = true;
         }
