@@ -156,6 +156,26 @@ pub fn go_compat_tw_no_paws() -> bool {
     GO_COMPAT_TW_NO_PAWS.with(std::cell::Cell::get)
 }
 
+// 凍結した Go の記録との照合のためだけに、TIME_WAIT の枠が受け入れた FIN の写しで TS.Recent を更新しない切り替えです
+// (RFC 7323 4.3 は更新を求める)。feature `harness` の build だけにあり、値は thread ごとで、既定は偽です。
+#[cfg(feature = "harness")]
+thread_local! {
+    static GO_COMPAT_TW_NO_TS_RECENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 真にすると、この thread で駆動する核は TIME_WAIT の枠で FIN の写しの TSval から TS.Recent を更新しません (凍結した
+/// Go と同じ)。核を駆動する前に呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
+#[cfg(feature = "harness")]
+pub fn set_go_compat_tw_no_ts_recent(on: bool) {
+    GO_COMPAT_TW_NO_TS_RECENT.with(|c| c.set(on));
+}
+
+/// 今の thread の値です。
+#[cfg(feature = "harness")]
+pub fn go_compat_tw_no_ts_recent() -> bool {
+    GO_COMPAT_TW_NO_TS_RECENT.with(std::cell::Cell::get)
+}
+
 // 凍結した Go の記録との照合のためだけに、時刻 0 に作った SYN-ACK を「作っていない」とみなし、RTT の標本にしない切り替えです
 // (Go は 0 を印に使う)。feature `harness` の build だけにあり、値は thread ごとで、既定は偽です。
 #[cfg(feature = "harness")]

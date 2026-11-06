@@ -59,7 +59,7 @@ impl Conn<'_> {
         }
         self.t.probes_out = 0;
         if self.t.persist {
-            self.t.retrans_start = 0; // 相手は probe に応えています
+            self.t.retrans_start = None; // 相手は probe に応えています
         }
         let wnd_changed = self.update_send_window(seg);
         // RFC 6937 の DeliveredData は SND.UNA の差と SACK 済みの byte の差の和です。累積の確認が先に SACK した
@@ -158,7 +158,7 @@ impl Conn<'_> {
         }
         let ack_rtt = self.rtt_on_ack(seg, sample, rtx_acked, now);
         self.t.backoff = 0;
-        self.t.retrans_start = 0;
+        self.t.retrans_start = None;
         self.cwnd_on_ack(seg, ack, acked, ack_rtt, now);
         self.t.dup_acks = 0;
         self.retrans_timer_on_ack(now);
