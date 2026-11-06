@@ -139,41 +139,73 @@ pub(crate) fn put_budget(b: Budget) {
     BUDGET.with_borrow_mut(|slot| *slot = Some(b));
 }
 
-/// `stats` の数の欄が `seen` の値より減っていないことを確かめ、`seen` を今の値に替えます。`text` は書き出しの
-/// 作業用の置き場です。欄の並びは核を作ってから変わらないので、初めての呼び出しは `seen` を作るだけです。
+/// `stats` の数がどれも `seen` の値より減っていないことを確かめ、`seen` を今の値に替えます。`text` は書き出しの
+/// 作業用の置き場です。`Stats` は欄を列挙する口を持たないので、Debug の出力の数字の並び (配列の欄を含みます)
+/// を欄の値として読みます。欄の名前に数字があっても、名前は核を作ってから変わらず、変わらない値は減らない
+/// ので、比べる結果は変わりません。
 fn check_stats_monotonic(stats: &wgft_wgstack::Stats, seen: &mut Vec<u64>, text: &mut String) {
     use std::fmt::Write as _;
     text.clear();
     write!(text, "{stats:?}").expect("write to a String");
-    let body = text
-        .split_once('{')
-        .and_then(|(_, r)| r.rsplit_once('}'))
-        .map_or("", |(b, _)| b);
+    if let Err(e) = stats_not_decreasing(text, seen) {
+        panic!("{e}: {stats:?}");
+    }
+}
+
+/// Debug の出力 `text` の数字の並びを `seen` と比べます。初めて (`seen` が空) は `seen` を作るだけです。
+fn stats_not_decreasing(text: &str, seen: &mut Vec<u64>) -> Result<(), String> {
     let first = seen.is_empty();
     let mut i = 0;
-    for field in body.split(',') {
-        let Some((name, value)) = field.split_once(':') else {
-            continue;
-        };
-        let Ok(value) = value.trim().parse::<u64>() else {
-            continue;
-        };
+    let mut digits = text
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|d| !d.is_empty());
+    for d in &mut digits {
+        let value: u64 = d
+            .parse()
+            .map_err(|_| format!("a Stats number {d} is not a u64"))?;
         if first {
             seen.push(value);
         } else {
             let old = seen
                 .get_mut(i)
-                .expect("Stats has the same fields at every step");
-            assert!(
-                value >= *old,
-                "Stats field {} decreased from {old} to {value}: {stats:?}",
-                name.trim()
-            );
+                .ok_or("Stats has more numbers than before")?;
+            if value < *old {
+                return Err(format!("Stats number {i} decreased from {old} to {value}"));
+            }
             *old = value;
         }
         i += 1;
     }
-    assert!(first || i == seen.len(), "Stats changed its number of fields");
+    if !first && i != seen.len() {
+        return Err("Stats has fewer numbers than before".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 配列の欄 (`retrans`) の減りも見つけ、増えたり同じだったりするのは通します。
+    #[test]
+    fn stats_monotonic_covers_array_fields() {
+        let mut stats = wgft_wgstack::Stats::default();
+        let mut seen = Vec::new();
+        let mut text = String::new();
+        stats.retrans[3] = 5;
+        stats.rtos = 2;
+        check_stats_monotonic(&stats, &mut seen, &mut text);
+        stats.retrans[3] = 6;
+        check_stats_monotonic(&stats, &mut seen, &mut text);
+        check_stats_monotonic(&stats, &mut seen, &mut text);
+        stats.retrans[3] = 5;
+        let err = stats_not_decreasing(&format!("{stats:?}"), &mut seen).unwrap_err();
+        assert!(err.contains("decreased from 6 to 5"), "{err}");
+        stats.retrans[3] = 7;
+        stats.rtos = 1;
+        let err = stats_not_decreasing(&format!("{stats:?}"), &mut seen).unwrap_err();
+        assert!(err.contains("decreased from 2 to 1"), "{err}");
+    }
 }
 
 /// 手で進める時計の核です。時刻は核を作ってからの ns で、Go の `ManualClock` と同じ値です。

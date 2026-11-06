@@ -72,6 +72,30 @@ pub const UDP_RX_BYTES: usize = udp::RX_BYTES;
 /// UDP の endpoint 1 つの受信と送信の上限が、核の全体の予算の何分の 1 かです。
 pub const UDP_ENDPOINT_SHARE: usize = udp::ENDPOINT_SHARE;
 
+/// この crate が整数の溢れを検査する build かを、この crate の中で実際に溢れさせて確かめます。検査ありなら溢れの
+/// 足し算が panic し、検査なしなら回り込んで返ります。試験と fuzz の道具 (feature `harness`) が、
+/// `-C overflow-checks=off` や `--config 'profile.release.package.wgft-wgstack.overflow-checks=false'` が
+/// 核に本当に効いたかを判じる canary です。設定は crate ごとに効くので、呼び手の crate ではなく核の中で試します。
+/// panic は呼び手の hook を一時的に外して受けます。
+#[cfg(feature = "harness")]
+#[must_use]
+#[inline(never)]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "a harness-only probe; the empty hook allocates nothing that matters and the core's data path never calls it"
+)]
+pub fn overflow_checks_enabled() -> bool {
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let panicked = std::panic::catch_unwind(|| {
+        core::hint::black_box(core::hint::black_box(u32::MAX) + core::hint::black_box(1))
+    })
+    .is_err();
+    std::panic::set_hook(prev);
+    panicked
+}
+
 /// cargo-fuzz の target が呼ぶ入口です。`--cfg fuzzing` の build だけにあり、製品の API ではありません。
 #[cfg(fuzzing)]
 pub mod fuzz {
