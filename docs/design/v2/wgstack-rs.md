@@ -174,7 +174,6 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
 | R1 と R2 の間の配送の問題の知らせ (SHLD-9) | 中継は知らせを使いません | 要りません | 接続ごとの R2 の設定と同じ時 |
 | ECN (SHLD-8、RFC 3168):交渉しません。核は輻輳を損失で知ります | 直す候補です。直す効果は server のモードとルールで違います ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))。ユーザー空間モードの server とカーネルモードのプロキシのルールでは、核の接続が通る区間で混みうるのはトンネルの外側の UDP の経路です。agent の device の層と UDP のソケットは、外側の IP の header の ECN の印を内側の packet に写さず、外側の packet に ECT も付けない (RFC 6040 の扱いを持たない) ので、核が ECN を交渉しても効果がありません。カーネルモードの DNAT のルールでは、内側の packet がクライアントと server の間のインターネットの経路を中身を変えずに渡ります。agent の device の層は内側の ECN の欄を変えず、外側が Not-ECT なら RFC 6040 の取り出しの規則も内側の欄を変えないので、その経路で付いた CE か、相手が返す ECE が核に届きえます (server の転送が内側の ECN の欄を保つかは確かめていません)。次の手順は、DNAT の経路で CE が保たれるかを確かめ、RFC 3168 の実装の提案と評価を行い、測ってから製品に採ることです | ありません | DNAT の経路で CE が保たれるかを確かめた時 |
 | 窓の右端 (SHLD-14):窓の欄を scale で切り下げるので、相手から見た右端が最大 2^scale - 1 byte 戻ります | 切り上げを繰り返すと右端が受信のバッファの外へ伸びるためです | ありません | 窓の縮みで送り手が止まる相手が見つかった時 |
-| PMTU の引き下げと輻輳の窓 (RFC 5681 3.1):引き下げで輻輳の窓を縮めません | 理由が無いため、直す候補です | ありません | 直す時 |
 | 最小の RTO (RFC 6298 2.4):RTO = SRTT + max(4 × RTTVAR, 200 ms) で、1 秒に切り上げません | Linux の最小の RTO に合わせます | ありません | 不要な RTO の数が性能の記録で目立った時 |
 | 窓の scale の記録 (RFC 7323 2.3):14 を超える scale を黙って 14 にします | 理由が無いため、直す候補です | ありません | 直す時 |
 | RST の timestamp (RFC 7323 3.2、5.2):RST に TSopt を付けません。TSecr で RST を厳しく確かめる相手では、核の RST が受けられない恐れがあります | RFC 7323 5.2 は、RST に TSopt を付けることを、議論の途中で研究を進めるための推奨としています。受け手が TSecr で RST を厳しく確かめるのは MAY で、TSopt の無い segment を捨てる規則 (3.2) は RST を除きます。同じ節によれば、RFC 1323 は RST に timestamp を付けないよう勧めていたので、TSopt の無い RST を受けない受け手は、RFC 1323 に従う送り手の RST も受けないことになります (RFC からの読みです)。核の RST の相手は、server の中継か、server のカーネルモードの DNAT のルールではクライアントの OS です ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))。どちらも TSecr で RST を確かめるかは確かめていません。得を測れないので、RST を作るすべての所に 12 byte の option を足す直しは採りません | ありません | TSecr で RST を確かめ、TSopt の無い RST を受けない相手が見つかった時 |
@@ -305,7 +304,6 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
 SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表にあります。
 
 - ECN (SHLD-8)
-- PMTU の引き下げと輻輳の窓 (RFC 5681 3.1)
 - 窓の scale の記録 (RFC 7323 2.3)
 - rescue の再送 (RFC 6675 4 節の規則 4)
 - TIME_WAIT を使い直す SYN の、等しい TSval の比べと番号の比べ (RFC 6191 2 節)
@@ -1577,6 +1575,7 @@ UDP と ICMP と断片の切り替えの行の件数は、git の集まり (348 
 | `set_go_compat_tw_no_paws` | TIME_WAIT の枠と行で PAWS をせず、古い TSval の FIN の写しでも期限を数え直します | TIME_WAIT の枠と行も PAWS で古い TSval の segment を捨てて ACK を返します。RST の例外と RFC 6191 の SYN の判定は PAWS の前です (RFC 7323 5.3) | 1 件の記録を、PAWS の ACK より後の応答まで照らし続けるため | 0 / 1 (stream-rx/seed-44) | `tcp_tests::rfc7323_*` |
 | `set_go_compat_tw_no_ts_recent` | TIME_WAIT の枠が受け入れた FIN の写しで、TS.Recent を更新しません。次の ACK の TSecr は古い値のままです | TIME_WAIT の枠も、行と同じく FIN の写しの TSval で TS.Recent を更新し、ACK はその値を返します (RFC 7323 4.3) | 1 件の記録を、TS.Recent の更新より後の応答まで照らし続けるため | 0 / 1 (stream-rx/seed-84) | `tcp_tests::rfc7323_time_wait_slot_updates_ts_recent_*` |
 | `set_go_compat_sent_at_zero` | 時刻 0 に作った SYN-ACK を「作っていない」とみなし、握手から RTT の標本を取りません | SYN-ACK の送った時刻を別の印 (`SynRow.sent`) で持つので、時刻 0 の握手からも標本を取ります (RFC 6298 2.2) | 1113 件の記録を、最初の RTO より後の応答まで照らし続けるため | 2 / 1113 (adversarial 626、fuzzcore 487) | `listen_tests::a_synack_sent_*`、`rtt_wire_*` |
+| `set_go_compat_pmtu_keep_cwnd` | PMTU の引き下げで送る MSS が小さくなっても輻輳の窓を縮めません | 新旧の MSS の比で窓を縮めます。ssthresh は変えません (RFC 5681 3.1) | 1396 件の記録を、PMTU の引き下げより後の応答の burst まで照らし続けるため | 6 / 1396 (adversarial 1391、sack-pmtu-split 5。完全な集まりの 9111 件を 2026-11-07 に数えた値) | `icmp_tests::pmtu_decrease_shrinks_cwnd_by_the_segment_size_ratio`、`pmtu_decrease_scales_a_non_initial_cwnd_and_leaves_ssthresh`、`pmtu_decrease_keeps_one_segment_of_cwnd`、`pmtu_decrease_scales_a_huge_cwnd_without_overflow`、`burst_after_pmtu_decrease_fits_ten_new_segments` |
 | `set_go_compat_shared_id` | UDP の datagram と echo の応答の IPv4 ID を、DF を立てた packet と同じ 1 つの数えから取ります (UDP は 0 を飛ばし、echo の応答は飛ばしません) | 別の数えから取り、0 を飛ばします (RFC 6864 4.3) | UDP と echo の応答の ID が TCP の segment と ICMP の誤りの数えで動くので、この記録を ID の違いより後の応答まで照らし続けるため | 15 / 15 (icmp-echo、udp-datagram、udp-large) | `icmp_tests::udp_ids_are_not_advanced_by_df_traffic`、`echo_replies_and_udp_share_a_counter_that_df_traffic_does_not_advance`、`open_id_counter_wraps_past_zero` |
 | `set_go_compat_echo_drop` | MTU を超える echo の応答を、断片に分けずに捨てて `icmp_dropped` に数えます | 断片に分けて全部返します (RFC 1122 3.2.2.6) | 5 件の記録を、大きな echo の応答より後の応答まで照らし続けるため | 5 / 5 (icmp-echo) | `icmp_tests::icmp_echo`、`oversized_echo_request_gets_a_fragmented_reply` |
 | `set_go_compat_df_frag` (試験の build だけ) | DF の立った断片を断片の誤りとして捨てます | 受け入れて再組み立てます (RFC 6864 4.3) | Go の再組み立ての golden を、DF の立った断片より後の手順まで照らし続けるため。記録の再生には当たる要求がありません | 0 / 0 (再組み立ての golden だけ。400 手順の 5 手目で食い違う) | `icmp_tests::fragments_with_df_set_are_reassembled`、`mixed_df_fragments_are_reassembled`、`frag::tests::accepts_dont_fragment_with_fragments` |
