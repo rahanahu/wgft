@@ -204,27 +204,32 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
   - 送り手の SWS の回避は、RFC が勧める規則の (1) から (3) を、Nagle の条件を外して持ちます。
     full-sized segment を送れる時、溜めたデータがすべて窓に入る時 (push の有無を問いません)、窓の上限の見積もり (Max(SND.WND)) の半分以上を送れる時に送ります
   - 規則 (4) の override timeout の代わりに、飛んでいるデータが無ければ、窓に入る小さな segment をすぐ送ります。
-    飛んでいるデータがある間は、次の確認を待ちます
-  - MUST-38 (送り手が SWS の回避を持つ) は、飛んでいるデータがある間の待ちで満たすと読みます。
-    規則 (1) から (4) は小文字の recommended で書かれているので、SHOULD の水準の外れとして扱います (RFC からの読みです)
+    飛んでいるデータがある間は、確認が届いて規則 (1) から (3) のどれかを満たすか、飛んでいるデータが無くなるまで送りません
+- RFC の水準:RFC 9293 3.8.6.2.1 は「A TCP implementation MUST include a SWS avoidance algorithm in the sender (MUST-38).」と書きます。
+  規則 (1) から (4) は「the following set of rules is recommended」として示し、override timeout は「should be in the range 0.1 - 1.0 seconds」とします。
+  核は、飛んでいるデータがある間の待ちで MUST-38 を満たすと読み、規則 (4) から外れることを SHOULD の水準の外れとして扱います (RFC からの読みです)。
+  弱い所は、データがすべて確認された後に相手が小さな窓を示す場面です。
+  核は窓に入る小さな segment をすぐ送るので、この場面で SWS を防ぐのは相手の受け手の SWS の回避だけです
 - 残す理由:どちらの待ちも、データの経路に遅れを足します。
   Nagle は、対話の多い中継 (遠隔の shell など) で、小さな書き込みを確認の往復の分だけ遅らせます。
   相手の遅延 ACK と重なると、遅延 ACK の時間の分も待ちます (RFC 9293 付録 A.3)。
   override timeout を待つと、小さな窓に入るデータを override timeout (0.1 から 1.0 秒) の分だけ遅らせます。
   Go の `net.TCPConn` の既定の `TCP_NODELAY` と同じく、小さな segment を待たせない形を選びます
 - 害を抑えるもの:相手が受け手の SWS の回避 (MUST-39) を持てば、相手は窓を MSS か受信のバッファの半分の小さい方より細かく開かないので、飛んでいるデータが無い時に小さな窓が残る場面は限られます。
-  相手の server が受け手の SWS の回避を持つかは確かめていません
+  核の TCP の相手は、server の中継か、server のカーネルモードの DNAT のルールではクライアントの OS です ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))。
+  どちらの相手が受け手の SWS の回避を持つかも確かめていません
 - 小さな segment が多い時の危険:
   - header の費用:segment ごとに IPv4 と TCP の header (timestamp を使えば 52 byte) と、WireGuard の暗号化と外側の UDP と IPv4 の header がかかります。
     中身の小さな segment では、header の byte が中身より多くなります
   - byte あたりの CPU:暗号化、UDP の送受信、TCP の処理は packet ごとにかかるので、同じ byte の列を小さな segment で送ると、両端で byte あたりの CPU が増えます
-  - 相手と途中の機器の負荷:相手の server の stack と、外側の経路で packet ごとに処理する NAT や firewall の負荷が、packet の数に応じて増えます。
+  - 相手と途中の機器の負荷:相手 (server の中継か、DNAT のルールではクライアントの OS) と、外側の経路で packet ごとに処理する NAT や firewall の負荷が、packet の数に応じて増えます。
+    DNAT のルールでは、小さな segment は server の NAT を通り、インターネットの経路を渡ってクライアントに届くので、その経路の機器の負荷も増えます。
     相手が返す ACK も増えます
 - 測った値:ありません
 - 見直す条件:
   - 小さな書き込みの多い利用で、packet の数か CPU が問題になった時
   - 小さな窓を示し続ける相手が見つかった時
-  - dial の側で、server 以外の相手へ送る時
+  - dial の側を足す時
 
 ### 理由の無い外れ
 
