@@ -14,7 +14,6 @@
 //! 前の接続が timestamp を使わず、新しい SYN が使う場合 (RFC 6191 の (b)) は、記録した外れとして残すので、この
 //! ファイルの試験は触れません。
 //!
-//! 修正の前に落ちる試験は `#[ignore]` を付けています。対照の試験は今の main で通ります。
 //! `handle_packet` に渡る packet は WireGuard が認証した後のものなので、遅れて着いた前の接続の segment も
 //! トンネルは防ぎません。守るのは PAWS と番号の検査だけです。
 
@@ -410,25 +409,21 @@ fn rfc6191_row_comparisons_that_main_already_follows() {
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_slot_accepts_equal_tsval_and_greater_seq() {
     run_cases(false, true, true);
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_row_accepts_equal_tsval_and_greater_seq() {
     run_cases(true, true, true);
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_slot_accepts_a_syn_without_tsopt_at_rcv_nxt() {
     run_cases(false, true, false);
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_row_accepts_a_syn_without_tsopt_at_rcv_nxt() {
     run_cases(true, true, false);
 }
@@ -610,7 +605,6 @@ fn rfc6191_old_segments_do_not_enter_a_connection_reused_by_a_newer_tsval() {
 /// 前の接続の番号の範囲は新しい ISN の直前まで届き、PAWS の TSval も等しいので、守るのは番号の検査と PAWS の
 /// 境目だけである。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_old_segments_do_not_enter_a_connection_reused_by_an_equal_tsval() {
     mixing_all(true);
 }
@@ -649,13 +643,11 @@ fn rfc6191_b_row_keeps_the_sequence_comparison() {
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_b_slot_accepts_a_syn_with_tsopt_at_rcv_nxt() {
     run_b(false, true);
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_b_row_accepts_a_syn_with_tsopt_at_rcv_nxt() {
     run_b(true, true);
 }
@@ -701,13 +693,11 @@ fn rfc6191_tsval_wraparound_row_follows_serial_order() {
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_tsval_wraparound_slot_accepts_equal_tsval() {
     run_tsval_wrap(false, true);
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_tsval_wraparound_row_accepts_equal_tsval() {
     run_tsval_wrap(true, true);
 }
@@ -895,7 +885,6 @@ fn rfc6191_stopped_clock_old_segments_do_not_enter_a_connection_reused_by_a_newe
 
 /// 等しい TSval で開き直した接続に、PAWS を通る古い segment が入らない (番号の検査だけが守る)。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_stopped_clock_old_segments_do_not_enter_a_connection_reused_by_an_equal_tsval() {
     mixing_const_all(true);
 }

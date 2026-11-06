@@ -329,13 +329,26 @@ fn acceptable(r: &TwRow, seg: &Segment<'_>) -> bool {
 }
 
 /// TIME_WAIT の 4 つ組への新しい SYN を受け入れてよいかを返します (RFC 6191 2 節)。前の接続が timestamp を
-/// 使っていれば、SYN が timestamp を持つときはその値が前の接続の最後の値より大きいこと、持たないときは
-/// シーケンス番号が前の接続の最後の番号より大きいことを求めます。
+/// 使っていて SYN も持つときは、TSval が前の接続の最後の値より大きいか、等しくて番号が RCV.NXT 以上である
+/// ことを求めます。それ以外は、シーケンス番号が前の接続の最後の番号 (RCV.NXT - 1) より大きい、
+/// つまり `SEG.SEQ >= RCV.NXT` であることだけを求めます。
 pub(crate) fn rfc6191(seg: &Segment<'_>, ts_ok: bool, ts_recent: u32, rcv_nxt: u32) -> bool {
-    if ts_ok && let Some((ts_val, _)) = seg.opt.ts {
-        return seq::gt(ts_val, ts_recent);
+    #[cfg(feature = "harness")]
+    if crate::stack::go_compat_tw_reuse_strict() {
+        // 凍結した Go の記録との照合用
+        return if ts_ok && let Some((ts_val, _)) = seg.opt.ts {
+            seq::gt(ts_val, ts_recent)
+        } else {
+            seq::gt(seg.seq, rcv_nxt)
+        };
     }
-    seq::gt(seg.seq, rcv_nxt)
+    if ts_ok && let Some((ts_val, _)) = seg.opt.ts {
+        if seq::gt(ts_val, ts_recent) {
+            return true;
+        }
+        return ts_val == ts_recent && seq::ge(seg.seq, rcv_nxt);
+    }
+    seq::ge(seg.seq, rcv_nxt)
 }
 
 /// TIME_WAIT の 4 つ組を使い直す SYN を待ち受けに渡せるかの判定です。
