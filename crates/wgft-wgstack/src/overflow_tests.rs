@@ -6,7 +6,11 @@
 //! - 握手の RTT を測らなかった接続 (SYN-ACK を再送した) に、呼び手が時計を `Time::MAX` に跳ばして ACK を渡す
 //! - SACK の無い接続の回復の間に、同じ重複 ACK を 300 万回以上受ける (窓が `u32` を回る)
 
-#![expect(clippy::disallowed_macros, reason = "test helpers")]
+#![expect(
+    clippy::disallowed_macros,
+    clippy::many_single_char_names,
+    reason = "test helpers and test data"
+)]
 
 use crate::stack::{MAX_NOW, ns};
 use crate::tcp::{RTO_MAX, RTO_MIN};
@@ -186,4 +190,63 @@ fn dup_ack_flood_of_thousands_keeps_cwnd_bounded() {
 #[test]
 fn dup_ack_flood_of_millions_keeps_cwnd_bounded() {
     dup_ack_flood(Congestion::NewReno, 3_200_000);
+}
+
+/// 網が作れる timestamp の標本は切りません。TSecr が 200 s 前の TSval を指す ACK の標本は、RTO の上限 (120 s) を超えて
+/// いても、そのまま SRTT に入ります (RFC 6298 2.3 は網の標本に上限を課さない。標本を `RTO_MAX` で切り直すと
+/// この試験が落ちる)。
+#[test]
+fn timestamp_sample_of_200_seconds_reaches_srtt_unchanged() {
+    use crate::tcp::{SEC, ts_clock};
+    for cc in [Congestion::NewReno, Congestion::Cubic] {
+        let mut n = net(cc);
+        let (c, _p) = n.accepted(true);
+        n.advance(Duration::from_secs(300));
+        let now = ns(n.now);
+        let mut v = n.s.conn(c.slot);
+        assert!(v.t.ts_ok, "{cc:?}: timestamps are on");
+        v.t.has_rtt = false;
+        let ecr = ts_clock(now)
+            .wrapping_add(v.t.ts_offset)
+            .wrapping_sub(200_000);
+        let r = v.ts_rtt_sample(ecr, now);
+        assert_eq!(r, 200 * SEC, "{cc:?}: the sample returned");
+        let t = &*v.t;
+        assert_eq!(t.srtt, 200 * SEC, "{cc:?}: srtt");
+        assert_eq!(t.rttvar, 100 * SEC, "{cc:?}: rttvar");
+        assert_eq!(t.rto, RTO_MAX, "{cc:?}: rto is still capped");
+        // 2 つ目の標本も同じ式で入る
+        let r = v.ts_rtt_sample(ecr, now);
+        assert_eq!(r, 200 * SEC);
+        assert_eq!(v.t.srtt, 200 * SEC, "{cc:?}: srtt after a second sample");
+    }
+}
+
+/// 握手の RTT の標本 (timestamp が無く、自分の時計で測る) も、ACK の経路と同じく `RTO_MAX` で切ります。SYN-ACK を
+/// 送った後に呼び手の時計が `Time::MAX` に跳んでも、SRTT と RTTVAR は `0..=RTO_MAX` に収まり、RTO は
+/// `RTO_MIN..=RTO_MAX` に収まります。
+#[test]
+fn handshake_own_clock_sample_is_capped_like_the_ack_path() {
+    for cc in [Congestion::NewReno, Congestion::Cubic] {
+        let mut n = net(cc);
+        let l = n.listen(80);
+        let mut p = n.syn_sack(40000, 80, false, true, true);
+        n.now = Time::MAX;
+        n.peer_ack(&mut p, &[]);
+        let c = n.accept(l);
+        let t = &*n.s.conn(c.slot).t;
+        assert!(t.has_rtt, "{cc:?}: the handshake took a sample");
+        assert!(
+            (0..=RTO_MAX).contains(&t.srtt) && (0..=RTO_MAX).contains(&t.rttvar),
+            "{cc:?}: srtt {} rttvar {}",
+            t.srtt,
+            t.rttvar
+        );
+        assert!(
+            (RTO_MIN..=RTO_MAX).contains(&t.rto),
+            "{cc:?}: rto {}",
+            t.rto
+        );
+        assert_eq!(t.srtt, RTO_MAX, "{cc:?}: the sample is cut at RTO_MAX");
+    }
 }
