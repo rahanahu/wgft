@@ -156,6 +156,26 @@ pub fn go_compat_tw_no_paws() -> bool {
     GO_COMPAT_TW_NO_PAWS.with(std::cell::Cell::get)
 }
 
+// 凍結した Go の記録との照合のためだけに、時刻 0 に作った SYN-ACK を「作っていない」とみなし、RTT の標本にしない切り替えです
+// (Go は 0 を印に使う)。feature `harness` の build だけにあり、値は thread ごとで、既定は偽です。
+#[cfg(feature = "harness")]
+thread_local! {
+    static GO_COMPAT_SENT_AT_ZERO: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 真にすると、この thread で駆動する核は時刻 0 の SYN-ACK から RTT の標本を取りません (凍結した Go と同じ)。
+/// 核を駆動する前に呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
+#[cfg(feature = "harness")]
+pub fn set_go_compat_sent_at_zero(on: bool) {
+    GO_COMPAT_SENT_AT_ZERO.with(|c| c.set(on));
+}
+
+/// 今の thread の値です。
+#[cfg(feature = "harness")]
+pub fn go_compat_sent_at_zero() -> bool {
+    GO_COMPAT_SENT_AT_ZERO.with(std::cell::Cell::get)
+}
+
 /// 何もしない hook です。boost の戻りを常に許します。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoHook;

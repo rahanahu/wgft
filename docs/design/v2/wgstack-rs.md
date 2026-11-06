@@ -1430,6 +1430,7 @@ Go の記録との照合だけが、それぞれの照合用の切り替えで G
 | `set_go_compat_row_rst` | 握手の途中の行は窓の内のどの RST でも消え、受け入れの判定は窓の右端を含みます。TIME_WAIT の枠と行、FIN_WAIT_2 の行は窓の内で番号の合わない RST に challenge ACK を返しません | 番号が IRS + 1 か RCV.NXT に等しい RST だけが消え、窓の内の他の RST には challenge ACK を返します。受け入れの判定は右端を含みません (RFC 5961 3.2、RFC 9293 3.10.7.4) | 72 件の記録を、行の RST より後の応答まで照らし続けるため | 0 / 72 (fuzzcore) | `tcp_tests::rfc5961_*`、`rfc9293_syn_rcvd_*` |
 | `set_go_compat_synack_rto` | SYN-ACK を再送した接続の最初の RTO は 1 秒のままです | 握手が RTT の標本を与えなかった接続は、確立の時に RTO を 3 秒にします。cookie の値の行も含みます (RFC 6298 5.7) | 520 件の記録を、最初の RTO より後の応答まで照らし続けるため | 7 / 520 (fuzzcore) | `listen_tests::rfc6298_*` |
 | `set_go_compat_tw_no_paws` | TIME_WAIT の枠と行で PAWS をせず、古い TSval の FIN の写しでも期限を数え直します | TIME_WAIT の枠と行も PAWS で古い TSval の segment を捨てて ACK を返します。RST の例外と RFC 6191 の SYN の判定は PAWS の前です (RFC 7323 5.3) | 1 件の記録を、PAWS の ACK より後の応答まで照らし続けるため | 0 / 1 (stream-rx/seed-44) | `tcp_tests::rfc7323_*` |
+| `set_go_compat_sent_at_zero` | 時刻 0 に作った SYN-ACK を「作っていない」とみなし、握手から RTT の標本を取りません | SYN-ACK の送った時刻を別の印 (`SynRow.sent`) で持つので、時刻 0 の握手からも標本を取ります (RFC 6298 2.2) | 1113 件の記録を、最初の RTO より後の応答まで照らし続けるため | 2 / 1113 (adversarial 626、fuzzcore 487) | `listen_tests::a_synack_sent_*`、`rtt_wire_*` |
 
 ## 置き換えの判定
 
@@ -1671,6 +1672,7 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   SYN と SYN-ACK の再送の後の窓は 1 SMSS にしますが印は立てず、続く slow start は意図して L = 2 のままです。
   RTO の後の slow start では ssthresh が有限になるので、HyStart++ は働きません。
   凍結した Go の記録は RTO の後も L = 2 なので、Go との照合だけ L = 2 に戻す照合用の切り替え (`set_go_compat_rto_l2`) があります。
+  RFC に合わせて直した他の挙動の切り替えは[凍結した Go の記録との違い](#凍結した-go-の記録との違い)の表にあります。
   切り替えは feature `harness` の build だけにあり、製品の build に切り替えも読み出しも書き込みもありません。
   環境変数やフラグでは切り替えられません。
   切り替えが真の核は、RTO で `rto_slow_start` を立てません。

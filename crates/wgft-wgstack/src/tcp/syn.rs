@@ -58,9 +58,10 @@ pub(crate) struct SynRow {
     pub(crate) ts_recent: u32,
     pub(crate) ts_offset: u32,
     pub(crate) deadline: Time,
-    /// 最初の SYN-ACK を作った時刻です。Go と同じく 0 は「測っていない」で、時刻 0 に作った SYN-ACK も
-    /// RTT の標本にしません (bit の一致のため)。
+    /// 最初の SYN-ACK を作った時刻です。`sent` が真のときだけ意味があります。
     pub(crate) sent_at: Time,
+    /// 最初の SYN-ACK を作り、`sent_at` に時刻を書いたか。時刻 0 を「作っていない」の印にしません。
+    pub(crate) sent: bool,
     pub(crate) prev: u32,
     pub(crate) next: u32,
     pub(crate) peer_mss: u16,
@@ -575,8 +576,12 @@ impl Shared {
         let row = self.syn.row_mut(id);
         row.pending = RowSend::None;
         if r.pending == RowSend::SynAck {
-            if row.sent_at.as_nanos() == 0 {
-                row.sent_at = time(now);
+            if !row.sent {
+                #[cfg(feature = "harness")]
+                let sent = !(crate::stack::go_compat_sent_at_zero() && now == 0); // 凍結した Go の記録との照合用
+                #[cfg(not(feature = "harness"))]
+                let sent = true;
+                (row.sent, row.sent_at) = (sent, time(now));
             }
             return self.build_syn_ack(&r, b, now);
         }

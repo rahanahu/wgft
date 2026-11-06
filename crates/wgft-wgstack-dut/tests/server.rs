@@ -487,6 +487,10 @@ fn assert_switches_off(when: &str) {
     assert!(!wgft_wgstack::go_compat_row_rst(), "row_rst {when}");
     assert!(!wgft_wgstack::go_compat_synack_rto(), "synack_rto {when}");
     assert!(!wgft_wgstack::go_compat_tw_no_paws(), "tw_no_paws {when}");
+    assert!(
+        !wgft_wgstack::go_compat_sent_at_zero(),
+        "sent_at_zero {when}"
+    );
 }
 
 #[test]

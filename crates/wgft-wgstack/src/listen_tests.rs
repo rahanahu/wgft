@@ -927,7 +927,7 @@ fn first_rto_delay(n: &mut TestNet, c: crate::ConnId) -> Duration {
 #[test]
 fn rfc6298_retransmitted_synack_without_timestamps_sets_rto_to_3s() {
     let mut n = TestNet::new(small_limits());
-    n.advance(Duration::from_secs(5)); // 時刻 0 は「送っていない」を意味するので避けます
+    n.advance(Duration::from_secs(5));
     let l = n.listen(80);
     let mut p = n.syn_sack(40000, 80, false, false, false);
     n.advance(Duration::from_millis(1100));
@@ -951,7 +951,7 @@ fn rfc6298_retransmitted_synack_without_timestamps_sets_rto_to_3s() {
 #[test]
 fn rfc6298_first_synack_without_timestamps_keeps_a_sampled_rto() {
     let mut n = TestNet::new(small_limits());
-    n.advance(Duration::from_secs(5)); // 時刻 0 は「送っていない」を意味するので避けます
+    n.advance(Duration::from_secs(5));
     let l = n.listen(80);
     let mut p = n.syn_sack(40000, 80, false, false, false);
     n.advance(Duration::from_millis(50));
@@ -1141,7 +1141,6 @@ fn first_rto_after_write(n: &mut TestNet, c: crate::ConnId) -> Duration {
 /// SYN-ACK を時刻 0 に送った接続でも、握手から RTT の標本を取り、最初の RTO は初期値の 1 秒より短くなります。
 /// 能動側 (dial) は核に無く、データの記録の `sent_at` は印として使っていないので、この 1 か所だけです。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn a_synack_sent_at_stack_time_zero_still_gives_an_rtt_sample() {
     let mut n = TestNet::new(small_limits());
     assert_eq!(
@@ -1175,4 +1174,25 @@ fn a_synack_sent_after_time_zero_gives_an_rtt_sample() {
     n.drain();
     let d = first_rto_after_write(&mut n, c);
     assert!(d < Duration::from_secs(1), "first RTO after {d:?}");
+}
+
+/// 凍結した Go との照合用の切り替え (feature `harness` だけ):時刻 0 に作った SYN-ACK から RTT の標本を取らず、
+/// 最初の RTO は初期値の 1 秒のままです。
+#[cfg(feature = "harness")]
+#[test]
+fn go_compat_switch_skips_the_rtt_sample_of_a_synack_sent_at_time_zero() {
+    crate::set_go_compat_sent_at_zero(true);
+    let mut n = TestNet::new(small_limits());
+    let l = n.listen(80);
+    let mut p = n.syn_sack(40000, 80, false, false, false);
+    n.advance(Duration::from_millis(50));
+    n.peer_ack(&mut p, &[]);
+    let c = n.accept(l);
+    n.drain();
+    let d = first_rto_after_write(&mut n, c);
+    crate::set_go_compat_sent_at_zero(false);
+    assert!(
+        d >= Duration::from_secs(1),
+        "the switch still took an RTT sample: the first RTO came after {d:?}"
+    );
 }
