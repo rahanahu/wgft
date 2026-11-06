@@ -98,6 +98,8 @@ mod netsim_tests;
 #[cfg(test)]
 mod rack_tests;
 #[cfg(test)]
+mod rfc6191_tests;
+#[cfg(test)]
 mod rto_l1_tests;
 #[cfg(test)]
 mod rto_wire_tests;
