@@ -51,6 +51,11 @@ struct Tw {
 
 /// 核が先に閉じ、相手の FIN で TIME_WAIT に入った状態を作ります。`row` が真なら行に移します。
 fn tw_setup(row: bool, ts: bool, iss: u32) -> Tw {
+    tw_setup_ts(row, ts, iss, 5000)
+}
+
+/// `tw_setup` で、相手の最初の TSval を選びます。
+fn tw_setup_ts(row: bool, ts: bool, iss: u32, ts0: u32) -> Tw {
     let mut n = TestNet::new(small_limits());
     let l = n.listen(80);
     let mut p = PeerConn {
@@ -61,7 +66,7 @@ fn tw_setup(row: bool, ts: bool, iss: u32) -> Tw {
         rcv: 0,
         dut_iss: 0,
         ts,
-        ts_val: 5000,
+        ts_val: ts0,
         dut_ts: 0,
         wnd: 65535,
     };
@@ -608,4 +613,289 @@ fn rfc6191_old_segments_do_not_enter_a_connection_reused_by_a_newer_tsval() {
 #[ignore = "fixed by the follow-up PR"]
 fn rfc6191_old_segments_do_not_enter_a_connection_reused_by_an_equal_tsval() {
     mixing_all(true);
+}
+
+// 前の接続が timestamp を使わず、SYN が使う場合 (RFC 6191 の (b))。核は記録した外れとして、番号だけで決める
+// (RFC は番号によらず受けてよいとする)。ここでは番号の境目だけを固定し、外れ自体は変えない。
+
+fn run_b(row: bool, rfc_only: bool) {
+    for iss in [ISS_PLAIN, ISS_WRAP] {
+        for (off, accept) in [(-1_i64, false), (0, true), (1, true)] {
+            // RCV.NXT ちょうどは (c) の直しの前は受けない。
+            if (off == 0) != rfc_only {
+                continue;
+            }
+            let mut tw = tw_setup(row, false, iss);
+            let seq = tw.rcv_nxt().wrapping_add(off as u32);
+            let (began, outs) = try_syn(&mut tw, &new_syn(seq, Some(7777)));
+            assert_eq!(
+                began,
+                accept,
+                "(b) seq off {off} (row {row}, iss {iss}): got {}",
+                show(&outs)
+            );
+        }
+    }
+}
+
+#[test]
+fn rfc6191_b_slot_keeps_the_sequence_comparison() {
+    run_b(false, false);
+}
+
+#[test]
+fn rfc6191_b_row_keeps_the_sequence_comparison() {
+    run_b(true, false);
+}
+
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn rfc6191_b_slot_accepts_a_syn_with_tsopt_at_rcv_nxt() {
+    run_b(false, true);
+}
+
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn rfc6191_b_row_accepts_a_syn_with_tsopt_at_rcv_nxt() {
+    run_b(true, true);
+}
+
+// TSval の回り込み:TS.Recent が u32::MAX の時、0 に回った TSval は大きい。
+
+fn run_tsval_wrap(row: bool, rfc_only: bool) {
+    for (delta, off, accept, rfc) in [
+        (1_i64, 100_000_i64, true, false),
+        (1, -1000, true, false),
+        (2, 0, true, false),
+        (-1, 100_000, false, false),
+        (-1, 0, false, false),
+        (0, 0, true, true),
+        (0, 1, true, true),
+        (0, -1, false, false),
+    ] {
+        if rfc != rfc_only {
+            continue;
+        }
+        let mut tw = tw_setup_ts(row, true, ISS_PLAIN, u32::MAX - 3);
+        assert_eq!(tw.recent(), u32::MAX, "the TSval did not reach the top");
+        let ts = tw.recent().wrapping_add(delta as u32);
+        let seq = tw.rcv_nxt().wrapping_add(off as u32);
+        let (began, outs) = try_syn(&mut tw, &new_syn(seq, Some(ts)));
+        assert_eq!(
+            began,
+            accept,
+            "tsval {ts} (delta {delta}), seq off {off} (row {row}): got {}",
+            show(&outs)
+        );
+    }
+}
+
+#[test]
+fn rfc6191_tsval_wraparound_slot_follows_serial_order() {
+    run_tsval_wrap(false, false);
+}
+
+#[test]
+fn rfc6191_tsval_wraparound_row_follows_serial_order() {
+    run_tsval_wrap(true, false);
+}
+
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn rfc6191_tsval_wraparound_slot_accepts_equal_tsval() {
+    run_tsval_wrap(false, true);
+}
+
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn rfc6191_tsval_wraparound_row_accepts_equal_tsval() {
+    run_tsval_wrap(true, true);
+}
+
+// 相手の時計が止まっている (遅れた segment の TSval が TS.Recent に等しい) 場合の混入。PAWS は「小さい」だけを捨てる
+// ので、等しい TSval の古い segment を止めるのは番号の検査だけである。ISS は回り込む。
+
+/// 遅れた segment の 1 種です。`seq` は前の接続の核の RCV.NXT (`R`) との差、`len` は中身の長さ、`fin` は FIN、
+/// `rst` は RST、`ts` が偽なら TSopt を持ちません。
+struct OldSeg {
+    name: &'static str,
+    seq_off: i64,
+    len: usize,
+    fin: bool,
+    rst: bool,
+    ts: bool,
+}
+
+const fn old(
+    name: &'static str,
+    seq_off: i64,
+    len: usize,
+    fin: bool,
+    rst: bool,
+    ts: bool,
+) -> OldSeg {
+    OldSeg {
+        name,
+        seq_off,
+        len,
+        fin,
+        rst,
+        ts,
+    }
+}
+
+fn old_segs() -> Vec<OldSeg> {
+    vec![
+        old("pure ACK at old RCV.NXT", 0, 0, false, false, true),
+        old("FIN at old RCV.NXT - 1", -1, 0, true, false, true),
+        old(
+            "data and FIN ending at the old FIN",
+            -11,
+            10,
+            true,
+            false,
+            true,
+        ),
+        old(
+            "data ending at old RCV.NXT - 1",
+            -10,
+            10,
+            false,
+            false,
+            true,
+        ),
+        old("data ending at old RCV.NXT", -9, 10, false, false, true),
+        old("RST at old RCV.NXT", 0, 0, false, true, true),
+        old("RST at old RCV.NXT - 1", -1, 0, false, true, true),
+        old("RST at old RCV.NXT without TSopt", 0, 0, false, true, false),
+        old(
+            "RST at old RCV.NXT - 1 without TSopt",
+            -1,
+            0,
+            false,
+            true,
+            false,
+        ),
+        old("data without TSopt", -10, 10, false, false, false),
+    ]
+}
+
+fn mixing_const_clock(row: bool, equal: bool, early: bool, o: &OldSeg) {
+    let ctx = format!("row {row}, equal {equal}, early {early}, {}", o.name);
+    let mut tw = tw_setup(row, true, ISS_WRAP);
+    let (old_snd, old_rcv, recent) = (tw.p.snd, tw.p.rcv, tw.recent());
+    assert_eq!(old_snd, 0, "the sequence space did not wrap");
+    let (syn_ts, syn_seq) = if equal {
+        (recent, old_snd)
+    } else {
+        (recent + 1, old_snd.wrapping_add(100_000))
+    };
+    let (began, outs) = try_syn(&mut tw, &new_syn(syn_seq, Some(syn_ts)));
+    assert!(began, "the reuse was not accepted ({ctx}): {}", show(&outs));
+    let sa = &outs[0];
+    let mut np = PeerConn {
+        sport: 40000,
+        dport: 80,
+        iss: syn_seq,
+        snd: syn_seq.wrapping_add(1),
+        rcv: sa.seq.wrapping_add(1),
+        dut_iss: sa.seq,
+        ts: true,
+        ts_val: syn_ts,
+        dut_ts: sa.ts.map_or(0, |(v, _)| v),
+        wnd: 65535,
+    };
+    let n = &mut tw.n;
+    let l = tw.l;
+    // 遅れた segment の TSval は前の接続の TS.Recent に等しい。
+    let mut flags = FLAG_ACK;
+    if o.fin {
+        flags |= FLAG_FIN;
+    }
+    if o.rst {
+        flags |= FLAG_RST;
+    }
+    let delayed = TSeg {
+        sport: 40000,
+        dport: 80,
+        seq: old_snd.wrapping_add(o.seq_off as u32),
+        ack: old_rcv,
+        flags,
+        wnd: 65535,
+        ts: o.ts.then_some((recent, np.dut_ts)),
+        payload: vec![b'O'; o.len],
+        ..TSeg::default()
+    };
+    if early {
+        n.inject(&delayed);
+        let outs = n.drain();
+        assert!(
+            outs.iter().all(|x| !x.has(FLAG_SYN)),
+            "{ctx}: {}",
+            show(&outs)
+        );
+        assert_eq!(
+            n.s.accept(n.now, l).err(),
+            Some(Error::WouldBlock),
+            "{ctx}: the old segment completed the handshake"
+        );
+    }
+    // 最後の ACK も止まった時計の TSval (SYN と同じ) を持つ。
+    let mut fin = np.seg(FLAG_ACK, &[]);
+    fin.ts = Some((syn_ts, np.dut_ts));
+    n.inject(&fin);
+    n.drain();
+    let c2 =
+        n.s.accept(n.now, l)
+            .unwrap_or_else(|e| panic!("{ctx}: the new connection never came up: {e:?}"))
+            .0;
+    n.drain();
+    n.events();
+    if !early {
+        n.inject(&delayed);
+        let outs = n.drain();
+        assert!(
+            outs.iter().all(|x| !x.has(FLAG_RST) && !x.has(FLAG_SYN)),
+            "{ctx}: {}",
+            show(&outs)
+        );
+    }
+    let mut buf = [0u8; 64];
+    assert_eq!(
+        n.s.read(n.now, c2, &mut buf),
+        Err(Error::WouldBlock),
+        "{ctx}: the delayed segment reached the new connection (data, EOF or reset)"
+    );
+    n.peer_ack(&mut np, b"hello");
+    let outs = n.drain();
+    assert_eq!(n.read_all(c2), b"hello", "{ctx}");
+    assert!(
+        outs.iter().all(|x| !x.has(FLAG_RST)),
+        "{ctx}: {}",
+        show(&outs)
+    );
+    assert_eq!(n.s.write(n.now, c2, b"world"), Ok(5), "{ctx}");
+}
+
+fn mixing_const_all(equal: bool) {
+    for row in [false, true] {
+        for early in [false, true] {
+            for o in &old_segs() {
+                mixing_const_clock(row, equal, early, o);
+            }
+        }
+    }
+}
+
+/// 対照:TSval が大きい SYN で開き直した接続に、止まった時計の古い segment は入らない。
+#[test]
+fn rfc6191_stopped_clock_old_segments_do_not_enter_a_connection_reused_by_a_newer_tsval() {
+    mixing_const_all(false);
+}
+
+/// 等しい TSval で開き直した接続に、PAWS を通る古い segment が入らない (番号の検査だけが守る)。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn rfc6191_stopped_clock_old_segments_do_not_enter_a_connection_reused_by_an_equal_tsval() {
+    mixing_const_all(true);
 }
