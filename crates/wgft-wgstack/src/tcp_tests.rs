@@ -1720,3 +1720,71 @@ fn rfc7323_time_wait_slot_follows_rfc6191_for_a_syn() {
 fn rfc7323_time_wait_row_follows_rfc6191_for_a_syn() {
     tw_rfc6191_syn(true);
 }
+
+// 波形の試験:RFC 7323 5.3 の R1。PAWS で捨てた segment (RST を除く) には ACK を返します。その ACK の TSecr は、
+// 捨てた segment の TSval でなく TS.Recent (最後に受け入れた TSval) です。RST は PAWS の対象でなく、ACK を返しません。
+
+/// PAWS で捨てられる segment を送り、返りの ACK が 1 つだけで、番号と TSecr が TIME_WAIT のものであることを確かめます。
+fn paws_drop_gets_one_ack(row: bool, with_data: bool) {
+    let (mut n, c, mut p) = paws_time_wait(row);
+    let recent = p.ts_val; // 最後に受け入れた TSval (相手の FIN)
+    let old = recent - 1000;
+    let s = if with_data {
+        let mut s = p.seg(FLAG_ACK, b"x");
+        s.ts = Some((old, p.dut_ts));
+        s
+    } else {
+        paws_old_fin(&mut p, old)
+    };
+    n.inject(&s);
+    let outs = n.drain();
+    assert!(
+        outs.len() == 1
+            && outs[0].flags == FLAG_ACK
+            && outs[0].ack == p.snd
+            && outs[0].payload.is_empty(),
+        "a PAWS drop (row {row}, data {with_data}): want one ACK for {}, got {}",
+        p.snd,
+        show(&outs)
+    );
+    assert_eq!(
+        outs[0].ts.map(|t| t.1),
+        Some(recent),
+        "the ACK's TSecr must be TS.Recent, not the dropped segment's TSval (row {row}, data {with_data})"
+    );
+    assert!(paws_tw_alive(&n, c, row));
+}
+
+#[test]
+fn rfc7323_wire_time_wait_slot_acks_a_paws_dropped_fin() {
+    paws_drop_gets_one_ack(false, false);
+}
+
+#[test]
+fn rfc7323_wire_time_wait_row_acks_a_paws_dropped_fin() {
+    paws_drop_gets_one_ack(true, false);
+}
+
+#[test]
+fn rfc7323_wire_time_wait_slot_acks_paws_dropped_data() {
+    paws_drop_gets_one_ack(false, true);
+}
+
+#[test]
+fn rfc7323_wire_time_wait_row_acks_paws_dropped_data() {
+    paws_drop_gets_one_ack(true, true);
+}
+
+/// 例外の RST は PAWS で捨てず、番号が合わなければ ACK も返しません (窓の外の RST)。
+#[test]
+fn rfc7323_wire_time_wait_gives_no_paws_ack_for_an_rst() {
+    for row in [false, true] {
+        let (mut n, _, mut p) = paws_time_wait(row);
+        let mut s = p.seg(FLAG_RST, &[]);
+        s.seq = p.snd.wrapping_add(1 << 30);
+        s.ts = Some((p.ts_val - 1000, p.dut_ts));
+        n.inject(&s);
+        let outs = n.drain();
+        assert!(outs.is_empty(), "row {row}: {}", show(&outs));
+    }
+}
