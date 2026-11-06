@@ -8,6 +8,9 @@ internal/dutproto/testdata/frames/*.json text eol=lf
 # The Go wgstack's recordings are binary; git neither converts nor diffs them. divergences.json
 # and divergences-full.json beside them stay text.
 testdata/wgstack-rec/**/*.rec.gz -text -diff
+# The WireGuard device's recorded timer trace is compared byte for byte with what the test
+# writes, so every checkout keeps LF line ends.
+crates/wgft-wireguard/testdata/timer-trace.txt text eol=lf
 
 # The fuzz targets' seeds and found inputs are bytes that the Rust targets read as they are.
 crates/wgft-wgstack/fuzz/corpus/** -text -diff
