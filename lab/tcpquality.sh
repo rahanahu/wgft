@@ -1101,13 +1101,6 @@ for mode in $MODES; do
       [ "$IPERF_GROUPS" = 1 ] || stats="$stats iperf_groups=$IPERF_GROUPS"
       c_us=; [ -n "$client_cg" ] && c_us=$(awk '$1 == "usage_usec" { print $2 }' "$client_cg/cpu.stat" 2>/dev/null)
       rmdir "$client_cg" 2>/dev/null
-    elif [ "$TOOL" = churn ]; then
-      got=$(tail -1 "$W/wgft-tq-churn-$mode.log")
-      sent=$got
-      # overall_mbit is the payload of the completed connections over CHURN_S, which the paired analysis reads
-      stats="undetermined=0 streams=1 duration_s=$CHURN_S overall_mbit=$(awk -v b="$(field received "$got")" -v s="$CHURN_S" 'BEGIN { printf "%.3f", b * 8 / s / 1e6 }') churn_close=$CHURN_CLOSE$(echo " $got" | grep -oE ' churn_[a-z0-9_]+=[^ ]*' | tr -d '\n')"
-      c_us=; [ -n "$client_cg" ] && c_us=$(awk '$1 == "usage_usec" { print $2 }' "$client_cg/cpu.stat" 2>/dev/null)
-      rmdir "$client_cg" 2>/dev/null
       if [ -n "$LATE_START_S" ]; then
         extra_fields="$extra_fields late_start_s=$LATE_START_S $($Q iperfx "$late_json" late)"
         # a late flow that was expected but did not report is a failed run, not a zero
@@ -1143,6 +1136,13 @@ for mode in $MODES; do
           [ ! -s "$rec/udp-$u.samples" ] || $Q useries "$rec/udp-$u.samples" 1 > "$rec/udp-$u.series.txt"
         done
       fi
+    elif [ "$TOOL" = churn ]; then
+      got=$(tail -1 "$W/wgft-tq-churn-$mode.log")
+      sent=$got
+      # overall_mbit is the payload of the completed connections over CHURN_S, which the paired analysis reads
+      stats="undetermined=0 streams=1 duration_s=$CHURN_S overall_mbit=$(awk -v b="$(field received "$got")" -v s="$CHURN_S" 'BEGIN { printf "%.3f", b * 8 / s / 1e6 }') churn_close=$CHURN_CLOSE$(echo " $got" | grep -oE ' churn_[a-z0-9_]+=[^ ]*' | tr -d '\n')"
+      c_us=; [ -n "$client_cg" ] && c_us=$(awk '$1 == "usage_usec" { print $2 }' "$client_cg/cpu.stat" 2>/dev/null)
+      rmdir "$client_cg" 2>/dev/null
     else
       got=$(tail -1 "$W/wgft-tq-fetch-$mode.log")
       wait_until 10 served "$mode" "$run"
