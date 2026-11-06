@@ -72,6 +72,8 @@ pub(crate) const TS_OPTION_LEN: u32 = 12;
 pub(crate) const RCV_WINDOW_SHIFT: u8 = 7;
 
 pub(crate) const RTO_INIT: i64 = SEC;
+/// SYN-ACK を再送して RTT の標本を取れなかった接続の最初の RTO です (RFC 6298 5.7)。
+pub(crate) const RTO_SYNACK_RETX: i64 = 3 * SEC;
 pub(crate) const RTO_MIN: i64 = 200 * MS;
 pub(crate) const RTO_MAX: i64 = 120 * SEC;
 /// 遅延 ACK の時間です。Linux の遅延 ACK の時間の最初の値と下限 (40 ms) と同じです。

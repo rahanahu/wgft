@@ -49,8 +49,9 @@ pub use stack::{
 pub use stack::{Spare, TouchedCheck};
 #[cfg(feature = "harness")]
 pub use stack::{
-    go_compat_dsack_snd_una, go_compat_row_rst, go_compat_rto_l2, set_go_compat_dsack_snd_una,
-    set_go_compat_row_rst, set_go_compat_rto_l2,
+    go_compat_dsack_snd_una, go_compat_row_rst, go_compat_rto_l2, go_compat_synack_rto,
+    set_go_compat_dsack_snd_una, set_go_compat_row_rst, set_go_compat_rto_l2,
+    set_go_compat_synack_rto,
 };
 pub use tcp::conn::ConnId;
 pub use time::Time;

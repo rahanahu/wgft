@@ -925,7 +925,6 @@ fn first_rto_delay(n: &mut TestNet, c: crate::ConnId) -> Duration {
 
 /// timestamp の無い接続の SYN-ACK を再送したなら、握手から RTT の標本を取れず、最初の RTO は 3 秒です。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc6298_retransmitted_synack_without_timestamps_sets_rto_to_3s() {
     let mut n = TestNet::new(small_limits());
     n.advance(Duration::from_secs(5)); // 時刻 0 は「送っていない」を意味するので避けます
@@ -965,7 +964,6 @@ fn rfc6298_first_synack_without_timestamps_keeps_a_sampled_rto() {
 
 /// 再送した SYN-ACK を受けて確立する cookie の行も、標本を取れないので最初の RTO は 3 秒です。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc6298_retransmitted_synack_of_a_cookie_row_sets_rto_to_3s() {
     let (mut n, l) = flooded();
     let mut p = cookie_then_full_queue(&mut n, 42000);
@@ -993,5 +991,33 @@ fn rfc6298_retransmitted_synack_of_a_cookie_row_sets_rto_to_3s() {
     assert!(
         d >= Duration::from_secs(3) && d < Duration::from_millis(3200),
         "the first RTO came after {d:?}, want 3 s"
+    );
+}
+
+/// 凍結した Go との照合用の切り替え (feature `harness` だけ):SYN-ACK を再送した接続の最初の RTO が、3 秒でなく
+/// 初期値の 1 秒のままになります。
+#[cfg(feature = "harness")]
+#[test]
+fn go_compat_switch_keeps_the_initial_rto_after_a_retransmitted_synack() {
+    crate::set_go_compat_synack_rto(true);
+    let mut n = TestNet::new(small_limits());
+    n.advance(Duration::from_secs(5));
+    let l = n.listen(80);
+    let mut p = n.syn_sack(40000, 80, false, false, false);
+    n.advance(Duration::from_millis(1100));
+    let outs = n.drain();
+    assert!(
+        outs.len() == 1 && outs[0].flags == FLAG_SYN | FLAG_ACK,
+        "the SYN-ACK was not retransmitted: {}",
+        show(&outs)
+    );
+    n.peer_ack(&mut p, &[]);
+    let c = n.accept(l);
+    n.drain();
+    let d = first_rto_delay(&mut n, c);
+    crate::set_go_compat_synack_rto(false);
+    assert!(
+        d >= Duration::from_secs(1) && d < Duration::from_millis(1200),
+        "the first RTO came after {d:?}, want 1 s"
     );
 }
