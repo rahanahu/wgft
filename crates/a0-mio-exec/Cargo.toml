@@ -1,0 +1,14 @@
+[package]
+name = "a0-mio-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Throwaway feasibility prototype: a single-threaded executor on mio for the agent's data plane thread. Not for merge."
+
+[dependencies]
+mio = { version = "1.2.4", features = ["os-poll", "net"] }
+tokio = { workspace = true, features = ["rt", "macros", "net", "time", "sync", "io-util"] }
+wgft-netstack = { workspace = true, features = ["harness"] }
+wgft-wgstack.workspace = true
