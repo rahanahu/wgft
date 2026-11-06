@@ -15,7 +15,8 @@ use crate::sackpeer_tests::check_scoreboard;
 use crate::stack::Event;
 use crate::tcp::RTX_PMTU;
 use crate::testnet_tests::{
-    DUT, PEER, TEST_MTU, TestNet, build_icmp, build_udp, small_limits, split_ipv4,
+    DUT, PEER, PeerConn, TEST_MTU, TestNet, build_icmp, build_udp, parse_out, small_limits,
+    split_ipv4,
 };
 use crate::wire::{self, IP_HEADER_LEN, PROTO_ICMP, PROTO_UDP, parse_ipv4};
 use crate::{Error, seq};
@@ -695,9 +696,9 @@ fn send_udp_and_drain(n: &mut TestNet, pc: crate::udp::UdpId, len: usize) -> Vec
     pkts
 }
 
-/// DF を立てた packet を多数出させます。TCP の segment と、ICMP の誤り (Port Unreachable) です。戻り値は出た
-/// TCP の segment の数です。
-fn emit_df_traffic(n: &mut TestNet, c: crate::tcp::conn::ConnId) -> usize {
+/// DF を立てた packet を多数出させます。TCP の segment と、ICMP の誤り (Port Unreachable) です。相手が segment を
+/// ACK して窓を開き直すので、何度呼んでも TCP の segment が出ます。戻り値は出た TCP の segment の数です。
+fn emit_df_traffic(n: &mut TestNet, c: crate::tcp::conn::ConnId, peer: &mut PeerConn) -> usize {
     let mut tcp = 0;
     for _ in 0..4 {
         n.s.write(n.now, c, &[0; 4000]).ok();
@@ -708,7 +709,15 @@ fn emit_df_traffic(n: &mut TestNet, c: crate::tcp::conn::ConnId) -> usize {
         for p in &pkts {
             assert_eq!(p[6] & 0x40, 0x40, "DF clear on {p:x?}");
         }
+        let outs: Vec<_> = pkts
+            .iter()
+            .filter(|p| p[9] == wire::PROTO_TCP)
+            .map(|p| parse_out(p))
+            .collect();
         tcp += pkts.iter().filter(|p| p[9] == wire::PROTO_TCP).count();
+        peer.absorb(&outs);
+        n.peer_ack(peer, &[]);
+        n.drain_raw();
     }
     assert!(tcp >= 8, "only {tcp} TCP segments");
     tcp
@@ -717,11 +726,10 @@ fn emit_df_traffic(n: &mut TestNet, c: crate::tcp::conn::ConnId) -> usize {
 /// UDP の datagram の間に TCP の segment と ICMP の誤りを送っても、UDP の ID は進みません
 /// (RFC 6864 4.3、5.2: 非 atomic の datagram の ID は独立した数えから取ります)。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn udp_ids_are_not_advanced_by_df_traffic() {
     let mut n = TestNet::new(small_limits());
     let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
-    let (c, _) = n.accepted(true);
+    let (c, mut peer) = n.accepted(true);
     n.drain_raw();
     let mut prev = {
         let a = send_udp_and_drain(&mut n, pc, 100);
@@ -730,7 +738,7 @@ fn udp_ids_are_not_advanced_by_df_traffic() {
         ip_id(&a[0])
     };
     for round in 0..3 {
-        emit_df_traffic(&mut n, c);
+        emit_df_traffic(&mut n, c, &mut peer);
         let b = send_udp_and_drain(&mut n, pc, 100);
         assert_eq!(b.len(), 1);
         assert_eq!(
@@ -744,20 +752,19 @@ fn udp_ids_are_not_advanced_by_df_traffic() {
 
 /// echo の応答も非 atomic で、UDP と同じ数えに従います。DF を立てた packet は数えを進めません。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn echo_replies_and_udp_share_a_counter_that_df_traffic_does_not_advance() {
     let mut n = TestNet::new(small_limits());
     let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
-    let (c, _) = n.accepted(true);
+    let (c, mut peer) = n.accepted(true);
     n.drain_raw();
     let first = ip_id(&send_udp_and_drain(&mut n, pc, 100)[0]);
-    emit_df_traffic(&mut n, c);
+    emit_df_traffic(&mut n, c, &mut peer);
     n.write(&build_icmp(PEER, &[ECHO, 0, 0, 0, 0, 1, 0, 1, b'x']));
     let reply = n.drain_raw();
     assert_eq!(reply.len(), 1);
     assert_eq!(reply[0][6] & 0x40, 0, "DF set on the echo reply");
     assert_eq!(ip_id(&reply[0]), id_after(first), "echo reply ID");
-    emit_df_traffic(&mut n, c);
+    emit_df_traffic(&mut n, c, &mut peer);
     let last = ip_id(&send_udp_and_drain(&mut n, pc, 100)[0]);
     assert_eq!(
         last,
@@ -772,7 +779,7 @@ fn echo_replies_and_udp_share_a_counter_that_df_traffic_does_not_advance() {
 fn fragmented_udp_shares_one_id_and_ignores_df_traffic() {
     let mut n = TestNet::new(small_limits());
     let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
-    let (c, _) = n.accepted(true);
+    let (c, mut peer) = n.accepted(true);
     n.drain_raw();
     let a = send_udp_and_drain(&mut n, pc, 3000);
     assert!(a.len() >= 3, "{} fragments", a.len());
@@ -781,7 +788,7 @@ fn fragmented_udp_shares_one_id_and_ignores_df_traffic() {
         assert_eq!(ip_id(p), id_a, "fragments of one datagram differ in ID");
         assert_eq!(p[6] & 0x40, 0, "DF set on a fragment");
     }
-    emit_df_traffic(&mut n, c);
+    emit_df_traffic(&mut n, c, &mut peer);
     let b = send_udp_and_drain(&mut n, pc, 3000);
     let id_b = ip_id(&b[0]);
     assert!(b.iter().all(|p| ip_id(p) == id_b));
