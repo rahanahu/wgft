@@ -1409,3 +1409,6 @@ fn a_handshake_flood_delays_the_first_session_but_does_not_stop_it() {
         "packets sent before the session arrived"
     );
 }
+
+#[path = "device_timer_tests.rs"]
+mod timers;

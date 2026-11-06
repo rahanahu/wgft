@@ -648,17 +648,20 @@ impl Device {
     /// When to call [`Device::handle_timeout`] next. Calling it earlier is harmless.
     #[must_use]
     pub fn poll_timeout(&self) -> Option<Instant> {
-        (0..self.peers.len())
-            .flat_map(|peer| {
-                let p = &self.peers[peer];
-                [
-                    self.proto.poll_timeout(peer),
-                    p.keepalive_at,
-                    p.deferred.map(|(at, _)| at),
-                ]
-            })
-            .flatten()
-            .min()
+        // データプレーンは起床ごとに 2 回呼ぶので、iterator の連鎖でなく素の loop で書く
+        fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+            match (a, b) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            }
+        }
+        let mut next = None;
+        for (id, p) in self.peers.iter().enumerate() {
+            next = earliest(next, self.proto.poll_timeout(id));
+            next = earliest(next, p.keepalive_at);
+            next = earliest(next, p.deferred.map(|(at, _)| at));
+        }
+        next
     }
 
     /// Points the peer at a new endpoint, as the control plane does after resolving the server's

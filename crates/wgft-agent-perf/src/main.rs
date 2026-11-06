@@ -7,13 +7,17 @@
 //! neither root nor a TUN device; `scripts/agent-perf-stat.sh` runs it in an unprivileged user and
 //! network namespace (`unshare -rn`) under `perf stat`.
 //!
-//! Two modes, one measured end each:
+//! Three modes, one measured end each:
 //!
 //! - `send`: the measured thread is the agent. It hands bursts of inner packets to the device
 //!   layer, which encrypts them, and sends each datagram with `sendto`. A second thread plays the
 //!   server and decrypts.
 //! - `recv`: the measured thread is the server end. It reads datagrams with `recvfrom` and passes
 //!   them to the device layer, which decrypts them. A second thread plays the agent and encrypts.
+//! - `answer`: `recv`, and in the same wake-up the measured end encrypts and sends one 40-byte
+//!   reply, as a relayed TCP download acknowledges once per wake-up. The wake-up both decrypts and
+//!   encrypts for the peer. The second thread reads the replies before each burst, outside the
+//!   measured time. The byte counts are those of the received bursts.
 //!
 //! Only the measured thread counts. Run the tool under `perf stat --no-inherit` so that the
 //! second thread stays out of the counters; the script does. The tool prints one `RESULT` line
@@ -21,6 +25,9 @@
 //! it made itself. Bursts are separated by a hand-off with the second thread over a channel; those
 //! futex calls are neither counted as data-path calls nor inside `cpu_ns`, but `perf stat` sees
 //! their user-space instructions, a small constant share per burst.
+//!
+//! Each burst is one wake-up of the measured end: like the data plane, it checks the device's timer
+//! once and reads the device's next deadline at the end.
 //!
 //! What the numbers include and leave out:
 //!

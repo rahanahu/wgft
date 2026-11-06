@@ -33,6 +33,10 @@ enum Mode {
     Send,
     /// Receive and decrypt: the measured thread is the server end.
     Recv,
+    /// Receive and decrypt a burst, then encrypt and send one 40-byte reply in the same wake-up:
+    /// the measured thread is the server end, like a relayed TCP download that acknowledges once
+    /// per wake-up.
+    Answer,
 }
 
 #[derive(Debug, Parser)]
@@ -117,17 +121,19 @@ fn run(args: &Args) -> Result<String, Error> {
     }
     let agent = Link::new(agent_socket, agent, !args.one_by_one);
     let server = Link::new(server_socket, server, !args.one_by_one);
-    let packet = inner_packet(args.size);
+    let packet = inner_packet(args.size, AGENT_IP, SERVER_IP);
     let bursts = args.packets.div_ceil(args.burst as u64);
     let plan = Plan {
         packet,
+        reply: inner_packet(40, SERVER_IP, AGENT_IP),
         burst: args.burst,
         bursts,
         cpu_peer: args.cpu_peer,
     };
     let measured = match args.mode {
         Mode::Send => measure_send(agent, server, &plan)?,
-        Mode::Recv => measure_recv(server, agent, &plan)?,
+        Mode::Recv => measure_recv(server, agent, &plan, false)?,
+        Mode::Answer => measure_recv(server, agent, &plan, true)?,
     };
     let packets = bursts * args.burst as u64;
     Ok(format!(
@@ -135,6 +141,7 @@ fn run(args: &Args) -> Result<String, Error> {
         match args.mode {
             Mode::Send => "send",
             Mode::Recv => "recv",
+            Mode::Answer => "answer",
         },
         args.size,
         if args.one_by_one { "off" } else { "on" },
@@ -164,14 +171,14 @@ fn server_config(key: PrivateKey, agent: PublicKey) -> DeviceConfig {
 }
 
 /// A valid inner IPv4 packet of `size` bytes from the agent to the server.
-fn inner_packet(size: usize) -> Vec<u8> {
+fn inner_packet(size: usize, src: Ipv4Addr, dst: Ipv4Addr) -> Vec<u8> {
     let mut p = vec![0u8; size];
     p[0] = 0x45;
     p[2..4].copy_from_slice(&u16::try_from(size).unwrap_or(u16::MAX).to_be_bytes());
     p[8] = 64;
     p[9] = 17;
-    p[12..16].copy_from_slice(&AGENT_IP.octets());
-    p[16..20].copy_from_slice(&SERVER_IP.octets());
+    p[12..16].copy_from_slice(&src.octets());
+    p[16..20].copy_from_slice(&dst.octets());
     let sum = p[..20]
         .as_chunks::<2>()
         .0
