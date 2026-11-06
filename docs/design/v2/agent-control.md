@@ -265,8 +265,10 @@ agent では次の範囲に届き、それより広がりません。
   LAN のアドレスを信じて認証を省くサービスは、server から来た接続も LAN からの接続として扱います
 - 届かない:agent のホストのサービスと、agent のホストを経由した LAN への転送。
   トンネルの packet はホストの TCP/IP に渡りません
-- 届かない:中継の待ち受けへの server 以外からの接続。
-  device の層の AllowedIPs が、復号した packet の送信元を server のアドレスの /32 に限ります
+- 届かない:中継の待ち受けへの、server を通らない接続。
+  device の層の AllowedIPs が、復号した packet の送信元を server のアドレスの /32 に限ります。
+  ただし、server のカーネルモードの DNAT のルールでは、インターネットのクライアントの packet が server の転送を通って届きます。
+  送信元のアドレスは server に書き換わりますが、TCP の相手はクライアントの OS で、クライアントのアドレスを偽った第三者の segment も届きえます ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))
 
 ### 中継
 

@@ -88,7 +88,9 @@
   gVisor が自分で捨てる誤りと同じ扱いです。
   Device は IPv4 だけを扱い、IPv6 の packet は `Write` の誤りになるので、ICMPv6 の誤りに当たる確認は持ちません。
   エージェントの Device にも同じ確認が効く。
-  エージェントに packet を送れるピアは `vpsd` だけで、`vpsd` の netstack が出す誤りの送信元は `vpsd` のトンネルのアドレスなので、エージェントの側で正当な誤りを捨てることはありません
+  エージェントに packet を送れるピアは `vpsd` だけです。
+  ユーザー空間モードの `vpsd` では、netstack が出す誤りの送信元は `vpsd` のトンネルのアドレスなので、エージェントの側で正当な誤りを捨てることはありません。
+  カーネルモードの `vpsd` の DNAT のルールで、クライアントと `vpsd` の間の経路で生まれた誤りが転送されてエージェントに届くか、届く時にこの確認を通るかは確かめていません ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))
 <a id="tcp-の-mss-の下限"></a>
 - TCP の MSS の下限:TUN の `Write` は、完成した IPv4 の datagram のうち SYN の立った TCP の segment(SYN と SYN-ACK)を、MSS の option の値が 536 より小さいときに捨てます。
   固定版の gVisor は、送った segment を確認されるまで 1 つずつ管理の構造ごと持ち、その構造は 1 つで約 0.62 KiB(`tcp.SegOverheadSize`)です。
