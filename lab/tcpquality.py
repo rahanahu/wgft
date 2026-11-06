@@ -80,7 +80,7 @@
 #       the duration is the longest, and the fairness is over all their streams; one failed client
 #       fails the run. A --late file is a flow that started late: its bytes and retransmits are added,
 #       its rate is over the main duration, and its stream stays out of the duration and the fairness;
-#       a late file that cannot be read is left out.
+#       a late file that cannot be read, or an empty --late path, is left out and adds late_error=<reason>.
 #   agentstat <pid> <log> <netns> [label]
 #       the agent's memory and refusals at one moment, for runs with many connections: its VmRSS and
 #       VmHWM in MiB, the "memory bound: N MiB" of its start line, the latest count of each wgstack
@@ -377,7 +377,8 @@ def iperf_merge(mains, lates=()):
     the longest, and the fairness is over all their streams. lates are flows that started late: their
     bytes and retransmits are added to the totals and their rate is taken over the main duration, but
     their streams stay out of the duration and the fairness. A main file that failed fails the run; a
-    late file that cannot be read or has no result is left out.
+    late file that cannot be read, has an error or has no result is left out and the line gets
+    late_error=<reason>, so that the caller can fail the run.
     """
     import json
     received = sent = 0
@@ -414,14 +415,23 @@ def iperf_merge(mains, lates=()):
         if rates:
             fair += " stream_min_mbit=%.3f stream_max_mbit=%.3f" % (min(rates), max(rates))
         fair += " stream_zero=%d" % sum(1 for b in per if b == 0)
+    late_error = ""
     for extra in lates:
         try:
-            e = json.load(open(extra)).get("end", {})
+            if not extra:
+                raise ValueError("empty_late_path")
+            j = json.load(open(extra))
+            if "error" in j:
+                raise ValueError(str(j["error"]))
+            e = j.get("end", {})
+            if not e.get("sum_received"):
+                raise ValueError("no_result")
             late_rcv = e["sum_received"]["bytes"]
             late_snd = e.get("sum_sent", {})
             late_sent = late_snd.get("bytes", 0)
             late_retr = late_snd.get("retransmits")
-        except (OSError, ValueError, KeyError, AttributeError):
+        except (OSError, ValueError, KeyError, AttributeError, TypeError) as ex:
+            late_error = late_error or str(ex).replace(" ", "_") or "unreadable"
             continue
         received += late_rcv
         sent += late_sent
@@ -429,6 +439,8 @@ def iperf_merge(mains, lates=()):
             bps += late_rcv * 8 / seconds
         if late_retr is not None:
             retrans.append(late_retr)
+    if late_error:
+        fair += " late_error=%s" % late_error
     return ("received=%d sent=%d duration_s=%.3f mbit=%.2f retransmits=%s%s"
             % (received, sent, seconds, bps / 1e6, sum(retrans) if retrans else "-", fair))
 
@@ -1307,8 +1319,8 @@ def iperfx(jsonfile, prefix):
     try:
         end = json.load(open(jsonfile)).get("end", {})
         rcv, snd = end["sum_received"], end.get("sum_sent", {})
-    except (OSError, ValueError, KeyError):
-        print("%s_mbit=0 %s_bytes=0 %s_retransmits=-" % (prefix, prefix, prefix))
+    except (OSError, ValueError, KeyError, AttributeError):
+        print("%s_mbit=0 %s_bytes=0 %s_retransmits=- %s_error=1" % (prefix, prefix, prefix, prefix))
         return 0
     print("%s_mbit=%.2f %s_bytes=%d %s_retransmits=%s"
           % (prefix, rcv["bits_per_second"] / 1e6, prefix, rcv["bytes"], prefix, snd.get("retransmits", "-")))

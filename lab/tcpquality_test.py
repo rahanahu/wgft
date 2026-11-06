@@ -986,7 +986,7 @@ class RxQueueTools(unittest.TestCase):
         self.assertEqual(x, ["late_mbit=4.00", "late_bytes=500000", "late_retransmits=2"])
         self.assertEqual(series, ["IPERFSERIES start_s=0.0 end_s=1.0 mbit=3.00 retransmits=1",
                                   "IPERFSERIES start_s=1.0 end_s=2.0 mbit=5.00 retransmits=2"])
-        self.assertEqual(missing.split(), ["cross_mbit=0", "cross_bytes=0", "cross_retransmits=-"])
+        self.assertEqual(missing.split(), ["cross_mbit=0", "cross_bytes=0", "cross_retransmits=-", "cross_error=1"])
 
     def test_iperf_merges_parallel_clients_and_a_late_flow(self):
         # two parallel clients of the main streams, and a late flow: the semantics of #902 and #903 together
@@ -999,6 +999,10 @@ class RxQueueTools(unittest.TestCase):
             # the late file is left out when it is missing or unreadable, and a failed main client still fails the run
             gone = dict(kv.split("=") for kv in self.run_tq("iperf", "--late", os.path.join(d, "none.json"), a, b).split())
             failed = self.run_tq("iperf", "--late", late, a, os.path.join(d, "none.json"))
+            errfile = self.write_json(d, "e.json", {"error": "unable to connect stream"})
+            noresult = self.write_json(d, "n.json", {"end": {}})
+            reasons = [dict(kv.split("=") for kv in self.run_tq("iperf", "--late", f, a, b).split())
+                       for f in (errfile, noresult, "")]
         # bytes and retransmits add up over the clients and the late flow; the duration is the longest main one
         self.assertEqual((got["received"], got["sent"], got["retransmits"], got["duration_s"]),
                          ("3500000", "3500100", "8", "10.000"))
@@ -1007,7 +1011,13 @@ class RxQueueTools(unittest.TestCase):
         # the fairness is over the four main streams alone
         for k in ("stream_jain", "stream_min_over_max", "stream_zero", "stream_min_mbit", "stream_max_mbit"):
             self.assertEqual(got[k], main_only[k], k)
+        # a missing late file is marked, and the other values are the main ones
+        self.assertIn("late_error", gone)
+        del gone["late_error"]
         self.assertEqual(gone, main_only)
+        self.assertEqual([r["late_error"] for r in reasons], ["unable_to_connect_stream", "no_result", "empty_late_path"])
+        for r in reasons:
+            self.assertEqual(r["received"], main_only["received"])
         self.assertTrue(failed.startswith("received=0 "), failed)
 
     def test_ssparse_reads_samples_and_sums_connections(self):

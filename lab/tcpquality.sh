@@ -1090,7 +1090,11 @@ for mode in $MODES; do
 
     if [ "$TOOL" = iperf3 ]; then
       # one line with received=, sent=, the receiver's duration and rate, and the sender's retransmits
-      late_args=(); [ -z "$LATE_START_S" ] || late_args=(--late "$W/wgft-tq-iperf-late-$mode.json")
+      late_args=() late_json=
+      if [ -n "$LATE_START_S" ]; then
+        late_json=$W/wgft-tq-iperf-late-$mode.json
+        late_args=(--late "$late_json")
+      fi
       got=$($Q iperf ${late_args[@]+"${late_args[@]}"} "${iperf_json[@]}")
       sent=$got
       stats="undetermined=0 streams=$STREAMS duration_s=$(field duration_s "$got") overall_mbit=$(field mbit "$got") retransmits=$(field retransmits "$got")$(echo "$got" | grep -oE ' stream_[a-z_]+=[^ ]*' | tr -d '\n')"
@@ -1104,7 +1108,13 @@ for mode in $MODES; do
       stats="undetermined=0 streams=1 duration_s=$CHURN_S overall_mbit=$(awk -v b="$(field received "$got")" -v s="$CHURN_S" 'BEGIN { printf "%.3f", b * 8 / s / 1e6 }') churn_close=$CHURN_CLOSE$(echo " $got" | grep -oE ' churn_[a-z0-9_]+=[^ ]*' | tr -d '\n')"
       c_us=; [ -n "$client_cg" ] && c_us=$(awk '$1 == "usage_usec" { print $2 }' "$client_cg/cpu.stat" 2>/dev/null)
       rmdir "$client_cg" 2>/dev/null
-      [ -z "$LATE_START_S" ] || extra_fields="$extra_fields late_start_s=$LATE_START_S $($Q iperfx "$late_json" late)"
+      if [ -n "$LATE_START_S" ]; then
+        extra_fields="$extra_fields late_start_s=$LATE_START_S $($Q iperfx "$late_json" late)"
+        # a late flow that was expected but did not report is a failed run, not a zero
+        case " $got $extra_fields " in
+          *" late_error="*) echo "FAIL  $mode run $run: the late flow did not report a result"; fail=1 run_pass=0 ;;
+        esac
+      fi
       [ -z "$PATH_CHANGE_AT" ] || extra_fields="$extra_fields path_change_at_s=$PATH_CHANGE_AT path_change_delay_ms=$PATH_CHANGE_DELAY_MS"
       [ -z "$CROSS_TCP" ] || extra_fields="$extra_fields $($Q iperfx "$W/wgft-tq-iperf-cross-$mode.json" cross)"
       if [ -n "$UDP_BLAST_MBIT" ]; then
