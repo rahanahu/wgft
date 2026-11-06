@@ -204,7 +204,7 @@ impl Conn<'_> {
         if !t.sack_ok {
             return 0;
         }
-        // 先頭の block が確認済みの範囲か 2 つ目の block の内側なら D-SACK です (RFC 2883 4 節)。
+        // 先頭の block が確認済みの範囲か 2 つ目の block の内側なら D-SACK です (RFC 2883 5 節)。
         if !seq::gt(b0.right, t.snd_una)
             || blocks
                 .get(1)
