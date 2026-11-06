@@ -1411,14 +1411,23 @@ fn frag_needed_quoting(pkts: &[Vec<u8>], total_len: u16, mtu: u16) -> Vec<u8> {
 
 /// 1 つの接続に Fragmentation Needed を順に送り、そのたびの PMTU を返します。
 fn pmtu_after(steps: &[(u16, u16)]) -> Vec<u32> {
-    let mut n = TestNet::new(small_limits());
+    pmtu_after_with_mtu(TEST_MTU, steps)
+}
+
+/// `pmtu_after` と同じで、核の MTU を `mtu` にします。
+fn pmtu_after_with_mtu(mtu: usize, steps: &[(u16, u16)]) -> Vec<u32> {
+    let config = Config {
+        limits: small_limits(),
+        ..Config::new(DUT, mtu)
+    };
+    let mut n = TestNet::with_config(config, [7; 64]);
     let (c, _) = n.accepted(true);
     n.s.write(n.now, c, &[0; 3000]).unwrap();
     let pkts = n.drain_raw();
     steps
         .iter()
-        .map(|&(total_len, mtu)| {
-            n.write(&frag_needed_quoting(&pkts, total_len, mtu));
+        .map(|&(total_len, nh)| {
+            n.write(&frag_needed_quoting(&pkts, total_len, nh));
             n.s.conn(c.slot).t.pmtu
         })
         .collect()
@@ -1525,5 +1534,161 @@ fn pmtu_report_that_keeps_the_mss_leaves_cwnd_alone() {
         assert_eq!(before, after, "sack {sack}: PMTU not below the current one");
         let (before, after) = cwnd_across_pmtu_report(Some(900), 1200, sack);
         assert_eq!(before, after, "sack {sack}: peer MSS still the limit");
+    }
+}
+
+/// RFC 1191 5 節の 4.2BSD の注と 7 節の表の境目です。Total Length が今の PMTU 以上のときだけ header の長さの
+/// 4 倍 (20 byte) を引き、Total Length 未満の最大の plateau を取ります (等しい plateau は取りません)。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn next_hop_mtu_zero_boundaries() {
+    // PMTU 1420 を超える Total Length は引いてから表を引きます (1500 - 20 = 1480 なら 1492 は大きすぎます)。
+    assert_eq!(pmtu_after(&[(1500, 0)]), [1006]);
+    // 今の PMTU に等しい Total Length も引きます。1020 - 20 = 1000 なら 508 で、下限で止めます。
+    assert_eq!(pmtu_after(&[(1420, 1020), (1020, 0)]), [1020, 552]);
+    // 今の PMTU 未満なら引かず、Total Length 未満の plateau を取ります。
+    assert_eq!(pmtu_after(&[(1010, 0)]), [1006]);
+    // plateau に等しい Total Length は、その plateau ではなく一つ下を取ります。
+    assert_eq!(pmtu_after(&[(1006, 0)]), [552]);
+    assert_eq!(pmtu_after(&[(1420, 1080), (1080, 0)]), [1080, 1006]);
+    // 見積もりが今の PMTU 以上なら PMTU を上げません。
+    assert_eq!(pmtu_after(&[(65535, 0)]), [TEST_MTU as u32]);
+}
+
+/// RFC 1191 7 節の表の plateau の直上の Total Length から、その plateau を見積もります。PMTU の上限は核の
+/// MTU で、設定の上限は 9216 です。表の 65535、32000、17914 は公開の API では届かないので、この試験の対象外です
+/// (核に試験専用の口を足していません)。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn next_hop_mtu_zero_reaches_every_plateau() {
+    const PLATEAUS: [u16; 7] = [8166, 4352, 2002, 1492, 1006, 508, 296];
+    // 核の MTU は上限の 9216 とし、どの段にも今の PMTU 未満の Total Length で入ります。
+    for w in PLATEAUS.windows(2) {
+        let (upper, below) = (w[0], w[1]);
+        assert_eq!(
+            pmtu_after_with_mtu(9216, &[(upper, 0)]),
+            [u32::from(below).max(552)],
+            "total length {upper}"
+        );
+        assert_eq!(
+            pmtu_after_with_mtu(9216, &[(upper + 1, 0)]),
+            [u32::from(upper)],
+            "total length {}",
+            upper + 1
+        );
+    }
+    // 上限の MTU に等しい Total Length は 20 を引いて 9196 とし、8166 を取ります。
+    assert_eq!(pmtu_after_with_mtu(9216, &[(9216, 0)]), [8166]);
+}
+
+/// 窓を `window(旧 MSS)` の `(cwnd, ssthresh)` にして、1420 から 1000 への PMTU の引き下げの前後の
+/// `(seg_mss, cwnd, ssthresh)` を返します。
+fn drop_with_window(
+    sack: bool,
+    window: impl Fn(u32) -> (u32, u32),
+) -> ((u32, u32, u32), (u32, u32, u32)) {
+    let mut n = TestNet::new(small_limits());
+    let (c, _) = n.accepted_sack(true, sack);
+    n.s.write(n.now, c, &vec![0; 30_000]).unwrap();
+    let pkts = n.drain_raw();
+    let old_mss = n.s.conn(c.slot).seg_mss();
+    let (cwnd, ssthresh) = window(old_mss);
+    {
+        let cs = n.s.conn(c.slot);
+        cs.t.cwnd = cwnd;
+        cs.t.ssthresh = ssthresh;
+    }
+    let snap = |n: &mut TestNet| {
+        let cs = n.s.conn(c.slot);
+        (cs.seg_mss(), cs.t.cwnd, cs.t.ssthresh)
+    };
+    let before = snap(&mut n);
+    n.write(&frag_needed_quoting(&pkts, TEST_MTU as u16, 1000));
+    (before, snap(&mut n))
+}
+
+/// RFC 5681 3.1 の比 (旧 segment size 対 新 segment size) で窓を縮めます。初期窓以外の窓でも切り捨ての比で、
+/// ssthresh は RFC が求めないので変えません。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn pmtu_decrease_scales_a_non_initial_cwnd_and_leaves_ssthresh() {
+    for sack in [false, true] {
+        let (before, after) = drop_with_window(sack, |_| (20_001, 15_000));
+        assert!(after.0 < before.0);
+        let want = (20_001u64 * u64::from(after.0) / u64::from(before.0)) as u32;
+        assert_eq!(after.1, want, "sack {sack}: {before:?} -> {after:?}");
+        assert_eq!(after.2, 15_000, "sack {sack}: ssthresh changed");
+    }
+}
+
+/// 比で縮めた窓が 1 segment に満たないときは、新しい segment size 1 つ分にします (窓の下限)。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn pmtu_decrease_keeps_one_segment_of_cwnd() {
+    for sack in [false, true] {
+        let (before, after) = drop_with_window(sack, |old| (old - 1, 4 * old));
+        assert!(after.0 < before.0);
+        assert_eq!(after.1, after.0, "sack {sack}: {before:?} -> {after:?}");
+        assert_eq!(after.2, 4 * before.0, "sack {sack}: ssthresh changed");
+    }
+}
+
+/// 窓が大きくても (4 MB 超) 比の計算が 32 bit であふれません。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn pmtu_decrease_scales_a_huge_cwnd_without_overflow() {
+    for sack in [false, true] {
+        let (before, after) = drop_with_window(sack, |_| (5_000_000, 6_000_000));
+        let want = (5_000_000u64 * u64::from(after.0) / u64::from(before.0)) as u32;
+        assert_eq!(after.1, want, "sack {sack}: {before:?} -> {after:?}");
+        assert_eq!(after.2, 6_000_000, "sack {sack}: ssthresh changed");
+    }
+}
+
+/// 引き下げの直後に出る送り直しの塊を返します。`(旧 MSS, 新 MSS, payload の長さの列)` です。
+fn burst_after_drop(sack: bool) -> (u32, u32, Vec<usize>) {
+    let mut n = TestNet::new(small_limits());
+    let (c, _) = n.accepted_sack(true, sack);
+    n.s.write(n.now, c, &vec![0; 30_000]).unwrap();
+    let pkts = n.drain_raw();
+    let old_mss = n.s.conn(c.slot).seg_mss();
+    n.write(&frag_needed_quoting(&pkts, TEST_MTU as u16, 1000));
+    let new_mss = n.s.conn(c.slot).seg_mss();
+    let lens = n
+        .drain()
+        .iter()
+        .map(|o| o.payload.len())
+        .filter(|&l| l > 0)
+        .collect();
+    (old_mss, new_mss, lens)
+}
+
+/// 引き下げの直後に出る塊は、10 x 新 MSS byte (初期窓の 10 segment) を超えません。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn burst_after_pmtu_decrease_fits_ten_new_segments() {
+    for sack in [false, true] {
+        let (old_mss, new_mss, lens) = burst_after_drop(sack);
+        let total: usize = lens.iter().sum();
+        assert!(new_mss < old_mss);
+        assert!(
+            total <= 10 * new_mss as usize,
+            "sack {sack}: {} segments, {total} bytes, limit {}",
+            lens.len(),
+            10 * new_mss
+        );
+    }
+}
+
+/// 対照:引き下げの後に出る segment は、どれも新しい MSS 以下です。
+#[test]
+fn segments_after_pmtu_decrease_fit_the_new_mss() {
+    for sack in [false, true] {
+        let (_, new_mss, lens) = burst_after_drop(sack);
+        assert!(!lens.is_empty(), "sack {sack}: nothing was resent");
+        assert!(
+            lens.iter().all(|&l| l <= new_mss as usize),
+            "sack {sack}: {lens:?} against {new_mss}"
+        );
     }
 }
