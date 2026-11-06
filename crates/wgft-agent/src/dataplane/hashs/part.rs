@@ -109,7 +109,10 @@ impl PartSend {
     pub(crate) fn add_stock(&mut self, it: Item) {
         if self.stock.len() == STOCK_CAP {
             self.stock.pop_front();
-            self.hub.counts.overflow_drops.fetch_add(1, Ordering::Relaxed);
+            self.hub
+                .counts
+                .overflow_drops
+                .fetch_add(1, Ordering::Relaxed);
         }
         self.stock.push_back(it);
     }
@@ -137,9 +140,7 @@ impl PartSend {
         let need = self.pulled - p0;
         if self.stock.len() < need {
             let ask = u32::try_from(need).unwrap_or(u32::MAX);
-            self.hub.links[self.k]
-                .demand
-                .ask(ask, &self.hub.front_bell);
+            self.hub.links[self.k].demand.ask(ask, &self.hub.front_bell);
             self.hub.counts.requests.fetch_add(1, Ordering::Relaxed);
             self.reseal_from = Some((p0, s0));
             return false;
@@ -318,7 +319,12 @@ impl PartSend {
 
     /// 試験が使う:核から引いて在庫で暗号化し、送らずに止める。
     #[cfg(test)]
-    pub(crate) fn pull_and_seal<U: Upper>(&mut self, upper: &mut U, now: Instant, vlen: usize) -> bool {
+    pub(crate) fn pull_and_seal<U: Upper>(
+        &mut self,
+        upper: &mut U,
+        now: Instant,
+        vlen: usize,
+    ) -> bool {
         let mut pulled = 0;
         while pulled < vlen.min(self.tx.slots()) {
             let Some(len) = upper.poll_transmit(now, self.tx.packet_slot(pulled)) else {
@@ -333,7 +339,11 @@ impl PartSend {
 
     /// 試験が使う:送り残しを送る。
     #[cfg(test)]
-    pub(crate) fn flush_for_test(&mut self, sink: &mut impl PartSink, now: Instant) -> Result<bool, PartSent> {
+    pub(crate) fn flush_for_test(
+        &mut self,
+        sink: &mut impl PartSink,
+        now: Instant,
+    ) -> Result<bool, PartSent> {
         self.flush(sink, now)
     }
 
@@ -388,6 +398,9 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
         if hub.is_ending() {
             return Ok(());
         }
+        let link = &hub.links[k];
+        // 知らせの回数は輪を読む前に読む。この起床の間に front が渡せば、眠らずに続ける
+        let seen = link.bell.prepare();
         let start = clock::now();
         let mut now = start;
         take_lane(&local, send, now);
@@ -432,12 +445,7 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
         if more {
             tokio::task::yield_now().await;
         }
-        let link = &hub.links[k];
-        link.bell.sleep();
-        if link.to_part.has_items() || hub.is_ending() {
-            link.bell.awake();
-            continue;
-        }
+        let rung = !link.bell.sleep(seen);
         let blocked = send.is_blocked();
         tokio::select! {
             () = link.bell.notifier().0.notified() => {}
@@ -449,17 +457,21 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
                     g.retain_ready();
                 }
             }
-            () = std::future::ready(()), if more => {}
+            () = std::future::ready(()), if more || rung => {}
             command = commands.recv() => match command {
                 None | Some(Command::Stop) => {
-                    link.bell.awake();
+                    if !rung {
+                        link.bell.awake();
+                    }
                     return Ok(());
                 }
                 Some(Command::Run(job)) => job(&local),
                 Some(Command::Status(_) | Command::SetEndpoint(_)) => {}
             },
         }
-        link.bell.awake();
+        if !rung {
+            link.bell.awake();
+        }
     }
 }
 
@@ -477,6 +489,7 @@ pub(in crate::dataplane) async fn final_flush<U: Upper>(
     let deadline = tokio::time::Instant::now() + FINAL_WAIT;
     let mut left = FINAL_PACKETS;
     while left > 0 && !hub.is_ending() {
+        let seen = hub.links[k].bell.prepare();
         let now = clock::now();
         take_lane(local, send, now);
         let (pulled, state) = {
@@ -490,26 +503,22 @@ pub(in crate::dataplane) async fn final_flush<U: Upper>(
             PartSent::Idle => return,
             PartSent::Starved => {
                 let link = &hub.links[k];
-                link.bell.sleep();
-                if !link.to_part.has_items() {
+                if link.bell.sleep(seen) {
                     let woke =
                         tokio::time::timeout_at(deadline, link.bell.notifier().0.notified()).await;
+                    link.bell.awake();
                     if woke.is_err() {
-                        link.bell.awake();
                         return;
                     }
                 }
-                link.bell.awake();
             }
-            PartSent::Blocked => {
-                match tokio::time::timeout_at(deadline, sink.0.writable()).await {
-                    Ok(Ok(mut g)) => {
-                        send.write_blocked = false;
-                        g.retain_ready();
-                    }
-                    _ => return,
+            PartSent::Blocked => match tokio::time::timeout_at(deadline, sink.0.writable()).await {
+                Ok(Ok(mut g)) => {
+                    send.write_blocked = false;
+                    g.retain_ready();
                 }
-            }
+                _ => return,
+            },
         }
     }
 }

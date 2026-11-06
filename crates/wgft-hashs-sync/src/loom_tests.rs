@@ -3,8 +3,8 @@
 //! `RUSTFLAGS="--cfg loom" cargo test -p wgft-hashs-sync --lib --release` で流す。模型は製品の型 ([`Ring`]、
 //! [`Bell`]、[`Demand`]、[`Ending`]) そのものを loom の同期の型で組んだものを使い、写しの模型は使わない。
 //!
-//! - L2 輪と眠りの印:書き手は公開と印の読み、読み手は印の書きと輪の読み直しを両側で SeqCst の順にした時、項が
-//!   残ったまま読み手が眠り続けない。順は FIFO。容量 2 の輪と項 3 つ、タイマーは「来た」の印
+//! - L2 輪と眠りの印:書き手は公開の後に知らせの回数を進め、読み手は起床の始めの回数のまま印を立てられた時だけ
+//!   眠る時、項が残ったまま読み手が眠り続けない。順は FIFO。容量 2 の輪と項 3 つ、タイマーは「来た」の印
 //! - L6 停止と panic:1 スレッドが終わりの印を立て、ほかが眠っている時、全員が終わり、各 unit が 1 回だけ落ち、
 //!   次の世代は全員の join の後に始まる。unit 2 つ、executor 3 つ
 //! - L7 在庫の補充の求め:在庫の尽きた区画が求めの印を立て、front が眠っていても補充され、求めが失われない
@@ -33,15 +33,12 @@ impl LoomNotify {
     }
 }
 
-/// 読み手が眠る規則:印を立て、仕事を読み直し、無ければ待つ。仕事があれば印を外して戻る。
-fn sleep_unless(bell: &Bell<LoomNotify>, work: impl Fn() -> bool) {
-    bell.sleep();
-    if work() {
+/// 読み手が眠る規則:起床の始めに読んだ回数 `seen` のまま印を立てられた時だけ待つ。
+fn sleep(bell: &Bell<LoomNotify>, seen: u64) {
+    if bell.sleep(seen) {
+        bell.notifier().wait();
         bell.awake();
-        return;
     }
-    bell.notifier().wait();
-    bell.awake();
 }
 
 #[test]
@@ -80,6 +77,7 @@ fn l2_ring_and_sleep_flag() {
         let mut next = 0u32;
         let mut fired = false;
         loop {
+            let seen = bell.prepare();
             while let Some(v) = ring.pop() {
                 assert_eq!(v, next, "FIFO");
                 next += 1;
@@ -88,7 +86,7 @@ fn l2_ring_and_sleep_flag() {
             if next == 3 && fired {
                 break;
             }
-            sleep_unless(&bell, || ring.has_items() || (!fired && timer.load(Ordering::SeqCst)));
+            sleep(&bell, seen);
         }
         producer.join().unwrap();
         timer_thread.join().unwrap();
@@ -113,12 +111,19 @@ fn l6_end_and_panic() {
         // 区画 1 と 2 は眠って待つ。印を見たら unit を落として終わる
         let sleepers: Vec<_> = (1..3)
             .map(|k| {
-                let (ending, bells, dropped) =
-                    (Arc::clone(&ending), Arc::clone(&bells), Arc::clone(&dropped));
+                let (ending, bells, dropped) = (
+                    Arc::clone(&ending),
+                    Arc::clone(&bells),
+                    Arc::clone(&dropped),
+                );
                 thread::spawn(move || {
                     let unit = Unit(dropped);
-                    while !ending.is_ended() {
-                        sleep_unless(&bells[k], || ending.is_ended());
+                    loop {
+                        let seen = bells[k].prepare();
+                        if ending.is_ended() {
+                            break;
+                        }
+                        sleep(&bells[k], seen);
                     }
                     drop(unit);
                 })
@@ -127,7 +132,9 @@ fn l6_end_and_panic() {
         // front (bells[0]) が panic で終わる:印を立てて全員を起こす
         {
             let (ending, bells) = (Arc::clone(&ending), Arc::clone(&bells));
-            thread::spawn(move || ending.end(bells.iter())).join().unwrap();
+            thread::spawn(move || ending.end(bells.iter()))
+                .join()
+                .unwrap();
         }
         for s in sleepers {
             s.join().unwrap();
@@ -155,23 +162,25 @@ fn l7_stock_request() {
             );
             thread::spawn(move || {
                 loop {
+                    let seen = front_bell.prepare();
                     let n = demand.take();
                     if n > 0 {
                         lane.push(n).unwrap();
                         part_bell.ring();
                         return;
                     }
-                    sleep_unless(&front_bell, || demand.pending());
+                    sleep(&front_bell, seen);
                 }
             })
         };
         // 区画:在庫が尽きたので 1 つ求め、届くまで眠る
         demand.ask(1, &front_bell);
         let got = loop {
+            let seen = part_bell.prepare();
             if let Some(n) = lane.pop() {
                 break n;
             }
-            sleep_unless(&part_bell, || lane.has_items());
+            sleep(&part_bell, seen);
         };
         assert_eq!(got, 1);
         front.join().unwrap();

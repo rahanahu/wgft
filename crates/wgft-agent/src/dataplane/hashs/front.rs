@@ -22,11 +22,11 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use wgft_wireguard::{Device, Event, PublicKey};
 
-use super::super::batch::{
-    BATCH_TIME, Pace, RxBatch, WAKE_BUDGET, each_packet, rx_store,
-};
+use super::super::batch::{BATCH_TIME, Pace, RxBatch, WAKE_BUDGET, each_packet, rx_store};
 use super::super::driver::{Io, ONE_SLOT_CAP, Outbox, Rest, Sent, Sink, Source, decrypt, earliest};
-use super::super::{Command, Local, Settings, SocketBuffers, Status, Upper, clock, duration_to_nanos};
+use super::super::{
+    Command, Local, Settings, SocketBuffers, Status, Upper, clock, duration_to_nanos,
+};
 use super::steer::{Route, Steer};
 use super::{Batch, Hub, Item, PIGGYBACK_MAX};
 
@@ -181,10 +181,7 @@ impl Front {
                     left -= 1;
                     added += 1;
                 }
-                self.hub
-                    .counts
-                    .refilled
-                    .fetch_add(added, Ordering::Relaxed);
+                self.hub.counts.refilled.fetch_add(added, Ordering::Relaxed);
                 if b.is_empty() {
                     b.clear();
                     let _ = self.hub.links[k].to_front.push(b);
@@ -211,15 +208,13 @@ impl Front {
         }
         errors
     }
-
-    /// 求めが残っているか。眠る前の読み直しに使う。
-    fn pending(&self) -> bool {
-        self.hub.is_ending() || self.hub.links.iter().skip(1).any(|l| l.demand.pending())
-    }
 }
 
 /// 受信のバッチを 1 つ行う (Inline の `receive_batch` に振り分けを足したもの)。
-#[expect(clippy::too_many_arguments, reason = "the Inline receive batch's inputs and the front")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the Inline receive batch's inputs and the front"
+)]
 async fn receive_batch<U: Upper>(
     local: &Local<U>,
     device: &mut Device,
@@ -282,7 +277,11 @@ async fn receive_batch<U: Upper>(
                 Route::Part(0) => upper.handle_packet(now, p),
                 Route::Part(k) => front.stage(k, p, device, now),
                 Route::TcpFragment => {
-                    front.hub.counts.tcp_fragments.fetch_add(1, Ordering::Relaxed);
+                    front
+                        .hub
+                        .counts
+                        .tcp_fragments
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
         });
@@ -351,7 +350,10 @@ fn send_batch<U: Upper>(
 }
 
 /// 送信の相 (Inline の `send_phase` と同じ規則)。
-#[expect(clippy::too_many_arguments, reason = "the Inline send phase's inputs and the front")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the Inline send phase's inputs and the front"
+)]
 fn send_phase<U: Upper>(
     local: &Local<U>,
     device: &mut Device,
@@ -434,7 +436,10 @@ fn finish_wake<U: Upper>(
 }
 
 /// front の駆動の task。Inline の `drive` と同じく、止める命令で最後の送り出しに要るものを返す。
-#[expect(clippy::too_many_arguments, reason = "the Inline driver's inputs and the front")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the Inline driver's inputs and the front"
+)]
 pub(in crate::dataplane) async fn drive<U: Upper>(
     local: Local<U>,
     device: &mut Device,
@@ -472,6 +477,8 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
                 "a partition thread of this tunnel generation ended",
             ));
         }
+        // 知らせの回数は起床の始めに読む。この起床の間に区画が求めや「枠が欲しい」で起こせば、眠らずに続ける
+        let seen = hub.front_bell.prepare();
         let start = clock::now();
         let mut now = start;
         let mut rx_more = false;
@@ -531,18 +538,15 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
         if more {
             tokio::task::yield_now().await;
         }
-        hub.front_bell.sleep();
-        if front.pending() {
-            hub.front_bell.awake();
-            continue;
-        }
+        // 眠りの印を立てられなければ、この起床の間に知らせがあった。命令が飢えないよう select は通る
+        let rung = !hub.front_bell.sleep(seen);
         tokio::select! {
             ready = socket.readable() => ready?,
             ready = socket.writable(), if blocked => ready?,
             () = clock::sleep_until_some(deadline) => {}
             () = local.0.wake.woken() => {}
             () = hub.front_bell.notifier().0.notified() => {}
-            () = std::future::ready(()), if more => {}
+            () = std::future::ready(()), if more || rung => {}
             command = commands.recv() => match command {
                 None | Some(Command::Stop) => break,
                 Some(Command::Status(reply)) => {
@@ -566,7 +570,9 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
                 Some(Command::Run(job)) => job(&local),
             },
         }
-        hub.front_bell.awake();
+        if !rung {
+            hub.front_bell.awake();
+        }
     }
     front.collect_sent(device);
     let gso = io.gso;

@@ -18,12 +18,12 @@
 #[cfg(all(loom, test))]
 use loom::sync::Mutex;
 #[cfg(all(loom, test))]
-pub use loom::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+pub use loom::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(not(all(loom, test)))]
-pub use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-#[cfg(not(all(loom, test)))]
 use std::sync::Mutex;
+#[cfg(not(all(loom, test)))]
+pub use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use std::sync::PoisonError;
 
@@ -67,7 +67,7 @@ impl<T> Ring<T> {
         *self.slots[t % self.slots.len()]
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(v);
-        self.tail.store(t.wrapping_add(1), Ordering::SeqCst);
+        self.tail.store(t.wrapping_add(1), Ordering::Release);
         Ok(())
     }
 
@@ -86,9 +86,9 @@ impl<T> Ring<T> {
         v
     }
 
-    /// 読み手が眠る前の読み直し:項が残っているか。[`Bell::sleep`] の後に呼ぶ (両側 SeqCst)。
+    /// 読み手:項が残っているか。
     pub fn has_items(&self) -> bool {
-        self.head.load(Ordering::SeqCst) != self.tail.load(Ordering::SeqCst)
+        self.head.load(Ordering::Relaxed) != self.tail.load(Ordering::Acquire)
     }
 }
 
@@ -98,34 +98,51 @@ pub trait Notifier {
     fn notify_one(&self);
 }
 
-/// 眠りの印つきの起こしの知らせ。待つのは 1 つの task だけである。
+/// 眠りの印つきの起こしの知らせ (event count)。待つのは 1 つの task だけである。
 ///
-/// 待つ側は、仕事を読み切った後に [`Bell::sleep`] で印を立て、仕事を読み直して空なら
-/// [`Bell::notifier`] で待つ。知らせる側は、仕事を公開した後に [`Bell::ring`] を呼び、印が立っていた時だけ
-/// 起こす。印と仕事の読みを両側で SeqCst の順にするので、仕事が残ったまま待ち続けることは無い (L2)。起こしの
-/// 知らせは許可を残すので、印を立ててから待つまでの間の知らせも失わない。
+/// 1 つの語に、知らせの回数 (2 ずつ進める) と眠りの印 (bit 0) を置く。待つ側は起床の始めに
+/// [`Bell::prepare`] で回数を読み、仕事を読み切った後に [`Bell::sleep`] でその回数のまま印を立てられた時だけ
+/// [`Bell::notifier`] で待つ。立てられなければ、その間に知らせがあったので仕事を読み直す。知らせる側は仕事を
+/// 公開した後に [`Bell::ring`] で回数を進め、印が立っていた時だけ起こす。印と回数が同じ語の読み書き (RMW) なので、
+/// 知らせは待つ側の印の前か後のどちらかに並び、仕事が残ったまま待ち続けることは無い (L2)。起こしの知らせは許可を
+/// 残すので、印を立ててから待つまでの間の知らせも失わない。
+///
+/// 最初の版は印と仕事を別の語の SeqCst の読み書きで組んだ (Dekker の形)。loom は SeqCst の読み書きを AcqRel と
+/// して扱うのでその形を確かめられず、fence を足しても模型 L2 が眠り続けを報告したので、1 つの語の形にした
+/// (2026-11-06)。
 #[derive(Debug, Default)]
 pub struct Bell<N> {
-    sleeping: AtomicBool,
+    state: AtomicU64,
     notify: N,
 }
 
+/// 眠りの印。
+const SLEEPING: u64 = 1;
+
 impl<N: Notifier> Bell<N> {
-    /// 知らせる側:公開の後に呼ぶ。待つ側が眠る途中か眠っていれば起こす。
+    /// 知らせる側:仕事を公開した後に呼ぶ。待つ側が眠る途中か眠っていれば起こす。
     pub fn ring(&self) {
-        if self.sleeping.swap(false, Ordering::SeqCst) {
+        if self.state.fetch_add(2, Ordering::AcqRel) & SLEEPING != 0 {
             self.notify.notify_one();
         }
     }
 
-    /// 待つ側:眠る前に印を立てる。この後に仕事を読み直す。
-    pub fn sleep(&self) {
-        self.sleeping.store(true, Ordering::SeqCst);
+    /// 待つ側:起床の始め (仕事を読む前) に知らせの回数を読む。
+    pub fn prepare(&self) -> u64 {
+        self.state.load(Ordering::Acquire) & !SLEEPING
     }
 
-    /// 待つ側:起きた後か、読み直しで仕事を見つけた時に印を外す。
+    /// 待つ側:仕事を読み切った後に、[`Bell::prepare`] の回数 `seen` のまま印を立てる。立てたら真で、待ってよい。
+    /// 偽ならその間に知らせがあったので、仕事を読み直す。
+    pub fn sleep(&self, seen: u64) -> bool {
+        self.state
+            .compare_exchange(seen, seen | SLEEPING, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// 待つ側:起きた後に印を外す。
     pub fn awake(&self) {
-        self.sleeping.store(false, Ordering::SeqCst);
+        self.state.fetch_and(!SLEEPING, Ordering::AcqRel);
     }
 
     /// 待つ側が待つ仕組み。
@@ -220,8 +237,14 @@ mod tests {
         let b = Bell::<Counting>::default();
         b.ring();
         assert_eq!(b.notifier().0.load(Ordering::SeqCst), 0);
-        b.sleep();
+        let seen = b.prepare();
         b.ring();
+        assert!(!b.sleep(seen), "a ring since prepare: read the work again");
+        let seen = b.prepare();
+        assert!(b.sleep(seen));
+        b.ring();
+        assert_eq!(b.notifier().0.load(Ordering::SeqCst), 1);
+        b.awake();
         b.ring();
         assert_eq!(b.notifier().0.load(Ordering::SeqCst), 1);
     }
