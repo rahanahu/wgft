@@ -1788,3 +1788,59 @@ fn rfc7323_wire_time_wait_gives_no_paws_ack_for_an_rst() {
         assert!(outs.is_empty(), "row {row}: {}", show(&outs));
     }
 }
+
+/// 古い TSval の FIN の写しは PAWS で捨てられ、TIME_WAIT の期限を数え直しません。入口から 61 秒の後は TIME_WAIT が
+/// 終わっていて、有効な TSval の FIN の写しには ACK を返さず (RST か無応答)、期限を数え直していたなら ACK を返します。
+fn paws_dropped_fin_does_not_keep_time_wait_alive_on_the_wire(row: bool) {
+    let (mut n, _, mut p) = paws_time_wait(row);
+    n.advance(Duration::from_secs(30));
+    let old = p.ts_val - 1000;
+    let s = paws_old_fin(&mut p, old);
+    n.inject(&s);
+    n.drain();
+    n.advance(Duration::from_secs(31));
+    n.drain();
+    let newer = p.ts_val + 10;
+    let probe = paws_old_fin(&mut p, newer);
+    n.inject(&probe);
+    let outs = n.drain();
+    assert!(
+        outs.iter().all(|o| o.flags != FLAG_ACK),
+        "61 s after TIME_WAIT began the 4-tuple still answers with an ACK (row {row}): {}",
+        show(&outs)
+    );
+}
+
+#[test]
+fn rfc7323_wire_time_wait_slot_ends_on_time_after_a_paws_dropped_fin() {
+    paws_dropped_fin_does_not_keep_time_wait_alive_on_the_wire(false);
+}
+
+#[test]
+fn rfc7323_wire_time_wait_row_ends_on_time_after_a_paws_dropped_fin() {
+    paws_dropped_fin_does_not_keep_time_wait_alive_on_the_wire(true);
+}
+
+/// 対照:有効な TSval の FIN の写しは期限を数え直すので、61 秒の後も ACK を返します。
+#[test]
+fn rfc7323_wire_time_wait_is_kept_alive_by_a_fin_with_a_valid_tsval() {
+    for row in [false, true] {
+        let (mut n, _, mut p) = paws_time_wait(row);
+        n.advance(Duration::from_secs(30));
+        let newer = p.ts_val + 10;
+        let s = paws_old_fin(&mut p, newer);
+        n.inject(&s);
+        n.drain();
+        n.advance(Duration::from_secs(31));
+        n.drain();
+        let newer = p.ts_val + 20;
+        let probe = paws_old_fin(&mut p, newer);
+        n.inject(&probe);
+        let outs = n.drain();
+        assert!(
+            outs.len() == 1 && outs[0].flags == FLAG_ACK,
+            "row {row}: want an ACK, got {}",
+            show(&outs)
+        );
+    }
+}
