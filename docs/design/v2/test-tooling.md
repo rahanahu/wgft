@@ -993,6 +993,14 @@ Rust の製品は RFC 3465 2.3 の L = 1 で、この違いは一覧に載せず
 そのため、RTO の後の ACK で Go の応答を最後まで照らせます。
 一方で、照合は製品の RTO の後の経路 (L = 1) を通りません。
 製品の L = 1 は、`cc_tests::rto_slow_start_limit`、`rto_l1_tests`、および `rto_wire_tests` (packet の入出力だけで窓を見る試験) が守ります。
+同じく、照合の核は[順序外の segment ごとの ACK](wgstack-rs.md#起床ごとの-ack-の合わせ)を、照合用の切り替え (`set_go_compat_merge_ooo_acks`) で凍結した Go と同じ 1 つの ACK に合わせます。
+Rust の製品は segment ごとに ACK を返し (RFC 5681 3.2)、この違いも一覧に載せず、切り替えで照合の上から消します。
+一覧に載せると、違う記録の多くで照合が記録の初めの方で止まり、その先を Go と比べられなくなるためです。
+2026-11-06 に照合の核で照らすと、git の集まりと完全な集まりのどの記録も、今の一覧のままで通りました。
+切り替えは RTO の切り替えと同じく feature `harness` の build だけにあり、照合は製品の segment ごとの ACK の経路を通りません。
+製品の経路は `dupack_tests` が守ります。
+適合の台本 `rfc2525-stretch-ack-burst-ooo` を Rust の `wgstack-dut` に流す確かめは、まだ関門の段にありません。
+手で流した結果は [RFC 2525 の既知の問題](../userspace/wgstack-verification.md#rfc-2525-の既知の問題)にあります。
 Go の `TestDivergencesList` が、どの行も git の記録を指し、番号が記録の中にあり、応答が 1 つの応答の frame で、理由を持つことを確かめます。
 
 手元の cache の大きな記録の集まり (完全な集まり) で Go と違う記録は、別の一覧 `testdata/wgstack-rec/divergences-full.json` に書きます。

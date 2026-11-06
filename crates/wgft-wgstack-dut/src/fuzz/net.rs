@@ -339,6 +339,7 @@ impl<H: Hook> Net<H> {
                 && h.tw_rows <= l.tw_rows
                 && h.accept_queued <= l.accept_queue
                 && h.ctl_queued <= l.ctl_slots
+                && h.ack_queued <= l.ctl_slots
                 && h.conns <= l.conns(),
             "a table exceeds its size: {h:?} limits {l:?}"
         );

@@ -9,6 +9,7 @@ use super::rack::Which;
 use super::sack::{Pick, Src};
 use super::{DELACK_TIMEOUT, INITIAL_WINDOW_SEGS, IP_TCP_HEADERS, RTX_TLP, ts_clock};
 use crate::buf::records::{REC_IN_T, REC_RETRANSMITTED, REC_RTX, Record};
+use crate::output::{ACK_PACKET_MAX, ACKS_PER_CONN};
 use crate::seq;
 use crate::stack::shared::LogKind;
 use crate::stack::time;
@@ -248,6 +249,29 @@ impl Conn<'_> {
         t.rcv_since_ack = 0;
         self.disarm(TMR_DELACK);
         self.t.last_ack_sent = self.t.rcv_nxt;
+    }
+
+    /// 送る必要の印 (`ack_now`) で待っている ACK を今の状態で作り、重複した ACK の輪に積みます。順序外の segment
+    /// と穴を埋める segment が、前の segment の ACK と 1 つに合わさらないようにするためです (RFC 5681 3.2、
+    /// wgstack-rs.md の「起床ごとの ACK の合わせ」)。輪が満杯なら積まず、待っている ACK は次の ACK と合わさります。
+    /// 接続が [`ACKS_PER_CONN`] だけ積んでいるときも同じく合わせます。積んだ接続は出力の list に入れ、送り出しが
+    /// この接続を回った時に輪の ACK を先に送らせます。
+    pub(crate) fn flush_ack(&mut self, now: i64) {
+        #[cfg(feature = "harness")]
+        if crate::stack::go_compat_merge_ooo_acks() {
+            return; // 凍結した Go の記録との照合用の切り替え:Go と同じく次の ACK と合わせます
+        }
+        if self.s.out.acks.is_full() || self.t.acks_queued >= ACKS_PER_CONN {
+            self.s.stats.dup_acks_merged += 1;
+            return;
+        }
+        let mut b = [0u8; ACK_PACKET_MAX];
+        let s = self.t.snd_nxt;
+        let n = self.build_bare(&mut b, s, now);
+        let pushed = self.s.out.acks.enqueue(self.id, self.t.generation, &b[..n]);
+        debug_assert!(pushed, "a bare ACK fits a slot of the ring");
+        self.t.acks_queued += 1;
+        self.s.queue_conn(self.id);
     }
 
     /// 中身の無い ACK を作ります。窓の probe は `seq` に SND.UNA - 1 を渡します (Linux と同じ)。

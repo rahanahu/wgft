@@ -19,10 +19,6 @@
     "observed": "0 new segments",
     "reason": "as limited-transmit/first-dupack.new-data: RACK has already resent the first segment"
   },
-  "rfc2525-stretch-ack-burst-ooo/dupack-per-segment": {
-    "observed": "1 duplicate ACKs",
-    "reason": "wgstack-rs.md, per-wake ACK merging: eight out-of-order segments injected before the poll get one duplicate ACK, not one each as RFC 5681 3.2 asks. Measured: 1 duplicate ACK for 8 segments"
-  },
   "rfc2525-stretch-ack-burst/every-second-segment": {
     "observed": "an ACK covers more than two segments; all acknowledged",
     "reason": "wgstack-rs.md, per-wake ACK merging: the core makes at most one content-free ACK per connection per wake, so a burst of twelve segments injected before the poll gets one ACK over all twelve, past the every-second-segment SHOULD of RFC 5681 4.2. Measured: 1 ACK for 12 segments"

@@ -18,7 +18,7 @@ use crate::fixed_vec::{AllocError, FixedVec};
 use crate::frag;
 use crate::icmp::{PING_ENDPOINTS, PingId, Pings};
 use crate::index::Index;
-use crate::output::{CtlRing, Dlist};
+use crate::output::{AckRing, CtlRing, Dlist};
 use crate::rng::Seeds;
 use crate::tcp::conn::{ConnBufs, ConnId, ConnSlots, QLink, State, Tcb, new_free_list};
 use crate::tcp::ctx::Conn;
@@ -72,6 +72,27 @@ pub fn set_go_compat_rto_l2(on: bool) {
 #[cfg(feature = "harness")]
 pub fn go_compat_rto_l2() -> bool {
     GO_COMPAT_RTO_L2.with(std::cell::Cell::get)
+}
+
+// 凍結した Go の記録との照合のためだけに、順序外の segment ごとの ACK を Go と同じく 1 つに合わせる切り替えです。
+// feature `harness` の build だけにあり、製品の build に切り替えも読み出しも書き込みもありません
+// (wgstack-rs.md の「起床ごとの ACK の合わせ」)。値は thread ごとで、既定は偽 (segment ごとに ACK を返す) です。
+#[cfg(feature = "harness")]
+thread_local! {
+    static GO_COMPAT_MERGE_OOO_ACKS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 真にすると、この thread で駆動する核は順序外の segment の ACK を重複した ACK の輪に積まず、凍結した Go と同じく
+/// 次の ACK と合わせます。使い方は [`set_go_compat_rto_l2`] と同じです。
+#[cfg(feature = "harness")]
+pub fn set_go_compat_merge_ooo_acks(on: bool) {
+    GO_COMPAT_MERGE_OOO_ACKS.with(|c| c.set(on));
+}
+
+/// 今の thread の値です。
+#[cfg(feature = "harness")]
+pub fn go_compat_merge_ooo_acks() -> bool {
+    GO_COMPAT_MERGE_OOO_ACKS.with(std::cell::Cell::get)
 }
 
 /// 何もしない hook です。boost の戻りを常に許します。
@@ -337,6 +358,7 @@ impl<H: Hook> Stack<H> {
                         conns: t.out_conns,
                         rows: t.out_rows,
                         ctl: t.ctl,
+                        acks: t.acks,
                         udp_queued: 0,
                         cur: 0,
                         deficit: [0; shared::NUM_CLASSES],
@@ -429,6 +451,7 @@ impl<H: Hook> Stack<H> {
         h.tw_rows = self.s.tw.len();
         h.accept_queued = self.s.queued;
         h.ctl_queued = self.s.out.ctl.len();
+        h.ack_queued = self.s.out.acks.len();
         h.frag_bytes = self.s.frag.usage().0 - self.s.frag.base_cost();
         (h.udp_rx_bytes, h.udp_rx_datagrams) = self.s.udp.held(crate::udp::RX);
         (h.udp_tx_bytes, h.udp_tx_datagrams) = self.s.udp.held(crate::udp::TX);
@@ -590,6 +613,34 @@ impl<H: Hook> Stack<H> {
             if !used && s.out.conns.contains(i) {
                 return Err("a free slot is in the output list".into());
             }
+            if t.acks_queued > 0 && !s.out.conns.contains(i) {
+                return Err("a connection with queued ACKs is not in the output list".into());
+            }
+        }
+        // 接続ごとの重複した ACK の数えは、輪の中のその接続の生きている ACK の数と一致します。手間は輪の長さと、
+        // 数えを持つ接続の数の積で、輪の長さは Q_ctl までです。
+        let live_tag = |tag: crate::output::AckTag| {
+            (tag.slot as usize) < self.conns.len() && {
+                let t = self.conns.tcb(tag.slot);
+                t.generation == tag.generation && !matches!(t.state, State::Free | State::Closed)
+            }
+        };
+        let mut total_live = 0usize;
+        s.out.acks.for_each_tag(|tag| total_live += usize::from(live_tag(tag)));
+        let mut total_counted = 0usize;
+        for (i, t, _) in self.conns.iter_bufs() {
+            if t.acks_queued == 0 {
+                continue;
+            }
+            let mut mine = 0usize;
+            s.out.acks.for_each_tag(|tag| mine += usize::from(tag.slot == i && live_tag(tag)));
+            if t.acks_queued > crate::output::ACKS_PER_CONN || mine != usize::from(t.acks_queued) {
+                return Err("a connection's queued ACK count disagrees with the ring".into());
+            }
+            total_counted += mine;
+        }
+        if total_live != total_counted {
+            return Err("the ring holds live ACKs of a connection that counts none".into());
         }
         let (rx, _) = s.udp.held(crate::udp::RX);
         let (tx, _) = s.udp.held(crate::udp::TX);
@@ -689,6 +740,7 @@ impl<H: Hook> Stack<H> {
         s.chunks.drain();
         s.frag.clear();
         s.out.ctl.clear();
+        s.out.acks.clear();
         s.events.clear();
         while s.out.conns.pop_front().is_some() {}
         while s.out.rows.pop_front().is_some() {}
@@ -946,10 +998,7 @@ impl<H: Hook> Stack<H> {
             let cls = self.s.out.pick(quantum)?;
             let n = match cls {
                 shared::CLASS_CTL => self.s.out.ctl.pop(buf).unwrap_or(0),
-                shared::CLASS_CONN => match self.s.out.conns.pop_front() {
-                    Some(id) => self.conn(id).poll(buf, now),
-                    None => 0,
-                },
+                shared::CLASS_CONN => self.poll_conn_class(buf, now),
                 shared::CLASS_ROW => match self.s.out.rows.pop_front() {
                     Some(id) => self.s.poll_row(id, buf, now),
                     None => 0,
@@ -962,6 +1011,43 @@ impl<H: Hook> Stack<H> {
             }
             self.s.out.spent(cls, n);
             return Some(n);
+        }
+        None
+    }
+
+    /// 接続の組から packet を 1 つ作ります。出力の list の先頭の接続が重複した ACK の輪に ACK を積んでいれば、
+    /// その接続の segment を作らずに輪の先頭の ACK を 1 つ送り、接続を list の末尾に回します。そうすると、輪の ACK
+    /// は同じ接続が送信の相で作る segment より先に出て (packet の順が作った順と同じになり、timestamp も戻りません)、
+    /// 輪に ACK を積んでいない接続は輪を待たずに list の順で送ります。list が空なら輪の残りを送ります。
+    fn poll_conn_class(&mut self, buf: &mut [u8], now: i64) -> usize {
+        let Some(id) = self.s.out.conns.pop_front() else {
+            return self.pop_queued_ack(buf).unwrap_or(0);
+        };
+        if self.conns.tcb(id).acks_queued > 0 {
+            if let Some(n) = self.pop_queued_ack(buf) {
+                self.s.queue_conn(id);
+                return n;
+            }
+            // 輪が空なら数えは古いので 0 に戻します (不変条件が数えと輪の一致を確かめます)。
+            self.conns.tcb_mut(id).acks_queued = 0;
+        }
+        self.conn(id).poll(buf, now)
+    }
+
+    /// 重複した ACK の輪の先頭の ACK を `buf` に写し、長さを返します。輪が空なら `None` です。作った接続が閉じたか
+    /// 枠が別の接続に移った ACK は捨てます。
+    fn pop_queued_ack(&mut self, buf: &mut [u8]) -> Option<usize> {
+        while let Some(tag) = self.s.out.acks.front() {
+            let live = (tag.slot as usize) < self.conns.len() && {
+                let t = self.conns.tcb(tag.slot);
+                t.generation == tag.generation && !matches!(t.state, State::Free | State::Closed)
+            };
+            if live {
+                let t = self.conns.tcb_mut(tag.slot);
+                t.acks_queued = t.acks_queued.saturating_sub(1);
+                return self.s.out.acks.pop(buf);
+            }
+            self.s.out.acks.skip();
         }
         None
     }
@@ -1099,6 +1185,7 @@ struct Tables {
     out_conns: Dlist,
     out_rows: Dlist,
     ctl: CtlRing,
+    acks: AckRing,
     events: EventList,
     wheel: Wheel,
     fired: FixedVec<u32>,
@@ -1148,6 +1235,7 @@ impl Tables {
             out_conns: Dlist::new(n)?,
             out_rows: Dlist::new(l.syn_rows + l.tw_rows)?,
             ctl: CtlRing::new(l.ctl_slots, config.mtu)?,
+            acks: AckRing::new(l.ctl_slots)?,
             events,
             wheel: Wheel::new(n * NUM_TIMERS)?,
             fired: FixedVec::try_with_capacity(n * NUM_TIMERS)?,

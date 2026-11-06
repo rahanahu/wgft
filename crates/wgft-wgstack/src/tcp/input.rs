@@ -206,6 +206,14 @@ impl Conn<'_> {
         else {
             return;
         };
+        // 中身を持つ順序外の segment (RCV.NXT より後から始まる) と、順序外の区間がある間に中身を持つ segment
+        // (穴を埋めるか順序外) には、segment ごとにすぐ ACK を返します (RFC 5681 3.2)。前の segment の ACK を
+        // 待っていれば、その ACK を入れる前の状態で先に作ります。順序どおりのデータだけの間は今までどおり 1 つに
+        // 合わせます (wgstack-rs.md の「起床ごとの ACK の合わせ」)。中身の無い順序外の FIN は自分の ACK を
+        // 求めないので、待っている ACK を分けません。
+        if n > 0 && self.t.ack_now && (off > nxt || self.b.rcv.intervals_len() > 0) {
+            self.flush_ack(now);
+        }
         let limit = self.t.adv_right.min(self.b.rcv.read_off + self.t.rcv_cap);
         let res = self
             .b

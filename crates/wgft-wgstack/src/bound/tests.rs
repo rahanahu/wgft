@@ -138,7 +138,10 @@ fn fix_matches_the_allocated_tables() {
         assert_eq!(p.wheel, b(sh.wheel.heap_bytes() + sh.fired.heap_bytes()));
         assert_eq!(
             p.output,
-            b(sh.out.conns.heap_bytes() + sh.out.rows.heap_bytes() + sh.out.ctl.heap_bytes())
+            b(sh.out.conns.heap_bytes()
+                + sh.out.rows.heap_bytes()
+                + sh.out.ctl.heap_bytes()
+                + sh.out.acks.heap_bytes())
         );
         assert_eq!(p.events, b(sh.events.heap_bytes()));
         assert_eq!(

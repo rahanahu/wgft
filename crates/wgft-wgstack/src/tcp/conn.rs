@@ -120,6 +120,8 @@ pub(crate) struct Tcb {
     pub(crate) rcv_wscale: u8,
     pub(crate) ack_now: bool,
     pub(crate) ack_delayed: bool,
+    /// 重複した ACK の輪に積んだ、この接続の ACK の数です。[`crate::output::ACKS_PER_CONN`] を上限にします。
+    pub(crate) acks_queued: u8,
     /// 次の ACK の先頭に載せる D-SACK の block (RFC 2883) があります。ACK を作るたびに読むので、受け手の欄の
     /// 行に置きます。
     pub(crate) dsack_pending: bool,

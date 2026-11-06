@@ -336,6 +336,8 @@ impl Conn<'_> {
             self.disarm(k);
         }
         self.s.unqueue_conn(self.id);
+        // 輪に残るこの接続の ACK は、接続が閉じるか枠が移った後なので、送る時に捨てます。
+        self.t.acks_queued = 0;
     }
 
     /// 接続が 4 つ組の hash の表にあれば外します。
