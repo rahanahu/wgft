@@ -181,7 +181,7 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
 | timestamp の offset (RFC 7323 7 節):接続ごとの乱数でなく、アドレスの組の鍵付きの hash の offset です | 同じ相手との接続をまたいで TSval が増え続け、相手の PAWS と RFC 6191 が効きます | 要りません | 接続の関係づけが問題になる利用が出た時 |
 | challenge ACK の速さの調整 (RFC 5961 7 節):核の全体で 1 秒に 500 から 1500 の固定で、管理者が変えられません | Device 全体の CPU と出力の費用を抑えます | ありません | 洪水の試験で正しい接続の回復が遅れた時 |
 | rescue の再送 (RFC 6675 4 節の NextSeg の規則 4):使いません | 理由が無いため、直す候補ですが、直すかは測ってから決めます。TLP は回復の間は張らない (`tcp/rack.rs` の `tlp_eligible`、RFC 8985 7.2 も fast recovery の間を除きます) ので、回復の中で末尾が失われると RTO まで待つ見込みです (コードと RFC からの読みで、試験はしていません) | ありません | 測った結果で直すか理由を記録する時 |
-| TIME_WAIT を使い直す SYN (RFC 6191 2 節):受けない SYN を黙って捨てず、速さを抑えた ACK を返します。加えて次の 3 つの比べが RFC より厳しい形です:前の接続が timestamp を使えば TSval が厳密に大きい時だけ受け、等しい TSval で番号が大きい SYN を受けません。前の接続が timestamp を使わず新しい SYN が timestamp を持つ時も番号で比べます。番号の比べは `SEG.SEQ > RCV.NXT` で、RFC より 1 つ厳しい形です | ACK を返すのは、RFC 5961 4.2 と RFC 9293 の TIME-WAIT の SYN の扱いに沿います。前の接続が timestamp を使わない時の比べは、TSopt の無い segment と組で残します ([TSopt の無い segment と timestamp を使わなかった前の接続](#tsopt-の無い-segment-と-timestamp-を使わなかった前の接続))。残りの 2 つの比べは、理由が無いため、直す候補です | ありません | 直す時、または dial の側の TIME_WAIT の使い直しを決める時 |
+| TIME_WAIT を使い直す SYN (RFC 6191 2 節):受けない SYN を黙って捨てず、速さを抑えた ACK を返します。加えて、前の接続が timestamp を使わず新しい SYN が timestamp を持つ時も番号で比べます | ACK を返すのは、RFC 5961 4.2 と RFC 9293 の TIME-WAIT の SYN の扱いに沿います。前の接続が timestamp を使わない時の比べは、TSopt の無い segment と組で残します ([TSopt の無い segment と timestamp を使わなかった前の接続](#tsopt-の無い-segment-と-timestamp-を使わなかった前の接続)) | ありません | 直す時、または dial の側の TIME_WAIT の使い直しを決める時 |
 | Protocol Unreachable (RFC 1122 3.2.2.1):知らない protocol の datagram を数えて黙って捨てます | 核に届く packet は、server が送るものと、server のカーネルモードの DNAT のルールが転送するクライアントの packet です。server は TCP、UDP、ICMP のほかを送らず、DNAT のルールが一致するのは TCP と UDP の packet だけです ([カーネルモード](../vps/kernel.md)) | ありません | ほかの protocol を運ぶ要望が出た時 |
 | Parameter Problem (RFC 1122 3.2.2.5):最初の断片の option の誤りにだけ返し、断片でない packet の option は確かめず、長さの崩れた packet は黙って捨てます。送り手は誤りを知りません | RFC 1122 3.2.2.5 の DISCUSSION は、Parameter Problem を受けることを「generally indicates some local or remote implementation error」とし、受けた送り手に求める動きを定めません。核に届く packet の送り手は、server の中継か、DNAT のルールではクライアントの OS です ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))。server の中継は IP option を付けないと見込みます (確かめていません)。DNAT のルールで、server の転送がクライアントの IP option や長さの崩れた packet を落とすかは確かめていません。一方で、誤りを作る経路を増やすと、ICMP の誤りの禁止 (誤りへの誤り、無効な送信元、先頭でない断片、broadcast と multicast の宛先など) と速さの制限を守る面が増えます。崩れた packet の数は `Stats` の `malformed` で分かります | 要りません | dial の側を足す時、または `malformed` の数が目立った時 |
 | 受けた TOS の受け渡し (RFC 1122 3.2.1.6):TCP と UDP に渡しません | 中継は L4 で終端し、受けた TOS を LAN の側へ運ぶ手段を持たないので、受け渡す相手がありません | ありません | DSCP を運ぶ要望が出た時 |
@@ -306,7 +306,6 @@ SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表
 - ECN (SHLD-8)
 - 窓の scale の記録 (RFC 7323 2.3)
 - rescue の再送 (RFC 6675 4 節の規則 4)
-- TIME_WAIT を使い直す SYN の、等しい TSval の比べと番号の比べ (RFC 6191 2 節)
 
 ### 直しを準備中の逸脱
 

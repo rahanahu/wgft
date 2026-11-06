@@ -14,8 +14,7 @@
 //! 前の接続が timestamp を使わず、新しい SYN が使う場合 (RFC 6191 の (b)) は、記録した外れとして残すので、この
 //! ファイルの試験は触れません。
 //!
-//! 修正の前に落ちる試験は `#[ignore]` を付けています。対照の試験は今の main で通ります。
-//! `handle_packet` に渡る packet は WireGuard が認証した後のものなので、遅れて着いた前の接続の segment も
+//! //! `handle_packet` に渡る packet は WireGuard が認証した後のものなので、遅れて着いた前の接続の segment も
 //! トンネルは防ぎません。守るのは PAWS と番号の検査だけです。
 
 #![expect(
@@ -410,25 +409,21 @@ fn rfc6191_row_comparisons_that_main_already_follows() {
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_slot_accepts_equal_tsval_and_greater_seq() {
     run_cases(false, true, true);
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_row_accepts_equal_tsval_and_greater_seq() {
     run_cases(true, true, true);
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_slot_accepts_a_syn_without_tsopt_at_rcv_nxt() {
     run_cases(false, true, false);
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_row_accepts_a_syn_without_tsopt_at_rcv_nxt() {
     run_cases(true, true, false);
 }
@@ -610,7 +605,6 @@ fn rfc6191_old_segments_do_not_enter_a_connection_reused_by_a_newer_tsval() {
 /// 前の接続の番号の範囲は新しい ISN の直前まで届き、PAWS の TSval も等しいので、守るのは番号の検査と PAWS の
 /// 境目だけである。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn rfc6191_old_segments_do_not_enter_a_connection_reused_by_an_equal_tsval() {
     mixing_all(true);
 }
