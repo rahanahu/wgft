@@ -14,7 +14,7 @@
 //! 前の接続が timestamp を使わず、新しい SYN が使う場合 (RFC 6191 の (b)) は、記録した外れとして残すので、この
 //! ファイルの試験は触れません。
 //!
-//! //! `handle_packet` に渡る packet は WireGuard が認証した後のものなので、遅れて着いた前の接続の segment も
+//! `handle_packet` に渡る packet は WireGuard が認証した後のものなので、遅れて着いた前の接続の segment も
 //! トンネルは防ぎません。守るのは PAWS と番号の検査だけです。
 
 #![expect(
