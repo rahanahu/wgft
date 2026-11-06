@@ -325,7 +325,8 @@ floor の境をまたぐ区間は境で切ります。
 
 取り消しは TCP の正しさを損ないません。
 RFC 2018 の 8 節は、受け手が SACK で知らせたデータを後で捨てることを許し、そのために送り手には累積の確認まではデータを捨てないこと(MUST NOT)を求めます。
-同じ節は、送り手が RTO の後に SACK の印を消すこと(SHOULD)と、窓の左端の segment を SACK の印によらず送り直すこと(MUST)を求めるので、取り消したデータは再送で届きます。
+RFC 2018 の 5 節は、送り手が RTO の後に SACK の印を消すこと(SHOULD)と、窓の左端の segment を SACK の印によらず送り直すこと(MUST)を求めるので、取り消したデータは再送で届きます。
+wgstack は最初の RTO で SACK の印を保つことがありますが([MUST からの記録した例外](../v2/wgstack-rs.md#must-からの記録した例外))、左端の MUST は満たします。
 取り消しの対象は、1 秒の間需要が無く、穴が埋まらないまま残った接続のデータです。
 
 この例外を置くのは、相手が枠を持ち続ける道をふさぐためです。
@@ -685,7 +686,7 @@ CLOSED の枠は 4 つ組の hash の表から外れ、送信の輪を返しま�
   初期の輻輳の窓は Linux と同じ 10 segment(RFC 6928)にし、黙った後の窓は RFC 5681 の 4.1 節に従って戻します。
   SYN か SYN-ACK を再送した接続の初期の窓は、RFC 5681 の 3.1 節と Linux と同じく 1 segment です
 - SACK:握手で SACK を交渉し、受け手として区間の表から SACK の block を返します。
-  D-SACK(RFC 2883)は返しません。
+  受け手は D-SACK(RFC 2883)の block も返します([受け手の ACK と D-SACK](wgstack-performance.md#受け手の-ack-と-d-sack))。
   送り手としては受け取った SACK の block で送信の記録に印を付け、回復に使います
 - 窓の probe:相手の窓が 0 の間は persist のタイマーで probe を送り、相手が probe に応える間は打ち切りません。
   persist に入るときと persist の間の ACK で、再送の打ち切りを数える起点と RTO の後退を消します。
@@ -736,7 +737,8 @@ ECN は交渉しません。
   扱いは[SACK による回復](wgstack-performance.md#sack-による回復)に従います
 - RACK-TLP(RFC 8985):性能の段階で実装しました。
   扱いは[RACK-TLP](wgstack-performance.md#rack-tlp)に従います
-- D-SACK(RFC 2883):受け手として返す側を加えます
+- D-SACK(RFC 2883):受け手として返す側を性能の段階で実装しました。
+  扱いは[受け手の ACK と D-SACK](wgstack-performance.md#受け手の-ack-と-d-sack)に従います
 - CUBIC(RFC 9438):性能の段階で実装し、既定の輻輳の制御にしました。
   扱いは[CUBIC](wgstack-performance.md#cubic)に従います
 
@@ -869,7 +871,7 @@ ECN は交渉しません。
   Linux で確かめた結果、台本の場合(timestamp が新しく番号が大きい、timestamp が新しく番号が小さい、どちらも古い)の応答は Linux と同じです(`timewait-reuse`)
 - MTU を超える echo request(理由を付けて受け入れる):断片で届いて組み立てた echo request の応答が MTU を超えるときは応答しません。
   Linux と gVisor は応答を断片に分けて返すと読めます。
-  wgstack は送る packet を断片に分けないので、適合の試験の wgstack の期待した差(`icmp-echo/oversized`)に入っています
+  wgstack は TCP と ICMP の packet を断片に分けないので(UDP の datagram は分けます)、適合の試験の wgstack の期待した差(`icmp-echo/oversized`)に入っています
 - 送る UDP の DF(閉じた):wgstack は UDP の datagram に DF を立てません。
   Linux で確かめた結果、Linux の応答も DF を持ちません(`udp-datagram` の `reply.df-clear`)
 - FIN_WAIT_2 の行への窓の内側の SYN(理由を付けて受け入れる):challenge ACK を返します。
