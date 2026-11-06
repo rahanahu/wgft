@@ -21,6 +21,8 @@ mod alloc_tests;
 mod held_tests;
 mod lansock;
 mod pipe;
+#[cfg(test)]
+mod readiness_tests;
 mod replies;
 #[cfg(test)]
 pub(crate) mod testpeer;

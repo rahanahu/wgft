@@ -100,6 +100,12 @@ thread_local! {
 pub(super) static BULK_ALIVE: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// The bulk buffers lent out right now on all threads: borrowed and not yet back in a free list or
+/// freed. The idle-release tests read it to see when a direction gives its bulk buffer back.
+#[cfg(test)]
+pub(super) static BULK_LENT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 thread_local! {
     /// スレッドごとの小さいバッファの置き場。接続の確立のたびに零埋めの確保をしないため。
     static IDLE_FREE: std::cell::RefCell<Vec<Box<[u8]>>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -142,6 +148,8 @@ fn give_back_idle(b: Box<[u8]>) {
 }
 
 fn borrow() -> Box<[u8]> {
+    #[cfg(test)]
+    BULK_LENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     BULK_FREE.with_borrow_mut(Vec::pop).unwrap_or_else(|| {
         #[cfg(test)]
         BULK_ALIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -150,6 +158,8 @@ fn borrow() -> Box<[u8]> {
 }
 
 fn give_back(b: Box<[u8]>) {
+    #[cfg(test)]
+    BULK_LENT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     BULK_FREE.with_borrow_mut(|free| {
         if free.len() < BULK_KEEP {
             free.push(b);
