@@ -216,6 +216,8 @@ AGENT_TOKEN=${AGENT_TOKEN:-/run/wgft-agentd.token}
 AGENT_CPUS=${AGENT_CPUS:-}
 AGENT_DP_CPUS=${AGENT_DP_CPUS:-}
 AGENT_WORKER_CPUS=${AGENT_WORKER_CPUS:-}
+# Hash S の試作 (`--placement apart-hs0`):区画のスレッド wgft-dp-part* を置く CPU
+AGENT_PART_CPUS=${AGENT_PART_CPUS:-}
 TARGET_LOCAL=${TARGET_LOCAL:-}
 if [ -n "${WGFT_BIN_DIR:-}" ]; then
   PATH=$WGFT_BIN_DIR:$PATH
@@ -634,7 +636,7 @@ for mode in $MODES; do
         fi
         [ "$mode" != rust ] || DP_SAMPLE=thread:dp:wgft-dataplane
         if [ -n "$AGENT_DP_CPUS" ] && [ "$mode" = rust ]; then
-          if ! threads_now=$(agentsh pin-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" 2>&1); then
+          if ! threads_now=$(agentsh pin-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" "$AGENT_PART_CPUS" 2>&1); then
             echo "FAIL  agent $mode: cannot place its threads: $threads_now"; fail=1; continue
           fi
           echo "   agent $threads_now"
@@ -692,7 +694,7 @@ for mode in $MODES; do
         # number of workers
         crypto_field=
         if [ -n "$AGENT_DP_CPUS" ] && [ "$mode" = rust ]; then
-          if threads_now=$(agentsh pin-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" 2>&1); then
+          if threads_now=$(agentsh pin-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" "$AGENT_PART_CPUS" 2>&1); then
             crypto_field=" agent_crypto_threads=$(echo "$threads_now" | sed -n 's/^crypto_threads=\([0-9]*\).*/\1/p' | head -1)"
           else
             echo "FAIL  agent $mode run $run: cannot place its threads: $threads_now"; fail=1 run_pass=0

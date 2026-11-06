@@ -1157,11 +1157,15 @@ THREAD_SAMPLERS = {}
 
 # the agent's threads by name: the data-plane thread, the crypto workers of builds that have them,
 # and the rest (control, resolver and the runtime's own)
-THREAD_GROUPS = (("wgft-dataplane", "dp"), ("wgft-crypto", "crypto"))
+THREAD_GROUPS = (("wgft-dataplane", "dp"), ("wgft-crypto", "crypto"), ("wgft-dp-part", "part"))
 
 
 def thread_group(comm):
-    return next((label for name, label in THREAD_GROUPS if comm == name), "other")
+    # the Hash S prototype's partition threads are wgft-dp-part1, wgft-dp-part2 and so on
+    return next(
+        (label for name, label in THREAD_GROUPS if comm == name or (label == "part" and comm.startswith(name))),
+        "other",
+    )
 
 
 class ThreadsSampler:

@@ -91,7 +91,7 @@ case "${1:-}" in
   pin-threads | check-threads)
     # <worker cpus> is a comma list; the k-th wgft-crypto thread, by thread id, goes on its k-th CPU
     # (round robin), so that each worker has a CPU of its own
-    pid=${2:?$1 <pid> <dp cpus> <worker cpus>} dp=${3:?} wk=${4:?}
+    pid=${2:?$1 <pid> <dp cpus> <worker cpus> [<partition cpus>]} dp=${3:?} wk=${4:?} part=${5:-}
     IFS=, read -ra wcpus <<<"$wk"
     rc=0 seen_dp=0 nwk=0 out=
     for tid in $(ls /proc/"$pid"/task 2>/dev/null | sort -n); do
@@ -100,6 +100,7 @@ case "${1:-}" in
       case $comm in
         wgft-dataplane) want=$dp seen_dp=1 ;;
         wgft-crypto) want=${wcpus[nwk % ${#wcpus[@]}]} nwk=$((nwk + 1)) ;;
+        wgft-dp-part*) want=$part ;;
         *) want= ;;
       esac
       if [ -n "$want" ] && [ "$1" = pin-threads ]; then taskset -pc "$want" "$tid" >/dev/null || rc=1; fi
