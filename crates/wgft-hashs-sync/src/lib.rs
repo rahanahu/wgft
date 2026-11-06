@@ -33,10 +33,22 @@ mod loom_tests;
 /// 容量 `cap` の 1 対 1 の輪。書き手と読み手はそれぞれ 1 つのスレッドだけである。
 pub struct Ring<T> {
     slots: Box<[Mutex<Option<T>>]>,
-    /// 読み手が次に読む位置。読み手だけが書く。
-    head: AtomicUsize,
+    /// 読み手が次に読む位置。読み手だけが書く。書き手と読み手の書く位置を別の cache line に置く。
+    head: Line<AtomicUsize>,
     /// 書き手が次に書く位置。書き手だけが書く。
-    tail: AtomicUsize,
+    tail: Line<AtomicUsize>,
+}
+
+/// 1 つの値を自分の cache line に置く (隣の line を先読みする CPU のために 128 byte)。
+#[derive(Debug, Default)]
+#[repr(align(128))]
+struct Line<T>(T);
+
+impl<T> std::ops::Deref for Line<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
 }
 
 impl<T> std::fmt::Debug for Ring<T> {
@@ -52,8 +64,8 @@ impl<T> Ring<T> {
     pub fn new(cap: usize) -> Self {
         Self {
             slots: (0..cap.max(1)).map(|_| Mutex::new(None)).collect(),
-            head: AtomicUsize::new(0),
-            tail: AtomicUsize::new(0),
+            head: Line(AtomicUsize::new(0)),
+            tail: Line(AtomicUsize::new(0)),
         }
     }
 

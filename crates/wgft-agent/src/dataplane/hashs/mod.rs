@@ -233,7 +233,15 @@ pub(crate) struct Link {
     pub(crate) bell: Bell,
     /// 区画が求める在庫の数。区画が書き、front が 0 に替えて読む。
     pub(crate) demand: Demand,
-    /// 区画が送った byte。front が状態の読み出しで device に足す。
+    /// 区画だけが書く数え。front は状態の読み出しで読むだけ。
+    pub(crate) stats: PartStats,
+}
+
+/// 区画だけが書く数え。front が書く輪と印と同じ cache line に載らないよう、自分の line に置く。
+#[derive(Debug, Default)]
+#[repr(align(128))]
+pub(crate) struct PartStats {
+    /// 区画が送った byte の累計。front が状態の読み出しで device に足す。
     pub(crate) sent_bytes: AtomicU64,
     /// 区画の送信の誤り。
     pub(crate) send_errors: AtomicU64,
@@ -246,8 +254,7 @@ impl Link {
             to_front: Ring::new(LANE_BATCHES),
             bell: Bell::default(),
             demand: Demand::default(),
-            sent_bytes: AtomicU64::new(0),
-            send_errors: AtomicU64::new(0),
+            stats: PartStats::default(),
         };
         for _ in 0..LANE_BATCHES {
             let _ = link.to_front.push(Box::new(Batch::new()));
@@ -256,7 +263,7 @@ impl Link {
     }
 }
 
-/// 試作の診断の数え。ラボの結果の注記と決定的な試験が読む。
+/// 試作の診断の数え。ラボの結果の注記と決定的な試験が読む。製品の build では 0 のまま ([`count`])。
 #[derive(Debug, Default)]
 pub(crate) struct Counts {
     /// 区画への輪のバッチが尽きて捨てた packet。
@@ -301,6 +308,16 @@ impl Counts {
             g(&self.part_sent),
         )
     }
+}
+
+/// 診断の数えを足す。ラボと試験の build だけが数え、製品の build では何もしない (送りと受け渡しの道に、Inline に
+/// 無い atomic を足さないため)。
+#[inline]
+pub(crate) fn count(a: &AtomicU64, n: u64) {
+    #[cfg(any(test, feature = "lab-observe"))]
+    a.fetch_add(n, Ordering::Relaxed);
+    #[cfg(not(any(test, feature = "lab-observe")))]
+    let _ = (a, n);
 }
 
 /// 世代の全スレッドが分け合う値。

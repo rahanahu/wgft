@@ -108,10 +108,7 @@ impl PartSend {
     pub(crate) fn add_stock(&mut self, it: Item) {
         if self.stock.len() == STOCK_CAP {
             self.stock.pop_front();
-            self.hub
-                .counts
-                .overflow_drops
-                .fetch_add(1, Ordering::Relaxed);
+            super::count(&self.hub.counts.overflow_drops, 1);
         }
         self.stock.push_back(it);
     }
@@ -122,10 +119,10 @@ impl PartSend {
             match self.hub.fresh(it, now) {
                 Freshness::Fresh => return,
                 Freshness::Lagging => {
-                    self.hub.counts.lag_drops.fetch_add(1, Ordering::Relaxed);
+                    super::count(&self.hub.counts.lag_drops, 1);
                 }
                 Freshness::Old => {
-                    self.hub.counts.age_drops.fetch_add(1, Ordering::Relaxed);
+                    super::count(&self.hub.counts.age_drops, 1);
                 }
             }
             self.stock.pop_front();
@@ -140,7 +137,7 @@ impl PartSend {
         if self.stock.len() < need {
             let ask = u32::try_from(need).unwrap_or(u32::MAX);
             self.hub.links[self.k].demand.ask(ask, &self.hub.front_bell);
-            self.hub.counts.requests.fetch_add(1, Ordering::Relaxed);
+            super::count(&self.hub.counts.requests, 1);
             self.reseal_from = Some((p0, s0));
             return false;
         }
@@ -179,10 +176,7 @@ impl PartSend {
             return true;
         }
         let dropped = (self.tx.n_sealed - j0) as u64;
-        self.hub
-            .counts
-            .lag_reseals
-            .fetch_add(dropped, Ordering::Relaxed);
+        super::count(&self.hub.counts.lag_reseals, dropped);
         self.tx.n_sealed = j0;
         self.tx.n_msgs = self.tx.next;
         self.reseal_from = Some((p0, j0));
@@ -219,11 +213,8 @@ impl PartSend {
                         .sum();
                     self.tx.next += n;
                     let link = &self.hub.links[self.k];
-                    link.sent_bytes.fetch_add(bytes, Ordering::Relaxed);
-                    self.hub
-                        .counts
-                        .part_sent
-                        .fetch_add(sent as u64, Ordering::Relaxed);
+                    link.stats.sent_bytes.fetch_add(bytes, Ordering::Relaxed);
+                    super::count(&self.hub.counts.part_sent, sent as u64);
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(self.blocked()),
@@ -240,6 +231,7 @@ impl PartSend {
                 Err(_) => {
                     let c = u64::from(self.tx.msgs[self.tx.next].count);
                     self.hub.links[self.k]
+                        .stats
                         .send_errors
                         .fetch_add(c, Ordering::Relaxed);
                     self.tx.next += 1;
@@ -256,10 +248,7 @@ impl PartSend {
         let j0 = usize::from(self.tx.msgs[self.tx.next].first);
         let p0 = self.seals[j0].2;
         let dropped = (self.tx.n_sealed - j0) as u64;
-        self.hub
-            .counts
-            .eagain_drops
-            .fetch_add(dropped, Ordering::Relaxed);
+        super::count(&self.hub.counts.eagain_drops, dropped);
         self.tx.n_sealed = j0;
         self.tx.n_msgs = self.tx.next;
         self.reseal_from = Some((p0, j0));

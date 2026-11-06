@@ -43,6 +43,8 @@ pub(crate) struct Front {
     rseq: u64,
     /// 区画ごとの詰めている途中のバッチ。番号 0 は使わない。
     cur: Vec<Option<Box<Batch>>>,
+    /// 区画ごとの、前に device に足した送った byte の累計。
+    seen_bytes: Vec<u64>,
 }
 
 impl Front {
@@ -54,6 +56,7 @@ impl Front {
             peer,
             rseq: 0,
             cur: (0..parts).map(|_| None).collect(),
+            seen_bytes: vec![0; parts],
         }
     }
 
@@ -88,7 +91,7 @@ impl Front {
         loop {
             if self.cur[k].is_none() {
                 let Some(b) = self.hub.links[k].to_front.pop() else {
-                    self.hub.counts.lane_drops.fetch_add(1, Ordering::Relaxed);
+                    super::count(&self.hub.counts.lane_drops, 1);
                     return;
                 };
                 self.cur[k] = Some(b);
@@ -101,7 +104,7 @@ impl Front {
             }
             if b.packets() == 0 {
                 // 空のバッチに入らない packet は MTU を超える。起きないが捨てて数える
-                self.hub.counts.lane_drops.fetch_add(1, Ordering::Relaxed);
+                super::count(&self.hub.counts.lane_drops, 1);
                 return;
             }
             self.ship(k, device, now);
@@ -122,7 +125,7 @@ impl Front {
             if b.push_stock(it).is_err() {
                 break;
             }
-            self.hub.counts.piggybacked.fetch_add(1, Ordering::Relaxed);
+            super::count(&self.hub.counts.piggybacked, 1);
         }
         self.send_to(k, b);
     }
@@ -179,7 +182,7 @@ impl Front {
                     left -= 1;
                     added += 1;
                 }
-                self.hub.counts.refilled.fetch_add(added, Ordering::Relaxed);
+                super::count(&self.hub.counts.refilled, added);
                 if b.is_empty() {
                     b.clear();
                     let _ = self.hub.links[k].to_front.push(b);
@@ -197,12 +200,15 @@ impl Front {
         self.publish();
     }
 
-    /// 区画が送った byte を device の数えに足し、区画の送信の誤りの和を返す。
-    fn collect_sent(&self, device: &mut Device) -> u64 {
+    /// 区画が送った byte を device の数えに足し、区画の送信の誤りの和を返す。区画の数えは区画だけが書き、front は
+    /// 状態の読み出しの時に読むだけである (front と区画が同じ cache line に書かない)。
+    fn collect_sent(&mut self, device: &mut Device) -> u64 {
         let mut errors = 0;
-        for l in self.hub.links.iter().skip(1) {
-            device.add_sent_bytes(&self.peer, l.sent_bytes.swap(0, Ordering::Relaxed));
-            errors += l.send_errors.load(Ordering::Relaxed);
+        for (k, l) in self.hub.links.iter().enumerate().skip(1) {
+            let total = l.stats.sent_bytes.load(Ordering::Relaxed);
+            device.add_sent_bytes(&self.peer, total.saturating_sub(self.seen_bytes[k]));
+            self.seen_bytes[k] = total;
+            errors += l.stats.send_errors.load(Ordering::Relaxed);
         }
         errors
     }
@@ -271,13 +277,7 @@ async fn receive_batch<U: Upper>(
             match front.steer.inbound(TUNNEL, p) {
                 Route::Part(0) => upper.handle_packet(now, p),
                 Route::Part(k) => front.stage(k, p, device, now),
-                Route::TcpFragment => {
-                    front
-                        .hub
-                        .counts
-                        .tcp_fragments
-                        .fetch_add(1, Ordering::Relaxed);
-                }
+                Route::TcpFragment => super::count(&front.hub.counts.tcp_fragments, 1),
             }
         });
     }
