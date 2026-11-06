@@ -217,7 +217,9 @@
 # `tcpquality.py agentstat` in the agent's machine: agent_rss_mib, agent_hwm_mib (the process's VmRSS
 # and VmHWM), agent_bound_mib (the Rust agent's start line), the latest count of each wgstack refusal
 # line (wg_*), the relay's refusal lines, and home's established and TIME_WAIT TCP sockets and
-# conntrack entries; vps_ct_count is the vps namespace's conntrack entries.
+# conntrack entries as home_tcp_estab_after, home_tcp_timewait_after and home_ct_count_after. Those
+# three are counts after the load has exited, not peaks, and nothing counts the agent's sockets
+# while the load runs; vps_ct_count is the vps namespace's conntrack entries.
 #
 # Requires `lab/lab build` and the netns topology (`lab/lab net up`).
 set -u

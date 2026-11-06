@@ -96,8 +96,8 @@ case ${1:-} in
     mkdir -p "$out"
     cases "$set_name" > "$out/cases.txt"
     # the defaults come first, so that the options given override them
-    # shellcheck disable=SC2086 # the arms are two words on purpose
     rc=0
+    # shellcheck disable=SC2086 # the arms are two words on purpose
     "$HERE/lab" paired --split --vcpus 4 --placement apart --rounds 2 --runs 2 ${args[@]+"${args[@]}"} \
       --cases "$out/cases.txt" --out "$out" $ARMS || rc=$?
     summary "$out" | tee "$out/manyconn.txt" || true

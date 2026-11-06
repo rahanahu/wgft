@@ -409,7 +409,7 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus
   tick の値は clock tick で数えるので、10 秒の窓で約 1% の粒度です。KVM の時間と qemu の時間も同じ粒度です。
   窓の両端はホストの 0.5 秒ごとの標本の間を直線で補うので、10 秒の実行で最大約 2.5% の誤差が入りえます。
   この誤差は 2 つの腕でほぼ打ち消し合います。
-  agent の VM のホストの halt polling を切っても、ゲストのモードの時間 (tick の値) は変わりませんでした (2026-11-06、2 vCPU)
+  agent の VM のホストの halt polling を切っても、ゲストのモードの時間 (tick の値) は変わりませんでした (2026-11-06、2 vCPU)。
 - ゲストのモードの時間の入力:`AGENTVMGUESTRATIO` と `PEERVMGUESTRATIO` の入力は、run ごとの vCPU のスレッドの実行時間 - KVM の時間 - qemu のユーザー空間の時間です。
   ホストの `/proc/<pid>/task/<tid>/stat` の guest_time (tick の数) は、idle の多い vCPU で過大に数えることがあり、使いません。
   2026-11-07 にホストの perf (ref-cycles のゲストの計数、tick に依らない) と、1 vCPU の軽い負荷、2 vCPU の軽い負荷、2 vCPU の最大負荷の 3 つの測定で並べました。各腕 4 run です。
@@ -602,15 +602,15 @@ lab/manyconn.sh summary ~/.cache/wgft-lab/manyconn-churn-<日時>
 CPU の判定の値は、各 case の `result.txt` の `AGENTVMGUESTRATIO` で、`AGENTVMRATIO` は参考の値です。
 
 - `concurrent`:全速の iperf3 の stream を 16、256、1024、2000 本、両方の向きに、`--udp-ping` 付きで流します。
-  2000 本と iperf3 の制御の接続 16 本の和は、agent の既定のフロー数の上限 (`WGFT_MAX_TCP_FLOWS` の 2048 から、1 つのルールが使えない予備の 4 を引いた数) に収まります
+  2000 本と iperf3 の制御の接続 16 本の和は、agent の既定のフロー数の上限 (`WGFT_MAX_TCP_FLOWS` の 2048 から、1 つのルールが使えない予備の 4 を引いた数) に収まります。
 - `fixed`:同じ本数で、stream の和が約 `MANYCONN_FIXED_MBIT` (既定 2048) Mbit/s になるように stream ごとの速さを抑えます。
-  2 つの腕に同じ負荷を掛け、UDP の往復の時間を比べます
+  2 つの腕に同じ負荷を掛け、UDP の往復の時間を比べます。
 - `churn`:短い接続 (往復 200 byte ずつ、待ち受けの側が先に閉じる) を毎秒 500 から 16000 本、10 秒ずつ開きます。
   毎秒 2000 本を 60 秒続ける case は、wgstack の TIME_WAIT の表 (65536 行を 60 秒、毎秒約 1092 本) を超える数の接続を閉じます。
   ただし client のアドレスが 1 つなので、表は埋まりません。
   client の一時ポートは 60 秒の内に一巡し、TIME_WAIT の行の 4 つ組への新しい SYN がその行を引き継ぐので、行の数は一時ポートの範囲 (既定 28232) を超えません。
   2026-11-07 の測定では押し出しは 0 でした。
-  表を埋めるには client のアドレスを増やす必要があります
+  表を埋めるには client のアドレスを増やす必要があります。
 
 `summary` は `tcpquality.py manyconn` で、case と腕ごとに中央値の表を出します。
 iperf3 の case は速さ (iperf3 の値と、byte を CPU の窓の全体で割った `window_mbit`)、agent の VM の byte あたりの CPU、公平 (Jain の指数、最小と最大の stream)、UDP の往復の時間、agent の RSS と起動の行のメモリの上界、断った行と drop の数です。
@@ -622,22 +622,23 @@ churn の case は、毎秒の完了数、確立と往復の時間の p50 と p9
   byte と速さは足し、公平の値は全部の stream で数えます。
   数百本の stream では、iperf3 が自分の 10 秒の外で接続と終わりに数秒から数十秒を使い、CPU の窓がその分だけ延びます。
   byte あたりの CPU は窓の全体で数えるので影響を受けませんが、iperf3 の速さの値はその窓の速さと合いません。
-  `manyconn` の `window_mbit` は窓の全体の速さで、速さの下限です
-  結果の行に `iperf_groups` が付きます
+  `manyconn` の `window_mbit` は窓の全体の速さで、速さの下限です。
+  結果の行に `iperf_groups` が付きます。
 - `TOOL=churn`:`tools/churn` の `churn run` が、`CHURN_RATE` 本を毎秒、`CHURN_S` 秒 (既定 10) 開きます。
   前の接続の終わりを待たずに開くので、遅れても負荷は下がりません。
   `churn_inflight_max` は client の側で dial を始めてから閉じ終えるまでの接続の最大の数です。
-  SYN の再送を待つ接続、agent の accept の待ち行列の接続、握手の後に RST で断られる途中の接続も数えるので、agent が中継に保持するフローの数 (上限 `WGFT_MAX_TCP_FLOWS` から予備の 4 を引いた数) を超えることがあります
+  SYN の再送を待つ接続、agent の accept の待ち行列の接続、握手の後に RST で断られる途中の接続も数えるので、agent が中継に保持するフローの数 (上限 `WGFT_MAX_TCP_FLOWS` から予備の 4 を引いた数) を超えることがあります。
   `CHURN_CLOSE=server` (既定) は LAN のホストが先に閉じ、agent の netstack が TIME_WAIT を持ちます。
-  `received` は完了した接続の往復の byte で、GB あたりの CPU に `2 × CHURN_SIZE / 1e9` を掛けると接続あたりになります
+  `received` は完了した接続の往復の byte で、GB あたりの CPU に `2 × CHURN_SIZE / 1e9` を掛けると接続あたりになります。
 - 送り元のアドレスごとの上限:client の namespace はアドレスが 1 つなので、stream と制御の接続の和が 120 以上の場合と churn では、server を `WGFT_MAX_TCP_FLOWS_PER_SOURCE=0` で起動します。
-  結果の行に `per_source_cap=off` が付きます
+  結果の行に `per_source_cap=off` が付きます。
 - conntrack:churn では 2 台の VM の conntrack の表を `CT_MAX` (既定 1048576) まで広げます。
-  conntrack の TIME_WAIT は 120 秒なので、既定の表は毎秒数千本の接続で溢れ、その drop はラボを測ることになるためです
-- agent の状態:各実行の窓の後に、`tcpquality.py agentstat` が agent の RSS と VmHWM、起動の行のメモリの上界、wgstack の断った行と drop の行の最新の数 (`wg_*`)、中継の断った行の数、`home` の確立と TIME_WAIT の TCP のソケットと conntrack の数を結果の行に足します。
+  conntrack の TIME_WAIT は 120 秒なので、既定の表は毎秒数千本の接続で溢れ、その drop はラボを測ることになるためです。
+- agent の状態:各実行の窓の後に、`tcpquality.py agentstat` が agent の RSS と VmHWM、起動の行のメモリの上界、wgstack の断った行と drop の行の最新の数 (`wg_*`)、中継の断った行の数、`home` の確立と TIME_WAIT の TCP のソケットと conntrack の数 (`home_tcp_estab_after`、`home_tcp_timewait_after`、`home_ct_count_after`) を結果の行に足します。
+  この 3 つは負荷が終わった後に 1 回数えた値で、最大値ではありません。負荷の間に agent 側のソケットの数を取る仕組みはありません。
   行の数は agent が同じ種類の行を出す間隔だけ遅れます。
   制御の輪の drop は種類ごとの数を log に出さないので、和 (`wg_ctl_dropped`) だけです。
-  TIME_WAIT の表の行の数も出ないので、押し出した数 (`wg_tw_evicted`) で見ます
+  TIME_WAIT の表の行の数も出ないので、押し出した数 (`wg_tw_evicted`) で見ます。
 
 ## 対応する VPS の環境
 

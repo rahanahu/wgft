@@ -419,6 +419,8 @@ TCP_STATES = {"01": "estab", "06": "timewait"}
 
 
 def agentstat(pid, log, ns=""):
+    # the socket and conntrack counts are read once, after the load has exited, so their keys end in
+    # _after: they are not peaks, and no count is taken while the load runs
     out = {}
     try:
         with open("/proc/%s/status" % pid) as f:
@@ -454,7 +456,7 @@ def agentstat(pid, log, ns=""):
             pass
         return n
     for k, v in in_netns(ns, sockets).items():
-        out["%s_%s" % (ns or "ns", k)] = v
+        out["%s_%s_after" % (ns or "ns", k)] = v
     print(" ".join("%s=%s" % kv for kv in out.items()))
     return 0
 
@@ -481,7 +483,7 @@ MANY_AGENT = ("agent_rss_mib", "agent_hwm_mib", "agent_bound_mib", "wg_syn_full"
               "wg_syn_accept_full", "wg_accept_overflow", "wg_tw_evicted", "wg_ctl_dropped", "wg_ooo_dropped",
               "wg_accounting_fault", "wg_udp_endpoint_full", "wg_udp_tunnel_full", "wg_udp_send_evicted",
               "wg_udp_send_expired", "wg_other_lines", "relay_tcp_refusing_lines", "relay_udp_dropping_lines",
-              "home_tcp_estab", "home_tcp_timewait", "home_ct_count")
+              "home_tcp_estab_after", "home_tcp_timewait_after", "home_ct_count_after")
 # the drop and error counters snapdiff prints only when they moved, summed over the runs
 MANY_DROPS = re.compile(r"(udp_rcvbuferr|udp_sndbuferr|tcp_synretrans|tcp_attemptfails|tcp_estabresets|tcp_twoverflow|"
                         r"tcp_listenoverflows|tcp_listendrops|_rxdrop|_txdrop|softnet_drop)$")
