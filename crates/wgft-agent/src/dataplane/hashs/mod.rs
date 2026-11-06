@@ -63,6 +63,10 @@ pub(crate) const STOCK_CAP: usize = 256;
 /// 起動の時の区画の数 P。Linux でバッチが有効な時だけ 2 以上になる (区画の送りは `sendmmsg` の道だけを持つ)。
 /// ラボの build (`lab-observe`) だけは `WGFT_LAB_HASHS_P` で上書きできる。
 pub(crate) fn part_count(batched: bool) -> usize {
+    // E2 の基準の腕 (測定だけの branch):同じ commit の Inline。区画に分けず、いつも今の Inline の駆動で動く
+    if cfg!(not(test)) {
+        return 1;
+    }
     if !cfg!(target_os = "linux") || !batched {
         return 1;
     }
