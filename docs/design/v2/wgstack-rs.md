@@ -1024,9 +1024,15 @@ CPU の目標は置き換えの条件に入れないので ([置き換えの判�
 データプレーンのスレッドがどの理由で終わっても、作り直しを管理する task はそれを知り、トンネルを作り直します。
 device の層のハンドシェイクの時刻の高い水位 (`Device::unix_high_water`) も、同じ受け渡しで次の世代に渡します。
 
-核 (`wgft-wgstack`)、WireGuard の device (`wgft-wireguard`) と、その下の WireGuard の protocol の crate (`sanstun`) は、release の build でも整数の桁あふれを検査します (`Cargo.toml` の `[profile.release.package.*]` の `overflow-checks = true`)。
-どれも相手が送る packet を読む crate で、桁あふれは相手が届かせうる誤りです。
-`sanstun` への指定は build の profile の設定で、依存のソースは変えません。
+release の build は、ワークスペースのすべての crate で整数の桁あふれを検査します (`Cargo.toml` の `[profile.release]` の `overflow-checks = true`)。
+特に核 (`wgft-wgstack`)、WireGuard の device (`wgft-wireguard`) と、その下の WireGuard の protocol の crate (`sanstun`) は相手が送る packet を読み、桁あふれは相手が届かせうる誤りです。
+検査の有無は、ソースを書いた crate でなく、コードを build する crate の設定で決まります。
+核の `Stack<H: Hook>` のような generic なコードは、`wgft-netstack` と `wgft-agent` を通した `Stack<LanHook<T>>` の形で、使う側の crate が build します。
+crate をまたいで inline された小さな関数も同じです。
+核の crate だけに指定すると、agent の release の build で核の generic な部分の検査が外れます。
+このため、crate ごとの指定をやめ、profile 全体で指定します。
+今後加える crate も外れず、依存のソースは変えません。
+桁あふれを意図して使う計算は、`wrapping_*` で明示します。
 検査が無いと値が黙って回り込み、表の添字や長さの誤りとして先へ進みます。
 検査があれば panic になり、上のとおり世代を終えてトンネルを作り直すので、結果の範囲が決まります。
 このため、panic を巻き戻す設定 (`panic = "unwind"`) と組で保ちます。
