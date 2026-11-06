@@ -899,7 +899,8 @@ for mode in $MODES; do
     elif [ "$TOOL" = churn ]; then
       got=$(tail -1 "$W/wgft-tq-churn-$mode.log")
       sent=$got
-      stats="undetermined=0 streams=1 duration_s=$CHURN_S churn_close=$CHURN_CLOSE$(echo " $got" | grep -oE ' churn_[a-z0-9_]+=[^ ]*' | tr -d '\n')"
+      # overall_mbit is the payload of the completed connections over CHURN_S, which the paired analysis reads
+      stats="undetermined=0 streams=1 duration_s=$CHURN_S overall_mbit=$(awk -v b="$(field received "$got")" -v s="$CHURN_S" 'BEGIN { printf "%.3f", b * 8 / s / 1e6 }') churn_close=$CHURN_CLOSE$(echo " $got" | grep -oE ' churn_[a-z0-9_]+=[^ ]*' | tr -d '\n')"
       c_us=; [ -n "$client_cg" ] && c_us=$(awk '$1 == "usage_usec" { print $2 }' "$client_cg/cpu.stat" 2>/dev/null)
       rmdir "$client_cg" 2>/dev/null
     else
