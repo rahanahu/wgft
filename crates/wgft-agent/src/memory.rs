@@ -164,12 +164,37 @@ pub struct MemoryBound {
     pub total: usize,
 }
 
+/// The agent's TCP/IP core tables for `WGFT_MAX_TCP_FLOWS` = `max_flows`; 0 is 2048.
+///
+/// The agent states every value instead of taking the core's defaults, which are small values for
+/// other users of the library. These are the values the agent has always used, the frozen Go
+/// wgstack's production tables, and docs/design/v2/agent-bound.md is generated from them.
+#[must_use]
+pub const fn core_limits(max_flows: usize) -> CoreLimits {
+    CoreLimits {
+        max_flows: if max_flows == 0 { 2048 } else { max_flows },
+        accept_queue: 512,
+        syn_rows: 1024,
+        tw_rows: 65536,
+        ctl_slots: 256,
+        frag_entries: 128,
+        frag_pieces: 512,
+        udp_rx_datagrams: 4096,
+        udp_tx_datagrams: 1024,
+        udp_rx_bytes: 4 << 20,
+        udp_tx_bytes: 4 << 20,
+        frag_bytes: 4 << 20,
+        boost_slots: 16,
+        pool_chunks: 64,
+    }
+}
+
 impl MemoryBound {
     /// The bound for the flow caps `limits` and the tunnel batching `batching`, with the core's
-    /// tables that `WGFT_MAX_TCP_FLOWS` makes.
+    /// tables that `WGFT_MAX_TCP_FLOWS` makes ([`core_limits`]).
     #[must_use]
     pub fn for_limits(limits: flowpool::Limits, batching: Batching) -> Self {
-        Self::with_core(limits, CoreLimits::with_max_flows(limits.tcp), batching)
+        Self::with_core(limits, core_limits(limits.tcp), batching)
     }
 
     /// The bound for the flow caps `limits` over a core with the tables `core_limits`, at the

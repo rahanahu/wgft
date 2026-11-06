@@ -40,7 +40,7 @@ pub(crate) fn limits() -> Limits {
         syn_rows: 32,
         tw_rows: 256,
         ctl_slots: 64,
-        ..Limits::default()
+        ..crate::memory::core_limits(0)
     }
 }
 

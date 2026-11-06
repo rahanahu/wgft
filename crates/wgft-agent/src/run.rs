@@ -163,7 +163,7 @@ impl Agent {
                 &self.private_key,
                 cfg,
                 &mut self.dataplane,
-                wgft_wgstack::Limits::with_max_flows(self.opts.limits.tcp),
+                crate::memory::core_limits(self.opts.limits.tcp),
                 self.opts.batching,
                 Some(&clock),
                 Arc::clone(&self.tunnel_dead),

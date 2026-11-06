@@ -70,7 +70,7 @@ fn held_matches_the_allocations_and_the_floor_term_is_reached() {
         syn_rows: 16,
         tw_rows: 32,
         ctl_slots: 16,
-        ..Limits::default()
+        ..wgft_wgstack_bench::agent_limits(0)
     };
     let slots = limits.conns();
 

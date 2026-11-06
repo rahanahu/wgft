@@ -26,13 +26,17 @@ use crate::wire::{self, IP_HEADER_LEN, Ipv4, PROTO_UDP, PayloadDrop, UDP_HEADER_
 use core::fmt;
 use core::net::{Ipv4Addr, SocketAddrV4};
 
-/// 受信の byte の予算です。値はどれも設定の項目にしません (udp-accounting.md の UDP の受信の予算)。
+/// 受信の byte の予算の、凍結した Go と wgft の agent の値です。予算は [`crate::Limits`] が持ちます。
+#[cfg(any(test, feature = "harness"))]
 pub(crate) const RX_BYTES: usize = 4 << 20;
-/// 受信の datagram の数の予算の本番の値です。
+/// 受信の datagram の数の予算の、凍結した Go と wgft の agent の値です。
+#[cfg(any(test, feature = "harness"))]
 pub(crate) const RX_DATAGRAMS: usize = 4096;
-/// 送信の byte の予算です。
+/// 送信の byte の予算の、凍結した Go と wgft の agent の値です。
+#[cfg(any(test, feature = "harness"))]
 pub(crate) const TX_BYTES: usize = 4 << 20;
-/// 送信の datagram の数の予算の本番の値です。
+/// 送信の datagram の数の予算の、凍結した Go と wgft の agent の値です。
+#[cfg(any(test, feature = "harness"))]
 pub(crate) const TX_DATAGRAMS: usize = 1024;
 /// endpoint 1 つの上限は予算のこの数分の 1 です。
 pub(crate) const ENDPOINT_SHARE: usize = 4;

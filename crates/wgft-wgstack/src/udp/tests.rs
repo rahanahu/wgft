@@ -912,3 +912,30 @@ fn send_latest_skips_a_head_that_has_started_to_leave() {
     n.s.check_invariants().unwrap();
     assert_eq!(n.s.held().udp_tx_datagrams, 0);
 }
+
+/// 既定の表の大きさ (`Limits::default()`) の核は、最も大きい UDP の datagram を断片から組み立てて受け、断片に
+/// 分けて送れます。UDP の byte の予算の下限と再組み立ての表の既定の値がその大きさを覆うことの確かめです。
+#[test]
+fn default_limits_carry_the_largest_datagram() {
+    let config = crate::config::Config {
+        limits: crate::Limits::default(),
+        ..crate::config::Config::new(DUT, TEST_MTU)
+    };
+    let budget = crate::budget::Budget::new(config.limits.boost_slots).unwrap();
+    let mut n = TestNet::with_budget(config, [7; 64], budget);
+    let pc = bind(&mut n, 53);
+    let msg: Vec<u8> = (0..MAX_PAYLOAD).map(|i| (i % 251) as u8).collect();
+    let frags = crate::testnet_tests::split_ipv4(&build_udp(PEER_UDP, 53, &msg), 1400, 9);
+    assert_eq!(frags.len(), 47);
+    for f in &frags {
+        n.write(f);
+    }
+    let mut b = vec![0u8; MAX_PAYLOAD];
+    let (k, from) = n.s.recv_from(n.now, pc, &mut b).unwrap();
+    assert_eq!((&b[..k], from), (&msg[..], PEER_UDP));
+    assert_eq!(n.s.send_to(n.now, pc, &msg, PEER_UDP), Ok(MAX_PAYLOAD));
+    let out = n.drain_raw();
+    assert!(out.len() >= 47, "{} fragments", out.len());
+    n.s.check_invariants().unwrap();
+    assert_eq!(n.s.stats().fragments_evicted, 0);
+}

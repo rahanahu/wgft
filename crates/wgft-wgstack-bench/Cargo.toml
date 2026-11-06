@@ -8,6 +8,8 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# 測定は agent と同じ表の大きさの核で行うので、agent の値 (`memory::core_limits`) を使います。
+wgft-agent.workspace = true
 wgft-wgstack.workspace = true
 
 [lints]

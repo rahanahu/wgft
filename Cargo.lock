@@ -1747,6 +1747,7 @@ name = "wgft-wgstack-bench"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "wgft-agent",
  "wgft-wgstack",
 ]
 
@@ -1761,6 +1762,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "wgft-agent",
  "wgft-alloc-count",
  "wgft-netstack",
  "wgft-tcpharness",

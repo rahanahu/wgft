@@ -34,6 +34,8 @@ name = "scenarios"
 harness = false
 
 [dev-dependencies]
+# agent の核の表の大きさが Go の記録の値 (`Limits::go_reference`) と同じであることの試験が使います。
+wgft-agent.workspace = true
 libtest-mimic.workspace = true
 tempfile.workspace = true
 wgft-alloc-count.workspace = true

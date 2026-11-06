@@ -23,7 +23,8 @@ pub(crate) fn clock() -> Instant {
     tokio::time::Instant::now().into_std()
 }
 
-/// 試験の表の大きさです。
+/// 試験の表の大きさです。接続と行の表は小さく、UDP と再組み立ての予算と boost の枠は wgft の agent の値です
+/// (核の既定は外の利用者のための小さな値です)。
 pub(crate) fn limits() -> Limits {
     Limits {
         max_flows: 16,
@@ -31,7 +32,15 @@ pub(crate) fn limits() -> Limits {
         syn_rows: 16,
         tw_rows: 32,
         ctl_slots: 16,
-        ..Limits::default()
+        frag_entries: 128,
+        frag_pieces: 512,
+        udp_rx_datagrams: 4096,
+        udp_tx_datagrams: 1024,
+        udp_rx_bytes: 4 << 20,
+        udp_tx_bytes: 4 << 20,
+        frag_bytes: 4 << 20,
+        boost_slots: 16,
+        pool_chunks: 64,
     }
 }
 

@@ -708,7 +708,7 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
 
 - MTU:起動の時には server の MTU を知らないので、核と device の項は受け付ける最大の 9216 で数えます
 - 核:核の `Bound::for_limits` の和です。
-  接続の枠の数は `WGFT_MAX_TCP_FLOWS` から作る核の表の大きさ (`Limits::with_max_flows`) で決まります
+  接続の枠の数は `WGFT_MAX_TCP_FLOWS` から作る核の表の大きさ (`wgft_agent::memory::core_limits`) で決まります
 - 表:handle の層の waker の表の上界と、核の hook が持つ LAN の側のソケットの表です。
   後者は作成の時に接続の枠の数だけ確保し、育ちません
 - データプレーンの駆動:waker を移す `Vec` は表の行の数 (`Netstack::waker_slots`) まで育ち、容量はその 2 倍までなので、2 × 行の数 × `Waker` の大きさです

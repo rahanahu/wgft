@@ -110,7 +110,7 @@ mod table {
     fn table() -> String {
         let bounds = TABLE_LIMITS.map(|(udp, tcp)| {
             let limits = flowpool::Limits { udp, tcp };
-            let core = Bound::for_limits(&CoreLimits::with_max_flows(tcp), MAX_MTU);
+            let core = Bound::for_limits(&super::core_limits(tcp), MAX_MTU);
             (
                 MemoryBound::for_limits(limits, Batching::derived(limits)),
                 core,
