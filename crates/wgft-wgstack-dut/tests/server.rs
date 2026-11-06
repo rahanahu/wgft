@@ -480,14 +480,23 @@ fn burst_after_ack(d: &mut WgstackDut, mut p: Peer) -> usize {
 #[test]
 fn go_compat_switch_is_per_core_and_restored() {
     assert!(!wgft_wgstack::go_compat_rto_l2());
+    assert!(!wgft_wgstack::go_compat_dsack_snd_una());
     let mut replay = WgstackDut::for_replay(&hello()).expect("HELLO");
     let mut product = WgstackDut::new(&hello()).expect("HELLO");
     // 2 つの核を同じ thread で交互に駆動する
     let (_, rp) = until_rto(&mut replay);
     assert!(!wgft_wgstack::go_compat_rto_l2(), "restored after a call");
+    assert!(
+        !wgft_wgstack::go_compat_dsack_snd_una(),
+        "restored after a call"
+    );
     let (_, pp) = until_rto(&mut product);
     let replay_burst = burst_after_ack(&mut replay, rp);
     assert!(!wgft_wgstack::go_compat_rto_l2(), "restored after a call");
+    assert!(
+        !wgft_wgstack::go_compat_dsack_snd_una(),
+        "restored after a call"
+    );
     let product_burst = burst_after_ack(&mut product, pp);
     // 後の RTO の slow start の増分は、replay の核が 2 SMSS、製品の核が 1 SMSS で、1 segment 違う
     assert_eq!(
@@ -497,4 +506,5 @@ fn go_compat_switch_is_per_core_and_restored() {
     );
     // replay の核を駆動した後も、thread の値は偽なので、直接駆動する核は製品と同じ L = 1 になる
     assert!(!wgft_wgstack::go_compat_rto_l2());
+    assert!(!wgft_wgstack::go_compat_dsack_snd_una());
 }

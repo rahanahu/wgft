@@ -74,6 +74,26 @@ pub fn go_compat_rto_l2() -> bool {
     GO_COMPAT_RTO_L2.with(std::cell::Cell::get)
 }
 
+// 凍結した Go の記録との照合のためだけに、先頭の SACK block が D-SACK かどうかを Go と同じく SND.UNA と比べて決める切り替えです
+// (RFC 2883 5 節は segment 自身の累積の確認と比べる)。feature `harness` の build だけにあり、値は thread ごとで、既定は偽です。
+#[cfg(feature = "harness")]
+thread_local! {
+    static GO_COMPAT_DSACK_SND_UNA: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 真にすると、この thread で駆動する核は D-SACK の判定を SND.UNA と比べます (凍結した Go と同じ)。核を駆動する前に
+/// 呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
+#[cfg(feature = "harness")]
+pub fn set_go_compat_dsack_snd_una(on: bool) {
+    GO_COMPAT_DSACK_SND_UNA.with(|c| c.set(on));
+}
+
+/// 今の thread の値です。
+#[cfg(feature = "harness")]
+pub fn go_compat_dsack_snd_una() -> bool {
+    GO_COMPAT_DSACK_SND_UNA.with(std::cell::Cell::get)
+}
+
 /// 何もしない hook です。boost の戻りを常に許します。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoHook;

@@ -19,7 +19,8 @@ use wgft_tcpharness::dut::{Accepted, ClockedDut, Datagram, DutError, Op};
 use wgft_tcpharness::frame::{self, BoostEvent, Clock, ErrKind, Handle, Hello, MAX_FRAME, VERSION};
 use wgft_wgstack::{
     BoostPolicy, Budget, Closed, Config, Congestion, ConnId, Error, Held, Hook, Limits, ListenerId,
-    PingId, Spare, Stack, Time, TouchedCheck, UdpId, go_compat_rto_l2, set_go_compat_rto_l2,
+    PingId, Spare, Stack, Time, TouchedCheck, UdpId, go_compat_dsack_snd_una, go_compat_rto_l2,
+    set_go_compat_dsack_snd_una, set_go_compat_rto_l2,
 };
 
 /// `HELLO_OK` が返す engine の名前です。
@@ -146,11 +147,12 @@ pub fn limits_from_hello(ls: &[frame::Limit]) -> Result<Limits, HelloError> {
 }
 
 /// [`WgstackDut::sync_go_compat`] が返す値です。捨てると、照合用の切り替えを呼びの前の値に戻します。
-struct CompatGuard(bool);
+struct CompatGuard(bool, bool);
 
 impl Drop for CompatGuard {
     fn drop(&mut self) {
         set_go_compat_rto_l2(self.0);
+        set_go_compat_dsack_snd_una(self.1);
     }
 }
 
@@ -267,9 +269,10 @@ impl WgstackDut {
     /// 核を駆動する間だけ、thread の照合用の切り替えをこの核の値にします。返した値を捨てると元の値に戻るので、
     /// 呼びの外の thread は偽のままで、直接 `Stack` を駆動する核は製品と同じ L = 1 です
     fn sync_go_compat(&self) -> CompatGuard {
-        let prev = go_compat_rto_l2();
+        let prev = (go_compat_rto_l2(), go_compat_dsack_snd_una());
         set_go_compat_rto_l2(self.go_compat);
-        CompatGuard(prev)
+        set_go_compat_dsack_snd_una(self.go_compat);
+        CompatGuard(prev.0, prev.1)
     }
 
     fn build(h: &Hello, replay: bool) -> Result<Self, HelloError> {

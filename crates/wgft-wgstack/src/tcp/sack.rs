@@ -204,8 +204,17 @@ impl Conn<'_> {
         if !t.sack_ok {
             return 0;
         }
-        // 先頭の block が確認済みの範囲か 2 つ目の block の内側なら D-SACK です (RFC 2883 5 節)。
-        if !seq::gt(b0.right, t.snd_una)
+        // 先頭の block がこの segment の累積の確認以下か 2 つ目の block の内側なら D-SACK です (RFC 2883 5 節)。
+        // 並べ替えられた古い ACK でも判断が変わらないよう、SND.UNA でなく segment 自身の確認と比べます。
+        #[cfg(feature = "harness")]
+        let dsack_ack = if crate::stack::go_compat_dsack_snd_una() {
+            t.snd_una // 凍結した Go の記録との照合用
+        } else {
+            seg.ack
+        };
+        #[cfg(not(feature = "harness"))]
+        let dsack_ack = seg.ack;
+        if !seq::gt(b0.right, dsack_ack)
             || blocks
                 .get(1)
                 .is_some_and(|b1| seq::le(b1.left, b0.left) && seq::le(b0.right, b1.right))
