@@ -1261,7 +1261,6 @@ fn a_reply_needing_more_fragments_than_the_cap_is_dropped_whole() {
 /// DF を立てた断片も、ほかの断片と同じく再組み立てます (RFC 6864 4.3: DF=1 の断片は、途中の router が分けたものを
 /// 再び分けないという意味で、正当な断片です)。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn fragments_with_df_set_are_reassembled() {
     let mut n = TestNet::new(small_limits());
     let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
@@ -1285,7 +1284,6 @@ fn fragments_with_df_set_are_reassembled() {
 
 /// DF の立った断片と立たない断片が混ざっても組み上がります。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn mixed_df_fragments_are_reassembled() {
     let mut n = TestNet::new(small_limits());
     let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();

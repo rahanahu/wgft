@@ -160,12 +160,18 @@ fn rejects_invalid_limits() {
 }
 
 #[test]
-fn rejects_dont_fragment_with_fragments() {
+fn accepts_dont_fragment_with_fragments() {
+    // RFC 6864 4.3 は DF の立った断片を禁じません。凍結した Go は断片の誤りとして捨てます。
     let mut t = table(1, 2, 1024);
     let mut p = pkt(17, 7, 0, true, 0, &[], b"abcdefgh");
     p[6..8].copy_from_slice(&0x6000u16.to_be_bytes());
     set_ipv4_checksum(&mut p[..20]);
-    assert_eq!(rejected(t.process(&p, at(0))).reason, Reason::Malformed);
+    assert!(matches!(t.process(&p, at(0)), Outcome::Held));
+    let mut t = table(1, 2, 1024);
+    crate::stack::set_go_compat_df_frag(true);
+    let out = t.process(&p, at(0));
+    crate::stack::set_go_compat_df_frag(false);
+    assert_eq!(rejected(out).reason, Reason::Malformed);
 }
 
 #[test]

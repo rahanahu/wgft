@@ -551,13 +551,14 @@ impl Table {
         let start = usize::from(flags & 0x1fff) * 8;
         let more = flags & 0x2000 != 0;
         let first = start == 0;
-        // 断片でない packet と、DF の立った断片は断片の誤りです。
+        // 断片でない packet は断片の誤りです。DF の立った断片は受け入れます (RFC 6864 4.3 は DF の立った断片を
+        // 禁じず、分けた側がさらに分けられないように立てうる)。
+        #[cfg(test)]
+        if crate::stack::go_compat_df_frag() && flags & 0x4000 != 0 {
+            return reject(Reason::Malformed, 6, first); // 凍結した Go の再組み立ての golden との照合用
+        }
         let is_fragment = more || start != 0;
-        if !ipv4_header_ok(&packet[..hlen])
-            || flags & 0x8000 != 0
-            || flags & 0x4000 != 0
-            || !is_fragment
-        {
+        if !ipv4_header_ok(&packet[..hlen]) || flags & 0x8000 != 0 || !is_fragment {
             return reject(Reason::Malformed, 6, first);
         }
         let (copied, copied_len) = match copied_options(&packet[..hlen], first) {

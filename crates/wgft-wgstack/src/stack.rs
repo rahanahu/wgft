@@ -218,6 +218,27 @@ pub fn go_compat_echo_drop() -> bool {
     GO_COMPAT_ECHO_DROP.with(std::cell::Cell::get)
 }
 
+// DF の立った断片を断片の誤りとして捨てる切り替えです。凍結した Go はそう動くので、Go の再組み立ての golden との
+// 照合のためだけにあります。記録の再生には要りません。試験の build だけにあり、製品の build には切り替えも
+// 読み出しもありません。値は thread ごとで、既定は偽 (RFC 6864 4.3 のとおり DF の立った断片も再組み立てる) です。
+#[cfg(test)]
+thread_local! {
+    static GO_COMPAT_DF_FRAG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 真にすると、この thread で駆動する再組み立ては DF の立った断片を捨てます (凍結した Go と同じ)。
+/// 核を駆動する前に呼びます。
+#[cfg(test)]
+pub(crate) fn set_go_compat_df_frag(on: bool) {
+    GO_COMPAT_DF_FRAG.with(|c| c.set(on));
+}
+
+/// 今の thread の値です。
+#[cfg(test)]
+pub(crate) fn go_compat_df_frag() -> bool {
+    GO_COMPAT_DF_FRAG.with(std::cell::Cell::get)
+}
+
 /// 何もしない hook です。boost の戻りを常に許します。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoHook;
