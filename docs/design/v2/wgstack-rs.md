@@ -2046,7 +2046,9 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   `max_age_ms` が 0 でなければ、datagram は入れた時刻 (ns) と時間の上限を持ち、`poll_udp` が先頭を取り出す時に、送り始めていない datagram が上限を超えていれば捨てます。
   捨てた数は `udp_send_evicted` と `udp_send_expired` に数え、`LogKind::UdpSendDropped` の門 (1 分に 1 回まで) を通します。
   `send_to` は変わらないので、凍結した Go の recording の照合には影響せず、divergences.json に足す行はありません。
-  待つ `send_to`、待ちの list の出入り、起こす経路は `cfg(test)` か `harness` の feature のときだけ作り、欄は残します。
+  待つ `send_to`、待ちの list の出入り、起こす経路は、どの build にも作ります。
+  wgft の agent は `send_to_latest` だけを使い、待ちの list は空のままなので、agent の挙動は変わりません。
+  背圧の要る一般の利用者 (古い datagram を捨ててほしくない送り手) は `send_to` と `UdpWritable` を使います。
   endpoint の列では、送り始めた先頭を飛ばした捨てが 2 番目を外すことがあり、`unlink_tx` はそれ以外の位置を会計の不整合 (`UdpFault::SendListBroken`) にします。
   不変条件の `check_invariants` は、送信の FIFO の前の指しと入れた時刻の順、endpoint の列の datagram の世代と順、列の長さが endpoint の送信の予算の件数に等しいことを確かめます
 - 断片の数:`fragments_dropped` は、Go の `FragmentsDropped` と同じく、datagram を完成させなかった断片 (保持した断片、重なった断片、捨てた断片) を数えます

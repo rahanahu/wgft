@@ -518,10 +518,7 @@ impl Udp {
         }
         self.dg[dir][usize::from(id)] = Dgram::default();
         let _ = self.dg_free[dir].try_push(id);
-        // 待つ送り手は `send_to` だけが作る。製品の build には `send_to` が無いので、起こす相手もいない
-        #[cfg(not(any(test, feature = "harness")))]
-        let _ = woken;
-        #[cfg(any(test, feature = "harness"))]
+        // 待つ送り手は `send_to` だけが作る。`send_to_latest` だけを使う呼び手では list は空のまま
         if dir == TX {
             while let Some(port) = self.wait_head {
                 let ep = self.eps.by_port_mut(port);
@@ -538,7 +535,6 @@ impl Udp {
     }
 
     /// endpoint `port` を送信の予算の空きを待つ list に入れます。
-    #[cfg(any(test, feature = "harness"))]
     fn wait(&mut self, port: u16) {
         let head = self.wait_head;
         let Some(ep) = self.eps.by_port_mut(port) else {
@@ -554,7 +550,6 @@ impl Udp {
     }
 
     /// endpoint `port` を待ちの list から外します。閉じる時に呼びます。
-    #[cfg(any(test, feature = "harness"))]
     fn unwait(&mut self, port: u16) {
         if !self.eps.by_port(port).is_some_and(|e| e.waiting) {
             return;
@@ -1151,12 +1146,16 @@ impl<H: Hook> Stack<H> {
         ))
     }
 
-    /// `data` を 1 つの datagram として `to` に送り、受け取った byte 数を返します。送信の予算 (核の全体と
-    /// endpoint 1 つの上限) を予約できなければ `WouldBlock` を返し、予約が返ったら `UdpWritable` を出します。
-    /// chunk を確保できなければ、待たずに [`Error::NoMemory`] を返します。
-    /// MTU を超える datagram は、送る時に DF を立てない断片に分けます。
-    #[cfg(any(test, feature = "harness"))]
-    #[doc(hidden)]
+    /// Queues `data` as one datagram to `to` and returns its length.
+    ///
+    /// When the send budget (the stack-wide UDP send budget or the endpoint's share of it) has no room,
+    /// returns [`Error::WouldBlock`] without queueing anything, and the stack emits
+    /// [`Event::UdpWritable`](crate::Event::UdpWritable) for this endpoint once queued datagrams have left.
+    /// When a buffer chunk cannot be allocated, returns [`Error::NoMemory`] at once without waiting.
+    /// A datagram larger than the MTU leaves as IPv4 fragments without DF.
+    ///
+    /// [`Stack::send_to_latest`] is the variant that never blocks and drops the oldest queued datagrams
+    /// instead.
     pub fn send_to(
         &mut self,
         now: Time,
@@ -1215,7 +1214,6 @@ impl<H: Hook> Stack<H> {
                 // TCP の `write` と同じく、確保の失敗は待たずに誤りで返します。送信の予約が返る当てが無いためです。
                 Err(Refused::NoMemory) => return Err(Error::NoMemory),
                 Err(r @ (Refused::Endpoint | Refused::Tunnel)) => {
-                    #[cfg(any(test, feature = "harness"))]
                     if latest.is_none() {
                         s.udp.wait(id.port);
                         return Err(Error::WouldBlock);
@@ -1264,7 +1262,6 @@ impl<H: Hook> Stack<H> {
             s.release_udp(RX, head);
             head = next;
         }
-        #[cfg(any(test, feature = "harness"))]
         s.udp.unwait(id.port);
         s.udp.eps.close(id.port, id.generation);
         let t = s.port_target(id.port);
