@@ -522,6 +522,15 @@ def manyconn(*logs):
                        if "host_agent_vcpu_guest_s" in r and int(r.get("churn_ok", "0")) > 0]
                 if per:
                     vals.append("agentvm_guest_us_per_conn=%.1f" % statistics.median(per))
+            else:
+                # the bytes over the whole CPU window: with hundreds of streams iperf3 can spend seconds
+                # connecting and closing outside its own 10 s, so this is a lower bound of the rate, and
+                # the window's length shows how far the run stretched
+                win = [(int(r["bytes"]) * 8 / float(r["window_s"]) / 1e6, float(r["window_s"])) for r in rs
+                       if r.get("bytes", "").isdigit() and float(r.get("window_s", "0") or 0) > 0]
+                if win:
+                    vals.append("window_mbit=%.0f window_s=%.1f" % (statistics.median(w[0] for w in win),
+                                                                    statistics.median(w[1] for w in win)))
             print("MANY case=%s arm=%s name=%s runs=%d failed=%d %s"
                   % (case, arm, names.get(arm, arm), len(rs), failed, " ".join(vals)))
     return 0

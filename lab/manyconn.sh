@@ -19,9 +19,12 @@
 #               MANYCONN_FIXED_MBIT (2048 by default, whole Mbit/s per stream), with UDP round trips:
 #               the same offered load for both arms, below the Rust agent's one-thread limit.
 #   churn       short connections (200 bytes each way, the target closing first) at 500 to 16000
-#               a second for 10 s, with UDP round trips, and 2000 a second for 60 s, long enough to
-#               fill the wgstack TIME_WAIT table (65536 rows held for 60 s, about 1092 closes a
-#               second) and make it evict.
+#               a second for 10 s, with UDP round trips, and 2000 a second for 60 s, past what
+#               the wgstack TIME_WAIT table holds (65536 rows held for 60 s, about 1092 closes a
+#               second). From the client's one address the table does not fill: the client's
+#               ephemeral ports come round within the 60 s, and a new SYN on a TIME_WAIT row
+#               takes that row over, so the rows stay under the port range (28232 by default);
+#               the 2026-11-07 run evicted none. Filling it needs more client addresses.
 # Every case runs 2 rounds of 2 runs per arm, with --vcpus 4 and --placement apart unless the
 # options say otherwise; the options go to `lab/lab paired` before --cases (for example --vcpus 1,
 # --out DIR, --base REF). MANYCONN_ARMS names the two arms, "rust kernel" by default. The CPU
@@ -29,7 +32,9 @@
 # /proc/stat (AGENTVMRATIO) for reference. The kernel arm has no RATIO of the agent process.
 #
 # summary prints `tcpquality.py manyconn` for every case under the out directories: per case and arm
-# the medians of the rate, the agent VM's CPU per GB (host guest time), the fairness, the UDP round
+# the medians of the rate (iperf3's own, and window_mbit, the bytes over the whole CPU window, a lower
+# bound when hundreds of streams make iperf3 spend seconds connecting and closing; window_s shows how
+# far the run stretched), the agent VM's CPU per GB (host guest time), the fairness, the UDP round
 # trips, the agent's RSS against its logged memory bound, its refusal lines and the drop counters,
 # or, for churn, the connections a second, the setup times and the agent VM's CPU per connection.
 #

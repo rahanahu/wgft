@@ -606,16 +606,23 @@ CPU の判定の値は、各 case の `result.txt` の `AGENTVMGUESTRATIO` で�
 - `fixed`:同じ本数で、stream の和が約 `MANYCONN_FIXED_MBIT` (既定 2048) Mbit/s になるように stream ごとの速さを抑えます。
   2 つの腕に同じ負荷を掛け、UDP の往復の時間を比べます
 - `churn`:短い接続 (往復 200 byte ずつ、待ち受けの側が先に閉じる) を毎秒 500 から 16000 本、10 秒ずつ開きます。
-  毎秒 2000 本を 60 秒続ける case は、wgstack の TIME_WAIT の表 (65536 行を 60 秒、毎秒約 1092 本) を埋めて押し出させます
+  毎秒 2000 本を 60 秒続ける case は、wgstack の TIME_WAIT の表 (65536 行を 60 秒、毎秒約 1092 本) を超える数の接続を閉じます。
+  ただし client のアドレスが 1 つなので、表は埋まりません。
+  client の一時ポートは 60 秒の内に一巡し、TIME_WAIT の行の 4 つ組への新しい SYN がその行を引き継ぐので、行の数は一時ポートの範囲 (既定 28232) を超えません。
+  2026-11-07 の測定では押し出しは 0 でした。
+  表を埋めるには client のアドレスを増やす必要があります
 
 `summary` は `tcpquality.py manyconn` で、case と腕ごとに中央値の表を出します。
-iperf3 の case は速さ、agent の VM の byte あたりの CPU、公平 (Jain の指数、最小と最大の stream)、UDP の往復の時間、agent の RSS と起動の行のメモリの上界、断った行と drop の数です。
+iperf3 の case は速さ (iperf3 の値と、byte を CPU の窓の全体で割った `window_mbit`)、agent の VM の byte あたりの CPU、公平 (Jain の指数、最小と最大の stream)、UDP の往復の時間、agent の RSS と起動の行のメモリの上界、断った行と drop の数です。
 churn の case は、毎秒の完了数、確立と往復の時間の p50 と p99、断られた数、1 秒以上かかった確立の数、agent の VM の接続あたりの CPU です。
 
 `tcpquality.sh` の側の扱いは次のとおりです。
 
 - 128 本を超える stream:iperf3 は 1 つの client で 128 本までなので、128 本ごとに LAN のホストの iperf3 の server (25800 から)、範囲のルールの待ち受けのポート (41800 から)、client を 1 つずつ置き、client を 0.1 秒ずつずらして始めます。
   byte と速さは足し、公平の値は全部の stream で数えます。
+  数百本の stream では、iperf3 が自分の 10 秒の外で接続と終わりに数秒から数十秒を使い、CPU の窓がその分だけ延びます。
+  byte あたりの CPU は窓の全体で数えるので影響を受けませんが、iperf3 の速さの値はその窓の速さと合いません。
+  `manyconn` の `window_mbit` は窓の全体の速さで、速さの下限です
   結果の行に `iperf_groups` が付きます
 - `TOOL=churn`:`tools/churn` の `churn run` が、`CHURN_RATE` 本を毎秒、`CHURN_S` 秒 (既定 10) 開きます。
   前の接続の終わりを待たずに開くので、遅れても負荷は下がりません。
