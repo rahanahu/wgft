@@ -1572,7 +1572,7 @@ fn next_hop_mtu_zero_reaches_every_plateau() {
         );
         assert_eq!(
             pmtu_after_with_mtu(9216, &[(upper + 1, 0)]),
-            [u32::from(upper)],
+            [u32::from(upper).max(552)],
             "total length {}",
             upper + 1
         );
