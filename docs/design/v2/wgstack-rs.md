@@ -556,6 +556,16 @@ Go の `internal/dataplane/deps_test.go` の `TestWgstackImports` に当たる�
 `no_std` で sans-IO を構造で強いる案は採りません。
 `alloc` を使うには `extern crate alloc;` の宣言が要るうえ、禁止の一覧で同じ効果を得られるためです。
 
+### 公開の文書
+
+核は Experimental として wgft の外の利用者に公開します (所有者の 2026-11-07 の決定)。
+公開の文書の正本は crate の英語の README (`crates/wgft-wgstack/README.md`、対の `README.ja.md`) と、公開の項目の英語の rustdoc です。
+README は crate の文書 (`#![doc = include_str!("../README.md")]`) を兼ね、中の例は doctest として流れます。
+README は、範囲と既知の制限 (能動の open が無いこと、自分のアドレスが 1 つであることを含みます)、sans-IO の使い方、上界の項、上限ごとの動作、上界に含まないもの、上界と RSS の違い、`Stack` の全体の動的な予算がまだ無いこと、panic と桁あふれの検査を書きます。
+`examples/echo.rs` は、手で書いた相手と TCP を一往復させる例で、CI の `wgstack example` の段が動かします。
+内部の注釈と、この設計文書は日本語のままです。
+`Stack<NoHook>` と `Budget` が `Send` であることは、crate の中の型の確かめが build で確かめます。
+
 ## sans-IO の API
 
 形 (入力、出力、待たない操作、知らせ) は決定に従います。

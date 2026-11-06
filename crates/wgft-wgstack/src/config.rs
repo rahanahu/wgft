@@ -8,9 +8,15 @@ pub const MIN_MTU: usize = 576;
 /// The largest MTU the stack accepts, which covers jumbo frames.
 pub const MAX_MTU: usize = 9216;
 
-/// The table sizes of a stack, fixed at creation.
+/// The table and budget sizes of a stack, fixed at creation.
 ///
-/// 一部の値だけを変えるときは、既定の値から作ります。
+/// Every table the stack keeps is sized from these values when the stack is created, and the stack never
+/// grows them. [`Bound::for_limits`](crate::Bound::for_limits) turns them into the memory bound before
+/// anything is allocated. What happens when each limit is reached is listed on each field.
+///
+/// [`Limits::default`] is a small, conservative set for a stack that serves a handful of connections: its
+/// bound is about 21.6 MiB at MTU 1420, of which about 4 MiB is allocated at creation. Raise the fields you
+/// need and start from the default for the rest:
 ///
 /// ```
 /// use wgft_wgstack::Limits;
@@ -20,39 +26,62 @@ pub const MAX_MTU: usize = 9216;
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
-    /// The number K of connections that can be established at once.
+    /// K, the connection slots for established connections. Together with `accept_queue` it makes
+    /// N_c = K + Q connection slots ([`Limits::conns`]); each slot reserves a 256 KiB send floor and a 256 KiB
+    /// receive floor in the bound. The stack does not stop at K established connections: an accepted
+    /// connection may take any free slot. A caller that wants fewer active connections counts them itself.
+    /// When no slot is free, a completing handshake is dropped and counted in `Stats::accept_overflow`.
     pub max_flows: usize,
-    /// accept の待ち行列の全体の数 Q です。接続の枠の数は K + Q です。待ち受け 1 つはその半分までです。
-    /// 1 は待ち受けの分が 0 になり、どの接続も accept できないので設定の誤りにします。0 は待ち受けを持たない
-    /// 核 (能動の open だけの核) のための値で、受け付けますが、どの待ち受けも接続を受けられません。
+    /// Q, the connections that may wait in accept queues in total; one listener may hold half of it. When a
+    /// listener's queue is full, the final ACK of a handshake is dropped (`Stats::accept_overflow`) and the
+    /// half-open row stays, so the handshake can complete when the application has accepted. 1 is refused,
+    /// since it leaves each listener no room; 0 is accepted for a stack without listeners, on which no
+    /// listener can accept a connection.
     pub accept_queue: usize,
-    /// 握手の途中の表の行の数 N_syn です。
+    /// Half-open (handshake) rows; one listener may use half of them. When a listener's share or the table is
+    /// full, SYNs are answered with SYN cookies, and dropped while the accept queue is also full
+    /// (`Stats::syn_accept_full`).
     pub syn_rows: usize,
-    /// TIME_WAIT と FIN_WAIT_2 の行の数 M です。
+    /// TIME_WAIT and FIN_WAIT_2 rows. When the table is full the oldest row is evicted (`Stats::tw_evicted`),
+    /// which shortens that 4-tuple's protection against old duplicate segments.
     pub tw_rows: usize,
-    /// 制御の出力の輪の枠の数 Q_ctl です。
+    /// Slots of the control output ring, each one MTU, for RSTs, handshake replies, ICMP errors and echo
+    /// replies. When it is full, new control packets are dropped (`Stats::ctl_dropped`) and
+    /// [`Stack::send_ping`](crate::Stack::send_ping) returns [`Error::NoBufferSpace`](crate::Error::NoBufferSpace).
     pub ctl_slots: usize,
-    /// 再組み立ての表の項目の数です。
+    /// Datagrams the reassembly table can assemble at once. When it is full, the oldest incomplete datagram
+    /// is evicted (`Stats::fragments_evicted`).
     pub frag_entries: usize,
-    /// 再組み立ての表の断片の枠の数です。
+    /// Fragments the reassembly table can hold at once. When none is free and nothing can be evicted, the
+    /// new fragment is dropped (`Stats::fragments_dropped`).
     pub frag_pieces: usize,
-    /// UDP の受信の datagram の数の予算です。endpoint 1 つの上限はその 4 分の 1 です。endpoint の分が 0 に
-    /// ならないよう、[`UDP_ENDPOINT_SHARE`](crate::UDP_ENDPOINT_SHARE) から 65535 までです。
+    /// Received UDP datagrams held at once; one endpoint may hold a quarter. Datagrams over the limit are
+    /// dropped (`Stats::udp_dropped`). From [`UDP_ENDPOINT_SHARE`](crate::UDP_ENDPOINT_SHARE), so each
+    /// endpoint can hold at least one, to 65535.
     pub udp_rx_datagrams: usize,
-    /// UDP の送信の datagram の数の予算です。endpoint 1 つの上限はその 4 分の 1 です。範囲は
-    /// `udp_rx_datagrams` と同じです。
+    /// Queued UDP datagrams to send; one endpoint may queue a quarter. Over the limit
+    /// [`Stack::send_to`](crate::Stack::send_to) returns `WouldBlock` and
+    /// [`Stack::send_to_latest`](crate::Stack::send_to_latest) drops the oldest queued datagram. The range is
+    /// that of `udp_rx_datagrams`.
     pub udp_tx_datagrams: usize,
-    /// UDP の受信の byte の予算です。endpoint 1 つの上限はその 4 分の 1 です。chunk (16 KiB) の単位で数え、
-    /// 最も大きい datagram が endpoint 1 つの上限に収まるよう、[`Limits::MIN_UDP_BYTES`] 以上にします。
+    /// Bytes of received UDP datagrams held, in 16 KiB chunks; one endpoint may hold a quarter. Datagrams over
+    /// the budget are dropped. At least [`Limits::MIN_UDP_BYTES`], so the largest datagram fits one endpoint's
+    /// quarter.
     pub udp_rx_bytes: usize,
-    /// UDP の送信の byte の予算です。分け方と下限は `udp_rx_bytes` と同じです。
+    /// Bytes of queued UDP datagrams to send, split and bounded below as `udp_rx_bytes`; over the budget the
+    /// send calls behave as for `udp_tx_datagrams`.
     pub udp_tx_bytes: usize,
-    /// 再組み立ての表の保持の byte の上限です。固定の管理領域、保持する断片の写し、完成の写し 1 つを数えます。
+    /// The reassembly table's byte limit, counting its fixed bookkeeping, the fragment copies it holds and one
+    /// completed datagram. Must at least cover the bookkeeping for `frag_entries` and `frag_pieces`.
     pub frag_bytes: usize,
-    /// boost の枠の数 B です。[`Budget`](crate::Budget) は同じ数の枠で作ります。0 は boost を使いません。
-    /// [`Limits::MAX_BOOST_SLOTS`] までです。
+    /// Boost slots B: a connection with demand may take one and grow its send and receive buffers from the
+    /// 256 KiB floors to 4 MiB; each slot adds about 7.8 MiB to the bound. When all slots are taken, a
+    /// connection that asks stays at its floors, and an idle holder may be moved back to the floors for it.
+    /// The [`Budget`](crate::Budget) must have this many slots. 0 disables boost; at most
+    /// [`Limits::MAX_BOOST_SLOTS`].
     pub boost_slots: usize,
-    /// 返った chunk (16 KiB) を次の確保のために残す数です。上界の固定の項に数えます。
+    /// Freed 16 KiB buffer chunks kept for reuse instead of returned to the allocator; counted in the bound's
+    /// fixed term.
     pub pool_chunks: usize,
 }
 
@@ -76,10 +105,10 @@ const DEFAULT_LIMITS: Limits = Limits {
 };
 
 impl Limits {
-    /// [`Limits::boost_slots`] の上限です。空きの枠の印を 1 語に収めます。
+    /// The largest [`Limits::boost_slots`].
     pub const MAX_BOOST_SLOTS: usize = 64;
-    /// [`Limits::udp_rx_bytes`] と [`Limits::udp_tx_bytes`] の下限です。最も大きい datagram (4 chunk) が
-    /// endpoint 1 つの上限 (予算の 4 分の 1) に収まる大きさです。
+    /// The smallest [`Limits::udp_rx_bytes`] and [`Limits::udp_tx_bytes`], 256 KiB: the largest datagram
+    /// (4 chunks) then fits one endpoint's quarter of the budget.
     pub const MIN_UDP_BYTES: usize = crate::udp::MIN_BYTES;
 
     /// 凍結した Go の wgstack の本番の表の大きさで、K を `max_flows` にした値です。0 は K = 2048 です。
@@ -116,7 +145,7 @@ impl Limits {
         }
     }
 
-    /// 接続の枠の数 N_c = K + Q です。
+    /// The connection slots N_c = K + Q.
     pub const fn conns(&self) -> usize {
         self.max_flows.saturating_add(self.accept_queue)
     }
@@ -131,42 +160,43 @@ impl Default for Limits {
 /// The congestion control algorithm for every TCP connection of the stack.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Congestion {
-    /// RFC 9438 の CUBIC です。既定です。
+    /// CUBIC (RFC 9438), the default.
     #[default]
     Cubic,
-    /// RFC 5681 の輻輳の回避と RFC 6582 です。
+    /// NewReno: RFC 5681 congestion avoidance with RFC 6582 recovery.
     NewReno,
 }
 
 /// When a connection asks for a boost, the larger per-connection buffers taken from the [`Budget`](crate::Budget).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BoostPolicy {
-    /// 需要の区間が閾値に届いた時に求めます。既定です。
+    /// Ask when the data read or written over a recent interval reaches a threshold. The default.
     #[default]
     OnDemand,
-    /// accept が接続を返す時に、受信の向きを含めて求めます。
+    /// Ask for the receive direction as well when [`Stack::accept`](crate::Stack::accept) returns the
+    /// connection.
     AtAccept,
-    /// boost を求めません。
+    /// Never ask.
     Never,
 }
 
-/// 作成の時の設定です。
+/// The configuration a stack is created with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
     /// The stack's single IPv4 address. The stack accepts packets to this address only.
     pub addr: Ipv4Addr,
     /// The MTU of the link that carries the stack's packets, from [`MIN_MTU`] to [`MAX_MTU`].
     pub mtu: usize,
-    /// 表の大きさです。
+    /// The table and budget sizes.
     pub limits: Limits,
-    /// 輻輳の制御です。
+    /// The congestion control algorithm.
     pub congestion: Congestion,
-    /// boost の与え方です。
+    /// When connections ask for a boost slot.
     pub boost: BoostPolicy,
 }
 
 impl Config {
-    /// 既定の表の大きさの設定です。
+    /// A configuration with the default [`Limits`], CUBIC and on-demand boost.
     pub const fn new(addr: Ipv4Addr, mtu: usize) -> Self {
         Self {
             addr,
@@ -178,19 +208,19 @@ impl Config {
     }
 }
 
-/// 設定の誤りです。
+/// A configuration error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ConfigError {
-    /// MTU が範囲の外です。
+    /// The MTU is outside [`MIN_MTU`] to [`MAX_MTU`].
     Mtu(usize),
-    /// 表の大きさが範囲の外です。
+    /// A table or budget size is out of range.
     Limits,
-    /// [`Budget`](crate::Budget) の枠の数が [`Limits::boost_slots`] と違います。
+    /// The [`Budget`](crate::Budget) has a different number of slots than [`Limits::boost_slots`].
     BudgetSlots {
-        /// `Budget` の枠の数です。
+        /// The budget's slots.
         budget: usize,
-        /// `Limits::boost_slots` です。
+        /// `Limits::boost_slots`.
         limits: usize,
     },
 }
@@ -211,7 +241,7 @@ impl fmt::Display for ConfigError {
 impl core::error::Error for ConfigError {}
 
 impl Config {
-    /// 設定を確かめます。
+    /// Checks the configuration. [`Stack::new`](crate::Stack::new) calls it too.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if !(MIN_MTU..=MAX_MTU).contains(&self.mtu) {
             return Err(ConfigError::Mtu(self.mtu));

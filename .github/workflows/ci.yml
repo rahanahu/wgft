@@ -487,6 +487,9 @@ jobs:
           scripts/check-musl-fill.sh --asm x86_64-unknown-linux-musl
           scripts/check-musl-fill.sh --asm aarch64-unknown-linux-musl
           cargo test -p wgft-wgstack --locked --target x86_64-unknown-linux-musl chunk
+      # The wgstack core's README example is a doctest; the full example runs a TCP exchange.
+      - name: wgstack example
+        run: cargo run -p wgft-wgstack --example echo --locked
 
   rust-deny:
     # B15. cargo-deny: licence allowlist, RustSec advisories, duplicate versions, and

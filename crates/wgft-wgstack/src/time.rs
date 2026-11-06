@@ -4,13 +4,12 @@ use core::fmt;
 use core::ops::{Add, Sub};
 use core::time::Duration;
 
-/// 核の時刻。任意の起点からの単調な nanosecond の数です。
+/// The stack's time: a monotonic count of nanoseconds from an arbitrary origin.
 ///
-/// 核は時計を読まず、呼び手がすべての操作に `Time` を渡します。
-/// 起点は呼び手が決め、駆動の層は作成の時の `Instant` からの経過を渡します。
-/// Go の wgstack の核の時刻 (起点からの int64 の ns) と同じ値を持てるので、記録の時刻をそのまま渡せます。
+/// The stack never reads a clock; the caller passes a `Time` to every operation. The caller chooses the origin, for
+/// example the time elapsed since an `Instant` taken at creation.
 ///
-/// 時間の足し算と引き算は飽和します。核の中で panic を起こさないためです。
+/// Addition and subtraction of durations saturate, so they never panic inside the stack.
 ///
 /// ```
 /// use core::time::Duration;
@@ -25,29 +24,29 @@ use core::time::Duration;
 pub struct Time(u64);
 
 impl Time {
-    /// 起点の時刻です。
+    /// The origin.
     pub const ZERO: Self = Self(0);
 
-    /// 表せる最も遅い時刻です。
+    /// The latest representable time.
     pub const MAX: Self = Self(u64::MAX);
 
-    /// 起点からの nanosecond の数から時刻を作ります。
+    /// Creates a time from a count of nanoseconds since the origin.
     pub const fn from_nanos(ns: u64) -> Self {
         Self(ns)
     }
 
-    /// 起点からの nanosecond の数を返します。
+    /// Returns the count of nanoseconds since the origin.
     pub const fn as_nanos(self) -> u64 {
         self.0
     }
 
-    /// `ns` nanosecond 後の時刻を返します。表せない時刻は [`Time::MAX`] にします。
+    /// Returns the time `ns` nanoseconds later; a time that cannot be represented becomes [`Time::MAX`].
     #[must_use]
     pub const fn saturating_add_nanos(self, ns: u64) -> Self {
         Self(self.0.saturating_add(ns))
     }
 
-    /// `earlier` からの経過の nanosecond を返します。`earlier` の方が遅ければ 0 です。
+    /// Returns the nanoseconds elapsed since `earlier`, or 0 if `earlier` is later.
     pub const fn nanos_since(self, earlier: Self) -> u64 {
         self.0.saturating_sub(earlier.0)
     }

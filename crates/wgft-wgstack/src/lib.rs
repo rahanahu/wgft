@@ -1,19 +1,8 @@
-//! wgft の TCP/IP の stack、wgstack の Rust 版の核です。
-//!
-//! 核は sans-IO です。入力は時刻、packet、アプリケーションの操作で、出力は packet、次に起こす時刻、
-//! 知らせです。核の中にスレッド、実時間のタイマー、ソケット、OS の乱数を置きません。
-//! 設計は `docs/design/v2/wgstack-rs.md` にあり、振る舞いの正本は凍結した Go の wgstack
-//! (`internal/wgstack`) とその設計文書です。移行の間は Go の wgstack と同じ入力に同じ packet を返します。
-//!
-//! 核が持つのは、受動の open、閉じる手順と TIME_WAIT、アプリケーションの操作と知らせ、データの送受信 (受け手の
-//! ACK と窓の自動調整、RTO、窓の probe)、SACK による回復と D-SACK、RACK-TLP、不要な再送の取り消し、CUBIC と
-//! NewReno、boost の取得と回収、UDP の endpoint と予算、echo と ping、ICMP の誤りと PMTU、断片の再組み立てです。
-//! dial の側 (能動の open) はまだ持ちません。
-//!
-//! 依存と確保の規則:この crate は標準ライブラリだけに依り、unsafe を使いません。
-//! 可変長の保持は容量を作成の時に決める配列だけで持ち、容量を自動で伸ばす API を使いません。
-//! この規則は `clippy.toml` の禁止の一覧と、source を走査する試験が確かめます。
-
+#![doc = include_str!("../README.md")]
+// 内部の注:核は wgft の Go の wgstack の Rust への移植で、設計は `docs/design/v2/wgstack-rs.md` にあります。
+// 依存と確保の規則:この crate は標準ライブラリだけに依り、unsafe を使いません。可変長の保持は容量を作成の時に
+// 決める配列だけで持ち、容量を自動で伸ばす API を使いません。この規則は `clippy.toml` の禁止の一覧と、source を
+// 走査する試験が確かめます。
 #![forbid(unsafe_code)]
 
 mod bitset;
@@ -64,12 +53,13 @@ pub use tcp::conn::ConnId;
 pub use time::Time;
 pub use udp::{UdpFault, UdpId};
 
-/// ping の endpoint の表の大きさです。[`PingId::index`] はこれより小さい値です。
+/// The number of ping endpoints a stack has; [`PingId::index`] is below it.
 pub const MAX_PINGS: usize = icmp::PING_ENDPOINTS;
-/// TCP の SYN が示す MSS の下限です。これより小さな MSS を示す SYN は捨てて [`LogKind::MssFloor`] に数えます。
+/// The smallest MSS a SYN may announce. A SYN with a smaller MSS is dropped and counted as
+/// [`LogKind::MssFloor`].
 pub const MIN_MSS: usize = 536;
 const _: () = assert!(MIN_MSS as u64 == buf::MIN_MSS);
-/// UDP の endpoint 1 つの受信と送信の上限が、核の全体の予算の何分の 1 かです。
+/// One UDP endpoint may use 1 / `UDP_ENDPOINT_SHARE` of the stack's UDP receive and send budgets.
 pub const UDP_ENDPOINT_SHARE: usize = udp::ENDPOINT_SHARE;
 
 /// この crate が整数の溢れを検査する build かを、この crate の中で実際に溢れさせて確かめます。検査ありなら溢れの
@@ -97,10 +87,17 @@ pub fn overflow_checks_enabled() -> bool {
     panicked
 }
 
-/// cargo-fuzz の target が呼ぶ入口です。`--cfg fuzzing` の build だけにあり、製品の API ではありません。
+// A stack without a hook can move to another thread; it has no thread-bound state.
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<Stack<NoHook>>();
+    send::<Budget>();
+};
+
+/// Entry points for the cargo-fuzz targets; only in `--cfg fuzzing` builds and not part of the API.
 #[cfg(fuzzing)]
 pub mod fuzz {
-    /// `parse` の target:packet の解釈と checksum と再組み立ての表に任意の bytes を通します。
+    /// The `parse` target: runs arbitrary bytes through packet parsing, checksums and reassembly.
     pub fn parse(data: &[u8]) {
         crate::wire::fuzz_parse(data);
     }
