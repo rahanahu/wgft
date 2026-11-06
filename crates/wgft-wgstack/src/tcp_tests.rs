@@ -1203,3 +1203,211 @@ fn stats_count_delayed_and_immediate_acks() {
     n.drain();
     assert_eq!(n.s.stats().acks_immediate, 1);
 }
+
+// RFC 5961 3.2:握手の途中の行と、TIME_WAIT と FIN_WAIT_2 の行の RST
+
+/// 相手の SYN を送り、握手の途中の行を 1 つ作ります。返り値は相手の RCV.NXT 相当の `IRS + 1`、SYN-ACK の窓の
+/// 値、核の ISN です。
+fn half_open(n: &mut TestNet) -> (u32, u32, u32) {
+    n.listen(80);
+    let irs = 7000;
+    n.inject(&TSeg {
+        sport: 40000,
+        dport: 80,
+        seq: irs,
+        flags: FLAG_SYN,
+        wnd: 65535,
+        mss: 1380,
+        ..TSeg::default()
+    });
+    let outs = n.drain();
+    assert!(
+        outs.len() == 1 && outs[0].flags == FLAG_SYN | FLAG_ACK,
+        "{}",
+        show(&outs)
+    );
+    assert_eq!(n.s.held().syn_rows, 1);
+    (irs + 1, u32::from(outs[0].wnd), outs[0].seq)
+}
+
+fn rst_at(seq: u32, ack: u32) -> TSeg {
+    TSeg {
+        sport: 40000,
+        dport: 80,
+        seq,
+        ack,
+        flags: FLAG_RST,
+        ..TSeg::default()
+    }
+}
+
+/// SYN-RCVD の行は、SEG.SEQ が RCV.NXT に等しい RST でだけ外れます。窓の内の他の RST には challenge ACK を返して
+/// 行を残します。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn rfc5961_syn_rcvd_row_needs_an_exact_rst() {
+    let mut n = net();
+    let (rcv_nxt, wnd, iss) = half_open(&mut n);
+    assert!(wnd > 3, "window {wnd}");
+    for seq in [rcv_nxt + 1, rcv_nxt + wnd / 2, rcv_nxt + wnd - 1] {
+        n.inject(&rst_at(seq, 0));
+        let outs = n.drain();
+        assert_eq!(
+            n.s.held().syn_rows,
+            1,
+            "an in-window RST at RCV.NXT+{} removed the row",
+            seq - rcv_nxt
+        );
+        assert!(
+            outs.len() == 1 && outs[0].flags == FLAG_ACK && outs[0].ack == rcv_nxt,
+            "RST at RCV.NXT+{}: want one challenge ACK, got {}",
+            seq - rcv_nxt,
+            show(&outs)
+        );
+        assert_eq!(outs[0].seq, iss + 1);
+    }
+    n.inject(&rst_at(rcv_nxt, 0));
+    assert!(n.drain().is_empty());
+    assert_eq!(n.s.held().syn_rows, 0, "the exact RST left the row");
+}
+
+/// 受信窓の右端ちょうど (RCV.NXT + RCV.WND) の RST は窓の外で、行を外しません。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn rfc5961_syn_rcvd_row_ignores_an_rst_at_the_right_window_edge() {
+    let mut n = net();
+    let (rcv_nxt, wnd, _) = half_open(&mut n);
+    n.inject(&rst_at(rcv_nxt + wnd, 0));
+    n.drain();
+    assert_eq!(
+        n.s.held().syn_rows,
+        1,
+        "an RST at RCV.NXT+RCV.WND removed the row"
+    );
+    // 窓の外の RST は黙って捨てます。
+    n.inject(&rst_at(rcv_nxt + wnd + 1000, 0));
+    assert!(n.drain().is_empty());
+    assert_eq!(n.s.held().syn_rows, 1);
+}
+
+/// TIME_WAIT の接続の枠で、窓の内の番号の合わない RST には challenge ACK を返し、窓の外の RST は黙って捨てます。
+/// 番号の合う RST は枠を閉じます。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn rfc5961_time_wait_slot_challenges_an_in_window_rst() {
+    let mut n = net();
+    let (c, mut p) = n.accepted(true);
+    n.s.close_write(n.now, c).unwrap();
+    let outs = n.drain();
+    p.absorb(&outs);
+    n.peer_ack(&mut p, &[]);
+    n.peer_fin(&mut p);
+    n.drain();
+    assert_eq!(n.s.conns.tcb(c.slot).state, State::TimeWait);
+    let mut s = p.seg(FLAG_RST, &[]);
+    s.seq = p.snd + 1;
+    n.inject(&s);
+    let outs = n.drain();
+    assert!(
+        outs.len() == 1 && outs[0].flags == FLAG_ACK && outs[0].ack == p.snd,
+        "in-window RST in TIME_WAIT: want one challenge ACK, got {}",
+        show(&outs)
+    );
+    assert_eq!(n.s.conns.tcb(c.slot).state, State::TimeWait);
+    let mut s = p.seg(FLAG_RST, &[]);
+    s.seq = p.snd.wrapping_add(1 << 30);
+    n.inject(&s);
+    assert!(n.drain().is_empty(), "an out-of-window RST was answered");
+    n.inject(&p.seg(FLAG_RST, &[]));
+    assert!(n.drain().is_empty());
+    assert_eq!(n.s.conns.tcb(c.slot).state, State::Closed);
+}
+
+/// 表の TIME_WAIT の行でも同じです。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn rfc5961_time_wait_row_challenges_an_in_window_rst() {
+    let mut n = net();
+    let (c, mut p) = n.accepted(true);
+    n.s.close_conn(n.now, c);
+    let outs = n.drain();
+    p.absorb(&outs);
+    n.peer_ack(&mut p, &[]);
+    n.peer_fin(&mut p);
+    n.drain();
+    assert_eq!(n.s.held().tw_rows, 1);
+    let mut s = p.seg(FLAG_RST, &[]);
+    s.seq = p.snd + 1;
+    n.inject(&s);
+    let outs = n.drain();
+    assert!(
+        outs.len() == 1 && outs[0].flags == FLAG_ACK && outs[0].ack == p.snd,
+        "in-window RST on a TIME_WAIT row: want one challenge ACK, got {}",
+        show(&outs)
+    );
+    assert_eq!(n.s.held().tw_rows, 1);
+    let mut s = p.seg(FLAG_RST, &[]);
+    s.seq = p.snd.wrapping_add(1 << 30);
+    n.inject(&s);
+    assert!(n.drain().is_empty(), "an out-of-window RST was answered");
+    assert_eq!(n.s.held().tw_rows, 1);
+    n.inject(&p.seg(FLAG_RST, &[]));
+    assert!(n.drain().is_empty());
+    assert_eq!(n.s.held().tw_rows, 0, "the exact RST left the row");
+}
+
+/// FIN_WAIT_2 の行でも同じです。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn rfc5961_fin_wait_2_row_challenges_an_in_window_rst() {
+    let mut n = net();
+    let (c, mut p) = n.accepted(true);
+    n.s.close_conn(n.now, c);
+    let outs = n.drain();
+    p.absorb(&outs);
+    n.peer_ack(&mut p, &[]); // FIN への ACK:FIN_WAIT_2 の行
+    n.drain();
+    assert_eq!(n.s.held().tw_rows, 1);
+    let mut s = p.seg(FLAG_RST, &[]);
+    s.seq = p.snd + 1;
+    n.inject(&s);
+    let outs = n.drain();
+    assert!(
+        outs.len() == 1 && outs[0].flags == FLAG_ACK && outs[0].ack == p.snd,
+        "in-window RST on a FIN_WAIT_2 row: want one challenge ACK, got {}",
+        show(&outs)
+    );
+    assert_eq!(n.s.held().tw_rows, 1);
+    n.inject(&p.seg(FLAG_RST, &[]));
+    assert!(n.drain().is_empty());
+    assert_eq!(n.s.held().tw_rows, 0, "the exact RST left the row");
+}
+
+/// 核の全体の challenge ACK の制限は、TIME_WAIT の枠と行、SYN-RCVD の行の challenge ACK にも掛かります。ここでは TIME_WAIT の行で確かめます。
+/// 1 秒の間に送れる数は 1 秒ごとに補う 500 から 1499 までで、それを超えた RST には何も返しません。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn rfc5961_challenge_acks_for_rows_obey_the_rate_limit() {
+    let mut n = net();
+    let (c, mut p) = n.accepted(true);
+    n.s.close_conn(n.now, c);
+    let outs = n.drain();
+    p.absorb(&outs);
+    n.peer_ack(&mut p, &[]);
+    n.peer_fin(&mut p);
+    n.drain();
+    assert_eq!(n.s.held().tw_rows, 1);
+    let limited = n.s.stats().challenge_limited;
+    let mut acks = 0u32;
+    for _ in 0..2000 {
+        let mut s = p.seg(FLAG_RST, &[]);
+        s.seq = p.snd + 1;
+        n.inject(&s);
+        acks += u32::try_from(n.drain().len()).unwrap();
+    }
+    let dropped = n.s.stats().challenge_limited - limited;
+    assert!(
+        (500..1500).contains(&acks) && dropped >= 500,
+        "{acks} challenge ACKs sent and {dropped} suppressed out of 2000 in-window RSTs"
+    );
+}
