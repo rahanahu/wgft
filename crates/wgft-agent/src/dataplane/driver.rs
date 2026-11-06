@@ -26,11 +26,10 @@ use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use wgft_wireguard::{Device, Event, PublicKey, Transmit};
+use wgft_wireguard::{Device, DropReason, Event, PublicKey, Transmit};
 
 use super::batch::{
-    BATCH_TIME, Pace, RX_SLOT, RxBatch, RxMeta, TxBatch, WAKE_BUDGET, each_packet, rx_store,
-    tx_store,
+    BATCH_TIME, Pace, RxBatch, TxBatch, WAKE_BUDGET, each_packet, rx_store, tx_store,
 };
 use super::{Command, Local, Settings, SocketBuffers, Status, Upper, clock, duration_to_nanos};
 use crate::batching::Batching;
@@ -149,13 +148,27 @@ impl Source for Io<'_> {
             };
         }
         let _ = vlen;
-        let (n, from) = self.socket.try_recv_from(&mut rx.data[..RX_SLOT])?;
-        rx.meta[0] = RxMeta {
-            from: Some(from),
-            len: u32::try_from(n).unwrap_or(0),
-            seg: 0,
-        };
-        Ok(1)
+        // Unix では recvmsg で datagram ごとの外側の TOS も読む
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let fd = self.socket.as_raw_fd();
+            self.socket
+                .try_io(tokio::io::Interest::READABLE, || rx.recv_one(fd))
+        }
+        // Windows は外側の TOS を読まず、外側を Not-ECT とみなす
+        #[cfg(not(unix))]
+        {
+            use super::batch::{RX_SLOT, RxMeta};
+            let (n, from) = self.socket.try_recv_from(&mut rx.data[..RX_SLOT])?;
+            rx.meta[0] = RxMeta {
+                from: Some(from),
+                len: u32::try_from(n).unwrap_or(0),
+                seg: 0,
+                ecn: 0,
+            };
+            Ok(1)
+        }
     }
 }
 
@@ -426,12 +439,42 @@ pub(super) async fn receive_batch<U: Upper>(
 
 /// 埋めた `n` 個の枠の datagram を、GRO がまとめた列は segment ごとに、device の層で平文の領域に
 /// 詰めて復号する。平文の領域の使った長さを返す。平文は暗号文より短いので、領域は足りる。
+/// datagram ごとに、それを運んだ外側の IP の header の ECN を device の層に渡す (RFC 6040 の写し)。
+/// GRO がまとめた枠の segment は、枠の 1 つの値を使う。
 fn decrypt(device: &mut Device, rx: &mut RxBatch, n: usize, now: Instant) -> usize {
-    rx.decrypt_each(n, |from, datagram, out| {
+    rx.decrypt_each(n, |from, ecn, datagram, out| {
         device
-            .handle_datagram(now, from, datagram, out)
+            .handle_datagram_with_ecn(now, from, ecn, datagram, out)
             .unwrap_or(0)
     })
+}
+
+/// 起床の終わりに、外側 CE と内側 Not-ECT で捨てた数 (`DropReason::CeOnNotEct`) が前の起床より
+/// 増えていたら、プロセスで 1 分に 1 回まで英語の 1 行を出す。`seen` はこの世代で最後に見た数である。
+/// RFC 6040 が求める捨て方だが、経路が Not-ECT の通信に CE を付けると、その通信は黙って届かなくなる。
+/// 捨てた数は device の層にしか無く、状態の読み出しは利用者に見えないので、ログでその兆しを見せる。
+fn warn_ce_on_not_ect(device: &Device, seen: &mut u64, now: Instant) {
+    static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    let dropped = device.drops().get(DropReason::CeOnNotEct);
+    if dropped <= *seen {
+        return;
+    }
+    *seen = dropped;
+    let mut last = LAST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last.is_some_and(|at| now.saturating_duration_since(at) < Duration::from_mins(1)) {
+        return;
+    }
+    *last = Some(now);
+    crate::logf!("{}", ce_on_not_ect_line(dropped));
+}
+
+/// [`warn_ce_on_not_ect`] の行。`dropped` はこのトンネルの世代で捨てた数の累計である。
+fn ce_on_not_ect_line(dropped: u64) -> String {
+    format!(
+        "warning: the WireGuard tunnel dropped {dropped} packets so far that arrived with an outer CE mark but are not ECN-capable inside, as RFC 6040 requires; a device on the path from the server marks traffic that is not ECN-capable"
+    )
 }
 
 /// 1 つずつ送受信する道の 1 回の起床の上限。受信の相と送信の相のそれぞれで、バッチの前の値のままにする。
@@ -551,12 +594,15 @@ fn send_phase<U: Upper>(
     }
 }
 
-/// 起床の終わり:device の event を流し、上の層の waker とログを引き、水位を残し、次の timer の時刻を返す。
+/// 起床の終わり:device の event を流し、上の層の waker とログを引き、外側 CE と内側 Not-ECT で捨てた
+/// 数の警告を出し、水位を残し、次の timer の時刻を返す。
 fn finish_wake<U: Upper>(
     local: &Local<U>,
     events: &mpsc::Sender<Event>,
     high_water: &AtomicU64,
     wakers: &mut Vec<Waker>,
+    ce_seen: &mut u64,
+    now: Instant,
 ) -> Option<Instant> {
     let mut guard = local.0.borrow();
     let inner = &mut *guard;
@@ -568,6 +614,7 @@ fn finish_wake<U: Upper>(
     while let Some(line) = inner.upper.poll_log() {
         crate::logf!("{line}");
     }
+    warn_ce_on_not_ect(&inner.device, ce_seen, now);
     high_water.store(
         duration_to_nanos(inner.device.unix_high_water()),
         Ordering::Relaxed,
@@ -608,6 +655,7 @@ pub(super) async fn drive<U: Upper>(
     let mut outbox = Outbox::new(batching, mtu, max_datagram);
     let mut io = Io::new(&socket, batching);
     let mut receive_errors = 0u64;
+    let mut ce_seen = 0u64;
     let mut wakers = Vec::new();
     loop {
         if local.is_poisoned() {
@@ -666,7 +714,7 @@ pub(super) async fn drive<U: Upper>(
             &mut now,
         );
         let more = rx_more || tx_more;
-        let deadline = finish_wake(&local, &events, high_water, &mut wakers);
+        let deadline = finish_wake(&local, &events, high_water, &mut wakers, &mut ce_seen, now);
         for waker in wakers.drain(..) {
             waker.wake();
         }
@@ -715,4 +763,17 @@ pub(super) async fn drive<U: Upper>(
         peer,
         gso,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ce_on_not_ect_warning_names_the_count_and_the_cause() {
+        assert_eq!(
+            ce_on_not_ect_line(3),
+            "warning: the WireGuard tunnel dropped 3 packets so far that arrived with an outer CE mark but are not ECN-capable inside, as RFC 6040 requires; a device on the path from the server marks traffic that is not ECN-capable"
+        );
+    }
 }

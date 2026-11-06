@@ -1,8 +1,9 @@
 //! sans-IO の WireGuard の device。
 //!
 //! 入力は 3 種類だけで、どれも呼び手が今の時刻を渡す:
-//! UDP で届いた datagram ([`Device::handle_datagram`])、トンネルへ送る IP の packet
-//! ([`Device::handle_packet`])、timer ([`Device::handle_timeout`])。
+//! UDP で届いた datagram と、それを運んだ外側の IP の header の ECN
+//! ([`Device::handle_datagram_with_ecn`])、トンネルへ送る IP の packet ([`Device::handle_packet`])、
+//! timer ([`Device::handle_timeout`])。
 //! 出力は送る datagram、トンネルの側へ渡す packet、event と、次に起こす時刻である。
 //! データの packet は呼び手の buffer を通る。受けた datagram は呼び手の buffer に復号して、その先頭の
 //! 長さを返し、送る packet は呼び手の buffer に暗号化して、送り先と長さを返す。packet ごとに確保も写しも
@@ -18,6 +19,10 @@
 //! - キューの上界:device が持つものはすべて件数とバイト数の上限を持ち、溢れたものは捨てて数える。
 //!   暗号の処理はその呼び出しの中で済ませるので、暗号の処理を待つキューは無い
 //! - 誤り:相手には何も返さず、[`Drops`] で数える
+//!
+//! トンネルの出口として、外側の ECN を RFC 6040 4.2 の表で内側の packet に写す
+//! (`ip::decapsulate_ecn`)。送る datagram の外側の ECN は device でなく socket が決め、agent は
+//! Not-ECT のままにする (RFC 6040 の compatibility mode と同じ外形)。
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -27,7 +32,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::allowed_ips::AllowedIps;
 use crate::config::{ConfigError, DeviceConfig, Limits, MAX_UNIX_TIME, MIN_MTU, Roaming};
 use crate::drops::{DropReason, Drops};
-use crate::ip::{IPV4_MIN_HEADER, parse_ipv4};
+use crate::ip::{IPV4_MIN_HEADER, decapsulate_ecn, parse_ipv4};
 use crate::keys::PublicKey;
 use crate::protocol::{DATA_OVERHEAD, Inbound, PeerId, ProtoEvent, Protocol, inner_mtu};
 use crate::queue::{BoundedQueue, ByteLen};
@@ -313,10 +318,32 @@ impl Device {
     /// its length: the packet is `out[..len]`, a well formed IPv4 packet without padding, from an
     /// address in its peer's allowed IPs. The packet stays in `out` until the caller reuses it.
     /// Nothing is allocated or copied for a data message.
+    ///
+    /// The datagram is taken to have arrived with an outer ECN field of Not-ECT, which leaves the
+    /// packet's ECN field as it is; [`Device::handle_datagram_with_ecn`] takes the outer field.
     pub fn handle_datagram(
         &mut self,
         now: Instant,
         from: SocketAddr,
+        datagram: &[u8],
+        out: &mut [u8],
+    ) -> Option<usize> {
+        self.handle_datagram_with_ecn(now, from, 0, datagram, out)
+    }
+
+    /// [`Device::handle_datagram`] for a datagram whose outer IP header carried the ECN field
+    /// `outer_ecn`: the low two bits of its TOS or traffic class byte; the other bits are ignored.
+    ///
+    /// A delivered packet's ECN field follows RFC 6040 section 4.2 (the decapsulation table of
+    /// Figure 4): with an outer CE, a Not-ECT packet is dropped and counted as
+    /// [`DropReason::CeOnNotEct`], and an ECN-capable one becomes CE; with an outer ECT(1), an
+    /// ECT(0) packet becomes ECT(1). The IPv4 header checksum is updated with the field. Every
+    /// other combination, and every packet under an outer Not-ECT, is delivered unchanged.
+    pub fn handle_datagram_with_ecn(
+        &mut self,
+        now: Instant,
+        from: SocketAddr,
+        outer_ecn: u8,
         datagram: &[u8],
         out: &mut [u8],
     ) -> Option<usize> {
@@ -364,7 +391,7 @@ impl Device {
             }
             Inbound::Data { peer, len } => {
                 self.accepted_from(peer, from, rx);
-                let delivered = self.check_inbound(peer, &out[..len]);
+                let delivered = self.check_inbound(peer, &mut out[..len], outer_ecn);
                 self.flush_staged(peer, now);
                 self.drain_proto_events(peer, now);
                 return delivered;
@@ -395,14 +422,24 @@ impl Device {
         }
     }
 
-    /// 復号した packet を検査し、詰め物を除いた長さを返す。通らなければ捨てて数える。
-    fn check_inbound(&mut self, peer: PeerId, plaintext: &[u8]) -> Option<usize> {
+    /// 復号した packet を検査し、外側の ECN を RFC 6040 の表で写し、詰め物を除いた長さを返す。
+    /// 通らなければ捨てて数える。
+    fn check_inbound(
+        &mut self,
+        peer: PeerId,
+        plaintext: &mut [u8],
+        outer_ecn: u8,
+    ) -> Option<usize> {
         let Some(header) = parse_ipv4(plaintext) else {
             self.drops.add(DropReason::InvalidInnerPacket, 1);
             return None;
         };
         if self.routes.lookup(header.src) != Some(peer) {
             self.drops.add(DropReason::DisallowedSource, 1);
+            return None;
+        }
+        if !decapsulate_ecn(plaintext, outer_ecn) {
+            self.drops.add(DropReason::CeOnNotEct, 1);
             return None;
         }
         Some(header.total_len)

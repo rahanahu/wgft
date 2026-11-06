@@ -25,7 +25,6 @@
 //! 今の `Device::handle_datagram` は外側の ECN を受け取らない。そこで、試験は [`receive`] という 1 つの
 //! 手当てだけを通して datagram を渡す。今は外側の ECN を捨てて `handle_datagram` を呼ぶ。外側の ECN を
 //! 受ける口 (引数でも別の関数でもよい) を足す修正は、この関数の中身だけを差し替える。
-//! 外側の ECN を要る試験は、その口が入るまで `#[ignore]` にしてある。
 //! 捨てた packet の数は、公開の `Device::drops()` の `total()` の増え方で見る。修正が足す専用の
 //! `DropReason` の変種があれば、`drops_total` の手当てをそれに合わせて絞ってよい。
 //!
@@ -174,8 +173,7 @@ fn receive(
     datagram: &[u8],
     out: &mut [u8],
 ) -> Option<usize> {
-    let _ = outer_ecn;
-    device.handle_datagram(now, from, datagram, out)
+    device.handle_datagram_with_ecn(now, from, outer_ecn, datagram, out)
 }
 
 /// 捨てた数の総和。今は専用の数が無いので、総和の増え方を見る。
@@ -300,7 +298,6 @@ fn assert_only_ecn_changed(sent: &[u8], got: &[u8], want_ecn: u8, why: &str) {
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn figure_4_all_sixteen_combinations() {
     let mut pair = Pair::connected();
     let mut seq = 0;
@@ -328,7 +325,6 @@ fn figure_4_all_sixteen_combinations() {
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn the_checksum_stays_valid_with_ip_options() {
     let mut pair = Pair::connected();
     // 内側 ECT(0) と外側 CE は CE に書き換わる。header は option で 24 と 60 バイト (IHL 6 と 15)
@@ -340,7 +336,6 @@ fn the_checksum_stays_valid_with_ip_options() {
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn each_datagram_uses_its_own_outer_ecn() {
     // 同じ device に続けて渡す datagram が、前の datagram の外側の ECN を引きずらない。
     // 受信の batch (recvmmsg と UDP GRO) があっても同じであるべきことの、device の層での形
@@ -382,7 +377,6 @@ fn each_datagram_uses_its_own_outer_ecn() {
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn a_dropped_packet_does_not_disturb_the_session() {
     // 外側 CE と内側 Not-ECT を捨てた後も、次の packet は届く
     let mut pair = Pair::connected();

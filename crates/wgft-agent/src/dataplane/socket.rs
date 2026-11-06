@@ -1,4 +1,5 @@
-//! WireGuard の UDP のソケット。開き方、バッファの要求と測定と警告、Windows の `SIO_UDP_CONNRESET`。
+//! WireGuard の UDP のソケット。開き方、バッファの要求と測定と警告、Unix の `IP_RECVTOS` (外側の ECN を
+//! datagram ごとに受ける)、Windows の `SIO_UDP_CONNRESET`。
 //!
 //! バッファの規則の正本は `docs/design/userspace/socket-buffers.md` で、Go の
 //! `internal/dataplane/userspace/sockbuf` と同じ値と文面を使う。Go の agent は wireguard-go の
@@ -90,7 +91,9 @@ pub(crate) fn warn(buffers: &SocketBuffers) {
 /// Opens the non-blocking UDP socket bound to `listen`, after asking for [`REQUESTED`] bytes of
 /// receive and send buffer, and on Linux also with the FORCE options that pass only with
 /// `CAP_NET_ADMIN` in the initial user namespace. Errors of these requests are ignored, as
-/// wireguard-go ignores them; the measurement shows the outcome.
+/// wireguard-go ignores them; the measurement shows the outcome. On Unix an IPv4 socket also asks
+/// for each datagram's TOS byte (`IP_RECVTOS`), whose ECN field the device layer applies to the
+/// packet inside (RFC 6040); without it the packets are delivered as under an outer Not-ECT.
 pub(crate) fn open(listen: SocketAddr) -> io::Result<(std::net::UdpSocket, SocketBuffers)> {
     let socket = Socket::new(
         Domain::for_address(listen),
@@ -102,6 +105,19 @@ pub(crate) fn open(listen: SocketAddr) -> io::Result<(std::net::UdpSocket, Socke
     let _ = socket.set_send_buffer_size(REQUESTED);
     #[cfg(target_os = "linux")]
     force_buffers(&socket);
+    #[cfg(unix)]
+    if listen.is_ipv4() {
+        use std::os::fd::AsRawFd;
+        if let Err(e) = wgft_udp_batch::one::enable_recv_tos(socket.as_raw_fd()) {
+            // トンネルを作り直すたびに並ばないよう、プロセスで 1 回だけ出す
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                crate::logf!(
+                    "warning: cannot read the outer ECN field on the WireGuard UDP socket: {e}; packets are delivered as if it were Not-ECT"
+                );
+            });
+        }
+    }
     #[cfg(windows)]
     if let Err(e) = disable_connection_reset(&socket) {
         // トンネルを作り直すたびに並ばないよう、プロセスで 1 回だけ出す

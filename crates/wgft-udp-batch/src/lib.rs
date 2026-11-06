@@ -11,8 +11,13 @@
 //!   先頭から読み直せる
 //! - 送信:核が書く packet の枠と、device の層が暗号化して書く datagram の枠を持つ。送る順に暗号化し、
 //!   同じ長さの datagram の並びを UDP の GSO の 1 つの message にまとめる
-//! - unsafe は Linux の system call の包み ([`sys`]) だけに置く
+//! - 外側の ECN:受けた datagram ごとに、IP の header の ECN の欄 (TOS の下位 2 bit) を見出しに持つ。
+//!   ソケットが `IP_RECVTOS` を有効にしていれば、カーネルが制御の message で渡す。UDP の GRO がまとめた
+//!   buffer の制御の message は 1 つなので、その値をすべての segment に使う
+//! - unsafe は system call の包み (Linux の [`sys`] と、Unix の 1 つずつの受信の [`one`]) だけに置く
 
+#[cfg(unix)]
+pub mod one;
 #[cfg(target_os = "linux")]
 pub mod sys;
 
@@ -43,12 +48,16 @@ pub struct RxMeta {
     pub len: u32,
     /// The segment size when UDP GRO joined several datagrams, else 0.
     pub seg: u32,
+    /// The ECN field of the IP header the datagram arrived in (the low two bits of its TOS), for
+    /// each segment of a GRO buffer; 0 (Not-ECT) when the socket does not report it.
+    pub ecn: u8,
 }
 
 const EMPTY_META: RxMeta = RxMeta {
     from: None,
     len: 0,
     seg: 0,
+    ecn: 0,
 };
 
 /// One datagram the device sealed into a send slot.
@@ -197,12 +206,13 @@ impl RxBatch {
     }
 
     /// Calls `f` with each datagram of the first `n` filled slots in order, GRO buffers split into
-    /// their segments, its sender, and the plaintext area after what earlier calls wrote; `f`
-    /// returns how many bytes it wrote there. Returns the plaintext area's used length.
+    /// their segments: its sender, the ECN field of the IP header it arrived in ([`RxMeta::ecn`]),
+    /// the datagram, and the plaintext area after what earlier calls wrote; `f` returns how many
+    /// bytes it wrote there. Returns the plaintext area's used length.
     pub fn decrypt_each(
         &mut self,
         n: usize,
-        mut f: impl FnMut(SocketAddr, &[u8], &mut [u8]) -> usize,
+        mut f: impl FnMut(SocketAddr, u8, &[u8], &mut [u8]) -> usize,
     ) -> usize {
         let slots = self.slots();
         let (dense, spills) = (self.dense, self.spill_at(0));
@@ -246,7 +256,7 @@ impl RxBatch {
                     scratch[cut - start..stop - start].copy_from_slice(&tail[..stop - cut]);
                     &scratch[..stop - start]
                 };
-                end += f(from, datagram, &mut plain[end..]);
+                end += f(from, m.ecn, datagram, &mut plain[end..]);
                 start = stop;
             }
         }
@@ -582,24 +592,32 @@ mod tests {
                 ],
             ),
         ] {
+            // 枠ごとの外側の ECN は、その枠のすべての segment に付く
             rx.meta[0] = RxMeta {
                 from: Some(from),
                 len: 40,
                 seg: 0,
+                ecn: 0b11,
             };
             rx.meta[1] = RxMeta {
                 from: Some(from),
                 len: 250,
                 seg,
+                ecn: 0b01,
             };
             let mut got = Vec::new();
-            let end = rx.decrypt_each(2, |f, d, out| {
+            let mut ecns = Vec::new();
+            let end = rx.decrypt_each(2, |f, ecn, d, out| {
                 assert_eq!(f, from);
                 got.push(d.to_vec());
+                ecns.push(ecn);
                 out[..1].copy_from_slice(&d[..1]);
                 1
             });
             assert_eq!(got, want, "segment size {seg}");
+            let mut want_ecns = vec![0b01; want.len()];
+            want_ecns[0] = 0b11;
+            assert_eq!(ecns, want_ecns, "segment size {seg}");
             assert_eq!(end, want.len());
         }
     }

@@ -1049,6 +1049,7 @@ impl Source for Feed {
                 from: Some(from),
                 len: u32::try_from(d.len()).unwrap(),
                 seg: 0,
+                ecn: 0,
             };
         }
         Ok(n)

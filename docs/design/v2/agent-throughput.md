@@ -538,11 +538,17 @@ Rust の agent の振る舞いです。
   device の層は自分が持つ datagram を先に送ることを求め (`Device::handle_packet`)、バッチの途中でハンドシェイクを待っていた packet が流れ出たときも順を保つためです
 - system call の誤り:`EINTR` は同じ呼び出しをやり直します。
   `sendmmsg` が 1 つも受け付けずに誤りも返さないときは、書けないときと同じに扱います。
-  カーネルが切り詰めた datagram と、制御の message が入りきらず GRO の segment の長さを失った buffer (`MSG_TRUNC`、`MSG_CTRUNC`) は、分けられないので捨て、状態の読み出しの `receive_truncated` に数えます
+  カーネルが切り詰めた datagram と、制御の message が入りきらず GRO の segment の長さか外側の ECN を失った buffer (`MSG_TRUNC`、`MSG_CTRUNC`) は、分けられないか正しく渡せないので捨て、状態の読み出しの `receive_truncated` に数えます
+- 外側の ECN:ソケットは `IP_RECVTOS` を有効にし、制御の領域は `UDP_GRO` と `IP_TOS` の 2 つの message が入る大きさです。
+  datagram ごとの TOS の下位 2 bit を枠の見出し (`RxMeta::ecn`) に持ち、復号のときに device の層へ渡します ([外側の ECN](wireguard-device.md#外側の-ecn-rfc-6040))。
+  GRO がまとめた枠の TOS の message は 1 つなので、その値をすべての segment に使います。
+  GRO が TOS の違う datagram をまとめないという見込みと確かめていない点は、[device の層の未確認](wireguard-device.md#未確認)にあります。
+  datagram ごとの費用は、制御の message の 1 byte を読むことと、外側が ECT か CE のときの表の引きです
 - GRO と GSO の有無:`UDP_GRO` を有効にできないカーネルでは、datagram は 1 つずつ届き、制御の message が付かないだけで、同じ道で読みます。
   GSO は `UDP_SEGMENT` を読めるカーネルで、枠が 2 つ以上あるときだけ使います
 - system call の包み:置き場と、`recvmmsg`、`sendmmsg`、`UDP_GRO` と `UDP_SEGMENT` を libc で直に呼ぶ小さな module (`sys.rs`) は、crate `wgft-udp-batch` に置きます。
-  データプレーンの unsafe はその module だけにあります。
+  1 つずつの受信の `recvmsg` の包み (`one.rs`、Unix) も同じ crate に置きます。
+  データプレーンの unsafe はこの 2 つの module だけにあります。
   crate に分けるのは、ホストの測定の道具 (`wgft-agent-perf`) が製品と同じ置き場と system call の道を動かせるようにするためです。
   見出しの配列は、呼び出しのたびに使う枠の分だけ書き直します。
   カーネルが `msg_namelen` と `msg_controllen` を書き換えるためと、buffer への raw pointer を呼び出しをまたいで持たないためです。
@@ -551,7 +557,9 @@ Rust の agent の振る舞いです。
   `quinn-udp` (0.5.14) はソケットに `IP_PMTUDISC_PROBE`、ECN、`IP_PKTINFO` を設定し、WireGuard の datagram の DF と断片化の扱いを変えます。
   見出しを呼び出しごとにスタックに作るので、起動の時に確保する置き場の規則にも合いません。
   `rustix` (1.1.6) は `sendmmsg` を持ちますが、`recvmmsg` と、UDP の GSO と GRO の制御の message を持ちません
-- Windows と macOS、`0`:置き場は枠 1 つで、見出しを持たず、`recv_from` と `send_to` で 1 つずつ送受信し、GRO と GSO を有効にしません。
+- Windows と macOS、`0`:置き場は枠 1 つで、見出しを持たず、1 つずつ送受信し、GRO と GSO を有効にしません。
+  受信は、Unix (macOS と Linux の `0`) では `recvmsg` で外側の TOS も受け、Windows では `recv_from` で受けて外側を Not-ECT とみなします。
+  送信は `send_to` です。
   1 回の起床は、受信の相と送信の相をそれぞれ 64 datagram と 64 packet までで区切り、遅れの予算を使わず、時計もバッチごとに読みません。
   枠が 1 つなので、UDP を先にする規則は何も並べ替えません。
   このため、この道の振る舞いはバッチの前と同じです
