@@ -62,6 +62,9 @@ pub(crate) struct TwTable {
     olinks: FixedVec<[u32; 2]>,
     /// 接続の枠ごとの、その枠から移した行の list の先頭です。古い handle の abort が元の枠と世代で行を引きます。
     oheads: FixedVec<u32>,
+    /// 行ごとの、速さを抑えた ACK を次に許す時刻です。行を 64 byte に収めるため、行の外に置きます。
+    /// 速さを抑えた ACK を送る時だけ読むので、行と同じ cache line に要りません。
+    acks: FixedVec<Time>,
 }
 
 impl TwTable {
@@ -81,6 +84,7 @@ impl TwTable {
             n: 0,
             olinks: FixedVec::try_filled(n, |_| [NIL; 2])?,
             oheads: FixedVec::try_filled(conns, |_| NIL)?,
+            acks: FixedVec::try_filled(n, |_| Time::ZERO)?,
         })
     }
 
@@ -91,6 +95,7 @@ impl TwTable {
             + self.free.heap_bytes()
             + self.olinks.heap_bytes()
             + self.oheads.heap_bytes()
+            + self.acks.heap_bytes()
     }
 
     pub(crate) fn capacity(&self) -> usize {
@@ -111,6 +116,15 @@ impl TwTable {
 
     pub(crate) fn row_mut(&mut self, id: u32) -> &mut TwRow {
         &mut self.rows[id as usize]
+    }
+
+    /// 行 `id` が速さを抑えた ACK を次に許す時刻です。
+    pub(crate) fn ack_until(&self, id: u32) -> Time {
+        self.acks[id as usize]
+    }
+
+    pub(crate) fn set_ack_until(&mut self, id: u32, t: Time) {
+        self.acks[id as usize] = t;
     }
 
     /// 最も古い行です。
@@ -185,6 +199,7 @@ impl TwTable {
             next: NIL,
             ..row
         };
+        self.acks[id as usize] = Time::ZERO;
         self.idx.insert(row.tup, id, 0);
         self.push_back(id);
         if let Some(h) = self.oheads.get_mut(row.origin as usize) {
@@ -375,9 +390,10 @@ impl Shared {
     }
 
     /// 接続の枠の状態 `row` を行に移します。満杯なら最も古い行を外して数えます。枠が送るはずだった ACK は行が
-    /// 送ります。
-    pub(crate) fn add_tw_row(&mut self, row: TwRow, ack_now: bool, now: i64) {
+    /// 送ります。行は枠の速さの制限 (次に ACK を許す時刻 `ack_until`) を受け継ぎます。
+    pub(crate) fn add_tw_row(&mut self, row: TwRow, ack_until: i64, ack_now: bool, now: i64) {
         let (id, evicted) = self.tw.insert(row);
+        self.tw.set_ack_until(id, time(ack_until));
         if let Some(e) = evicted {
             let out = self.tw_row_id(e);
             self.unqueue_row(out);
@@ -398,9 +414,15 @@ impl Shared {
         }
     }
 
+    /// 行から ACK を送ります。`limited` の ACK は、行ごとの速さの制限を受けます。
     fn tw_ack(&mut self, id: u32, now: i64, limited: bool) {
-        if limited && !self.challenge_allowed(now) {
-            return;
+        #[cfg(feature = "harness")]
+        let limited = limited && !crate::stack::go_compat_core_challenge(); // 凍結した Go の記録との照合用
+        if limited {
+            let Some(until) = self.flow_ack(ns(self.tw.ack_until(id)), now) else {
+                return;
+            };
+            self.tw.set_ack_until(id, time(until));
         }
         self.tw.row_mut(id).pending = true;
         let out = self.tw_row_id(id);

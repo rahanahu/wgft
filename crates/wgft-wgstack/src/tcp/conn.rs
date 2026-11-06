@@ -147,7 +147,8 @@ pub(crate) struct Tcb {
     pub(crate) snd_shut: bool,
     pub(crate) ooo_fin_off: u64,
     pub(crate) ts_recent_at: i64,
-    pub(crate) last_oow: i64,
+    /// 速さを抑えた ACK (challenge ACK と、中身の無い受け入れられない segment への ACK) を次に許す時刻です。
+    pub(crate) ack_until: i64,
     pub(crate) rs_time: i64,
     pub(crate) rs_seq: u64,
     pub(crate) rs_space: u64,

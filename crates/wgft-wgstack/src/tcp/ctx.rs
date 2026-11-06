@@ -153,6 +153,7 @@ impl Conn<'_> {
             rto: RTO_INIT,
             ssthresh: u32::MAX,
             recover: r.iss,
+            ack_until: crate::stack::ns(r.ack_until),
             ..Tcb::default()
         };
         *self.k = ConnCold::default();
@@ -283,7 +284,7 @@ impl Conn<'_> {
         self.drop_resources();
         if self.t.in_index {
             self.unindex();
-            self.s.add_tw_row(row, ack_now, now);
+            self.s.add_tw_row(row, self.t.ack_until, ack_now, now);
         }
         self.free_slot();
         true

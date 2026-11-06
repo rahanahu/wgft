@@ -21,7 +21,7 @@ use crate::tcp::conn::QLink;
 use crate::tcp::listen::{Listener, PortTable};
 use crate::tcp::syn::SynTable;
 use crate::tcp::timewait::TwTable;
-use crate::tcp::{IP_TCP_HEADERS, TS_OPTION_LEN};
+use crate::tcp::{FLOW_ACK_INTERVAL, IP_TCP_HEADERS, TS_OPTION_LEN};
 use crate::udp::Udp;
 use crate::wheel::Wheel;
 use crate::wire::{self, FLAG_ACK, FLAG_RST, OptWriter, Segment, TcpHeader, Tuple};
@@ -132,6 +132,9 @@ pub struct Stats {
     pub ooo_dropped: u64,
     pub recv_trimmed: u64,
     pub recv_no_memory: u64,
+    /// 接続か行ごとの速さの制限で送らなかった ACK です。challenge ACK (RFC 5961) と、受け入れられない segment への
+    /// ACK を数えます。受け入れられない segment は、接続では中身の無い segment だけで、行では中身のある segment も
+    /// 含みます。
     pub challenge_limited: u64,
     /// 再組み立ての表が保持したか捨てた断片です。datagram を完成させた断片は数えません (Go の
     /// `FragmentsDropped` と同じ数え方です)。
@@ -347,9 +350,6 @@ pub(crate) struct Shared {
     pub(crate) icmp_sec: i64,
     pub(crate) icmp_count: i64,
     pub(crate) budget: Budget,
-    /// challenge ACK の token bucket です。
-    pub(crate) ch_sec: i64,
-    pub(crate) ch_count: i64,
     pub(crate) stats: Stats,
     pub(crate) gates: Gates,
 }
@@ -456,22 +456,15 @@ impl Shared {
             .sum(u64::from(t.laddr) | u64::from(t.raddr) << 32, 0) as u32
     }
 
-    /// 核の全体の challenge ACK の token bucket から 1 つ取れたかを返します。1 秒ごとに limit/2 から 3*limit/2
-    /// の間の乱数の数を補います。
-    pub(crate) fn challenge_allowed(&mut self, now: i64) -> bool {
-        const LIMIT: u64 = 1000;
-        let sec = now / 1_000_000_000;
-        if sec != self.ch_sec || self.ch_count < 0 {
-            self.ch_sec = sec;
-            self.ch_count = i64::try_from(LIMIT / 2 + self.random_below(LIMIT)).unwrap_or(0);
-        }
-        let ok = self.ch_count > 0;
-        if ok {
-            self.ch_count -= 1;
-        } else {
+    /// 接続か行の速さを抑えた ACK を 1 つ許すかを決めます。`until` はその接続か行が次の ACK を許す時刻 (ns) で、
+    /// 許したら次の時刻を返し、許さなければ数えて `None` を返します。間隔は固定で、接続か行の外の状態 (他の接続の
+    /// ACK、窓、接続と行の数) を読まないので、他の接続の状態は許すかどうかに現れません。
+    pub(crate) fn flow_ack(&mut self, until: i64, now: i64) -> Option<i64> {
+        if now < until {
             self.stats.challenge_limited += 1;
+            return None;
         }
-        ok
+        Some(now.saturating_add(FLOW_ACK_INTERVAL))
     }
 
     /// 自分が示す MSS です。MTU から IPv4 と TCP の header を引いた値です。

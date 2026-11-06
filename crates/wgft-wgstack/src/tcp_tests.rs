@@ -15,6 +15,7 @@
     reason = "test data"
 )]
 
+use crate::dnat_peer_tests::PER_FLOW_INTERVAL;
 use crate::stack::{Error, Event};
 use crate::tcp::conn::State;
 use crate::testnet_tests::{DUT, PeerConn, TEST_MTU, TSeg, TestNet, show, small_limits};
@@ -264,7 +265,9 @@ fn rfc5961() {
     s.seq = s.seq.wrapping_add(1 << 30);
     n.inject(&s);
     assert!(n.drain().is_empty());
-    // 確立後の SYN には challenge ACK
+    // 確立後の SYN には challenge ACK。接続ごとの速さの制限の間隔を空けます。
+    n.advance(PER_FLOW_INTERVAL);
+    n.drain();
     let s = p.seg(FLAG_SYN, &[]);
     n.inject(&s);
     let outs = n.drain();
@@ -1249,6 +1252,9 @@ fn rfc5961_syn_rcvd_row_needs_an_exact_rst() {
     let (rcv_nxt, wnd, iss) = half_open(&mut n);
     assert!(wnd > 3, "window {wnd}");
     for seq in [rcv_nxt + 1, rcv_nxt + wnd / 2, rcv_nxt + wnd - 1] {
+        // 行ごとの速さの制限の間隔を空けます。間に再送した SYN-ACK は捨てます。
+        n.advance(PER_FLOW_INTERVAL);
+        n.drain();
         n.inject(&rst_at(seq, 0));
         let outs = n.drain();
         assert_eq!(
@@ -1376,34 +1382,6 @@ fn rfc5961_fin_wait_2_row_challenges_an_in_window_rst() {
     n.inject(&p.seg(FLAG_RST, &[]));
     assert!(n.drain().is_empty());
     assert_eq!(n.s.held().tw_rows, 0, "the exact RST left the row");
-}
-
-/// 核の全体の challenge ACK の制限は、TIME_WAIT の枠と行、SYN-RCVD の行の challenge ACK にも掛かります。ここでは TIME_WAIT の行で確かめます。
-/// 1 秒の間に送れる数は 1 秒ごとに補う 500 から 1499 までで、それを超えた RST には何も返しません。
-#[test]
-fn rfc5961_challenge_acks_for_rows_obey_the_rate_limit() {
-    let mut n = net();
-    let (c, mut p) = n.accepted(true);
-    n.s.close_conn(n.now, c);
-    let outs = n.drain();
-    p.absorb(&outs);
-    n.peer_ack(&mut p, &[]);
-    n.peer_fin(&mut p);
-    n.drain();
-    assert_eq!(n.s.held().tw_rows, 1);
-    let limited = n.s.stats().challenge_limited;
-    let mut acks = 0u32;
-    for _ in 0..2000 {
-        let mut s = p.seg(FLAG_RST, &[]);
-        s.seq = p.snd + 1;
-        n.inject(&s);
-        acks += u32::try_from(n.drain().len()).unwrap();
-    }
-    let dropped = n.s.stats().challenge_limited - limited;
-    assert!(
-        (500..1500).contains(&acks) && dropped >= 500,
-        "{acks} challenge ACKs sent and {dropped} suppressed out of 2000 in-window RSTs"
-    );
 }
 
 // RFC 9293 3.10.7.4 の受け入れの表:SYN-RCVD の行は、窓が 0 より大きいとき、長さ 0 の segment なら

@@ -681,7 +681,8 @@ CLOSED の枠は 4 つ組の hash の表から外れ、送信の輪を返しま�
   適合の試験は、この差を期待した差の一覧に入れず、[受信のバッファの溢れ](wgstack-verification.md#受信のバッファの溢れ)の台本が単位の 1 つ未満の丸めを許して量を測ります
 - RFC 5961:窓の内側で番号が一致しない RST と確立後の SYN に challenge ACK を返し、ACK の受け入れの範囲を確かめます。
   Rust 版は、握手の途中の行(番号が IRS + 1 に等しい RST だけが行を外す)、TIME_WAIT の枠と行、FIN_WAIT_2 の行にも同じ RST の扱いを適用します。凍結した Go は確立した接続だけです
-  challenge ACK の速さは Device 全体の token bucket で抑えます
+  凍結した Go は、challenge ACK の速さを Device 全体の token bucket で抑えます。
+  Rust 版は、接続と行ごとの制限で抑えます ([challenge ACK の速さの制限](../v2/wgstack-rs.md#challenge-ack-の速さの制限))
 - MSS:相手の MSS に従い、MSS の option の無い SYN では 536 を使います。
   入口の[MSS の下限](packet-validation.md#tcp-の-mss-の下限)と、Fragmentation Needed による PMTU の引き下げ(下限 552)を持ちます。
   引き下げでは、SACK を交渉した接続は新しい大きさに入らない記録だけを損失にして送り直し、交渉しない接続は SND.UNA から送り直します。

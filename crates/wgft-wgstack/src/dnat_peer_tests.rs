@@ -6,10 +6,10 @@
 //! 古い segment も、転送された偽の segment も止めません。ここでは `handle_packet` に渡る packet の列だけで、
 //! timestamp、RST、challenge ACK、TIME_WAIT の使い直しの挙動を確かめます。
 //!
-//! 安全な今の挙動を確かめる試験は通ります。所有者が名指しした欠陥の再現の試験と、直しの後に通るべき試験は
-//! `fixed by the follow-up PR` を含む理由で ignore にしてあります (後者は `challenge_budget_tests`)。RFC の範囲の
-//! 危険を示す試験は `hazard`、所有者が残している既知の外れを示す試験は `known deviation` の理由で ignore にして
-//! あります。各件の説明は PR の本文にあります。
+//! 安全な今の挙動を確かめる試験と、所有者が名指しした欠陥 (核の全体で 1 つの challenge ACK の予算) の再現の
+//! 試験は通ります。別の PR で直す欠陥 (核の全体で 1 つの IP の ID の数え) の試験は `defect`、RFC の範囲の危険を
+//! 示す試験は `hazard`、所有者が残している既知の外れを示す試験は `known deviation` の理由で ignore にしてあります。
+//! 各件の説明は試験を足した PR の本文にあります。
 
 #![expect(
     clippy::disallowed_macros,
@@ -270,9 +270,8 @@ fn blind_data_without_tsopt_is_dropped() {
 /// 依ってはいけません (RFC 5961 の Errata ID 4772、CVE-2016-5696)。予算が全体で 1 つなら、窓の内に当たった偽の RST
 /// を同じ秒に予算の最大より多く送ると、第三者が数える数は 0 になり、外れなら 500 以上になります (直す前の核の値)。
 /// 第三者は 1 秒に 1 回、被害者の接続の窓の位置を確かめられます。
-/// 所有者が名指しした再現の試験 (3 件の 1 つ) です。直しの PR で ignore を外します。
+/// 所有者が名指しした再現の試験 (3 件の 1 つ) です。
 #[test]
-#[ignore = "reproduction: fixed by the follow-up PR"]
 fn attacker_cannot_observe_whether_a_spoofed_rst_hit_the_window() {
     let observe = |hit: bool| {
         let (mut n, _, v) = established(&[VICTIM, ATTACKER]);
@@ -300,9 +299,8 @@ fn attacker_cannot_observe_whether_a_spoofed_rst_hit_the_window() {
 
 /// 第三者が自分の接続への SYN で予算を使い切っても、被害者の接続の challenge ACK は返ります。クライアントが再起動して
 /// 同じポートから新しい SYN を送る半開きの回復は、この challenge ACK に RST を返すことで進みます (RFC 5961 4.2)。
-/// 所有者が名指しした再現の試験 (3 件の 1 つ) です。直しの PR で ignore を外します。
+/// 所有者が名指しした再現の試験 (3 件の 1 つ) です。
 #[test]
-#[ignore = "reproduction: fixed by the follow-up PR"]
 fn a_challenge_ack_flood_does_not_silence_another_connection() {
     let (mut n, _, v) = established(&[VICTIM, ATTACKER]);
     let (c, pv) = v[0];
@@ -528,9 +526,8 @@ fn another_clients_stream_does_not_take_old_bytes_of_the_previous_client() {
 /// 上の回復は、TIME_WAIT の行が返す ACK に頼ります。この ACK を他の流れと分け合う予算から取る実装 (直す前の核)
 /// では、第三者が自分の接続への SYN で予算を使い切り続けると、B の SYN には何も返らず、B は行の期限 (60 秒) まで
 /// 開けません。
-/// 所有者が名指しした再現の試験 (3 件の 1 つ) です。直しの PR で ignore を外します。
+/// 所有者が名指しした再現の試験 (3 件の 1 つ) です。
 #[test]
-#[ignore = "reproduction: fixed by the follow-up PR"]
 fn a_challenge_ack_flood_does_not_block_time_wait_reuse() {
     let (mut n, _, _, p, mut v) = time_wait(true, &[ATTACKER]);
     let (_, mut pa) = v.remove(0);

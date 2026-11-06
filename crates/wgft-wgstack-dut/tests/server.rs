@@ -503,6 +503,10 @@ fn assert_switches_off(when: &str) {
         !wgft_wgstack::go_compat_pmtu_keep_cwnd(),
         "pmtu_keep_cwnd {when}"
     );
+    assert!(
+        !wgft_wgstack::go_compat_core_challenge(),
+        "core_challenge {when}"
+    );
 }
 
 #[test]

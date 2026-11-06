@@ -159,7 +159,7 @@ Go の文書と食い違う点は、この文書が理由と共に挙げたも�
   - 新しい接続は、受け入れの判定 (RFC 9293 3.10.7.4) で受信の窓の外の segment を捨て、timestamp を使う接続では PAWS (RFC 7323) で古い TSval の segment を捨てます。
     TSopt の無い segment は PAWS で比べません ([TSopt の無い segment と timestamp を使わなかった前の接続](#tsopt-の無い-segment-と-timestamp-を使わなかった前の接続))
   - RST は番号が RCV.NXT と一致する時だけ、確立した接続、握手の途中の行、TIME_WAIT の枠と行、FIN_WAIT_2 の行を終えます。
-    窓の内で番号が合わない RST には、核の全体の速さの制限の内側で challenge ACK を返し、窓の外の RST は捨てます (RFC 5961 3.2)。
+    窓の内で番号が合わない RST には、接続か行ごとの速さの制限の内で challenge ACK を返し、窓の外の RST は捨てます (RFC 5961 3.2、[challenge ACK の速さの制限](#challenge-ack-の速さの制限))。
     窓の内の segment でも、ACK の値が受け入れの範囲の外なら challenge ACK を返します (RFC 5961 5.2)
 - 見直す条件:前の接続の古い segment に起因するデータの破損か誤った RST が観測されたとき、または timestamp を示さない相手が多く、2 MSL の内の 4 つ組の使い直しがよく起きる相手の集まりが見つかったときです
 
@@ -218,7 +218,7 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
 | RST の timestamp (RFC 7323 3.2、5.2):RST に TSopt を付けません。TSecr で RST を厳しく確かめる相手では、核の RST が受けられない恐れがあります | RFC 7323 5.2 は、RST に TSopt を付けることを、議論の途中で研究を進めるための推奨としています。受け手が TSecr で RST を厳しく確かめるのは MAY で、TSopt の無い segment を捨てる規則 (3.2) は RST を除きます。同じ節によれば、RFC 1323 は RST に timestamp を付けないよう勧めていたので、TSopt の無い RST を受けない受け手は、RFC 1323 に従う送り手の RST も受けないことになります (RFC からの読みです)。核の RST の相手は、server の中継か、server のカーネルモードの DNAT のルールではクライアントの OS です ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))。どちらも TSecr で RST を確かめるかは確かめていません。得を測れないので、RST を作るすべての所に 12 byte の option を足す直しは採りません | ありません | TSecr で RST を厳しく確かめる相手では、核の RST が受けられない恐れがあります。その相手が実在するかは確かめていません | TSecr で RST を確かめ、TSopt の無い RST を受けない相手が見つかった時 |
 | TSopt の無い segment (RFC 7323 3.2):timestamp を交渉した後の TSopt の無い segment を捨てず、PAWS を飛ばします | [TSopt の無い segment と timestamp を使わなかった前の接続](#tsopt-の無い-segment-と-timestamp-を使わなかった前の接続) | ありません | 同じ節 | 同じ節 |
 | timestamp の offset (RFC 7323 7 節):接続ごとの乱数でなく、アドレスの組の鍵付きの hash の offset です | 同じ相手との接続をまたいで TSval が増え続け、相手の PAWS と RFC 6191 が効きます | 要りません | 接続をまたいで TSval が続くので、接続の関係づけができます。ほかは未記録 (見直す条件と RFC 7323 7 節からの読みです) | 接続の関係づけが問題になる利用が出た時 |
-| challenge ACK の速さの調整 (RFC 5961 7 節):核の全体で 1 秒に 500 から 1500 の固定で、管理者が変えられません | Device 全体の CPU と出力の費用を抑えます | ありません | 未記録 (見直す条件は洪水の試験での回復の遅れです) | 洪水の試験で正しい接続の回復が遅れた時 |
+| challenge ACK の速さの調整 (RFC 5961 7 節):接続、TIME_WAIT の行、握手の途中の行ごとに 500 ms に 1 回の固定で、管理者が変えられません。核の全体の上限は持ちません | [challenge ACK の速さの制限](#challenge-ack-の速さの制限) | ありません | 同じ節 (核の全体で 1 つの IP の ID の数えを通るサイドチャネルが残ります。多くの接続と行で起こしうる CPU と出力の費用は評価中です) | 同じ節 |
 | rescue の再送 (RFC 6675 4 節の NextSeg の規則 4):使いません | 理由が無いため、直す候補ですが、直すかは測ってから決めます。TLP は回復の間は張らない (`tcp/rack.rs` の `tlp_eligible`、RFC 8985 7.2 も fast recovery の間を除きます) ので、回復の中で末尾が失われると RTO まで待つ見込みです (コードと RFC からの読みで、試験はしていません) | ありません | 回復の中で末尾が失われると RTO まで待つ見込みです (コードと RFC からの読みで、試験はしていません) | 測った結果で直すか理由を記録する時 |
 | TIME_WAIT を使い直す SYN (RFC 6191 2 節):受けない SYN を黙って捨てず、速さを抑えた ACK を返します。加えて、前の接続が timestamp を使わず新しい SYN が timestamp を持つ時も番号で比べます | ACK を返すのは、RFC 5961 4.2 と RFC 9293 の TIME-WAIT の SYN の扱いに沿います。前の接続が timestamp を使わない時の比べは、TSopt の無い segment と組で残します ([TSopt の無い segment と timestamp を使わなかった前の接続](#tsopt-の無い-segment-と-timestamp-を使わなかった前の接続)) | ありません | ACK を返す形の害は未記録。timestamp を使わない前の接続の比べの危険は[TSopt の無い segment と timestamp を使わなかった前の接続](#tsopt-の無い-segment-と-timestamp-を使わなかった前の接続)の節にあります | 直す時、または dial の側の TIME_WAIT の使い直しを決める時 |
 | Protocol Unreachable (RFC 1122 3.2.2.1):知らない protocol の datagram を数えて黙って捨てます | 核に届く packet は、server が送るものと、server のカーネルモードの DNAT のルールが転送するクライアントの packet です。server は TCP、UDP、ICMP のほかを送らず、DNAT のルールが一致するのは TCP と UDP の packet だけです ([カーネルモード](../vps/kernel.md)) | ありません | 未記録 | ほかの protocol を運ぶ要望が出た時 |
@@ -336,6 +336,63 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
   - 接続ごとに timestamp を使ったり使わなかったりする相手が見つかった時
   - DNAT のルールで、違うクライアントの接続が核の TIME_WAIT の間に同じ 4 つ組を使い直すことが確かめられた時
   - 核を server を経ない相手に向ける時
+
+#### challenge ACK の速さの制限
+
+決定:challenge ACK の速さを、核の全体の 1 つの予算でなく、接続、TIME_WAIT の行、握手の途中の行ごとの独立した制限で抑えます。
+核の全体の上限は持ちません (2026-11-07)。
+
+- 核の形:
+  - 接続の枠、TIME_WAIT の行、握手の途中の行は、速さを抑えた ACK を次に許す時刻をそれぞれ 1 つ持ちます。
+    ACK を許すと、その時刻を今の時刻の 500 ms 先にします。
+    500 ms は、凍結した Go が中身の無い窓の外の segment への ACK に使う接続ごとの間隔と同じ値です
+  - 1 つの接続か行の速さを抑えた ACK は、すべてこの 1 つの制限を分け合います。
+    接続では、窓の内で番号の合わない RST、確立した後の SYN、受け入れの範囲の外の ACK の値への challenge ACK (RFC 5961 3.2、4.2、5.2) と、PAWS か受け入れの判定で捨てた中身の無い segment への ACK です。
+    TIME_WAIT の行では、使い直しを拒んだ SYN、窓の内で番号の合わない RST、PAWS と受け入れの判定で捨てた segment への ACK です。
+    握手の途中の行では、別の番号の SYN、窓の内で番号の合わない RST、PAWS と受け入れの判定で捨てた segment への ACK です
+  - 番号の合う RST は制限しません。
+    接続では、中身のある受け入れられない segment への ACK も制限しません。
+    再送された FIN への ACK と、TIME_WAIT の行に移る時の ACK も制限しません
+  - 接続が TIME_WAIT の行に移る時と、握手の途中の行が接続になる時は、次に許す時刻を受け継ぎます
+  - 制限で送らなかった ACK は `Stats` の `challenge_limited` に数えます
+  - TIME_WAIT の行の時刻は行の外の配列に置き、行を 64 byte に保ちます。
+    速さを抑えた ACK を送る時だけ読むので、行と同じ cache line に要りません。
+    握手の途中の行と接続の枠は欄に持ちます。
+    メモリは TIME_WAIT の行と握手の途中の行ごとに 8 byte 増えます ([上界の表](wgstack-bound.md))
+- 核の全体の 1 つの予算を採らない理由:カーネルモードの DNAT のルールでは、核の TCP の相手はインターネットの一般のクライアントで、攻撃者も公開したポートに自分の接続を開けます ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))。
+  すべての接続が 1 つの予算を分け合うと、次の 2 つの害が起きます。
+  - サイドチャネル:攻撃者は他人の接続の 4 つ組に偽の RST を送り、続けて自分の接続で challenge ACK を引いて数えます。
+    偽の RST が窓に当たって予算を使ったかが、自分の数に現れます。
+    これは RFC 5961 の Erratum 4772 と CVE-2016-5696 のサイドチャネルです。
+    窓、RCV.NXT、ACK の受け入れの範囲を順に絞れば、番号の合う RST とデータの差し込みに使えます
+  - DoS:攻撃者が自分の接続で予算を使い切ると、他人の接続の challenge ACK と TIME_WAIT の行の ACK が止まります。
+    再起動したクライアントの半開きの接続の回復 (RFC 5961 4.2) と、TIME_WAIT の使い直しを拒まれたクライアントの回復が止まります
+- 許すかどうかの判断が読むもの:接続か行の ACK を許すかは、その接続か行の時刻と今の時刻だけで決まり、核の共有の状態を読みません。
+  他の接続の ACK と窓は、許すかどうかに現れません。
+  攻撃者は偽の segment で他人の接続の制限を使えますが、その ACK は正しい相手に届くので、攻撃者は数えられません
+- 残るサイドチャネル:送った ACK は、核の全体で 1 つの IP の ID の数え (`Shared::next_id`) を進めます。
+  この数えは、接続の segment、行の ACK と SYN-ACK、制御の輪の RST が使います。
+  このため、攻撃者は自分の流れで受ける packet の IP の ID の進み (2 つか 1 つか) から、他人の接続が challenge ACK を送ったかを知りえます。
+  この既知のサイドチャネルは、IP の ID の数え方を変える別の変更で直します
+- RFC の水準:RFC 5961 7 節は、速さの制限を持つこと (SHOULD) と、時間と数を管理者が変えられること (SHOULD) を求め、数える単位を定めません。
+  Erratum 4772 (Held for Document Update) は、数えを接続ごとにすることを提案します。
+  核の間隔は固定で管理者が変えられないので、変えられることの SHOULD から外れます
+- 核の全体の上限を持たない理由:核の全体で 1 秒あたりの challenge ACK の数を抑える上限は持たず、新しい共有の制限も足しません。
+  - 間隔は固定で、他の接続と行の状態も、接続と行の数も読みません。
+    接続と行の数で間隔を延ばす形は、次の理由で採りません。
+    - 接続と行の数という共有の数が、新しい観測の経路になります
+    - 接続と行が多い時に、正しい相手への応答が数十秒遅れます
+  - 出力の上界:速さを抑えた ACK はどれも届いた segment 1 つへの応答なので、出力の packet の数は入力の packet の数を超えません。
+    加えて、1 つの接続か行の速さを抑えた ACK は 500 ms に 1 回までで、接続と行の数は表の大きさが上限です
+  - 保持の上界:ACK は待ち行列に積まず、接続と行が持つ「送るものがある」印から `poll_transmit` の時に作ります ([出力](#出力))。
+    送る前の ACK は接続か行ごとに 1 つまでで、ACK のための保持は増えません。
+    RST と ICMP の誤りは、作成の時に確保した制御の輪とその受け入れの規則が抑えます。
+    核の全体の資源は、この輪、接続と行の表の上限、メモリの予算で守ります
+  - 未確認の点:この上界で、多くの接続と行を持つ攻撃者が起こしうる CPU と出力の費用が十分に小さいかは、別に評価しています。
+    十分とは確かめていません
+- 試験:`challenge_budget_tests`、`dnat_peer_tests` の challenge ACK の試験、`tcp_tests::rfc5961*` が守ります
+- 測った値:ありません
+- 見直す条件:CPU と出力の費用の評価が上界を不十分とした時、正しい接続の回復が制限で遅れた時、または管理者が間隔を変える要望が出た時
 
 ### 理由の無い外れ
 
@@ -654,7 +711,10 @@ boost の変化は知らせに入れず、hook だけで伝えます ([boost の
 - 停止の間の時計:駆動の層は、device の層に渡すものと同じ時刻を核に渡します。
   時計はデータプレーンの時計で、Linux と macOS では一時停止の間に止まり、Windows ではスリープの間も進みます ([agent の置き換えの時計](agent-parity.md#時計))
 - 乱数:作成の時に 64 byte の種を渡します。
-  Go と同じく、先頭の 16 byte を ISN の鍵、次の 16 byte を表の hash の鍵、残りの 32 byte を ChaCha8 の種にし、timestamp の鍵、IP の ID の始めの値、challenge ACK の揺らぎ、区間の treap の優先度は ChaCha8 から引きます。
+  Go と同じく、先頭の 16 byte を ISN の鍵、次の 16 byte を表の hash の鍵、残りの 32 byte を ChaCha8 の種にし、timestamp の鍵、IP の ID の始めの値、区間の treap の優先度は ChaCha8 から引きます。
+  Go は challenge ACK の予算の揺らぎも ChaCha8 から引きますが、Rust の核は揺らぎを持たないので引きません ([challenge ACK の速さの制限](#challenge-ack-の速さの制限))。
+  このため、challenge ACK を送った後に引く区間の treap の優先度の種は Go と違います。
+  treap の形は出力に出ないので、記録との照合に影響しません。
   DF を下ろした datagram の ID の数え (`ip_id_open`) の始めの値は ChaCha8 から引かず、ISN の鍵から用途の印で導くので、ChaCha8 の列は Go と同じです。
   製品は OS の乱数から種を作り、試験は固定の種を渡します
 - ChaCha8:bit の一致のため、Go の `math/rand/v2` の `ChaCha8` と同じ列を出す生成器を wgft の中で書きます。
@@ -1618,6 +1678,7 @@ UDP と ICMP と断片の切り替えの行の件数は、git の集まり (348 
 | `set_go_compat_tw_no_paws` | TIME_WAIT の枠と行で PAWS をせず、古い TSval の FIN の写しでも期限を数え直します | TIME_WAIT の枠と行も PAWS で古い TSval の segment を捨てて ACK を返します。RST の例外と RFC 6191 の SYN の判定は PAWS の前です (RFC 7323 5.3) | 1 件の記録を、PAWS の ACK より後の応答まで照らし続けるため | 0 / 1 (stream-rx/seed-44) | `tcp_tests::rfc7323_*` |
 | `set_go_compat_tw_no_ts_recent` | TIME_WAIT の枠が受け入れた FIN の写しで、TS.Recent を更新しません。次の ACK の TSecr は古い値のままです | TIME_WAIT の枠も、行と同じく FIN の写しの TSval で TS.Recent を更新し、ACK はその値を返します (RFC 7323 4.3) | 1 件の記録を、TS.Recent の更新より後の応答まで照らし続けるため | 0 / 1 (stream-rx/seed-84) | `tcp_tests::rfc7323_time_wait_slot_updates_ts_recent_*` |
 | `set_go_compat_tw_reuse_strict` | TIME_WAIT を使い直す SYN は、TSval が厳密に大きい時と、番号が RCV.NXT より大きい時だけ受けます。等しい TSval は受けません | 前の接続が timestamp を使い SYN も持つ時は、等しい TSval で番号が RCV.NXT 以上でも受けます。番号の比べは `SEG.SEQ >= RCV.NXT` です (RFC 6191 2 節) | 13 件の記録を、使い直す SYN への応答より後まで照らし続けるため | 0 / 13 (fuzzcore) | `rfc6191_tests::*` |
+| `set_go_compat_core_challenge` | challenge ACK と握手の途中の行、TIME_WAIT の枠と行の ACK を核の全体の予算だけで抑えます (記録の速さでは尽きません)。中身の無い受け入れられない segment への ACK は接続ごとに 500 ms に 1 回までで、時刻 0 の送信を「送っていない」とみなします | 接続、TIME_WAIT の行、握手の途中の行ごとに、速さを抑えた ACK のすべての種類が 500 ms に 1 回の制限を分け合い、時刻 0 の送信も数えます (RFC 5961 7 節、[challenge ACK の速さの制限](#challenge-ack-の速さの制限)) | 1460 件の記録を、同じ流れの 2 つ目の速さを抑えた ACK より後の応答まで照らし続けるため | 10 / 1460 (fuzzcore 1458、stream-tx 2。完全な集まりは 9111 件で、2026-11-07 に数えた値) | `challenge_budget_tests`、`dnat_peer_tests::a_challenge_ack_flood_*`、`attacker_cannot_observe_*`、`tcp_tests::rfc5961*` |
 | `set_go_compat_sent_at_zero` | 時刻 0 に作った SYN-ACK を「作っていない」とみなし、握手から RTT の標本を取りません | SYN-ACK の送った時刻を別の印 (`SynRow.sent`) で持つので、時刻 0 の握手からも標本を取ります (RFC 6298 2.2) | 1113 件の記録を、最初の RTO より後の応答まで照らし続けるため | 2 / 1113 (adversarial 626、fuzzcore 487) | `listen_tests::a_synack_sent_*`、`rtt_wire_*` |
 | `set_go_compat_pmtu_keep_cwnd` | PMTU の引き下げで送る MSS が小さくなっても輻輳の窓を縮めません | 新旧の MSS の比で窓を縮めます。ssthresh は変えません (RFC 5681 3.1) | 1396 件の記録を、PMTU の引き下げより後の応答の burst まで照らし続けるため | 6 / 1396 (adversarial 1391、sack-pmtu-split 5。完全な集まりの 9111 件を 2026-11-07 に数えた値) | `icmp_tests::pmtu_decrease_shrinks_cwnd_by_the_segment_size_ratio`、`pmtu_decrease_scales_a_non_initial_cwnd_and_leaves_ssthresh`、`pmtu_decrease_keeps_one_segment_of_cwnd`、`pmtu_decrease_scales_a_huge_cwnd_without_overflow`、`burst_after_pmtu_decrease_fits_ten_new_segments` |
 | `set_go_compat_shared_id` | UDP の datagram と echo の応答の IPv4 ID を、DF を立てた packet と同じ 1 つの数えから取ります (UDP は 0 を飛ばし、echo の応答は飛ばしません) | 別の数えから取り、0 を飛ばします (RFC 6864 4.3) | UDP と echo の応答の ID が TCP の segment と ICMP の誤りの数えで動くので、この記録を ID の違いより後の応答まで照らし続けるため | 15 / 15 (icmp-echo、udp-datagram、udp-large) | `icmp_tests::udp_ids_are_not_advanced_by_df_traffic`、`echo_replies_and_udp_share_a_counter_that_df_traffic_does_not_advance`、`open_id_counter_wraps_past_zero` |
