@@ -108,15 +108,19 @@ Go の文書と食い違う点は、この文書が理由と共に挙げたも�
   - TIME_WAIT の表が満杯なら最も古い行を期限の前に外すので、多くの接続を閉じる相手は TIME_WAIT の行を 60 秒より早く押し出せます ([TIME_WAIT の表](../userspace/wgstack.md#time_wait-の表))
   - RFC 6191 の SYN で行を外した後に、その握手が RST か期限で消えても、TIME_WAIT には戻りません。
     RFC 9293 の MAY-2 は、SYN が古い写しと分かれば TIME-WAIT に戻せる時だけ TIME-WAIT から SYN を受けることを認めます。
-    その握手の途中の行は、窓の内のどの番号の RST でも消えます (窓の右端ちょうどの segment も受けます)。
-    前の接続の古い RST が窓に入れば、使い直しの握手を消せます。
-    この RST の扱いは直しを準備中です ([直しを準備中の逸脱](#直しを準備中の逸脱))
+    その握手の途中の行は、番号が IRS + 1 に等しい RST だけで消えます。
+    窓の内の他の RST には challenge ACK を返し、窓の右端ちょうどの segment は窓の外として扱います (RFC 5961 3.2、RFC 9293 3.10.7.4)
+  - TIME_WAIT の枠と行は、窓の内で番号の合わない RST にも challenge ACK を返します (RFC 5961 3.2)。
+    相手は普通この時点で CLOSED なので、challenge ACK に番号の合う RST を返し、TIME_WAIT が終わります。
+    このため、経路の外の攻撃者が TIME_WAIT を早く終えさせるのに要るのは、番号の厳密な当てずっぽうでなく窓の内の当てずっぽうです。
+    RFC 5961 は SYN-SENT 以外のすべての状態にこの挙動を求めるので、核は守ります。
+    FIN_WAIT_2 と握手の途中の行では、相手が接続を持つので、この危険は起きません
 - 害を抑えるもの (コードで確かめた範囲):
   - 核の ISN は RFC 6528 の鍵付きの hash と 4 µs ごとに進む時計で作り、TIME_WAIT を使い直す時は前の接続の SND.NXT の 65537 先より前に置きません (`Shared::isn`)。
     このため、核が前の接続で送った segment の番号は、新しい接続で相手が受け入れる範囲から外れやすくなります
   - 新しい接続は、受け入れの判定 (RFC 9293 3.10.7.4) で受信の窓の外の segment を捨て、timestamp を使う接続では PAWS (RFC 7323) で古い TSval の segment を捨てます
-  - 確立した後の接続では、RST は番号が RCV.NXT と一致する時だけ接続を終えます。
-    窓の内で番号が合わない RST には challenge ACK を返し、窓の外の RST は捨てます (RFC 5961 3.2)。
+  - RST は番号が RCV.NXT と一致する時だけ、確立した接続、握手の途中の行、TIME_WAIT の枠と行、FIN_WAIT_2 の行を終えます。
+    窓の内で番号が合わない RST には、核の全体の速さの制限の内側で challenge ACK を返し、窓の外の RST は捨てます (RFC 5961 3.2)。
     窓の内の segment でも、ACK の値が受け入れの範囲の外なら challenge ACK を返します (RFC 5961 5.2)
 - 見直す条件:前の接続の古い segment に起因するデータの破損か誤った RST が観測されたとき、または timestamp を示さない相手が多く、2 MSL の内の 4 つ組の使い直しがよく起きる相手の集まりが見つかったときです
 
@@ -206,8 +210,6 @@ SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表
 次の逸脱は別の PR で直すので、例外として記録しません。
 直しが入ったら行を消します。
 
-- RFC 5961 3.2:握手の途中の行は窓の内のどの番号の RST でも行を消し、TIME_WAIT と FIN_WAIT_2 は窓の内で番号の合わない RST に challenge ACK を返しません。
-  握手の途中の行は、窓の右端ちょうどの segment も受けます (RFC 9293 3.10.7.4 の受け入れの判定からも外れます)
 - RFC 6298 5.7:SYN-ACK を再送して RTT の標本の無い接続の RTO を、確立の後に 3 秒に戻しません
 - RFC 7323 5.3:TIME_WAIT の接続と行で PAWS を行いません
 - RFC 5681 3 節:HyStart++ (RFC 9406) の外の slow start でも 1 ACK の増分の上限 L を 2 にします
@@ -1422,6 +1424,7 @@ Go の記録との照合だけが、それぞれの照合用の切り替えで G
 | --- | --- | --- | --- | --- | --- |
 | `set_go_compat_rto_l2` | RTO の後の slow start の増分を L = 2 のままにします | L = 1 にします (RFC 3465 2.3) | 2694 件の記録を、RTO より後の応答まで照らし続けるため | 14 / 2694 | `cc_tests::rto_slow_start_limit`、`rto_l1_tests`、`rto_wire_tests` |
 | `set_go_compat_dsack_snd_una` | D-SACK の判定で先頭の block を SND.UNA と比べます | 同じ packet の累積の ACK と比べます (RFC 2883 5 節) | 26 件の記録を、並べ替えられた古い ACK より後の応答まで照らし続けるため | 0 / 26 (adversarial) | `undo_tests::rfc2883_*` |
+| `set_go_compat_row_rst` | 握手の途中の行は窓の内のどの RST でも消え、受け入れの判定は窓の右端を含みます。TIME_WAIT の枠と行、FIN_WAIT_2 の行は窓の内で番号の合わない RST に challenge ACK を返しません | 番号が IRS + 1 か RCV.NXT に等しい RST だけが消え、窓の内の他の RST には challenge ACK を返します。受け入れの判定は右端を含みません (RFC 5961 3.2、RFC 9293 3.10.7.4) | 72 件の記録を、行の RST より後の応答まで照らし続けるため | 0 / 72 (fuzzcore) | `tcp_tests::rfc5961_*`、`rfc9293_syn_rcvd_*` |
 
 ## 置き換えの判定
 

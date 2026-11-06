@@ -381,13 +381,41 @@ impl Shared {
     pub(crate) fn syn_input(&mut self, id: u32, seg: &Segment<'_>, now: i64) -> RowVerdict {
         let r = *self.syn.row(id);
         let rcv_nxt = r.irs.wrapping_add(1);
+        // RFC 9293 3.10.7.4 の受け入れの判定です。窓の右端 (RCV.NXT + RCV.WND) は窓の外です。
         let in_window = || {
-            let end = seg.seq.wrapping_add(seg.seq_len());
-            seq::ge(end, rcv_nxt) && seq::le(seg.seq, rcv_nxt.wrapping_add(u32::from(r.rcv_wnd)))
+            let wnd = u32::from(r.rcv_wnd);
+            let n = seg.seq_len();
+            #[cfg(feature = "harness")]
+            if crate::stack::go_compat_row_rst() {
+                // 凍結した Go の記録との照合用: 右端を含み、最後の byte が RCV.NXT - 1 のデータも受け入れる
+                let end = seg.seq.wrapping_add(n);
+                return seq::ge(end, rcv_nxt) && seq::le(seg.seq, rcv_nxt.wrapping_add(wnd));
+            }
+            let inside = |x: u32| seq::ge(x, rcv_nxt) && seq::lt(x, rcv_nxt.wrapping_add(wnd));
+            match (n, wnd) {
+                (0, 0) => seg.seq == rcv_nxt,
+                (0, _) => inside(seg.seq),
+                (_, 0) => false,
+                _ => inside(seg.seq) || inside(seg.seq.wrapping_add(n - 1)),
+            }
         };
         if seg.has(FLAG_RST) {
-            if in_window() {
+            // RFC 5961 3.2:番号が RCV.NXT に等しい RST だけが行を外します。窓の内の他の RST には challenge ACK
+            // を返し、右端 (RCV.NXT + RCV.WND) を含む窓の外の RST は捨てます。
+            #[cfg(feature = "harness")]
+            if crate::stack::go_compat_row_rst() {
+                // 凍結した Go の記録との照合用: 窓の内のどの RST でも行を外す
+                if in_window() {
+                    self.remove_syn_row(id);
+                }
+                return RowVerdict::Done;
+            }
+            if seg.seq == rcv_nxt {
                 self.remove_syn_row(id);
+            } else if seq::gt(seg.seq, rcv_nxt)
+                && seq::lt(seg.seq, rcv_nxt.wrapping_add(u32::from(r.rcv_wnd)))
+            {
+                self.row_ack(id, now);
             }
             return RowVerdict::Done;
         }

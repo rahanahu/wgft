@@ -419,9 +419,16 @@ impl Shared {
             return false;
         }
         if seg.has(FLAG_RST) {
-            // Linux の既定 (tcp_rfc1337=0) と同じく、番号の合う RST で行を外します。
+            // Linux の既定 (tcp_rfc1337=0) と同じく、番号の合う RST で行を外します。窓の内で番号の合わない RST には
+            // challenge ACK を返し (RFC 5961 3.2)、窓の外の RST は捨てます。
             if seg.seq == r.rcv_nxt {
                 self.remove_tw_row(id);
+            } else if acceptable(&r, seg) {
+                #[cfg(feature = "harness")]
+                if crate::stack::go_compat_row_rst() {
+                    return true; // 凍結した Go の記録との照合用: challenge ACK を返さない
+                }
+                self.tw_ack(id, now, true);
             }
             return true;
         }

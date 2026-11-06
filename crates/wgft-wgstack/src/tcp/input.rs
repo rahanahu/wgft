@@ -129,8 +129,16 @@ impl Conn<'_> {
     /// 枠に残る TIME_WAIT の接続への segment を処理します。
     fn time_wait_input(&mut self, seg: &Segment<'_>, now: i64, reuse: &mut Option<u32>) -> bool {
         if seg.has(FLAG_RST) {
+            // 番号の合う RST で閉じます。窓の内で番号の合わない RST には challenge ACK を返し (RFC 5961 3.2)、
+            // 窓の外の RST は捨てます。
             if seg.seq == self.t.rcv_nxt {
                 self.enter_closed(None);
+            } else if self.acceptable(seg) {
+                #[cfg(feature = "harness")]
+                if crate::stack::go_compat_row_rst() {
+                    return false; // 凍結した Go の記録との照合用: challenge ACK を返さない
+                }
+                self.challenge_ack(now);
             }
             return false;
         }

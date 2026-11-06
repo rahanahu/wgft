@@ -1244,7 +1244,6 @@ fn rst_at(seq: u32, ack: u32) -> TSeg {
 /// SYN-RCVD の行は、SEG.SEQ が RCV.NXT に等しい RST でだけ外れます。窓の内の他の RST には challenge ACK を返して
 /// 行を残します。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc5961_syn_rcvd_row_needs_an_exact_rst() {
     let mut n = net();
     let (rcv_nxt, wnd, iss) = half_open(&mut n);
@@ -1273,7 +1272,6 @@ fn rfc5961_syn_rcvd_row_needs_an_exact_rst() {
 
 /// 受信窓の右端ちょうど (RCV.NXT + RCV.WND) の RST は窓の外で、行を外しません。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc5961_syn_rcvd_row_ignores_an_rst_at_the_right_window_edge() {
     let mut n = net();
     let (rcv_nxt, wnd, _) = half_open(&mut n);
@@ -1293,7 +1291,6 @@ fn rfc5961_syn_rcvd_row_ignores_an_rst_at_the_right_window_edge() {
 /// TIME_WAIT の接続の枠で、窓の内の番号の合わない RST には challenge ACK を返し、窓の外の RST は黙って捨てます。
 /// 番号の合う RST は枠を閉じます。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc5961_time_wait_slot_challenges_an_in_window_rst() {
     let mut n = net();
     let (c, mut p) = n.accepted(true);
@@ -1325,7 +1322,6 @@ fn rfc5961_time_wait_slot_challenges_an_in_window_rst() {
 
 /// 表の TIME_WAIT の行でも同じです。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc5961_time_wait_row_challenges_an_in_window_rst() {
     let mut n = net();
     let (c, mut p) = n.accepted(true);
@@ -1358,7 +1354,6 @@ fn rfc5961_time_wait_row_challenges_an_in_window_rst() {
 
 /// FIN_WAIT_2 の行でも同じです。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc5961_fin_wait_2_row_challenges_an_in_window_rst() {
     let mut n = net();
     let (c, mut p) = n.accepted(true);
@@ -1386,7 +1381,6 @@ fn rfc5961_fin_wait_2_row_challenges_an_in_window_rst() {
 /// 核の全体の challenge ACK の制限は、TIME_WAIT の枠と行、SYN-RCVD の行の challenge ACK にも掛かります。ここでは TIME_WAIT の行で確かめます。
 /// 1 秒の間に送れる数は 1 秒ごとに補う 500 から 1499 までで、それを超えた RST には何も返しません。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc5961_challenge_acks_for_rows_obey_the_rate_limit() {
     let mut n = net();
     let (c, mut p) = n.accepted(true);
@@ -1437,7 +1431,6 @@ fn row_promoted(n: &mut TestNet, seg: &TSeg) -> bool {
 
 /// 右端 (RCV.NXT + RCV.WND) の SYN は窓の外で、RST を返さず行も外しません。窓の内の SYN は対照です。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc9293_syn_rcvd_row_ignores_a_syn_at_the_right_window_edge() {
     let syn = |seq| TSeg {
         sport: 40000,
@@ -1473,7 +1466,6 @@ fn rfc9293_syn_rcvd_row_ignores_a_syn_at_the_right_window_edge() {
 
 /// 右端の ACK は窓の外で、行を接続にしません。窓の内の ACK は対照です。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc9293_syn_rcvd_row_is_not_promoted_by_an_ack_at_the_right_window_edge() {
     let mut n = net();
     let (rcv_nxt, wnd, iss) = half_open(&mut n);
@@ -1494,7 +1486,6 @@ fn rfc9293_syn_rcvd_row_is_not_promoted_by_an_ack_at_the_right_window_edge() {
 /// 全体が RCV.NXT より前にあるデータ (最後の byte が RCV.NXT - 1) は受け入れられず、行を接続にしません。
 /// 最後の byte が RCV.NXT にかかるデータは対照です。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc9293_syn_rcvd_row_rejects_data_that_ends_at_rcv_nxt() {
     let mut n = net();
     let (rcv_nxt, _, iss) = half_open(&mut n);
@@ -1512,7 +1503,6 @@ fn rfc9293_syn_rcvd_row_rejects_data_that_ends_at_rcv_nxt() {
 
 /// 右端から始まるデータは窓の外です。右端をまたぐ (最初の byte が窓の内の) データは対照です。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc9293_syn_rcvd_row_rejects_data_that_starts_at_the_right_window_edge() {
     let mut n = net();
     let (rcv_nxt, wnd, iss) = half_open(&mut n);
@@ -1528,5 +1518,40 @@ fn rfc9293_syn_rcvd_row_rejects_data_that_starts_at_the_right_window_edge() {
             &row_ack_seg(rcv_nxt + wnd - 1, iss, FLAG_ACK, b"xy")
         ),
         "data straddling the right edge did not promote the row"
+    );
+}
+
+/// 凍結した Go との照合用の切り替え (feature `harness` だけ):窓の内のどの RST でも握手の途中の行を外し、TIME_WAIT の行では
+/// 窓の内の合わない RST に challenge ACK を返さず、握手の途中の行の受け入れの判定が窓の右端を含みます。
+#[cfg(feature = "harness")]
+#[test]
+fn go_compat_switch_restores_the_old_row_rst_handling() {
+    crate::set_go_compat_row_rst(true);
+    let mut n = net();
+    let (rcv_nxt, wnd, _) = half_open(&mut n);
+    n.inject(&rst_at(rcv_nxt + wnd / 2, 0));
+    let outs = n.drain();
+    assert!(
+        n.s.held().syn_rows == 0 && outs.is_empty(),
+        "an in-window RST left the SYN-RCVD row: {}",
+        show(&outs)
+    );
+    let mut n = net();
+    let (c, mut p) = n.accepted(true);
+    n.s.close_conn(n.now, c);
+    let outs = n.drain();
+    p.absorb(&outs);
+    n.peer_ack(&mut p, &[]);
+    n.peer_fin(&mut p);
+    n.drain();
+    let mut s = p.seg(FLAG_RST, &[]);
+    s.seq = p.snd + 1;
+    n.inject(&s);
+    let outs = n.drain();
+    crate::set_go_compat_row_rst(false);
+    assert!(
+        outs.is_empty() && n.s.held().tw_rows == 1,
+        "a challenge ACK was sent from the TIME_WAIT row: {}",
+        show(&outs)
     );
 }

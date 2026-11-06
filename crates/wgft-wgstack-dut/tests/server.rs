@@ -477,26 +477,27 @@ fn burst_after_ack(d: &mut WgstackDut, mut p: Peer) -> usize {
     d.poll(usize::MAX).expect("poll").len()
 }
 
+/// 照合用の切り替えがどれも偽 (製品と同じ) であることを確かめます。切り替えを足したらここに足します。
+fn assert_switches_off(when: &str) {
+    assert!(!wgft_wgstack::go_compat_rto_l2(), "rto_l2 {when}");
+    assert!(
+        !wgft_wgstack::go_compat_dsack_snd_una(),
+        "dsack_snd_una {when}"
+    );
+    assert!(!wgft_wgstack::go_compat_row_rst(), "row_rst {when}");
+}
+
 #[test]
 fn go_compat_switch_is_per_core_and_restored() {
-    assert!(!wgft_wgstack::go_compat_rto_l2());
-    assert!(!wgft_wgstack::go_compat_dsack_snd_una());
+    assert_switches_off("at the start");
     let mut replay = WgstackDut::for_replay(&hello()).expect("HELLO");
     let mut product = WgstackDut::new(&hello()).expect("HELLO");
     // 2 つの核を同じ thread で交互に駆動する
     let (_, rp) = until_rto(&mut replay);
-    assert!(!wgft_wgstack::go_compat_rto_l2(), "restored after a call");
-    assert!(
-        !wgft_wgstack::go_compat_dsack_snd_una(),
-        "restored after a call"
-    );
+    assert_switches_off("after a call");
     let (_, pp) = until_rto(&mut product);
     let replay_burst = burst_after_ack(&mut replay, rp);
-    assert!(!wgft_wgstack::go_compat_rto_l2(), "restored after a call");
-    assert!(
-        !wgft_wgstack::go_compat_dsack_snd_una(),
-        "restored after a call"
-    );
+    assert_switches_off("after a call");
     let product_burst = burst_after_ack(&mut product, pp);
     // 後の RTO の slow start の増分は、replay の核が 2 SMSS、製品の核が 1 SMSS で、1 segment 違う
     assert_eq!(
@@ -504,7 +505,6 @@ fn go_compat_switch_is_per_core_and_restored() {
         product_burst + 1,
         "replay {replay_burst}, product {product_burst}"
     );
-    // replay の核を駆動した後も、thread の値は偽なので、直接駆動する核は製品と同じ L = 1 になる
-    assert!(!wgft_wgstack::go_compat_rto_l2());
-    assert!(!wgft_wgstack::go_compat_dsack_snd_una());
+    // replay の核を駆動した後も、thread の値は偽なので、直接駆動する核は製品と同じ挙動になる
+    assert_switches_off("at the end");
 }
