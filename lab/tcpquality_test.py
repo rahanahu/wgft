@@ -127,6 +127,21 @@ class CpuPaired(unittest.TestCase):
         self.assertNotIn("peer_bound", out)
         self.assertIn("LEFT_OUT planned=8 used=8 ", out)
 
+    def test_split_log_gets_the_guest_mode_ratio(self):
+        # host_agent_vcpu_guest_s over the bytes: x 1.2 s and y 1.0 s for 1 GB each give 1.2
+        def host(rnd, run, arm):
+            return "bytes=1000000000 window_s=10 host_agent_vcpu_guest_s=%s host_peer_vcpu_guest_s=2" % (
+                "1.2" if arm == "x" else "1.0")
+        rc, out = analyse(self.split_log(host))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("AGENTVMGUESTRATIO x_over_y=1.200 ci95_low=1.200 ci95_high=1.200 pairs=8 ", out)
+        self.assertIn("AGENTVMGUESTCPU arm=x name=new runs=8 cpu_s_per_gb=1.200 ", out)
+        self.assertRegex(out, r"AGENTVMGUESTCPU arm=y .* agentvm_guest_share=0.10\n")
+        self.assertIn("PEERVMGUESTRATIO x_over_y=1.000 ", out)
+        # without the host's samples there is no such line
+        rc, out = analyse(self.split_log(lambda rnd, run, arm: ""))
+        self.assertNotIn("GUEST", out)
+
     def test_placement_rejects_userspace_arms_with_more_threads(self):
         # --placement apart pins the agent to one CPU: only the rust and kernel arms. --rounds 3 is
         # invalid too, so the command stops in validation even if the placement check were gone
@@ -417,6 +432,9 @@ class HostCounters(unittest.TestCase):
         self.assertEqual((got["agent_vcpu_ns"], got["agent_vhost_ns"], got["agent_other_ns"]), ("6000", "150", "1040"))
         self.assertEqual((got["agent_vcpu_guest"], got["agent_vcpu_stime"], got["agent_vcpu_vcs"]), ("5", "2", "3"))
         self.assertEqual((got["agent_vhostp_ns"], got["agent_vhoste_ns"]), ("0", "50"))
+        # the pinned vCPU thread on its own, by its host CPU, cumulative
+        self.assertEqual((got["agent_pv16_run_ns"], got["agent_pv16_guest"], got["agent_pv16_stime"]), ("6000", "5", "2"))
+        self.assertNotIn("agent_pv0-23_run_ns", got)
 
     def test_hostsample_stops_when_its_lab_is_gone(self):
         with tempfile.TemporaryDirectory() as d:
@@ -446,7 +464,9 @@ class HostCounters(unittest.TestCase):
                          "peer_vcpu_guest": 3 * hz * k, "peer_vcpu_utime": 3.5 * hz * k, "peer_vcpu_stime": 4.5 * hz * k,
                          "peer_vcpu_wait": 0.2e9 * k, "peer_vcpu_vcs": 1000.0 * k, "peer_vcpu_nvcs": 10.0 * k,
                          "peer_vhost_vcs": 500.0 * k,
-                         "peer_vcpucpu_busy": 8.5 * hz * k, "peer_vcpucpu_irq": 0.25 * hz * k})
+                         "peer_vcpucpu_busy": 8.5 * hz * k, "peer_vcpucpu_irq": 0.25 * hz * k,
+                         "peer_pv9_run_ns": 6e9 * k, "peer_pv9_guest": 1 * hz * k, "peer_pv9_stime": 4.5 * hz * k,
+                         "peer_pv8_run_ns": 2e9 * k, "peer_pv8_guest": 2 * hz * k, "peer_pv8_stime": 0.0})
         kvm = [{"t": 0.0, "kvm_42_halt_poll_success_ns": 0.0, "kvm_42_exits": 0.0},
                {"t": 10.0, "kvm_42_halt_poll_success_ns": 4e9, "kvm_42_exits": 1e6}]
         r = {"t_start": "0", "t_end": "10", "window_s": "10", "bytes": "2000000000", "peervm_cpu_share": "0.3"}
@@ -457,7 +477,11 @@ class HostCounters(unittest.TestCase):
                 "host_peer_vhost_blocks_per_s": "50", "host_peer_vcpucpu_irq_s": "0.250", "host_peer_vcpucpu_not_vcpu_s": "0.500",
                 "host_peer_vcpu_beyond_guest_s": "5.000", "host_peer_vcpu_beyond_guest_s_per_gb": "2.500",
                 "host_peer_kvm_halt_poll_success_s": "4.000", "host_peer_kvm_exits_per_s": "100000",
-                "host_qemu_s_per_gb": "4.500", "host_vhost_pcore_frac": "0.00", "host_irq_s": "0.100"}
+                "host_qemu_s_per_gb": "4.500", "host_vhost_pcore_frac": "0.00", "host_irq_s": "0.100",
+                # vCPUs in the order of their host CPUs: 8 is vCPU 0, 9 is vCPU 1
+                "host_peer_vcpu0_run_share": "0.200", "host_peer_vcpu0_guest_share": "0.200",
+                "host_peer_vcpu0_kvm_share": "0.000", "host_peer_vcpu1_run_share": "0.600",
+                "host_peer_vcpu1_guest_share": "0.100", "host_peer_vcpu1_kvm_share": "0.450"}
         for k, v in want.items():
             self.assertEqual(got.get(k), v, k)
 
