@@ -6,7 +6,7 @@
 //! 内側で送ります。
 
 use crate::fixed_vec::{AllocError, FixedVec};
-use crate::stack::shared::{EV_PING, LogKind, Shared};
+use crate::stack::shared::{CtlKind, EV_PING, Shared};
 use crate::stack::{Error, Hook, Stack};
 use crate::tcp::MIN_PMTU;
 use crate::tcp::conn::State;
@@ -179,7 +179,7 @@ impl Shared {
             .min(MIN_REASSEMBLY.min(self.config.mtu) - IP_HEADER_LEN - 8)];
         let id = self.next_id();
         let Some(b) = self.out.ctl.slot() else {
-            self.refused(LogKind::CtlDropped, now);
+            self.ctl_refused(CtlKind::IcmpError, now);
             return;
         };
         let total = IP_HEADER_LEN + 8 + quote.len();
@@ -208,26 +208,65 @@ impl Shared {
         self.send_icmp_error_raw(ip.packet, typ, code, rest, now);
     }
 
-    /// 自分のアドレス宛ての echo request に、制御の輪から echo reply を返します。
+    /// 自分のアドレス宛ての echo request に、制御の輪から echo reply を返します。応答が MTU を超えるときは、
+    /// request の data を全部含めて、DF を立てない断片に分けます (RFC 1122 3.2.2.6)。断片は UDP の datagram の
+    /// 断片と同じ大きさで分け、同じ ID を共有します。
     fn echo_reply(&mut self, ip: &Ipv4<'_>, now: i64) {
         let payload = ip.payload();
-        let total = IP_HEADER_LEN + payload.len();
-        if total > self.config.mtu {
+        if payload.len() < 8 {
             self.stats.icmp_dropped += 1;
             return;
         }
-        let id = self.next_open_id();
-        let Some(b) = self.out.ctl.slot() else {
-            self.refused(LogKind::CtlDropped, now);
+        let total = IP_HEADER_LEN + payload.len();
+        let mtu = self.config.mtu;
+        #[cfg(feature = "harness")]
+        if crate::stack::go_compat_echo_drop() && total > mtu {
+            self.stats.icmp_dropped += 1; // 凍結した Go の記録との照合用: 断片に分けず捨てる
             return;
+        }
+        // 断片ごとの ICMP の byte 数です。最後の断片を除き、8 の倍数にします。
+        let space = (mtu - IP_HEADER_LEN) & !7;
+        let frags = if total <= mtu {
+            1
+        } else {
+            payload.len().div_ceil(space)
         };
-        wire::write_ipv4_header(b, total, id, PROTO_ICMP, ip.dst, ip.src);
-        wire::clear_df(b); // echo の応答は DF を立てません (Linux と同じく PMTU discovery を使いません)
-        let m = &mut b[IP_HEADER_LEN..total];
-        m.copy_from_slice(payload);
-        m[0] = ECHO_REPLY;
-        wire::finish_icmp(m);
-        self.out.ctl.commit(total);
+        let id = self.next_open_id();
+        // 断片は全部積めるときだけ積みます。一部だけ積むと、受け手が完成させない断片が残ります。echo の応答の
+        // 断片が持てる枠には上限があり、超える応答は丸ごと捨てて、RST と ICMP の誤りの枠を残します。
+        if !self.out.ctl.echo_room(frags) {
+            self.ctl_refused(CtlKind::Echo, now);
+            return;
+        }
+        // ICMP の checksum は message の全体にかかるので、断片に分ける前に応答の message で計算します。
+        let mut head = [0u8; 8];
+        head[1] = payload[1];
+        head[4..8].copy_from_slice(&payload[4..8]);
+        let csum = !wire::checksum(u32::from(wire::checksum(0, &head)), &payload[8..]);
+        let mut off = 0;
+        while off < payload.len() {
+            let n = if frags == 1 {
+                payload.len()
+            } else {
+                space.min(payload.len() - off)
+            };
+            let more = off + n < payload.len();
+            let Some(b) = self.out.ctl.slot() else {
+                return; // 空きを確かめたので起きません
+            };
+            wire::write_ipv4_header(b, IP_HEADER_LEN + n, id, PROTO_ICMP, ip.dst, ip.src);
+            // echo の応答は DF を立てません (Linux と同じく PMTU discovery を使いません)。
+            let field = u16::try_from(off / 8).unwrap_or(0) | if more { 0x2000 } else { 0 };
+            wire::set_frag_field(b, field);
+            let m = &mut b[IP_HEADER_LEN..IP_HEADER_LEN + n];
+            m.copy_from_slice(&payload[off..off + n]);
+            if off == 0 {
+                m[0] = ECHO_REPLY;
+                m[2..4].copy_from_slice(&csum.to_be_bytes());
+            }
+            self.out.ctl.commit_echo(IP_HEADER_LEN + n);
+            off += n;
+        }
     }
 
     /// echo reply を、識別子と送信元の合う endpoint に渡します。応答を 1 つ持っていれば捨てます。

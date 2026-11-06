@@ -9,6 +9,7 @@
 )]
 #![expect(clippy::cast_possible_truncation, reason = "small test sizes")]
 
+use crate::config::Config;
 use crate::icmp::{DST_UNREACH, ECHO, ECHO_REPLY, PARAM_PROBLEM, PING_ENDPOINTS, TIME_EXCEEDED};
 use crate::sack_tests::{TEST_SEG_PAYLOAD, sack_conn};
 use crate::sackpeer_tests::check_scoreboard;
@@ -45,7 +46,7 @@ fn icmp_echo() {
     );
     // echo の応答は DF を立てず、IPv4 の header の checksum は正しくあります。
     assert_eq!(pkts[0][6] & 0x40, 0, "DF set");
-    // 壊れた echo と、MTU を超える echo は捨てます。
+    // 壊れた echo は捨て、MTU を超える echo の応答は断片に分けて全部返します (RFC 1122 3.2.2.6)。
     let mut bad = build_icmp(PEER, &req);
     let last = bad.len() - 1;
     bad[last] ^= 1;
@@ -55,8 +56,11 @@ fn icmp_echo() {
     for f in split_ipv4(&build_icmp(PEER, &big), 1000, 5) {
         n.write(&f);
     }
-    assert_eq!(n.drain_raw().len(), 0);
-    assert_eq!(n.s.stats().icmp_dropped, 2);
+    let pkts = n.drain_raw();
+    assert_eq!(pkts.len(), 2);
+    let sizes: usize = pkts.iter().map(|p| p.len() - IP_HEADER_LEN).sum();
+    assert_eq!(sizes, TEST_MTU);
+    assert_eq!(n.s.stats().icmp_dropped, 1);
 }
 
 #[test]
@@ -230,8 +234,19 @@ fn bound_echo_flood_fills_only_the_control_ring() {
     }
     n.s.check_invariants().unwrap();
     let h = n.s.held();
-    assert_eq!(h.ctl_queued, small_limits().ctl_slots);
+    // echo の応答が輪に置けるのは枠の 1/4 までで、洪水はそこで止まります。
+    let cap = (small_limits().ctl_slots / 4).max(1);
+    assert_eq!(h.ctl_queued, cap);
     assert!(n.s.stats().ctl_dropped > 0);
+    // 残りの枠はほかの制御の packet (ICMP の誤り) のために空いています。
+    let free = small_limits().ctl_slots - cap;
+    for i in 0..free as u16 {
+        n.s.handle_packet(
+            n.now,
+            &build_udp(SocketAddrV4::new(PEER, 6000 + i), 9, b"x"),
+        );
+    }
+    assert_eq!(n.s.held().ctl_queued, small_limits().ctl_slots);
     n.s.send_to(n.now, pc, b"still here", PEER_UDP).unwrap();
     let mut buf = vec![0u8; TEST_MTU];
     let mut udp = false;
@@ -978,4 +993,267 @@ fn no_icmp_error_is_sent_to_invalid_sources() {
     let mut n = TestNet::new(small_limits());
     n.write(&build_udp(PEER_UDP, 9, b"x"));
     assert_eq!(n.drain_raw().len(), 1);
+}
+
+/// MTU を超える echo reply が要る echo request (断片で届いて組み立てた) に、応答を捨てずに返します (RFC 1122
+/// 3.2.2.6: echo request の data は応答に全部含める。意図した断片化を実装しないなら、MTU に切って送る)。
+/// 要るのは、応答が出ること、MTU に収まること、data が request の data の先頭から続くことです。断片に分けて
+/// 全部を返す実装も許します。
+#[test]
+fn oversized_echo_request_gets_a_fragmented_reply() {
+    let mut n = TestNet::new(small_limits());
+    let mut msg = vec![0u8; TEST_MTU];
+    msg[0] = ECHO;
+    msg[4..8].copy_from_slice(&[0x12, 0x34, 0, 9]);
+    for (i, b) in msg[8..].iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    for f in split_ipv4(&build_icmp(PEER, &msg), 1000, 5) {
+        n.write(&f);
+    }
+    let pkts = n.drain_raw();
+    assert!(!pkts.is_empty(), "no echo reply: {:?}", n.s.stats());
+    let mut parts: Vec<(usize, Vec<u8>, bool)> = Vec::new();
+    for p in &pkts {
+        let ip = parse_ipv4(p).unwrap();
+        assert!(
+            ip.proto == PROTO_ICMP && ip.src == DUT.to_bits() && ip.dst == PEER.to_bits(),
+            "unexpected packet {p:x?}"
+        );
+        let flags = u16::from_be_bytes([p[6], p[7]]);
+        parts.push((
+            usize::from(flags & 0x1fff) * 8,
+            ip.payload().to_vec(),
+            flags & 0x2000 != 0,
+        ));
+    }
+    parts.sort_by_key(|x| x.0);
+    let reply: Vec<u8> = parts.iter().flat_map(|x| x.1.clone()).collect();
+    if pkts.len() == 1 {
+        // 切り詰めた応答は、ちょうど MTU の大きさです。
+        assert_eq!(pkts[0].len(), TEST_MTU, "truncated reply size");
+        assert!(!parts[0].2);
+    } else {
+        assert!(!parts.last().unwrap().2 && parts[..parts.len() - 1].iter().all(|x| x.2));
+        assert_eq!(
+            reply.len(),
+            msg.len(),
+            "fragmented reply must carry all data"
+        );
+    }
+    assert_eq!(reply[0], ECHO_REPLY);
+    assert_eq!(reply[1], 0);
+    assert_eq!(reply[4..8], msg[4..8], "identifier and sequence");
+    assert_eq!(reply[8..], msg[8..reply.len()], "echoed data");
+    assert_eq!(!wire::checksum(0, &reply), 0, "ICMP checksum");
+}
+
+// 制御の輪 (256 枠、FIFO) の受け入れの規則: echo の応答は同時に 64 枠までです。応答は断片がすべて収まるときだけ
+// 積み、収まらなければ応答ごと捨てます (一部だけ積みません)。捨てた数は TCP の制御 (RST と cookie の SYN-ACK)、
+// ICMP の誤り、echo に分けて数え、`ctl_dropped` は合計です。
+
+const ECHO_CAP: usize = 64;
+
+/// `Stats` の欄を Debug の表現から読みます。欄が無ければ失敗します (欄の追加より前の核でも試験が組めます)。
+fn stat(s: &crate::Stats, name: &str) -> u64 {
+    let d = format!("{s:?}");
+    let key = format!(" {name}: ");
+    let at = d
+        .find(&key)
+        .unwrap_or_else(|| panic!("Stats has no field {name}"));
+    d[at + key.len()..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap()
+}
+
+/// 長さ `len` の ICMP の message を持つ echo request を、1400 byte の断片 (ID は `ip_id`) で核に渡します。
+fn send_big_echo(n: &mut TestNet, ip_id: u16, len: usize) {
+    let mut msg = vec![0xa5u8; len];
+    msg[0] = ECHO;
+    msg[1] = 0;
+    msg[4..8].copy_from_slice(&[0x12, 0x34, 0, 1]);
+    for f in split_ipv4(&build_icmp(PEER, &msg), 1400, ip_id) {
+        n.s.handle_packet(n.now, &f);
+    }
+}
+
+fn is_echo_fragment(p: &[u8]) -> bool {
+    let flags = u16::from_be_bytes([p[6], p[7]]);
+    p[9] == PROTO_ICMP && (flags & 0x3fff != 0 || p[20] == ECHO_REPLY)
+}
+
+/// 出た echo の応答の断片を、応答 (IP の ID) ごとに `(offset, 中身の長さ, MF)` の列にします。
+fn echo_replies(pkts: &[Vec<u8>]) -> std::collections::BTreeMap<u16, Vec<(usize, usize, bool)>> {
+    let mut m = std::collections::BTreeMap::<u16, Vec<_>>::new();
+    for p in pkts.iter().filter(|p| is_echo_fragment(p)) {
+        let flags = u16::from_be_bytes([p[6], p[7]]);
+        m.entry(ip_id(p)).or_default().push((
+            usize::from(flags & 0x1fff) * 8,
+            p.len() - IP_HEADER_LEN,
+            flags & 0x2000 != 0,
+        ));
+    }
+    for v in m.values_mut() {
+        v.sort_unstable();
+    }
+    m
+}
+
+/// 応答の断片が先頭から隙間なく続き、最後だけ MF が無く、中身が `len` byte であることを確かめます。
+fn assert_whole_reply(id: u16, frags: &[(usize, usize, bool)], len: usize) {
+    let mut at = 0;
+    for (i, &(off, l, more)) in frags.iter().enumerate() {
+        assert_eq!(off, at, "reply {id}: a gap before fragment {i}");
+        assert_eq!(more, i + 1 < frags.len(), "reply {id}: MF of fragment {i}");
+        at += l;
+    }
+    assert_eq!(at, len, "reply {id} is partial: {frags:?}");
+}
+
+fn is_rst(p: &[u8]) -> bool {
+    p[9] == wire::PROTO_TCP && p[33] & 0x04 != 0
+}
+
+fn is_icmp_error(p: &[u8]) -> bool {
+    p[9] == PROTO_ICMP && (u16::from_be_bytes([p[6], p[7]]) << 2) == 0 && p[20] == DST_UNREACH
+}
+
+fn closed_port_syn(n: &mut TestNet, sport: u16) {
+    let seg = TSeg {
+        sport,
+        dport: 81,
+        seq: 1000,
+        flags: FLAG_SYN,
+        wnd: 65535,
+        mss: 1360,
+        ..TSeg::default()
+    };
+    n.s.handle_packet(n.now, &build_peer(&seg));
+}
+
+/// 同じ drain の間に大きな echo request を多数送っても、echo の断片は 64 枠までで、出た応答はどれも断片が揃います。
+#[test]
+fn echo_replies_hold_at_most_64_ring_slots_and_none_is_partial() {
+    let mut n = TestNet::new(crate::config::Limits::default());
+    for i in 0..100u16 {
+        send_big_echo(&mut n, 100 + i, 3000);
+    }
+    let pkts = n.drain_raw();
+    let echo = pkts.iter().filter(|p| is_echo_fragment(p)).count();
+    assert!(
+        (1..=ECHO_CAP).contains(&echo),
+        "{echo} echo fragments in one drain"
+    );
+    let replies = echo_replies(&pkts);
+    assert!(!replies.is_empty());
+    for (id, frags) in &replies {
+        assert_whole_reply(*id, frags, 3000);
+    }
+}
+
+/// echo だけの洪水の中でも、同じ drain の間の RST と ICMP の誤り (合わせて 192 未満) はすべて出ます。
+/// RST や ICMP の誤りが落ちないとは主張しません。この規模では落ちないことだけを確かめます。
+#[test]
+fn echo_flood_leaves_room_for_rst_and_icmp_errors() {
+    let mut n = TestNet::new(crate::config::Limits::default());
+    for i in 0..200u16 {
+        send_big_echo(&mut n, 100 + i, 3000);
+    }
+    for i in 0..100u16 {
+        closed_port_syn(&mut n, 40000 + i);
+    }
+    for i in 0..80u16 {
+        n.s.handle_packet(
+            n.now,
+            &build_udp(SocketAddrV4::new(PEER, 6000 + i), 9, b"x"),
+        );
+    }
+    let pkts = n.drain_raw();
+    assert_eq!(pkts.iter().filter(|p| is_rst(p)).count(), 100, "RSTs");
+    assert_eq!(
+        pkts.iter().filter(|p| is_icmp_error(p)).count(),
+        80,
+        "ICMP errors"
+    );
+    for (id, frags) in &echo_replies(&pkts) {
+        assert_whole_reply(*id, frags, 3000);
+    }
+}
+
+/// 捨てた応答ごとに ctl_dropped_echo が 1 増え、ctl_dropped は 3 種類の合計です。
+#[test]
+fn echo_drops_are_counted_per_whole_reply() {
+    let mut n = TestNet::new(crate::config::Limits::default());
+    let requests = 100u64;
+    for i in 0..requests as u16 {
+        send_big_echo(&mut n, 100 + i, 3000);
+    }
+    let st = n.s.stats();
+    let pkts = n.drain_raw();
+    let sent = echo_replies(&pkts).len() as u64;
+    assert!(sent > 0 && sent < requests);
+    assert_eq!(stat(&st, "ctl_dropped_echo"), requests - sent);
+    assert_eq!(stat(&st, "ctl_dropped_tcp"), 0);
+    assert_eq!(stat(&st, "ctl_dropped_icmp_error"), 0);
+    assert_eq!(stat(&st, "ctl_dropped"), requests - sent);
+}
+
+/// 輪が RST で満ちると、RST、ICMP の誤り、echo の捨てがそれぞれの欄に数えられ、合計は 3 つの和です。
+#[test]
+fn drops_are_counted_by_kind_and_sum_to_the_total() {
+    let mut n = TestNet::new(crate::config::Limits::default());
+    let (rsts, errors, echoes) = (300u64, 50u64, 5u64);
+    for i in 0..rsts as u16 {
+        closed_port_syn(&mut n, 40000 + i);
+    }
+    for i in 0..errors as u16 {
+        n.s.handle_packet(
+            n.now,
+            &build_udp(SocketAddrV4::new(PEER, 6000 + i), 9, b"x"),
+        );
+    }
+    for i in 0..echoes as u16 {
+        n.write(&build_icmp(PEER, &[ECHO, 0, 0, 0, 0, 1, 0, i as u8]));
+    }
+    let st = n.s.stats();
+    let pkts = n.drain_raw();
+    let out_rst = pkts.iter().filter(|p| is_rst(p)).count() as u64;
+    let out_err = pkts.iter().filter(|p| is_icmp_error(p)).count() as u64;
+    let out_echo = echo_replies(&pkts).len() as u64;
+    let (tcp, icmp, echo) = (
+        stat(&st, "ctl_dropped_tcp"),
+        stat(&st, "ctl_dropped_icmp_error"),
+        stat(&st, "ctl_dropped_echo"),
+    );
+    assert_eq!(tcp, rsts - out_rst, "TCP control drops");
+    assert_eq!(icmp, errors - out_err, "ICMP error drops");
+    assert_eq!(echo, echoes - out_echo, "echo drops");
+    assert!(tcp > 0 && icmp > 0 && echo > 0, "{tcp} {icmp} {echo}");
+    assert_eq!(stat(&st, "ctl_dropped"), tcp + icmp + echo);
+}
+
+/// 64 枠を超える断片が要る応答は、輪が空でも応答ごと捨てます。そのあとの小さな echo には答えます。
+#[test]
+fn a_reply_needing_more_fragments_than_the_cap_is_dropped_whole() {
+    let config = Config {
+        limits: crate::config::Limits::default(),
+        ..Config::new(DUT, 576)
+    };
+    let mut n = TestNet::with_config(config, [7; 64]);
+    // 中身 65000 byte の応答は、MTU 576 では 552 byte ずつ 118 個の断片になります。
+    send_big_echo(&mut n, 100, 65000);
+    let st = n.s.stats();
+    let pkts = n.drain_raw();
+    assert_eq!(
+        pkts.iter().filter(|p| is_echo_fragment(p)).count(),
+        0,
+        "a partial or whole oversize reply came out"
+    );
+    assert_eq!(stat(&st, "ctl_dropped_echo"), 1);
+    assert_eq!(stat(&st, "ctl_dropped"), 1);
+    n.write(&build_icmp(PEER, &[ECHO, 0, 0, 0, 0, 1, 0, 2, b'x']));
+    assert_eq!(echo_replies(&n.drain_raw()).len(), 1);
 }

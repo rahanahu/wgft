@@ -159,6 +159,7 @@ struct Compat {
     tw_no_paws: bool,
     sent_at_zero: bool,
     shared_id: bool,
+    echo_drop: bool,
 }
 
 impl Compat {
@@ -172,6 +173,7 @@ impl Compat {
             tw_no_paws: wgft_wgstack::go_compat_tw_no_paws(),
             sent_at_zero: wgft_wgstack::go_compat_sent_at_zero(),
             shared_id: wgft_wgstack::go_compat_shared_id(),
+            echo_drop: wgft_wgstack::go_compat_echo_drop(),
         }
     }
 
@@ -185,6 +187,7 @@ impl Compat {
             tw_no_paws: on,
             sent_at_zero: on,
             shared_id: on,
+            echo_drop: on,
         }
     }
 
@@ -197,6 +200,7 @@ impl Compat {
         wgft_wgstack::set_go_compat_tw_no_paws(self.tw_no_paws);
         wgft_wgstack::set_go_compat_sent_at_zero(self.sent_at_zero);
         wgft_wgstack::set_go_compat_shared_id(self.shared_id);
+        wgft_wgstack::set_go_compat_echo_drop(self.echo_drop);
     }
 }
 

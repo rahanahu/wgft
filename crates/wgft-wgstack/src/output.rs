@@ -161,7 +161,14 @@ impl Dlist {
     }
 }
 
-/// 制御の出力の輪です。枠の数と大きさは作成の時に固定し、満杯なら新しい packet を捨てます。
+/// 枠の長さの欄の最上位 bit です。echo の応答の断片の枠に立てます (MTU は 2^15 より小さい)。
+const ECHO_FLAG: u16 = 0x8000;
+
+// 枠の長さは MTU 以下なので、最上位 bit の印と重ならないことを、型の上で保ちます。
+const _: () = assert!(crate::config::MAX_MTU < ECHO_FLAG as usize);
+
+/// 制御の出力の輪です。枠の数と大きさは作成の時に固定し、満杯なら新しい packet を捨てます。echo の応答の断片が
+/// 同時に持てる枠は上限があり、残りは RST と ICMP の誤りのために空けます。
 #[derive(Debug)]
 pub(crate) struct CtlRing {
     buf: FixedVec<u8>,
@@ -169,10 +176,14 @@ pub(crate) struct CtlRing {
     size: usize,
     head: usize,
     n: usize,
+    /// 輪にある echo の応答の断片の枠の数です。積む時に増やし、取り出す時に減らします。
+    echo: usize,
+    /// `echo` の上限です。
+    echo_cap: usize,
 }
 
 impl CtlRing {
-    /// 大きさ `size` の枠を `slots` 個持つ輪を確保します。
+    /// 大きさ `size` の枠を `slots` 個持つ輪を確保します。echo の応答の断片の上限は `max(1, slots / 4)` です。
     pub(crate) fn new(slots: usize, size: usize) -> Result<Self, AllocError> {
         let bytes = slots.checked_mul(size).ok_or(AllocError)?;
         Ok(Self {
@@ -181,6 +192,8 @@ impl CtlRing {
             size,
             head: 0,
             n: 0,
+            echo: 0,
+            echo_cap: (slots / 4).max(1),
         })
     }
 
@@ -191,6 +204,12 @@ impl CtlRing {
 
     pub(crate) fn len(&self) -> usize {
         self.n
+    }
+
+    /// echo の応答の断片 `k` 個を、全部まとめて積めるかを返します。輪の空きに足り、echo の応答の断片の枠が上限を
+    /// 超えないときだけ真です。
+    pub(crate) fn echo_room(&self, k: usize) -> bool {
+        self.lens.len() - self.n >= k && self.echo + k <= self.echo_cap
     }
 
     /// 次に積む枠を返します。満杯なら `None` です。
@@ -209,10 +228,35 @@ impl CtlRing {
         self.n += 1;
     }
 
+    /// [`CtlRing::commit`] と同じで、echo の応答の断片として数えます。呼ぶ前に [`CtlRing::echo_room`] で
+    /// 確かめます。
+    pub(crate) fn commit_echo(&mut self, n: usize) {
+        let i = (self.head + self.n) % self.lens.len();
+        self.commit(n);
+        self.lens[i] |= ECHO_FLAG;
+        self.echo += 1;
+    }
+
     /// 積んだ packet をすべて捨てます。
     pub(crate) fn clear(&mut self) {
         self.head = 0;
         self.n = 0;
+        self.echo = 0;
+    }
+
+    /// echo の応答の断片の数えが、輪の中の印の付いた枠の数と上限に合うかを確かめます。
+    pub(crate) fn check(&self) -> Result<(), &'static str> {
+        let slots = self.lens.len();
+        let flagged = (0..self.n)
+            .filter(|k| self.lens[(self.head + k) % slots] & ECHO_FLAG != 0)
+            .count();
+        if flagged != self.echo {
+            return Err("ctl ring: the echo count differs from the echo slots in the ring");
+        }
+        if self.echo > self.echo_cap {
+            return Err("ctl ring: echo slots exceed their cap");
+        }
+        Ok(())
     }
 
     /// 先頭の packet を `dst` に写して外し、写した長さを返します。空なら `None` です。
@@ -221,7 +265,10 @@ impl CtlRing {
             return None;
         }
         let i = self.head;
-        let len = usize::from(self.lens[i]).min(dst.len());
+        if self.lens[i] & ECHO_FLAG != 0 {
+            self.echo -= 1;
+        }
+        let len = usize::from(self.lens[i] & !ECHO_FLAG).min(dst.len());
         dst[..len].copy_from_slice(&self.buf[i * self.size..i * self.size + len]);
         self.head = (self.head + 1) % self.lens.len();
         self.n -= 1;

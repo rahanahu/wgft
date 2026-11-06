@@ -213,7 +213,6 @@ SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表
 直しが入ったら行を消します。
 
 - RFC 5681 3 節:HyStart++ (RFC 9406) の外の slow start でも 1 ACK の増分の上限 L を 2 にします
-- RFC 1122 3.2.2.6:MTU を超える echo の応答を、切らずに捨てます
 - RFC 6864 4.3 と RFC 1122 3.3.2:DF の立った断片を壊れた packet として捨てます (MUST からの逸脱でなく、相互運用の直しです)
 - RFC 1122 3.3.2:期限を過ぎた再組み立ての項目を追い出す時に Time Exceeded を送りません
 
@@ -1430,6 +1429,7 @@ UDP と ICMP と断片の切り替えの行の件数は、git の集まり (348 
 | `set_go_compat_tw_no_paws` | TIME_WAIT の枠と行で PAWS をせず、古い TSval の FIN の写しでも期限を数え直します | TIME_WAIT の枠と行も PAWS で古い TSval の segment を捨てて ACK を返します。RST の例外と RFC 6191 の SYN の判定は PAWS の前です (RFC 7323 5.3) | 1 件の記録を、PAWS の ACK より後の応答まで照らし続けるため | 0 / 1 (stream-rx/seed-44) | `tcp_tests::rfc7323_*` |
 | `set_go_compat_sent_at_zero` | 時刻 0 に作った SYN-ACK を「作っていない」とみなし、握手から RTT の標本を取りません | SYN-ACK の送った時刻を別の印 (`SynRow.sent`) で持つので、時刻 0 の握手からも標本を取ります (RFC 6298 2.2) | 1113 件の記録を、最初の RTO より後の応答まで照らし続けるため | 2 / 1113 (adversarial 626、fuzzcore 487) | `listen_tests::a_synack_sent_*`、`rtt_wire_*` |
 | `set_go_compat_shared_id` | UDP の datagram と echo の応答の IPv4 ID を、DF を立てた packet と同じ 1 つの数えから取ります (UDP は 0 を飛ばし、echo の応答は飛ばしません) | 別の数えから取り、0 を飛ばします (RFC 6864 4.3) | UDP と echo の応答の ID が TCP の segment と ICMP の誤りの数えで動くので、この記録を ID の違いより後の応答まで照らし続けるため | 15 / 15 (icmp-echo、udp-datagram、udp-large) | `icmp_tests::udp_ids_are_not_advanced_by_df_traffic`、`echo_replies_and_udp_share_a_counter_that_df_traffic_does_not_advance`、`open_id_counter_wraps_past_zero` |
+| `set_go_compat_echo_drop` | MTU を超える echo の応答を、断片に分けずに捨てて `icmp_dropped` に数えます | 断片に分けて全部返します (RFC 1122 3.2.2.6) | 5 件の記録を、大きな echo の応答より後の応答まで照らし続けるため | 5 / 5 (icmp-echo) | `icmp_tests::icmp_echo`、`oversized_echo_request_gets_a_fragmented_reply` |
 
 ## 置き換えの判定
 
@@ -1824,6 +1824,29 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   directed broadcast の送信元 (RFC 1122 3.2.1.3 の d から f) は、核がアドレスを 1 つしか持たず、prefix を知らないので見分けません。
   agent では送信元が server の 1 つのアドレスに限られるので、起きません。
   Go の記録の再生は変わりません
+- MTU を超える echo の応答:応答が MTU を超えるときは、request の data を全部含め、DF を立てない断片に分けて制御の輪に積みます。
+  RFC 1122 3.2.2.6 は、data を応答に全部含めることを求め、断片化を実装しないときだけ切ることを許します。
+  wgstack は UDP の datagram を断片に分けるので、echo の応答も切りません。
+  断片の大きさは UDP の datagram の断片と同じ (MTU から IP の header を引いた 8 の倍数) で、1 つの ID (非 atomic の datagram の数え) を共有します。
+  UDP の送信の経路は endpoint の予算に結びつくので使わず、制御の輪の枠に直接積みます。
+  制御の輪は 1 本の FIFO のままで、優先度の待ち行列も scheduler も足しません。
+  echo の応答の断片が輪で同時に持てる枠は、`max(1, ctl_slots / 4)` までです (既定の 256 枠では 64)。
+  輪は、echo の応答の断片の枠の数を持ち、積む時に増やし、取り出す時に取り出した枠の分だけ減らします。
+  `check_invariants` が、この数と輪の中の印の付いた枠の数、上限を確かめます。
+  応答は、輪の空きと上限の内側の残りの両方に断片が全部収まるときだけ積みます。
+  収まらなければ応答を丸ごと捨て、断片を一部だけ積むことはしません。
+  最大の request (約 64 KiB) の応答は、MTU 1420 で断片 47 個になり、上限の 64 に収まります。
+  MTU が約 1044 より小さいと、最大の応答は 64 個を超えるので丸ごと捨てます。
+  保証するのは、echo だけでは 64 枠を超えて取れず、echo だけの洪水でも残りの枠 (既定で 192) が RST と ICMP の誤りに残ることです。
+  RST と ICMP の誤りが捨てられないとは言いません。これらが輪を満たす洪水 (どの接続にも当たらない segment への RST の洪水、速さの制限の内側の Port Unreachable) では、今までどおり捨てられます。
+  RST の洪水は、この変更の外にある既知の限界として残します ([出力](../userspace/wgstack.md#出力))。
+  捨てた数は、`ctl_dropped` を合計として残し、TCP の制御 (RST と cookie の SYN-ACK) の `ctl_dropped_tcp`、ICMP の誤りの `ctl_dropped_icmp_error`、echo の応答を丸ごと捨てた `ctl_dropped_echo` に分けて数えます。
+  echo の応答は、輪が満杯でも上限でも、1 つ捨てるごとに `ctl_dropped_echo` と合計に 1 を足します。
+  この上限は、main の小さい echo の洪水にも同じように働きます。
+  ICMP の checksum は message の全体にかかるので、断片に分ける前に計算して最初の断片に書きます。
+  凍結した Go は応答を捨てて `icmp_dropped` に数えるので、Go との照合だけ元に戻す照合用の切り替え (`set_go_compat_echo_drop`) があります。
+  置き場所、スコープ、`WgstackDut` が持つ値は `set_go_compat_rto_l2` と同じです。
+  この意図した違いは、照合の上でだけ消えます
 
 ### handle の層で決めたこと
 

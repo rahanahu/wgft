@@ -119,7 +119,14 @@ pub struct Stats {
     pub syn_cookies_reset: u64,
     pub accept_overflow: u64,
     pub tw_evicted: u64,
+    /// 制御の輪に積めずに捨てた packet の合計です。下の 3 つの和です。
     pub ctl_dropped: u64,
+    /// 制御の輪に積めずに捨てた TCP の制御の segment (RST と cookie の SYN-ACK) です。
+    pub ctl_dropped_tcp: u64,
+    /// 制御の輪に積めずに捨てた ICMP の誤りです。
+    pub ctl_dropped_icmp_error: u64,
+    /// 制御の輪に積めずに、echo の応答を 1 つ丸ごと捨てた数です。
+    pub ctl_dropped_echo: u64,
     pub ooo_dropped: u64,
     pub recv_trimmed: u64,
     pub recv_no_memory: u64,
@@ -190,6 +197,14 @@ pub struct Stats {
     pub boost_reclaimed: u64,
     /// floor に戻す時に取り消した順序外の byte の数です。
     pub boost_reneged_bytes: u64,
+}
+
+/// 制御の輪に積む packet の種類です。捨てた数を種類ごとに数えます。
+#[derive(Clone, Copy)]
+pub(crate) enum CtlKind {
+    Tcp,
+    IcmpError,
+    Echo,
 }
 
 /// 1 分に 1 回までの門を通るログの種類です。
@@ -358,6 +373,16 @@ impl Shared {
         self.gates.allow(kind, now, n);
     }
 
+    /// 制御の輪に積めずに捨てたことを、種類ごとと合計に数えます。
+    pub(crate) fn ctl_refused(&mut self, kind: CtlKind, now: i64) {
+        match kind {
+            CtlKind::Tcp => self.stats.ctl_dropped_tcp += 1,
+            CtlKind::IcmpError => self.stats.ctl_dropped_icmp_error += 1,
+            CtlKind::Echo => self.stats.ctl_dropped_echo += 1,
+        }
+        self.refused(LogKind::CtlDropped, now);
+    }
+
     /// MSS の下限で SYN を捨てたことを数えます。
     pub(crate) fn drop_mss(&mut self, now: i64) {
         self.refused(LogKind::MssFloor, now);
@@ -496,7 +521,7 @@ impl Shared {
         let id = self.next_id();
         let Some(b) = self.out.ctl.slot() else {
             let now = self.now;
-            self.refused(LogKind::CtlDropped, now);
+            self.ctl_refused(CtlKind::Tcp, now);
             return false;
         };
         wire::write_tcp(b, id, &h, o, 0);
