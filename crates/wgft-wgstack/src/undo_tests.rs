@@ -537,7 +537,6 @@ fn inject_ack_with_sack(n: &mut TestNet, q: &mut SackPeer, ack: u32, b: SackBloc
 /// RFC 2883 5 節:先頭の block が D-SACK かどうかは、同じ packet の累積の確認と比べて決めます。SND.UNA より低い
 /// 古い ACK の先頭の block が、その ACK の確認より上にあれば D-SACK ではありません。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc2883_old_ack_block_above_its_own_ack_is_not_a_dsack() {
     let (mut n, c, mut q, outs) = dsack_setup();
     let mult = n.s.conn(c.slot).t.reo_wnd_mult;
@@ -579,5 +578,21 @@ fn rfc2883_block_below_current_ack_is_a_dsack() {
         n.s.stats().dsacks_in,
         1,
         "a D-SACK below the cumulative ACK"
+    );
+}
+
+/// 凍結した Go との照合用の切り替え (feature `harness` だけ):D-SACK を SND.UNA と比べて決め、並べ替えられた古い ACK
+/// の先頭の block を D-SACK とみなします。切り替えが偽なら RFC 2883 5 節のとおり D-SACK ではありません。
+#[cfg(feature = "harness")]
+#[test]
+fn go_compat_switch_compares_dsack_with_snd_una() {
+    let (mut n, _c, mut q, outs) = dsack_setup();
+    crate::set_go_compat_dsack_snd_una(true);
+    inject_ack_with_sack(&mut n, &mut q, outs[1].seq, blk(&outs[2]));
+    crate::set_go_compat_dsack_snd_una(false);
+    assert_eq!(
+        n.s.stats().dsacks_in,
+        1,
+        "the switch did not restore the SND.UNA comparison"
     );
 }
