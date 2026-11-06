@@ -157,7 +157,7 @@ impl Shared {
         }
         let src = u32::from_be_bytes([orig[12], orig[13], orig[14], orig[15]]);
         let dst = u32::from_be_bytes([orig[16], orig[17], orig[18], orig[19]]);
-        if dst != self.addr || src == 0 || src == u32::MAX || src >> 28 == 0xe {
+        if dst != self.addr || crate::wire::invalid_source(src) {
             return;
         }
         // 先頭でない断片は、ICMP の種類を読む前に捨てます。

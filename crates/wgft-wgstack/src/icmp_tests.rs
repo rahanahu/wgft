@@ -895,7 +895,6 @@ fn with_source(mut p: Vec<u8>, src: Ipv4Addr) -> Vec<u8> {
 
 /// どの送信元の UDP、echo request、TCP の SYN も、待ち受けにも閉じた port にも届かず、何も返しません。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn datagrams_from_invalid_sources_are_discarded_silently() {
     let mut n = TestNet::new(small_limits());
     let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
@@ -952,7 +951,6 @@ fn datagrams_from_invalid_sources_are_discarded_silently() {
 
 /// 無効な送信元には、Port Unreachable も Time Exceeded も Parameter Problem も送りません。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn no_icmp_error_is_sent_to_invalid_sources() {
     for src in INVALID_SOURCES {
         let mut n = TestNet::new(small_limits());

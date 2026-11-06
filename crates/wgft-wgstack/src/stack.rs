@@ -850,6 +850,12 @@ impl<H: Hook> Stack<H> {
             self.s.stats.not_local += 1;
             return;
         }
+        // 送信元が 0/8、127/8、224/4、240/4 の datagram は黙って捨てます (RFC 1122 3.2.1.3)。240/4 は RFC が
+        // 求めない wgft の選択で、255.255.255.255 を含みます。
+        if wire::invalid_source(ip.src) {
+            self.s.stats.bad_source += 1;
+            return;
+        }
         if ip.fragment {
             self.input_fragment(&ip, now);
             return;
