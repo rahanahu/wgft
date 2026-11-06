@@ -41,6 +41,8 @@ pub(crate) struct PartSend {
     pulled: usize,
     /// 在庫を待つ平文:(最初の packet の枠、その datagram の枠)。
     pub(crate) reseal_from: Option<(usize, usize)>,
+    /// 求めてまだ届いていない在庫の数 (先回りの補充が求めすぎないため)。
+    outstanding: usize,
     gso: bool,
     gso_refused: bool,
     /// ソケットが `EAGAIN` を返し、書けるようになるのを待つ。
@@ -98,6 +100,7 @@ impl PartSend {
             seals: vec![(0, Instant::now(), 0); slots],
             pulled: 0,
             reseal_from: None,
+            outstanding: 0,
             gso,
             gso_refused: false,
             write_blocked: false,
@@ -111,6 +114,20 @@ impl PartSend {
             super::count(&self.hub.counts.overflow_drops, 1);
         }
         self.stock.push_back(it);
+        self.outstanding = self.outstanding.saturating_sub(1);
+    }
+
+    /// 届く途中の求めが無く、在庫が `target` に満たなければ、その差を front に求める。求めは同時に 1 つだけで、
+    /// front は応えられなかった分を戻して次の起床で応えるので、求めすぎない。
+    fn ask_up_to(&mut self, target: usize) {
+        if self.outstanding > 0 || self.stock.len() >= target {
+            return;
+        }
+        let n = target - self.stock.len();
+        self.outstanding = n;
+        let ask = u32::try_from(n).unwrap_or(u32::MAX);
+        self.hub.links[self.k].demand.ask(ask, &self.hub.front_bell);
+        super::count(&self.hub.counts.requests, 1);
     }
 
     /// 遅れか時間の上限を超えた在庫を先頭から捨てる (暗号化の前の確かめ)。
@@ -145,9 +162,7 @@ impl PartSend {
         self.drop_stale(now);
         let need = self.pulled - p0;
         if self.stock.len() < need {
-            let ask = u32::try_from(need.max(REFILL_TARGET)).unwrap_or(u32::MAX);
-            self.hub.links[self.k].demand.ask(ask, &self.hub.front_bell);
-            super::count(&self.hub.counts.requests, 1);
+            self.ask_up_to(need.max(REFILL_TARGET));
             self.reseal_from = Some((p0, s0));
             return false;
         }
@@ -167,10 +182,8 @@ impl PartSend {
         }
         self.reseal_from = None;
         // 先回りの補充:次のバッチの分を今求めておく。front は眠っていれば起き、起きていれば次の相で応える
-        if self.stock.len() < REFILL_LOW {
-            let ask = u32::try_from(REFILL_TARGET - self.stock.len()).unwrap_or(u32::MAX);
-            self.hub.links[self.k].demand.ask(ask, &self.hub.front_bell);
-            super::count(&self.hub.counts.requests, 1);
+        if self.stock.len() + self.outstanding < REFILL_LOW {
+            self.ask_up_to(REFILL_TARGET);
         }
         let gso = self.gso && !self.gso_refused;
         self.tx.lay_out(s0, gso);
