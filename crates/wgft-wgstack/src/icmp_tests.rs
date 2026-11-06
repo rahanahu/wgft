@@ -979,3 +979,57 @@ fn no_icmp_error_is_sent_to_invalid_sources() {
     n.write(&build_udp(PEER_UDP, 9, b"x"));
     assert_eq!(n.drain_raw().len(), 1);
 }
+
+/// MTU を超える echo reply が要る echo request (断片で届いて組み立てた) に、応答を捨てずに返します (RFC 1122
+/// 3.2.2.6: echo request の data は応答に全部含める。意図した断片化を実装しないなら、MTU に切って送る)。
+/// 要るのは、応答が出ること、MTU に収まること、data が request の data の先頭から続くことです。断片に分けて
+/// 全部を返す実装も許します。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn oversized_echo_request_gets_a_reply_truncated_to_the_mtu() {
+    let mut n = TestNet::new(small_limits());
+    let mut msg = vec![0u8; TEST_MTU];
+    msg[0] = ECHO;
+    msg[4..8].copy_from_slice(&[0x12, 0x34, 0, 9]);
+    for (i, b) in msg[8..].iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    for f in split_ipv4(&build_icmp(PEER, &msg), 1000, 5) {
+        n.write(&f);
+    }
+    let pkts = n.drain_raw();
+    assert!(!pkts.is_empty(), "no echo reply: {:?}", n.s.stats());
+    let mut parts: Vec<(usize, Vec<u8>, bool)> = Vec::new();
+    for p in &pkts {
+        let ip = parse_ipv4(p).unwrap();
+        assert!(
+            ip.proto == PROTO_ICMP && ip.src == DUT.to_bits() && ip.dst == PEER.to_bits(),
+            "unexpected packet {p:x?}"
+        );
+        let flags = u16::from_be_bytes([p[6], p[7]]);
+        parts.push((
+            usize::from(flags & 0x1fff) * 8,
+            ip.payload().to_vec(),
+            flags & 0x2000 != 0,
+        ));
+    }
+    parts.sort_by_key(|x| x.0);
+    let reply: Vec<u8> = parts.iter().flat_map(|x| x.1.clone()).collect();
+    if pkts.len() == 1 {
+        // 切り詰めた応答は、ちょうど MTU の大きさです。
+        assert_eq!(pkts[0].len(), TEST_MTU, "truncated reply size");
+        assert!(!parts[0].2);
+    } else {
+        assert!(!parts.last().unwrap().2 && parts[..parts.len() - 1].iter().all(|x| x.2));
+        assert_eq!(
+            reply.len(),
+            msg.len(),
+            "fragmented reply must carry all data"
+        );
+    }
+    assert_eq!(reply[0], ECHO_REPLY);
+    assert_eq!(reply[1], 0);
+    assert_eq!(reply[4..8], msg[4..8], "identifier and sequence");
+    assert_eq!(reply[8..], msg[8..reply.len()], "echoed data");
+    assert_eq!(!wire::checksum(0, &reply), 0, "ICMP checksum");
+}
