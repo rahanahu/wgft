@@ -15,10 +15,10 @@ use crate::sackpeer_tests::check_scoreboard;
 use crate::stack::Event;
 use crate::tcp::RTX_PMTU;
 use crate::testnet_tests::{
-    DUT, PEER, PeerConn, TEST_MTU, TestNet, build_icmp, build_udp, parse_out, small_limits,
-    split_ipv4,
+    DUT, PEER, PeerConn, TEST_MTU, TSeg, TestNet, build_icmp, build_peer, build_udp, parse_out,
+    small_limits, split_ipv4,
 };
-use crate::wire::{self, IP_HEADER_LEN, PROTO_ICMP, PROTO_UDP, parse_ipv4};
+use crate::wire::{self, FLAG_SYN, IP_HEADER_LEN, PROTO_ICMP, PROTO_UDP, parse_ipv4};
 use crate::{Error, seq};
 use core::net::{Ipv4Addr, SocketAddrV4};
 use core::time::Duration;
@@ -866,4 +866,118 @@ fn non_initial_fragment_with_bad_options_gets_no_icmp() {
             assert_eq!(n.s.recv_from(n.now, pc, &mut b), Err(Error::WouldBlock));
         }
     }
+}
+
+// RFC 1122 3.2.1.3: 送信元が 0/8、127/8、224/4、240/4 または 255.255.255.255 の datagram は黙って捨てます。
+// RFC 1122 3.2.2: そのような送信元には ICMP の誤りを送りません。
+
+const INVALID_SOURCES: [Ipv4Addr; 11] = [
+    Ipv4Addr::UNSPECIFIED,
+    Ipv4Addr::new(0, 1, 2, 3),
+    Ipv4Addr::LOCALHOST,
+    Ipv4Addr::new(127, 255, 255, 254),
+    Ipv4Addr::new(224, 0, 0, 1),
+    Ipv4Addr::new(239, 255, 255, 250),
+    Ipv4Addr::new(240, 0, 0, 1),
+    Ipv4Addr::new(250, 9, 0, 2),
+    Ipv4Addr::new(255, 255, 255, 254),
+    Ipv4Addr::BROADCAST,
+    Ipv4Addr::new(0, 255, 255, 255),
+];
+
+/// packet の送信元を書き換え、header の checksum を直します。
+fn with_source(mut p: Vec<u8>, src: Ipv4Addr) -> Vec<u8> {
+    let hlen = usize::from(p[0] & 0x0f) * 4;
+    p[12..16].copy_from_slice(&src.octets());
+    wire::set_ipv4_checksum(&mut p[..hlen]);
+    p
+}
+
+/// どの送信元の UDP、echo request、TCP の SYN も、待ち受けにも閉じた port にも届かず、何も返しません。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn datagrams_from_invalid_sources_are_discarded_silently() {
+    let mut n = TestNet::new(small_limits());
+    let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    let l = n.listen(80);
+    let mut buf = [0u8; 64];
+    for src in INVALID_SOURCES {
+        let syn = |dport| TSeg {
+            sport: 40000,
+            dport,
+            src: Some(src),
+            seq: 1000,
+            flags: FLAG_SYN,
+            wnd: 65535,
+            mss: 1360,
+            ..TSeg::default()
+        };
+        let what: [(&str, Vec<u8>); 5] = [
+            (
+                "UDP to a bound port",
+                build_udp(SocketAddrV4::new(src, 5000), 53, b"hi"),
+            ),
+            (
+                "UDP to a closed port",
+                build_udp(SocketAddrV4::new(src, 5000), 9, b"hi"),
+            ),
+            (
+                "echo request",
+                build_icmp(src, &[ECHO, 0, 0, 0, 0, 1, 0, 1, b'x']),
+            ),
+            ("SYN to a listener", build_peer(&syn(80))),
+            ("SYN to a closed port", build_peer(&syn(81))),
+        ];
+        for (name, pkt) in what {
+            n.write(&pkt);
+            let out = n.drain_raw();
+            assert!(out.is_empty(), "{src}: {name} was answered: {out:x?}");
+            assert_eq!(
+                n.s.recv_from(n.now, pc, &mut buf),
+                Err(Error::WouldBlock),
+                "{src}: {name} was delivered"
+            );
+            assert!(
+                n.events().is_empty(),
+                "{src}: {name} raised an event: {:?}",
+                n.s.stats()
+            );
+        }
+    }
+    assert_eq!(n.s.accept(n.now, l), Err(Error::WouldBlock));
+    // 対照: 正しい送信元の UDP は届きます。
+    n.write(&build_udp(PEER_UDP, 53, b"hi"));
+    assert_eq!(n.s.recv_from(n.now, pc, &mut buf).map(|r| r.0), Ok(2));
+}
+
+/// 無効な送信元には、Port Unreachable も Time Exceeded も Parameter Problem も送りません。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn no_icmp_error_is_sent_to_invalid_sources() {
+    for src in INVALID_SOURCES {
+        let mut n = TestNet::new(small_limits());
+        n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+        // 閉じた port への UDP。
+        n.write(&build_udp(SocketAddrV4::new(src, 5000), 9, b"x"));
+        assert!(n.drain_raw().is_empty(), "{src}: Port Unreachable");
+        // 最初の断片だけが届き、再組み立ての期限が切れます。
+        let frags = split_ipv4(
+            &build_udp(SocketAddrV4::new(src, 5000), 53, &[0; 3000]),
+            1000,
+            78,
+        );
+        n.write(&frags[0]);
+        n.advance(Duration::from_secs(31));
+        assert!(n.drain_raw().is_empty(), "{src}: Time Exceeded");
+        // 最初の断片の option が不正です。
+        n.write(&with_source(
+            frag_with_options(0, true, &[0x82, 1, 0, 0], b"abcdefgh"),
+            src,
+        ));
+        assert!(n.drain_raw().is_empty(), "{src}: Parameter Problem");
+    }
+    // 対照: 正しい送信元には Port Unreachable が返ります。
+    let mut n = TestNet::new(small_limits());
+    n.write(&build_udp(PEER_UDP, 9, b"x"));
+    assert_eq!(n.drain_raw().len(), 1);
 }
