@@ -20,6 +20,9 @@ use super::driver::{Outbox, Sink, Source, pump, receive_batch};
 use super::{Carry, Dataplane, Generations, Settings, Upper, UpperError, UpperInit, clock};
 use crate::batching::Batching;
 
+#[cfg(target_os = "linux")]
+mod ecn;
+
 const AGENT_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 2);
 const SERVER_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 1);
 
