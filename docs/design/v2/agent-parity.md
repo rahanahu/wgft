@@ -772,7 +772,7 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
 - 項の行:`memory bound:` の行の次に、項ごとの MiB を次の形の 1 行で書きます。
   `memory bound terms: base <N> MiB, core fixed <N> MiB, core arrays <N> MiB, core flows <N> MiB, tables <N> MiB, driver <N> MiB, device <N> MiB, batch <N> MiB, tcp relay <N> MiB, tcp bulk <N> MiB, udp relay <N> MiB, resolver <N> MiB, state <N> MiB; per listener, not in the line: tcp <N> KiB, udp <N> KiB`
   核の項は、作成の時に作って流れによらず持つ固定の部分 (`Bound::fix`、`core fixed`)、接続の枠が初めて使われた時から持つ floor の記録の輪と区間の表 (`Bound::floor_arrays`、`core arrays`)、残り (`core flows`) に分けます。
-  TCP の中継の項は、接続ごとの task と登録の部分 (`tcp relay`) と大きいバッファの部分 (`tcp bulk`) に分けます。
+  TCP の中継の項は、接続ごとの task と登録と小さいバッファの部分 (`tcp relay`) と、大きいバッファと置き場に残す小さいバッファの部分 (`tcp bulk`) に分けます。
   形は保証の外で、ラボの check 5 と 5b が読みます
 - 使った枠の行:`lab-observe` の feature を付けた build だけが書きます (ラボの `lab build` と `lab suite` の build が付け、性能を測る `lab paired` の build は付けません)。製品の build は 1 秒ごとの起床も、データプレーンのスレッドへの呼び出しも持ちません。
   feature を付けた agent は核を作ってから使ったことのある接続の枠 (floor の配列を持つ枠) の数を 1 秒ごとに読み、刻みの倍数に切り上げた値が増えたときだけ、`memory: connection slots used so far: at most <N> of <N_c>; their floor arrays hold <K> KiB` を書きます。
@@ -786,9 +786,10 @@ Go の agent の確認が使う 100 MiB の余裕は GC の目標に対するも
   形は保証の外です
 - 単体の試験 (`relay/held_tests.rs`):小さい上限 (UDP 128、TCP 24) の agent を試験の相手と組み、`wgft-alloc-count` で数えた生きている確保を段ごとに測ります。
   作成の後の保持を作成の時に作る項 (核の固定の部分、表、駆動、device) と比べ、応答のバッファの枠をすべて貸させた後の育ちを枠の数の UDP のバッファと比べます。
-  予算が拒むまで UDP のセッションを作った後の中継の育ちをセッションの数とセッションの項の積と比べ、予算が拒むまで TCP の中継を開いて両向きに大きいバッファを借りさせた後の中継の育ちを、中継の数と接続ごとの項の積と生きている大きいバッファの和と比べます。
+  予算が拒むまで UDP のセッションを作った後の中継の育ちをセッションの数とセッションの項の積と比べ、予算が拒むまで TCP の中継を開いて両向きに大きいバッファを借りさせた後の中継の育ちを、中継の数と接続ごとの項 (小さいバッファ 2 つを含む) の積と生きている大きいバッファの和と比べます。
   データが止まった後の生きている大きいバッファは、置き場に残す 16 個までであることも確かめます。
-  UDP のセッションが無通信の期限で閉じた後と、すべてを閉じた後は、保持がその段の前と、使い回しに残す応答のバッファと大きいバッファの和に戻ることを確かめ、閉じた流れの漏れを見ます。
+  すべてを閉じた後は、借りている小さいバッファの数 (試験の build だけが数えます) が 0 で、生きている小さいバッファが置き場に残す 64 個までであることも確かめます。
+  UDP のセッションが無通信の期限で閉じた後と、すべてを閉じた後は、保持がその段の前と、使い回しに残す応答のバッファと大きいバッファと小さいバッファの和に戻ることを確かめ、閉じた流れの漏れを見ます。
   試験の側の持ち物は見積もらずに測ります。
   server の側の device は agent 無しで立てて測り、台本の client は落としても agent に何も送らないので落とす前後の差を測り、TCP の宛先の接続は普通の client で同じ量を往復させて測ります。
   核の保持は核が数えて返す値 (`Stack::held`) を差し引きます。

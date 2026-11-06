@@ -40,23 +40,22 @@ pub(crate) const BULK_WAIT: Duration = Duration::from_millis(200);
 /// 読まず、`n` を超えて返さないので、`[..n]` は今の接続が書いた byte だけである。`after_read` は長さ
 /// だけを見る。ほかに `idle` と `bulk` を読む経路は無い。
 struct Buf {
-    idle: Option<Box<[u8]>>,
+    idle: Box<[u8]>,
     bulk: Option<Box<[u8]>>,
 }
 
 impl Buf {
     fn new() -> Self {
         Self {
-            idle: Some(borrow_idle()),
+            idle: borrow_idle(),
             bulk: None,
         }
     }
 
     fn space(&mut self) -> &mut [u8] {
-        match (&mut self.bulk, &mut self.idle) {
-            (Some(b), _) | (None, Some(b)) => b,
-            // `idle` は drop の時にだけ外す
-            (None, None) => &mut [],
+        match &mut self.bulk {
+            Some(b) => b,
+            None => &mut self.idle,
         }
     }
 
@@ -78,9 +77,8 @@ impl Buf {
 impl Drop for Buf {
     fn drop(&mut self) {
         self.release();
-        if let Some(b) = self.idle.take() {
-            give_back_idle(b);
-        }
+        // 空の Box は確保を持たない。`idle` を読む経路は drop の後に無い
+        give_back_idle(std::mem::take(&mut self.idle));
     }
 }
 
@@ -112,8 +110,16 @@ thread_local! {
 pub(super) static IDLE_ALIVE: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// The idle buffers lent out right now on all threads: borrowed and not yet back in a free list
+/// or freed. The memory bound's test asserts it is 0 once every relay has closed.
+#[cfg(test)]
+pub(super) static IDLE_LENT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// 置き場から借りる。内容は前の借り手のままで、零埋めしない。新しく確保した時だけ零で始まる。
 fn borrow_idle() -> Box<[u8]> {
+    #[cfg(test)]
+    IDLE_LENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     IDLE_FREE.with_borrow_mut(Vec::pop).unwrap_or_else(|| {
         #[cfg(test)]
         IDLE_ALIVE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -122,6 +128,8 @@ fn borrow_idle() -> Box<[u8]> {
 }
 
 fn give_back_idle(b: Box<[u8]>) {
+    #[cfg(test)]
+    IDLE_LENT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     IDLE_FREE.with_borrow_mut(|free| {
         if free.len() < IDLE_KEEP {
             free.push(b);
@@ -270,8 +278,6 @@ async fn write_lan(lan: &LanStream, mut src: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
-    use tokio::net::TcpListener;
 
     fn idle_free_len() -> usize {
         IDLE_FREE.with_borrow(Vec::len)
@@ -300,35 +306,6 @@ mod tests {
         assert_eq!(b.space().len(), IDLE_BUF);
         // 零埋めしない: 前の内容が残っている。読みの経路が `[..n]` だけを使うことが漏れを防ぐ
         assert!(b.space().iter().all(|&x| x == 0xAA));
-    }
-
-    #[tokio::test]
-    async fn a_read_exposes_only_what_it_wrote() {
-        // 前の接続の内容で汚れたバッファを借りても、読みが返す範囲は今の接続の byte だけである
-        let mut old = Buf::new();
-        dirty(&mut old, 0xAA);
-        drop(old);
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
-            .await
-            .unwrap();
-        let (server, _) = listener.accept().await.unwrap();
-        client.write_all(b"hello").await.unwrap();
-
-        let mut buf = Buf::new();
-        assert!(buf.space().iter().all(|&x| x == 0xAA));
-        let n = read_lan(&server, buf.space()).await.unwrap();
-        assert_eq!(&buf.space()[..n], b"hello");
-        assert!(n < IDLE_BUF);
-        // 小さいバッファを満たさない読みでは大きいバッファを借りない
-        buf.after_read(n);
-        assert!(buf.bulk.is_none());
-        // 大きいバッファへ移った後も、読みの範囲は今の接続の byte だけである
-        buf.bulk = Some(borrow());
-        client.write_all(b"world!").await.unwrap();
-        let n = read_lan(&server, buf.space()).await.unwrap();
-        assert_eq!(&buf.space()[..n], b"world!");
     }
 
     #[test]

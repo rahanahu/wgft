@@ -558,3 +558,67 @@ async fn stopping_the_data_plane_resets_the_relayed_connections() {
     assert_eq!(c.outcome(Duration::from_secs(5)).await, Outcome::Reset);
     drop(m);
 }
+
+/// 前の接続が置き場のバッファを汚した後でも、中継が運ぶ byte は今の接続のものだけである。小さいバッファと
+/// 大きいバッファの行き来をすべて通し、両方の向きを echo の往復で厳密に比べる。置き場はデータプレーンの
+/// スレッドごとなので、試験のスレッドでなく中継そのものを通して汚す。
+#[tokio::test]
+async fn reused_relay_buffers_carry_only_the_current_connections_bytes() {
+    let peer = Peer::start().await;
+    let target = echo().await;
+    let mut m = manager(&peer);
+    assert_eq!(m.apply(&tcp("r_a", 80, &target.to_string())).await, 1);
+
+    // 1 本目:0xAA を両方の向きに大きく流し、閉じて、置き場の小さいバッファと大きいバッファを 0xAA で汚す
+    let mut c = peer.connect(80).await.unwrap();
+    let dirt = vec![0xAAu8; 32 << 10];
+    let back = round_trip(&mut c, &dirt).await.unwrap();
+    assert!(back.len() == dirt.len() && back.iter().all(|&b| b == 0xAA));
+    c.finish();
+    assert_eq!(c.outcome(Duration::from_secs(5)).await, Outcome::Eof);
+    wait_for("the dirtying flow to come back", || {
+        m.tcp_pool().in_use() == 0
+    })
+    .await;
+
+    // 2 本目:0xAA を含まない byte だけを送る。送った byte と戻った byte が一致しなければ、前の接続の内容か
+    // 別の範囲を運んだことになる
+    let mut c = peer.connect(80).await.unwrap();
+    let mut sent = Vec::new();
+    let mut got = Vec::new();
+    for round in 0u8..2 {
+        // 小さいバッファを満たす大きい書き込み:大きいバッファを借りる
+        let long: Vec<u8> = (0..24usize << 10)
+            .map(|i| 1 + u8::try_from(i % 100).unwrap())
+            .collect();
+        got.extend(round_trip(&mut c, &long).await.unwrap());
+        sent.extend(long);
+        // 大きいバッファを持っている間の短い読み:2048 byte に満たない読みを大きいバッファに受ける
+        for k in 0u8..3 {
+            let short = vec![0xC0 + 4 * round + k; 100 + 37 * usize::from(k)];
+            got.extend(round_trip(&mut c, &short).await.unwrap());
+            sent.extend(short);
+        }
+        // 期限を超えて黙る:大きいバッファを返す。その後の短い読みは小さいバッファに受ける
+        tokio::time::sleep(2 * super::pipe::BULK_WAIT).await;
+        let short = vec![0xD0 + round; 50];
+        got.extend(round_trip(&mut c, &short).await.unwrap());
+        sent.extend(short);
+    }
+    c.finish();
+    let (rest, end) = c.read_to_end(Duration::from_secs(5)).await;
+    assert_eq!(end, Outcome::Eof);
+    assert!(rest.is_empty(), "{} bytes after the echoes", rest.len());
+    assert!(
+        got == sent,
+        "the relay returned different bytes than it was given ({} sent, {} back)",
+        sent.len(),
+        got.len()
+    );
+    assert!(
+        !got.contains(&0xAA),
+        "bytes of the earlier connection came back"
+    );
+    wait_for("the flow to come back", || m.tcp_pool().in_use() == 0).await;
+    m.close().await;
+}

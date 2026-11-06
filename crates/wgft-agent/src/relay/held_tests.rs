@@ -7,11 +7,13 @@
 //!   device) に収まる
 //! - 応答のバッファ:枠をすべて同時に貸させた後の育ちが、枠の数の UDP のバッファに収まる
 //! - UDP:予算が拒むまでセッションを作った後の育ちが、セッションの数とセッションの項の積に収まる
-//! - TCP:予算が拒むまで中継を開き、両向きに大きいバッファを借りさせた後の育ちが、中継の数と中継の項の積と、
-//!   生きている大きいバッファの和に収まる。データが止まった中継は大きいバッファを返し、生きている大きい
-//!   バッファは置き場に残す数までになる
+//! - TCP:予算が拒むまで中継を開き、両向きに大きいバッファを借りさせた後の育ちが、中継の数と中継の項
+//!   (接続ごとの小さいバッファ 2 つを含む) の積と、生きている大きいバッファの和に収まる。データが止まった
+//!   中継は大きいバッファを返し、生きている大きいバッファは置き場に残す数までになる
 //! - 閉じた後:UDP のセッションが無通信の期限で閉じた後と、すべてを閉じた後の保持が、作成の時の保持と、
-//!   使い回しのために残す応答のバッファと大きいバッファの和に収まる。閉じた流れの漏れはここで見える
+//!   使い回しのために残す応答のバッファと大きいバッファと小さいバッファの和に収まる。閉じた流れの漏れは
+//!   ここで見える。すべてを閉じた後は、借りている小さいバッファの数が 0 で、生きている小さいバッファが
+//!   置き場に残す数までであることも確かめる
 //!
 //! 試験の側の持ち物は見積もらずに測る。server の側の device は agent 無しで立てて測る。台本の client は
 //! 落としても agent に何も送らないので、落とす前後の差を試験の側とする。TCP の宛先の echo の接続は、
@@ -34,7 +36,7 @@ use wgft_alloc_count::live_bytes;
 use wgft_proto::Proto;
 
 use super::pipe::BULK_WAIT;
-use super::pipe::{BULK_ALIVE, IDLE_ALIVE};
+use super::pipe::{BULK_ALIVE, IDLE_ALIVE, IDLE_LENT};
 use super::replies::{REPLIES, REPLY_SLOTS, UDP_BUF};
 use super::testpeer::{self, Outcome, Peer};
 use super::tests::{rule, targets, wait_for};
@@ -308,7 +310,7 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
         .saturating_sub(udp_closed)
         .saturating_sub(n_tcp * echo_conn)
         .saturating_sub(tcp_core);
-    let tcp_allowed = n_tcp * tcp_relay_conn() + bulk * BULK_BUF + IDLE_KEEP * IDLE_BUF + SLACK;
+    let tcp_allowed = n_tcp * tcp_relay_conn() + bulk * BULK_BUF + SLACK;
     let per_relay = tcp_growth.saturating_sub(bulk * BULK_BUF) / n_tcp.max(1);
     eprintln!(
         "tcp: {n_tcp} relays grew the relay by {tcp_growth} bytes with {bulk} bulk buffers alive against {tcp_allowed}, the core by {tcp_core}; the scripted clients and the echo connections held {tcp_test_side}"
@@ -322,11 +324,6 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
         bulk <= BULK_KEEP,
         "{bulk} bulk buffers are alive after the data stopped, above the {BULK_KEEP} kept for reuse"
     );
-    let idle = IDLE_ALIVE.load(Ordering::Relaxed);
-    assert!(
-        idle <= IDLE_KEEP,
-        "{idle} idle buffers are alive after every relay closed, above the {IDLE_KEEP} kept for reuse"
-    );
     assert!(
         tcp_growth <= tcp_allowed,
         "{n_tcp} TCP relays grew the relay by {tcp_growth} bytes, above {tcp_allowed}"
@@ -334,6 +331,17 @@ async fn the_relays_hold_what_the_terms_of_the_memory_bound_count() {
 
     // すべてを閉じた後は、作成の時の保持と、使い回しに残す応答のバッファと大きいバッファまでに戻る
     m.close().await;
+    // 閉じた中継が借りていた小さいバッファは、すべて置き場に戻るか解放される。返し忘れは借りている数に
+    // 残り、置き場の上限の中に隠れない
+    wait_for("the idle buffers to come back", || {
+        IDLE_LENT.load(Ordering::Relaxed) == 0
+    })
+    .await;
+    let idle = IDLE_ALIVE.load(Ordering::Relaxed);
+    assert!(
+        idle <= IDLE_KEEP,
+        "{idle} idle buffers are alive after every relay closed, above the {IDLE_KEEP} kept for reuse"
+    );
     let closed = settled().await;
     let left = closed
         .saturating_sub(setup)
