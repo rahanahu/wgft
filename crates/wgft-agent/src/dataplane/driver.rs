@@ -35,6 +35,49 @@ use super::batch::{
 use super::{Command, Local, Settings, SocketBuffers, Status, Upper, clock, duration_to_nanos};
 use crate::batching::Batching;
 
+/// Inline の帰属の計数 (lab-observe と試験の build だけが数え、時計を読む)。Hash S の計数と比べるため。
+struct InlineCounts {
+    wakes: AtomicU64,
+    ns_busy: AtomicU64,
+    ns_rx: AtomicU64,
+    ns_rx_yield: AtomicU64,
+    ns_tx: AtomicU64,
+    ns_pull: AtomicU64,
+    ns_seal: AtomicU64,
+    ns_sys: AtomicU64,
+    pulled: AtomicU64,
+}
+
+static INLINE: InlineCounts = InlineCounts {
+    wakes: AtomicU64::new(0),
+    ns_busy: AtomicU64::new(0),
+    ns_rx: AtomicU64::new(0),
+    ns_rx_yield: AtomicU64::new(0),
+    ns_tx: AtomicU64::new(0),
+    ns_pull: AtomicU64::new(0),
+    ns_seal: AtomicU64::new(0),
+    ns_sys: AtomicU64::new(0),
+    pulled: AtomicU64::new(0),
+};
+
+/// Inline の帰属の計数の行。
+#[cfg(feature = "lab-observe")]
+fn inline_line() -> String {
+    let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
+    format!(
+        "inline: wakes={} ns_busy={} ns_rx={} ns_rx_yield={} ns_tx={} ns_pull={} ns_seal={} ns_sys={} pulled={}",
+        g(&INLINE.wakes),
+        g(&INLINE.ns_busy),
+        g(&INLINE.ns_rx),
+        g(&INLINE.ns_rx_yield),
+        g(&INLINE.ns_tx),
+        g(&INLINE.ns_pull),
+        g(&INLINE.ns_seal),
+        g(&INLINE.ns_sys),
+        g(&INLINE.pulled),
+    )
+}
+
 /// 送り出しの先。製品はソケットで、試験は記録する。
 pub(super) trait Sink {
     /// 1 つの datagram を送る。`WouldBlock` は書けないことを示し、datagram は呼び手が持ち続ける。
@@ -305,6 +348,7 @@ pub(super) fn send_batch<U: Upper>(
     let tx = &mut outbox.tx;
     let vlen = vlen.clamp(1, tx.slots());
     let mut pulled = 0;
+    let t = super::hashs::t0();
     while pulled < vlen {
         let Some(len) = upper.poll_transmit(now, tx.packet_slot(pulled)) else {
             break;
@@ -312,6 +356,9 @@ pub(super) fn send_batch<U: Upper>(
         tx.set_len(pulled, len);
         pulled += 1;
     }
+    super::hashs::t1(&INLINE.ns_pull, t);
+    super::hashs::count(&INLINE.pulled, pulled as u64);
+    let t = super::hashs::t0();
     // UDP の中継の datagram を TCP の segment の後ろに並べない
     for udp in [true, false] {
         for i in 0..pulled {
@@ -327,7 +374,11 @@ pub(super) fn send_batch<U: Upper>(
     }
     let gso = sink.gso() && !outbox.gso_refused;
     outbox.tx.lay_out(0, gso);
-    let state = if !outbox.drain(device, sink) {
+    super::hashs::t1(&INLINE.ns_seal, t);
+    let t = super::hashs::t0();
+    let drained = outbox.drain(device, sink);
+    super::hashs::t1(&INLINE.ns_sys, t);
+    let state = if !drained {
         Sent::Blocked
     } else if pulled == vlen {
         Sent::Full
@@ -629,12 +680,15 @@ pub(super) async fn drive<U: Upper>(
             ));
         }
         let start = clock::now();
+        let tb = super::hashs::t0();
+        super::hashs::count(&INLINE.wakes, 1);
         let mut now = start;
         let wake = Wake { start, timed };
         // 受信の相:ソケットが空になるか、予算が尽きるまでバッチを読む。核の出力は送信の相でまとめて
         // 引くので、ACK は起床ごとに 1 回の割で作られる
         let mut rx_more = false;
         let mut rx_done = 0;
+        let trx = super::hashs::t0();
         loop {
             let vlen = if timed {
                 rx_pace.units(BATCH_TIME, rx.slots())
@@ -653,6 +707,10 @@ pub(super) async fn drive<U: Upper>(
             )
             .await?;
             rx_done += n;
+            super::hashs::count(
+                &INLINE.ns_rx_yield,
+                u64::try_from(yielded.as_nanos()).unwrap_or(u64::MAX),
+            );
             if timed {
                 let after = clock::now();
                 // 中継の task に譲っていた時間は、このバッチの仕事ではない
@@ -668,6 +726,8 @@ pub(super) async fn drive<U: Upper>(
                 break;
             }
         }
+        super::hashs::t1(&INLINE.ns_rx, trx);
+        let ttx = super::hashs::t0();
         let tx_more = send_phase(
             &local,
             device,
@@ -683,6 +743,7 @@ pub(super) async fn drive<U: Upper>(
         for waker in wakers.drain(..) {
             waker.wake();
         }
+        super::hashs::t1(&INLINE.ns_tx, ttx);
         let blocked = outbox.is_blocked();
         if more {
             // 予算で止めたので、同じスレッドの中継の task (accept と読み書き) に順を譲ってから続ける。下の
@@ -690,6 +751,7 @@ pub(super) async fn drive<U: Upper>(
             // 使い切るまで起床を繰り返すので、その間に核の accept の待ち行列が溢れる
             tokio::task::yield_now().await;
         }
+        super::hashs::t1(&INLINE.ns_busy, tb);
         tokio::select! {
             ready = socket.readable() => ready?,
             ready = socket.writable(), if blocked => ready?,
@@ -719,6 +781,8 @@ pub(super) async fn drive<U: Upper>(
             },
         }
     }
+    #[cfg(feature = "lab-observe")]
+    crate::logf!("{}", inline_line());
     let gso = io.gso;
     Ok(Rest {
         socket,
