@@ -16,11 +16,13 @@ use std::cell::RefCell;
 use std::future::poll_fn;
 use std::io;
 use std::net::Shutdown;
+use std::pin::Pin;
+use std::pin::pin;
 use std::time::Duration;
 
 use socket2::SockRef;
 use tokio::net::TcpStream as LanStream;
-use tokio::time::Instant;
+use tokio::time::{Instant, Sleep};
 use wgft_netstack::{Access, TcpStream};
 
 /// The buffer a direction holds while idle (Go's `idleBufSize`).
@@ -171,10 +173,43 @@ fn give_back(b: Box<[u8]>) {
     });
 }
 
-impl Buf {
-    /// 大きいバッファを返す期限。持っていなければ無い。
-    fn deadline(&self) -> Option<Instant> {
-        self.bulk.as_ref().map(|_| Instant::now() + BULK_WAIT)
+/// 大きいバッファを返す期限の管理。期限は「最後のデータの時刻 + [`BULK_WAIT`]」で持ち、読みのたびに
+/// timer を作り直さない。timer は大きいバッファを借りた時に 1 つだけ掛け、発火した時に本当に
+/// [`BULK_WAIT`] 途切れていたかを確かめる。途切れていなければ残りで掛け直す。
+struct Idle {
+    last: Instant,
+    armed: bool,
+}
+
+impl Idle {
+    fn new() -> Self {
+        Self {
+            last: Instant::now(),
+            armed: false,
+        }
+    }
+
+    /// データを処理し終えた時に呼ぶ。大きいバッファを持つ間だけ時刻を読む。
+    fn data(&mut self, buf: &Buf, timer: Pin<&mut Sleep>) {
+        if buf.bulk.is_none() {
+            return;
+        }
+        self.last = Instant::now();
+        if !self.armed {
+            self.armed = true;
+            timer.reset(self.last + BULK_WAIT);
+        }
+    }
+
+    /// timer が発火した時に呼ぶ。途切れていれば大きいバッファを返し、そうでなければ残りで掛け直す。
+    fn fired(&mut self, buf: &mut Buf, timer: Pin<&mut Sleep>) {
+        let due = self.last + BULK_WAIT;
+        if Instant::now() >= due {
+            buf.release();
+            self.armed = false;
+        } else {
+            timer.reset(due);
+        }
     }
 }
 
@@ -198,14 +233,15 @@ async fn tun_to_lan<A: Access>(
     lan: &LanStream,
 ) -> io::Result<()> {
     let mut buf = Buf::new();
+    let mut idle = Idle::new();
+    let mut timer = pin!(tokio::time::sleep_until(idle.last));
     loop {
-        let deadline = buf.deadline();
         let read = poll_fn(|cx| tun.borrow_mut().poll_read_bytes(cx, buf_space(&mut buf)));
         let n = tokio::select! {
             biased;
             r = read => r?,
-            () = sleep_until(deadline) => {
-                buf.release();
+            () = timer.as_mut(), if idle.armed => {
+                idle.fired(&mut buf, timer.as_mut());
                 continue;
             }
         };
@@ -216,6 +252,7 @@ async fn tun_to_lan<A: Access>(
         }
         write_lan(lan, &buf.space()[..n]).await?;
         buf.after_read(n);
+        idle.data(&buf, timer.as_mut());
     }
 }
 
@@ -225,13 +262,14 @@ async fn lan_to_tun<A: Access>(
     lan: &LanStream,
 ) -> io::Result<()> {
     let mut buf = Buf::new();
+    let mut idle = Idle::new();
+    let mut timer = pin!(tokio::time::sleep_until(idle.last));
     loop {
-        let deadline = buf.deadline();
         let n = tokio::select! {
             biased;
             r = read_lan(lan, buf_space(&mut buf)) => r?,
-            () = sleep_until(deadline) => {
-                buf.release();
+            () = timer.as_mut(), if idle.armed => {
+                idle.fired(&mut buf, timer.as_mut());
                 continue;
             }
         };
@@ -248,18 +286,12 @@ async fn lan_to_tun<A: Access>(
             rest = &rest[w..];
         }
         buf.after_read(n);
+        idle.data(&buf, timer.as_mut());
     }
 }
 
 fn buf_space(buf: &mut Buf) -> &mut [u8] {
     buf.space()
-}
-
-async fn sleep_until(deadline: Option<Instant>) {
-    match deadline {
-        Some(t) => tokio::time::sleep_until(t).await,
-        None => std::future::pending().await,
-    }
 }
 
 async fn read_lan(lan: &LanStream, dst: &mut [u8]) -> io::Result<usize> {
