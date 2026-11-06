@@ -139,6 +139,43 @@ pub(crate) fn put_budget(b: Budget) {
     BUDGET.with_borrow_mut(|slot| *slot = Some(b));
 }
 
+/// `stats` の数の欄が `seen` の値より減っていないことを確かめ、`seen` を今の値に替えます。`text` は書き出しの
+/// 作業用の置き場です。欄の並びは核を作ってから変わらないので、初めての呼び出しは `seen` を作るだけです。
+fn check_stats_monotonic(stats: &wgft_wgstack::Stats, seen: &mut Vec<u64>, text: &mut String) {
+    use std::fmt::Write as _;
+    text.clear();
+    write!(text, "{stats:?}").expect("write to a String");
+    let body = text
+        .split_once('{')
+        .and_then(|(_, r)| r.rsplit_once('}'))
+        .map_or("", |(b, _)| b);
+    let first = seen.is_empty();
+    let mut i = 0;
+    for field in body.split(',') {
+        let Some((name, value)) = field.split_once(':') else {
+            continue;
+        };
+        let Ok(value) = value.trim().parse::<u64>() else {
+            continue;
+        };
+        if first {
+            seen.push(value);
+        } else {
+            let old = seen
+                .get_mut(i)
+                .expect("Stats has the same fields at every step");
+            assert!(
+                value >= *old,
+                "Stats field {} decreased from {old} to {value}: {stats:?}",
+                name.trim()
+            );
+            *old = value;
+        }
+        i += 1;
+    }
+    assert!(first || i == seen.len(), "Stats changed its number of fields");
+}
+
 /// 手で進める時計の核です。時刻は核を作ってからの ns で、Go の `ManualClock` と同じ値です。
 ///
 /// 各段の確かめは [`HarnessOptions::check`] の形で行います。
@@ -153,6 +190,9 @@ pub struct Net<H: Hook> {
     options: HarnessOptions,
     touched: TouchedCheck,
     digest: DefaultHasher,
+    /// 前の段の `Stats` の数です。数が減らないことを確かめるのに使います。
+    stats_seen: Vec<u64>,
+    stats_text: String,
 }
 
 impl<H: Hook> Net<H> {
@@ -194,6 +234,8 @@ impl<H: Hook> Net<H> {
             options,
             touched,
             digest: DefaultHasher::new(),
+            stats_seen: Vec::new(),
+            stats_text: String::new(),
         }
     }
 
@@ -332,6 +374,9 @@ impl<H: Hook> Net<H> {
             format!("{:?}", stack.stats()).hash(&mut self.digest);
             format!("{:?}", stack.poll_timeout()).hash(&mut self.digest);
         }
+        // 統計の数は増えるだけです。検査なしの build では回り込みが panic にならないので、減ったかどうかで
+        // 見つけます。`Stats` は欄を列挙する口を持たないので、Debug の出力から数の欄を読みます。
+        check_stats_monotonic(&stack.stats(), &mut self.stats_seen, &mut self.stats_text);
         let h = stack.held();
         let l = &self.limits;
         assert!(

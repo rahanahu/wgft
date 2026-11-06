@@ -287,11 +287,18 @@ replay_full() {
 # fuzz_rs runs the Rust wgstack's cargo-fuzz target $1 for $2 executions, without AddressSanitizer and
 # without tracing comparisons, which make a run about twice as slow and safe Rust gains little from. The new
 # inputs go to a corpus in the log directory and a failing input to an artifact beside it.
+#
+# With "nochecks" as $3 the target is built with -C overflow-checks=off, in its own target directory so
+# that the two builds do not rebuild each other, and runs with WGFT_FUZZ_OVERFLOW_CHECKS=off: the target
+# then overflows a counter on purpose at start-up and aborts if that panics, which proves the checks are
+# really off. Nothing panics on an overflow in such a build, so a run fails only on the harness's checks:
+# the core invariants, the held bounds and Stats fields that never decrease.
 fuzz_rs() {
-  local target=$1 runs=$2 fz=crates/wgft-wgstack/fuzz work
+  local target=$1 runs=$2 mode=${3:-} fz=crates/wgft-wgstack/fuzz work suffix=""
+  [[ $mode == nochecks ]] && suffix=-nochecks
   command -v cargo >/dev/null && cargo +nightly fuzz --version >/dev/null 2>&1 || { echo "SKIP: no nightly cargo with cargo-fuzz"; exit 0; }
   grep -q "^name = \"$target\"" "$fz/Cargo.toml" 2>/dev/null || { echo "SKIP: no fuzz target $target in this tree"; exit 0; }
-  work=$logdir/fuzz-rs-$target
+  work=$logdir/fuzz-rs-$target$suffix
   rm -rf "$work" && mkdir -p "$work/corpus" || return 1
   if [[ $target == replay ]]; then
     cargo run -q -p wgft-wgstack-dut --locked --example replay_seeds -- "$work/corpus" || return 1
@@ -309,7 +316,12 @@ fuzz_rs() {
   # the corpus in git, when the target has one; raw_adversary has none and starts from raw_seeds
   local corpora=("$work/corpus")
   [[ -d $fz/corpus/$target ]] && corpora+=("fuzz/corpus/$target")
-  (cd crates/wgft-wgstack && cargo +nightly fuzz run -s none --no-trace-compares "$target" "${corpora[@]}" -- \
+  local fenv=(WGFT_FUZZ_OVERFLOW_CHECKS=on) fopts=()
+  if [[ $mode == nochecks ]]; then
+    fenv=(WGFT_FUZZ_OVERFLOW_CHECKS=off "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C overflow-checks=off")
+    fopts=(--target-dir "$PWD/$fz/target/nochecks")
+  fi
+  (cd crates/wgft-wgstack && env "${fenv[@]}" cargo +nightly fuzz run -s none --no-trace-compares "${fopts[@]}" "$target" "${corpora[@]}" -- \
     -runs="$runs" -artifact_prefix="$work/" "${extra[@]}") || { echo "the failing input is under $work"; return 1; }
 }
 
@@ -377,6 +389,11 @@ step wgstack-rs-adversarial 'command -v cargo >/dev/null || { echo "SKIP: no car
 # every Go recording in git besides its own seeds. SKIP where there is no nightly toolchain or cargo-fuzz.
 for t in parse:2000000 core:2500 replay:20000 adversarial_sender:200 raw_adversary:2000; do
   step "fuzz-rs-${t%%:*}" "fuzz_rs ${t%%:*} ${t#*:}"
+done
+# The same two targets, which drive the congestion window and the RTT estimator, built without overflow
+# checks, as a user's release build of the core would be.
+for t in core:2500 raw_adversary:2000; do
+  step "fuzz-rs-${t%%:*}-nochecks" "fuzz_rs ${t%%:*} ${t#*:} nochecks"
 done
 step stream-seeds-full 'WGFT_WGSTACK_STREAM_SEEDS=full go test -count=1 ./internal/wgstack -run "Stream|Scoreboard|RecvBuf"'
 step adversarial-seeds 'need_test ./internal/wgstack TestAdversarialSender; WGFT_WGSTACK_AUDIT_SEEDS=3000 go test -count=1 ./internal/wgstack -run TestAdversarialSender'
