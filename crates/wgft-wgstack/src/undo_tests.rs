@@ -596,3 +596,86 @@ fn go_compat_switch_compares_dsack_with_snd_una() {
         "the switch did not restore the SND.UNA comparison"
     );
 }
+
+// 波形の試験:RFC 2883 5 節。内部の欄は読まず、送り手が出す segment の時刻だけで確かめます。
+// 本物の D-SACK を受けた送り手は、RACK の並べ替えの窓を広げて (RFC 8985 6.2)、穴の再送を遅らせます。
+// 先頭の block が同じ packet の累積の確認より上にある古い ACK は D-SACK ではないので、窓を広げず、
+// 穴の再送の時刻は ACK を受けなかったときと同じです。
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Extra {
+    None,
+    /// 並べ替えられた古い ACK:確認は SND.UNA より低く、先頭の block はその確認より上で SND.UNA より低い。
+    OldAckBlockAboveItsAck,
+    /// 本物の D-SACK:先頭の block が同じ packet の累積の確認以下。
+    DsackBelowAck,
+}
+
+/// 再送を 1 回経験した接続で、穴のある flight を送らせ、穴が再送されるまでの時間を 1 ms の刻みで返します。
+/// 本物の再送が先にあるのは、再送の累計が D-SACK の累計に足りない block を核が捨てるからです。
+fn hole_retransmit_delay(extra: Extra) -> Duration {
+    let (mut n, c, mut q, outs) = rack_conn(10);
+    q.deliver_with(&mut n, &outs, |i, _| i == 1);
+    let resent = n.drain();
+    assert!(
+        resent.iter().any(|o| o.seq == outs[1].seq),
+        "the hole was not retransmitted: {}",
+        crate::testnet_tests::show(&resent)
+    );
+    n.advance(TEST_RTT);
+    q.deliver(&mut n, &resent);
+    n.drain();
+    n.advance(TEST_RTT);
+    // 次の flight
+    write_zeros(&mut n, c, 8 * TEST_SEG_PAYLOAD);
+    let flight = n.drain();
+    assert!(flight.len() >= 6, "a flight of {} segments", flight.len());
+    n.advance(TEST_RTT);
+    if extra == Extra::DsackBelowAck {
+        // 重複した flight[0] への D-SACK。確認を進める ACK なので、重複 ACK には数えません。
+        inject_ack_with_sack(&mut n, &mut q, flight[1].seq, blk(&flight[0]));
+    }
+    q.deliver(&mut n, &flight[..2]);
+    match extra {
+        Extra::None | Extra::DsackBelowAck => {}
+        Extra::OldAckBlockAboveItsAck => {
+            inject_ack_with_sack(&mut n, &mut q, flight[0].seq, blk(&flight[1]));
+        }
+    }
+    n.drain();
+    // flight[2] が穴で、後ろの 2 つが届く (DupThresh の 3 には足りない)
+    q.deliver(&mut n, &flight[3..5]);
+    let mut waited = Duration::ZERO;
+    while waited < Duration::from_millis(150) {
+        let got = n.drain();
+        if got
+            .iter()
+            .any(|o| o.seq == flight[2].seq && !o.payload.is_empty())
+        {
+            return waited;
+        }
+        n.advance(MS);
+        waited += MS;
+    }
+    panic!("the hole was never retransmitted");
+}
+
+#[test]
+fn rfc2883_wire_old_ack_does_not_change_the_retransmit_timing() {
+    let base = hole_retransmit_delay(Extra::None);
+    let old = hole_retransmit_delay(Extra::OldAckBlockAboveItsAck);
+    assert_eq!(
+        old, base,
+        "a reordered old ACK shifted the hole's retransmission from {base:?} to {old:?}"
+    );
+}
+
+#[test]
+fn rfc2883_wire_genuine_dsack_delays_the_hole_retransmit() {
+    let base = hole_retransmit_delay(Extra::None);
+    let ds = hole_retransmit_delay(Extra::DsackBelowAck);
+    assert!(
+        ds > base,
+        "a genuine D-SACK did not widen the reorder window: {base:?} then {ds:?}"
+    );
+}
