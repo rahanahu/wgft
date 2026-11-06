@@ -182,6 +182,13 @@ pub(crate) enum Ipv4Drop {
     BadChecksum,
 }
 
+/// 送信元として使えないアドレスかを返します。0/8、127/8、224/4、240/4 で、255.255.255.255 を含みます。
+/// 0/8、127/8、broadcast、multicast は RFC 1122 3.2.1.3 と 3.2.2 に沿い、240/4 (Class E) は RFC が求めない
+/// wgft の選択です。このアドレスから届いた datagram は捨て、ICMP の誤りも送りません。
+pub(crate) fn invalid_source(src: u32) -> bool {
+    matches!(src >> 24, 0 | 127) || src >> 28 >= 0xe
+}
+
 /// `b` を IPv4 の packet として解釈します。Total Length より後ろの byte は切り捨てます
 /// (packet-validation.md の IPv4 の Total Length)。
 pub(crate) fn parse_ipv4(b: &[u8]) -> Result<Ipv4<'_>, Ipv4Drop> {

@@ -400,6 +400,8 @@ Go 以外の実装も同じ規則で行います。
 ただし Rust の wgstack は、RFC に合わせて次の項目が違います。違う所は各項目に書きます。
 
 - IPv4 だけ:IPv4 でない packet は捨てます
+- 送信元:Rust の wgstack は、送信元が 0/8、127/8、224/4、240/4 (255.255.255.255 を含む) の packet を断片も含めて黙って捨て、そのような送信元には ICMP の誤りを送りません。
+  RFC 1122 3.2.1.3 と 3.2.2 に沿い、240/4 を捨てるのは wgft の選択です。v1 の 2 つの netstack はこの検査をしません
 - Total Length:IPv4 のヘッダの Total Length より後ろの byte を切り捨ててから扱います ([IPv4 の Total Length](../userspace/packet-validation.md#ipv4-の-total-length))
 - 断片の再組み立て:IPv4 の断片は wgft の再組み立ての表で組み立て、完成した datagram だけを扱います。
   表は未完成の datagram 128 件、断片 512 個、4 MiB を上限とし、未完成の datagram の期限は 30 秒で、1 秒ごとに期限切れを消します ([再組み立ての表](../userspace/packet-validation.md#再組み立ての表))

@@ -146,6 +146,8 @@ pub struct Stats {
     pub malformed: u64,
     pub bad_checksum: u64,
     pub not_local: u64,
+    /// 送信元が 0/8、127/8、224/4、240/4 にある datagram を捨てた数です (RFC 1122 3.2.1.3)。
+    pub bad_source: u64,
     pub retransmit_aborts: u64,
     pub probe_aborts: u64,
     /// 再送のタイマーの期限で送り直した回数です。窓の probe は数えません。
