@@ -212,7 +212,51 @@ SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表
 次の逸脱は別の PR で直すので、例外として記録しません。
 直しが入ったら行を消します。
 
-- RFC 5681 3 節:HyStart++ (RFC 9406) の外の slow start でも 1 ACK の増分の上限 L を 2 にします
+- RFC 5681 3 節:HyStart++ (RFC 9406) の外の slow start でも 1 ACK の増分の上限 L を 2 にします。
+  直す形は測ってから選びます ([slow start の 1 ACK の増分](#slow-start-の-1-ack-の増分))
+
+#### slow start の 1 ACK の増分
+
+- 今の核:slow start の間、新しいデータを累積で確認した ACK ごとに、輻輳の窓を min(N, L × SMSS) 増やします。
+  N は、その ACK が新しく確認した byte の数です。
+  L は RTO の後の slow start で 1、それ以外で 2 です ([回復と輻輳の制御と boost で決めたこと](#回復と輻輳の制御と-boost-で決めたこと))
+- RFC 5681 との関係:RFC 5681 3 節は、送り手が 3 節の手順の許すより攻めた送り方をしてはならないとします (MUST NOT)。
+  slow start の増分は 3.1 節の次の文です。
+  「During slow start, a TCP increments cwnd by at most SMSS bytes for each ACK received that cumulatively acknowledges new data.」
+  同じ節は、RFC 3465 の 1 ACK で SMSS を超える増分を次のように扱います。
+  「We note that [RFC3465] allows for cwnd increases of more than SMSS bytes for incoming acknowledgments during slow start on an experimental basis; however, such behavior is not allowed as part of the standard.」
+  このため、HyStart++ の外の L = 2 は、今は RFC 5681 が標準として認める範囲の外です
+- RFC 3465 との関係:RFC 3465 (Experimental) は Appropriate Byte Counting の slow start で、L = 2 × SMSS を認め (MAY)、2 × SMSS を超える L を禁じます (2.3 節)。
+  RTO の後の slow start には L = 1 × SMSS を求めます (MUST)。
+  核の L はこの範囲に入りますが、RFC 3465 は実験の文書なので、RFC 5681 からの外れを埋めません
+- RFC 9406 との関係:HyStart++ (RFC 9406、Standards Track) は slow start の増分を min(N, L × SMSS) とし (4.2 節)、pacing の無い送り手に L = 8 を示します (4.3 節)。
+  核は ssthresh が初期値のままで回復の外の間、つまり最初の slow start で HyStart++ を動かすので、その間の L = 2 は RFC 9406 の範囲です。
+  4.3 節は、HyStart++ を最初の slow start だけに使い、残りは標準の slow start に戻すよう求めます (SHOULD)。
+  長く黙った後に restart window を育てる時に HyStart++ を使うことは認めます (MAY)
+- 外れる slow start:HyStart++ の外で、RTO の後でもない slow start です。
+  コードからは次の経路と読めます。
+  取り消しの後の経路は、試験で確かめていません
+  - 黙った後の窓の戻し (RFC 5681 4.1):ssthresh を覚えた接続が RTO より長く黙ると、窓を IW 以下に戻し、L = 2 で育てます
+  - SACK を交渉しない接続の回復の終わり:窓を ssthresh より小さくして slow start に戻ると、L = 2 で育てます。
+    この slow start は回復の中でなく回復の後と読みます。
+    回復の中と読むなら、RFC 3465 3.2 節の「L MUST NOT be > 1*SMSS bytes in any slow start-based loss recovery」からも外れます
+  - 取り消しの後:戻した窓が ssthresh より小さいと、L = 2 の slow start が続きます
+- 影響と危険:最初でない slow start は覚えた ssthresh で終わるので、L = 2 でも ssthresh を超えて窓が育つわけではありません。
+  L = 2 では窓が ssthresh に早く着き、ACK ごとに送り出す量が大きくなります。
+  相手が 2 segment ごとに ACK を返すなら、窓は往復ごとに L = 1 で約 1.5 倍、L = 2 で 2 倍に育ちます。
+  ACK が失われるか相手がまとめて確認すると、1 つの ACK で増える窓と送り出す量が L = 1 より大きくなります (RFC 3465 2.3 節)。
+  相手が segment ごとに ACK を返すなら、N が SMSS を超えないので L の差は出ません
+- 直しの候補:
+  - 1 つ目の候補:HyStart++ の外の slow start をすべて L = 1 にします。
+    MUST を満たす最も単純な直しです
+  - 2 つ目の候補:黙った後の窓の戻しでも HyStart++ を動かし (RFC 9406 4.3 節の MAY)、残りの経路を L = 1 にします
+- 測定:ホストの qbench で、今の核と 2 つの候補を比べる測定を予定しています。
+  間を置いて送る burst の完了時間、再送した byte、待ち行列で落ちた数を比べます。
+  測った値はまだありません
+- 決め方:測った値は、2 つの候補から直し方を選ぶ材料です。
+  RFC に従うかを性能だけで決めないので、どちらの候補が今の核より遅くても、それだけを理由に MUST の例外として残すことはしません
+
+直しが入ったら、この節も消すか書き換えます。
 
 ## Go から Rust への対応
 
@@ -1665,6 +1709,7 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   取り消しは、印を窓と ssthresh と一緒に `init_undo` の時点の値 (`undo_rto_slow_start`) に戻します。
   先の RTO の slow start の途中で起きた 2 回目の RTO や高速の回復を取り消しても、先の slow start の L = 1 が続くためです。
   最初の slow start と、回復の後の slow start は L = 2 のままです。
+  HyStart++ の外の L = 2 は RFC 5681 からの外れで、直しを準備しています ([slow start の 1 ACK の増分](#slow-start-の-1-ack-の増分))。
   SACK を交渉しない接続が回復の終わりに窓を ssthresh より小さくして slow start に戻る場合は、RTO の後ではないので L = 2 です。
   RTO の再送の後に続けて RTO が起きたときは立てたままです。
   黙った後の窓の戻し (RFC 5681 4.1) は印を変えず、RTO の後の slow start の途中なら L = 1 のままです。
