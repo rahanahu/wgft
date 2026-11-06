@@ -63,7 +63,11 @@
 #       /proc/stat, then HOSTQEMU, HOSTAGENT and HOSTPEER from all qemu threads on the host.
 #       AGENTVMGUESTRATIO is the decision ratio for the agent VM's CPU per byte; AGENTVMRATIO and VMRATIO
 #       are reference values, since the guest's /proc/stat misses most softirq on an otherwise idle vCPU.
-#       A --split log without the host's guest time prints "AGENTVMGUEST unavailable". The
+#       A --split log without the host's guest time prints "AGENTVMGUEST unavailable". The guest input is each
+#       VM's vCPU run time less KVM and qemu user time (host_<vm>_vcpu_s, _kvm_s, _qemu_s for agent and peer), not the
+#       tick-counted guest time (see GUEST_CONSISTENCY_TOL); the AGENTVMGUESTCONSISTENCY and PEERVMGUESTCONSISTENCY
+#       lines are a diagnostic of how far the tick value was off. Logs without the fields print "CONSISTENCY
+#       unavailable" and keep the tick value. The
 #       kernel arm (by its name), whose agent process does no work, has no RATIO line but a line
 #       saying so, and is compared by the VM ratios only.
 #   iperf <jsonfile>
@@ -635,6 +639,42 @@ def paired_ratio(data, key, label, sender_check=False):
     return 0
 
 
+# The guest input of AGENTVMGUESTRATIO and PEERVMGUESTRATIO is a VM's vCPU threads' run time (schedstat) less
+# their KVM time and their qemu user time. The tick-counted guest time (field 43) over-counts on idle-heavy
+# vCPUs: up to 10% for the agent VM and up to 30% for the peer VM, and not evenly between arms. Against host
+# perf guest cycles (2026-11-07, three cells, 4 runs per arm) the agent VM's paired ratios of this estimate
+# were within 2% and the tick ones off by up to 10%; the estimate itself stayed 1-7% high in absolute terms
+# for the agent VM (2-11% for the peer VM, whose paired ratios were not validated), and not evenly between
+# arms. A run is flagged, as a diagnostic only, when its tick (guest + KVM + qemu) / run time is outside
+# 1 +- GUEST_CONSISTENCY_TOL; the clean max-load cells sit within +-0.5%, so 2% is a judgement and not a
+# break in the data. A run without the fields keeps its tick value.
+GUEST_CONSISTENCY_TOL = 0.02
+
+
+def guest_consistency(r, vm="agent"):
+    # (tick guest + KVM + qemu user time) / vCPU run time of a VM's vCPU threads in one run, or None when the
+    # run lacks a field or ran no vCPU time
+    try:
+        run = float(r["host_%s_vcpu_s" % vm])
+        total = sum(float(r["host_%s_vcpu_%s_s" % (vm, k)]) for k in ("guest", "kvm", "qemu"))
+    except (KeyError, ValueError):
+        return None
+    return total / run if run > 0 else None
+
+
+def guest_estimate(r, vm="agent"):
+    # a copy of the run with the guest time taken as vCPU run time - KVM - qemu time, or None when that
+    # is not positive
+    g = float(r["host_%s_vcpu_s" % vm]) - float(r["host_%s_vcpu_kvm_s" % vm]) - float(r["host_%s_vcpu_qemu_s" % vm])
+    if g <= 0:
+        return None
+    c = dict(r)
+    c["host_%s_vcpu_guest_s" % vm] = "%.3f" % g
+    c.pop("%svm_guest_s_per_gb" % vm, None)
+    add_guest_keys(c)
+    return c
+
+
 def cpupaired_key(data, key, vm, pre=None, share_key="vm_cpu_share", vcpus=None):
     # vm: the key is a VM's CPU per byte, so the busy share is checked against the VM's vCPUs.
     # pre, share_key and vcpus name another such value: `lab/lab paired --split` has the agent VM,
@@ -650,6 +690,15 @@ def cpupaired_key(data, key, vm, pre=None, share_key="vm_cpu_share", vcpus=None)
     counts = {"missing": 0, "failed": 0, "sync_timeout": 0, "sender_bound": 0}
     peer_check = peer_check_of(plan, runs)
     peer_arms = {"x": 0, "y": 0}
+    # the guest-time check of AGENTVMGUEST: only when some run carries the fields it needs
+    # (and the peer VM's PEERVMGUEST, on the same basis)
+    gvm = {"AGENTVMGUEST": "agent", "PEERVMGUEST": "peer"}.get(pre)
+    consist = gvm is not None and any(guest_consistency(r, gvm) is not None for r in runs.values())
+    unchecked = {"x": 0, "y": 0}
+    flagged = {"x": 0, "y": 0}
+    checked = {"x": 0, "y": 0}
+    worst = {"x": None, "y": None}
+    estimated = {"x": 0, "y": 0}
     if peer_check:
         counts["peer_bound"] = 0
     late = 0
@@ -669,6 +718,24 @@ def cpupaired_key(data, key, vm, pre=None, share_key="vm_cpu_share", vcpus=None)
                 for arm, n in peer_arm_counts(x, y).items():
                     peer_arms[arm] += n
             continue
+        if consist:
+            fixed = []
+            for arm, r in (("x", x), ("y", y)):
+                c = guest_consistency(r, gvm)
+                if c is None:
+                    unchecked[arm] += 1
+                else:
+                    checked[arm] += 1
+                    if worst[arm] is None or abs(c - 1) > abs(worst[arm] - 1):
+                        worst[arm] = c
+                    if abs(c - 1) > GUEST_CONSISTENCY_TOL:
+                        flagged[arm] += 1
+                    f = guest_estimate(r, gvm)
+                    if f is not None:
+                        r = f
+                        estimated[arm] += 1
+                fixed.append(r)
+            x, y = fixed
         vals = [(float(r[key]), float(r["overall_mbit"]), float(r.get("agent_cpu_share", "nan")), sender_share(r),
                  float(r.get(share_key, "nan"))) for r in (x, y)]
         arm_vals["x"].append(vals[0])
@@ -698,6 +765,22 @@ def cpupaired_key(data, key, vm, pre=None, share_key="vm_cpu_share", vcpus=None)
     arm_text, warn = peer_arm_text(peer_arms) if peer_check else ("", None)
     print(pre + "LEFT_OUT planned=%d used=%d %s%s" % (len(keys), len(pairs["a"]) + len(pairs["b"]),
                                                 " ".join("%s=%d" % kv for kv in counts.items()), arm_text))
+    if consist:
+        for arm in ("x", "y"):
+            print(pre + "CONSISTENCY arm=%s name=%s flagged=%d of %d checked runs worst=%s%s%s; diagnostic: tick (guest + KVM + "
+                  "qemu time) / vCPU run time outside %.2f..%.2f"
+                  % (arm, names.get(arm, arm), flagged[arm], checked[arm],
+                     "%.3f" % worst[arm] if worst[arm] is not None else "n/a",
+                     " unchecked=%d" % unchecked[arm] if unchecked[arm] else "",
+                     " guest=run-kvm-qemu in %d runs" % estimated[arm],
+                     1 - GUEST_CONSISTENCY_TOL, 1 + GUEST_CONSISTENCY_TOL))
+        hi, lo = max(flagged.values()), min(flagged.values())
+        if hi >= 2 and hi >= 2 * lo:
+            print(pre + "WARN guest_inconsistent x=%d y=%d: one arm's tick guest time disagrees with the vCPU run time at "
+                  "least twice as often as the other's; the ratio does not use the tick time" % (flagged["x"], flagged["y"]))
+    elif pre == "AGENTVMGUEST":
+        print(pre + "CONSISTENCY unavailable: the runs carry no host_agent_vcpu_s, _guest_s, _kvm_s and _qemu_s; "
+              "the guest time is the tick value, not checked against the vCPU run time")
     if warn:
         PEER_WARNS.append(warn)
     if late:

@@ -158,6 +158,107 @@ class CpuPaired(unittest.TestCase):
         self.assertIn("AGENTVMRATIO x_over_y=0.800 ci95_low=0.800 ci95_high=0.800 pairs=8 left_out=0 ", out)
         self.assertNotIn("AGENTVMGUEST unavailable", out)
 
+    @staticmethod
+    def consistency_host(bad=(), kvm_bad="4.8", tick=None, extra=None):
+        # vCPU run time 10 s, KVM 4 s, qemu 0 s, so the guest estimate (run - KVM - qemu) is 6 s. The tick guest
+        # time is 6 s unless tick(arm) says else; a run in `bad` has KVM kvm_bad (4.8 s: tick consistency 1.08,
+        # estimate 5.2 s). y moves 1.2 GB, so the ratio x/y of the 6 s guest time is 1.2
+        def host(rnd, run, arm):
+            return ("bytes=%d window_s=10 host_agent_vcpu_s=10 host_agent_vcpu_guest_s=%s host_agent_vcpu_kvm_s=%s "
+                    "host_agent_vcpu_qemu_s=0 %s"
+                    % (1000000000 if arm == "x" else 1200000000, tick(arm) if tick else "6",
+                       kvm_bad if (rnd, run, arm) in bad else "4.0", extra(rnd, run, arm) if extra else ""))
+        return host
+
+    @staticmethod
+    def guest_ratio(out):
+        return out.split("AGENTVMGUESTRATIO ")[1].split("\n")[0]
+
+    def test_consistent_run_keeps_its_value(self):
+        rc, out = analyse(self.split_log(self.consistency_host()))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("AGENTVMGUESTCONSISTENCY arm=x name=new flagged=0 of 8 checked runs worst=1.000 guest=run-kvm-qemu in 8 runs;", out)
+        self.assertIn("AGENTVMGUESTCONSISTENCY arm=y name=old flagged=0 of 8 checked runs worst=1.000 guest=run-kvm-qemu in 8 runs;", out)
+        self.assertIn("x_over_y=1.200 ci95_low=1.200 ci95_high=1.200 pairs=8 left_out=0 ", self.guest_ratio(out))
+
+    def test_every_run_uses_run_less_kvm_and_qemu_not_the_tick_value(self):
+        # tick guest 9 s in x and 6 s in y would give 1.8; run - KVM = 6 s in both gives 1.2
+        rc, out = analyse(self.split_log(self.consistency_host(tick=lambda arm: "9" if arm == "x" else "6")))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("x_over_y=1.200 ci95_low=1.200 ci95_high=1.200 pairs=8 ", self.guest_ratio(out))
+        self.assertIn("flagged=8 of 8 checked runs worst=1.300", out)
+        self.assertNotIn("NOT DECIDABLE", out)
+
+    def test_flagged_run_is_a_diagnostic_only(self):
+        # y round 2 run 1: KVM 4.8 s, so the tick consistency is 1.08 and the estimate 5.2 s instead of 6 s
+        rc, out = analyse(self.split_log(self.consistency_host({(2, 1, "y")})))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("AGENTVMGUESTCONSISTENCY arm=y name=old flagged=1 of 8 checked runs worst=1.080 guest=run-kvm-qemu in 8 runs;", out)
+        self.assertIn("AGENTVMGUESTCONSISTENCY arm=x name=new flagged=0 of 8 checked runs worst=1.000 ", out)
+        self.assertRegex(out, r"AGENTVMGUESTLEFT_OUT planned=8 used=8 missing=0 failed=0 sync_timeout=0 sender_bound=0\n")
+        self.assertIn("pairs=8 left_out=0 ", self.guest_ratio(out))
+        self.assertNotIn("ci95_high=1.200", self.guest_ratio(out))
+
+    def test_low_side_is_flagged_too(self):
+        rc, out = analyse(self.split_log(self.consistency_host({(1, 1, "x")}, kvm_bad="3.0")))
+        self.assertIn("AGENTVMGUESTCONSISTENCY arm=x name=new flagged=1 of 8 checked runs worst=0.900 ", out)
+
+    def test_qemu_user_time_counts_in_the_diagnostic_and_the_estimate(self):
+        # tick 6 + KVM 4 + qemu 0.5 = 1.05 of the run time; the estimate is 10 - 4 - 0.5 = 5.5 s
+        rc, out = analyse(self.split_log(self.consistency_host(
+            extra=lambda r, n, a: "host_agent_vcpu_qemu_s=0.5")))
+        self.assertIn("flagged=8 of 8 checked runs worst=1.050 ", out)
+        self.assertIn("agentvm_guest_share=0.55\n", out)
+
+    def test_half_the_runs_flagged_still_gives_a_ratio(self):
+        bad = {(1, 1, "x"), (2, 1, "y"), (3, 1, "x"), (4, 1, "y")}
+        rc, out = analyse(self.split_log(self.consistency_host(bad)))
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("NOT DECIDABLE", out)
+        self.assertIn("pairs=8 left_out=0 ", self.guest_ratio(out))
+
+    def test_arm_asymmetric_flags_warn(self):
+        bad = {(1, 1, "x"), (2, 1, "x"), (3, 1, "x")}
+        rc, out = analyse(self.split_log(self.consistency_host(bad)))
+        self.assertIn("AGENTVMGUESTWARN guest_inconsistent x=3 y=0: ", out)
+
+    def test_mixed_log_checks_and_estimates_only_runs_with_the_fields(self):
+        def host(rnd, run, arm):
+            if (rnd, run) == (1, 1):
+                return "bytes=1000000000 window_s=10 host_agent_vcpu_guest_s=6"
+            return self.consistency_host()(rnd, run, arm)
+        rc, out = analyse(self.split_log(host))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("flagged=0 of 7 checked runs worst=1.000 unchecked=1 guest=run-kvm-qemu in 7 runs;", out)
+        self.assertNotIn("CONSISTENCY unavailable", out)
+
+    def test_peer_bound_and_flagged_pair_counts_once_as_peer_bound(self):
+        bound = {(1, 1, "x")}
+        host = self.consistency_host({(1, 1, "x")}, extra=lambda r, n, a: self.peer_fields(
+            [(0.99, 0.99)] if (r, n, a) in bound else [(0.80, 0.20)]))
+        rc, out = analyse(self.split_log(host))
+        self.assertRegex(out, r"AGENTVMGUESTLEFT_OUT planned=8 used=7 missing=0 failed=0 sync_timeout=0 sender_bound=0 peer_bound=1 ")
+        self.assertIn("flagged=0 of 7 checked runs", out)
+
+    def test_peer_vm_uses_the_same_basis(self):
+        # peer tick guest 9 s in x and 6 s in y would give 1.8; run - KVM = 6 s in both gives 1.2
+        def extra(rnd, run, arm):
+            return "host_peer_vcpu_s=10 host_peer_vcpu_guest_s=%s host_peer_vcpu_kvm_s=%s host_peer_vcpu_qemu_s=0" % (
+                "9" if arm == "x" else "6", "4.8" if (rnd, run, arm) == (1, 1, "x") else "4.0")
+        rc, out = analyse(self.split_log(self.consistency_host(extra=extra)))
+        self.assertIn("PEERVMGUESTCONSISTENCY arm=x name=new flagged=8 of 8 checked runs worst=1.380 guest=run-kvm-qemu in 8 runs;", out)
+        self.assertIn("PEERVMGUESTCONSISTENCY arm=y name=old flagged=0 of 8 checked runs worst=1.000 guest=run-kvm-qemu in 8 runs;", out)
+        self.assertRegex(out, r"PEERVMGUESTRATIO x_over_y=1\.[12]\d\d ")
+        self.assertNotIn("PEERVMGUESTRATIO x_over_y=1.800", out)
+
+    def test_log_without_consistency_fields_keeps_the_tick_value(self):
+        def host(rnd, run, arm):
+            return "bytes=1000000000 window_s=10 host_agent_vcpu_guest_s=%s" % ("1.2" if arm == "x" else "1.0")
+        rc, out = analyse(self.split_log(host))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("AGENTVMGUESTCONSISTENCY unavailable: ", out)
+        self.assertIn("AGENTVMGUESTRATIO x_over_y=1.200 ci95_low=1.200 ci95_high=1.200 pairs=8 ", out)
+
     def test_placement_rejects_userspace_arms_with_more_threads(self):
         # --placement apart pins the agent to one CPU: only the rust and kernel arms. --rounds 3 is
         # invalid too, so the command stops in validation even if the placement check were gone
