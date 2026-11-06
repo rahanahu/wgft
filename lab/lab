@@ -868,7 +868,7 @@ paired_sync() {
 }
 
 # lab paired の使い方。lab help と引数の誤りの両方がこの 1 つの文字列を出す
-PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local] [--placement apart|apart-mt|apart-hs|apart-hs0] [--agent-load CPU:DUTY]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y, or with --split: paired --split [options] --cases FILE [--max-wall SECONDS] ARM_X ARM_Y"
+PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local] [--placement apart|apart-mt|apart-hs|apart-hs0|apart-hs2] [--agent-load CPU:DUTY]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y, or with --split: paired --split [options] --cases FILE [--max-wall SECONDS] ARM_X ARM_Y"
 
 # is_uint <値>:1 以上の整数か
 is_uint() { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
@@ -898,7 +898,7 @@ paired_parse_args() {
       --split) split=1; shift ;;
       --peer-vcpus) peervcpus=${2:?--peer-vcpus N}; shift 2 ;;
       --target) target=${2:?--target lan|local}; shift 2 ;;
-      --placement) placement=${2:?--placement apart|apart-mt|apart-hs|apart-hs0}; shift 2 ;;
+      --placement) placement=${2:?--placement apart|apart-mt|apart-hs|apart-hs0|apart-hs2}; shift 2 ;;
       --agent-load) agentload=${2:?--agent-load CPU:DUTY}; shift 2 ;;
       --cases) cases=${2:?--cases FILE}; shift 2 ;;
       --max-wall) maxwall=${2:?--max-wall SECONDS}; shift 2 ;;
@@ -931,10 +931,11 @@ paired_validate() {
   [[ -z $delayqueue ]] || require_uint --delay-queue-pkts "$delayqueue"
   [[ -z $peervcpus || -n $split ]] || die "--peer-vcpus goes with --split"
   [[ -z $target || ( -n $split && ( $target == lan || $target == local ) ) ]] || die "--target wants lan or local, with --split"
-  [[ -z $placement || ( -n $split && ( $placement == apart || $placement == apart-mt || $placement == apart-hs || $placement == apart-hs0 ) ) ]] || die "--placement wants apart or apart-mt, or apart-hs and apart-hs0 for the Hash S prototype, with --split"
+  [[ -z $placement || ( -n $split && ( $placement == apart || $placement == apart-mt || $placement == apart-hs || $placement == apart-hs0 || $placement == apart-hs2 ) ) ]] || die "--placement wants apart or apart-mt, or apart-hs and apart-hs0 for the Hash S prototype, with --split"
   # apart-hs と apart-hs0 (Hash S の試作):agent のプロセスを全 vCPU に置き、data plane の front のスレッド (wgft-dataplane)
   # を CPU 1 に置く。区画のスレッド (wgft-dp-part*) は apart-hs では固定せず、apart-hs0 では CPU 0 (NIC の割り込みと同じ
   # CPU) に置く。プロセスの使える CPU の数が区画の数 P を決めるので、2 vCPU で P = 2 になる
+  [[ $placement != apart-hs2 ]] || ((vcpus >= 3)) || die "--placement apart-hs2 puts the partition threads on CPUs 2 and up; use --vcpus 3 or more"
   [[ $placement != apart-hs0 ]] || ((vcpus == 2)) || die "--placement apart-hs0 puts the partition thread on CPU 0 beside the NIC's interrupts, which is the 2 vCPU layout; use --vcpus 2"
   [[ $placement != apart-hs ]] || ((vcpus >= 2)) || die "--placement apart-hs wants --vcpus 2 or more"
   # apart-mt は data plane のスレッドを CPU 1、暗号の worker を CPU 2 と 3 に 1 つずつ置く。A+ の agent はプロセスの使える
@@ -1190,10 +1191,12 @@ paired_split_setup() {
       # 8 vCPU でも worker が data plane のスレッドと同じ塊に留まる
       SPLIT_AGENT_CPUS=1-$((vcpus - 1)) SPLIT_AGENT_DP_CPUS=1 SPLIT_AGENT_WORKER_CPUS=2,3
     fi
-    if [[ $placement == apart-hs || $placement == apart-hs0 ]]; then
+    if [[ $placement == apart-hs || $placement == apart-hs0 || $placement == apart-hs2 ]]; then
       # Hash S の試作:プロセスを全 vCPU に置き、front を CPU 1。暗号の worker は無いので worker の CPU は名目だけ
       SPLIT_AGENT_CPUS=0-$((vcpus - 1)) SPLIT_AGENT_DP_CPUS=1 SPLIT_AGENT_WORKER_CPUS=1
       [[ $placement != apart-hs0 ]] || SPLIT_AGENT_PART_CPUS=0
+      # apart-hs2:区画のスレッドを NIC の割り込みの CPU 0 と front の CPU 1 から離し、CPU 2 以降に置く (3 vCPU 以上)
+      [[ $placement != apart-hs2 ]] || SPLIT_AGENT_PART_CPUS=2-$((vcpus - 1))
     fi
     # 相手の VM:1 つの flow の受信の softirq は RPS が flow ごとに選ぶ 1 つの vCPU で走る。その vCPU が NIC の割り込みの
     # vCPU と重なった実行が詰まったので、NIC の全 vector を CPU 0 に固定し、全 veth の RPS から CPU 0 を外す

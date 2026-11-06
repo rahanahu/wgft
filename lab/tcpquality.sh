@@ -725,6 +725,12 @@ for mode in $MODES; do
         ip netns exec "$CLIENT_NS" iperf3 -c 198.51.100.1 -p 41800 -t "$IPERF_S" -P "$STREAMS" $rev -J \
         ${IPERF_MBIT:+-b "${IPERF_MBIT}M"} > "$W/wgft-tq-iperf-$mode.json" 2> "$W/wgft-tq-fetch-$mode.log" &
       fetcher=$!
+      # a diagnostic hook, only when the untracked lab/.perf-hook.sh exists (profiling the agent VM during the run)
+      perfhook=
+      if [ -n "$AGENT_AT" ] && [ -f "$(dirname "$0")/.perf-hook.sh" ]; then
+        agentx -- bash /wgft/lab/.perf-hook.sh "$agent_pid" "$run" > "$W/wgft-tq-perfhook-$mode.log" 2>&1 &
+        perfhook=$!
+      fi
       if [ -n "$UDPPING" ]; then
         (sleep 0.5; exec ip netns exec "$CLIENT_NS" $Q uping 198.51.100.1 41801 "$((IPERF_S - 1))" "$UDPPING_MS" udp_load) \
           > "$W/wgft-tq-uping-$mode.log" 2>&1 &
@@ -752,6 +758,10 @@ for mode in $MODES; do
     fi
     wait "$fetcher"
     tool_rc=$?
+    if [ -n "${perfhook:-}" ]; then
+      wait "$perfhook"
+      cat "$W/wgft-tq-perfhook-$mode.log"
+    fi
     # the CPU window closes when the transfer ends; the pinger's last second of waiting for late
     # echoes is not part of it
     if [ -n "$CPU" ]; then
