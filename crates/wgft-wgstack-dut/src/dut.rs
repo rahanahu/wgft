@@ -157,6 +157,7 @@ struct Compat {
     row_rst: bool,
     synack_rto: bool,
     tw_no_paws: bool,
+    tw_no_ts_recent: bool,
     sent_at_zero: bool,
     shared_id: bool,
     echo_drop: bool,
@@ -171,6 +172,7 @@ impl Compat {
             row_rst: wgft_wgstack::go_compat_row_rst(),
             synack_rto: wgft_wgstack::go_compat_synack_rto(),
             tw_no_paws: wgft_wgstack::go_compat_tw_no_paws(),
+            tw_no_ts_recent: wgft_wgstack::go_compat_tw_no_ts_recent(),
             sent_at_zero: wgft_wgstack::go_compat_sent_at_zero(),
             shared_id: wgft_wgstack::go_compat_shared_id(),
             echo_drop: wgft_wgstack::go_compat_echo_drop(),
@@ -185,6 +187,7 @@ impl Compat {
             row_rst: on,
             synack_rto: on,
             tw_no_paws: on,
+            tw_no_ts_recent: on,
             sent_at_zero: on,
             shared_id: on,
             echo_drop: on,
@@ -198,6 +201,7 @@ impl Compat {
         wgft_wgstack::set_go_compat_row_rst(self.row_rst);
         wgft_wgstack::set_go_compat_synack_rto(self.synack_rto);
         wgft_wgstack::set_go_compat_tw_no_paws(self.tw_no_paws);
+        wgft_wgstack::set_go_compat_tw_no_ts_recent(self.tw_no_ts_recent);
         wgft_wgstack::set_go_compat_sent_at_zero(self.sent_at_zero);
         wgft_wgstack::set_go_compat_shared_id(self.shared_id);
         wgft_wgstack::set_go_compat_echo_drop(self.echo_drop);

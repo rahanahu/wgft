@@ -1975,3 +1975,18 @@ fn rfc7323_time_wait_slot_updates_ts_recent_from_a_retransmitted_fin() {
 fn rfc7323_time_wait_row_updates_ts_recent_from_a_retransmitted_fin() {
     tw_fin_updates_ts_recent(true);
 }
+
+/// 凍結した Go との照合用の切り替え (feature `harness` だけ):TIME_WAIT の枠は FIN の写しで TS.Recent を更新しません。
+#[cfg(feature = "harness")]
+#[test]
+fn go_compat_switch_skips_ts_recent_update_in_time_wait_slot() {
+    crate::set_go_compat_tw_no_ts_recent(true);
+    let (mut n, _c, mut p) = paws_time_wait(false);
+    let old_recent = p.ts_val;
+    let s = paws_old_fin(&mut p, old_recent + 100);
+    n.inject(&s);
+    let outs = n.drain();
+    crate::set_go_compat_tw_no_ts_recent(false);
+    assert_eq!(outs.len(), 1, "want one ACK, got {}", show(&outs));
+    assert_eq!(outs[0].ts.map(|t| t.1), Some(old_recent));
+}

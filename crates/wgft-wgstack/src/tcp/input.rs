@@ -186,7 +186,12 @@ impl Conn<'_> {
         let n = u32::try_from(seg.payload.len()).unwrap_or(0);
         if seg.has(FLAG_FIN) && seg.seq.wrapping_add(n).wrapping_add(1) == self.t.rcv_nxt {
             // TS.Recent の更新 (RFC 7323 4.3)。TS.Recent より小さい TSval は更新しません。ACK はこの値を返します。
-            if self.t.ts_ok
+            #[cfg(feature = "harness")]
+            let upd = !crate::stack::go_compat_tw_no_ts_recent(); // 凍結した Go の記録との照合用
+            #[cfg(not(feature = "harness"))]
+            let upd = true;
+            if upd
+                && self.t.ts_ok
                 && let Some(v) = seg.opt.ts.map(|(v, _)| v)
                 && seq::ge(v, self.t.ts_recent)
             {
