@@ -115,7 +115,7 @@ pub struct Config {
     pub partition: Option<Partition>,
 }
 
-/// Hash S の区画の 1 つとして核を作る時の値です (試作、independent-exploration.md の 6.8 節)。
+/// Hash S の区画の 1 つとして核を作る時の値です (試作)。
 ///
 /// 区画は鍵 (ISN、timestamp、SYN cookie) を全区画で共有し、変わる状態 (乱数、IP の ID、challenge ACK の bucket)
 /// を区画ごとに持ちます。

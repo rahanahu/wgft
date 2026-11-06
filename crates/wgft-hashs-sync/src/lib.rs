@@ -9,7 +9,7 @@
 //! 枠だけを触るので、錠は取り合わない (順は `head` と `tail` の Acquire と Release が決める)。錠は所有の安全な
 //! 受け渡しのためだけにあり、取るのはバッチ 1 つごとに 1 回である。
 //!
-//! loom の模型 (notes の common-design.md の L2、L6、L7) は、この crate の型そのものを `--cfg loom` の試験の
+//! loom の模型 (Hash S の設計の記録の L2、L6、L7) は、この crate の型そのものを `--cfg loom` の試験の
 //! build で loom の同期の型に替えて確かめる (`cargo test -p wgft-hashs-sync --lib` を `RUSTFLAGS="--cfg loom"` で)。
 //! 待つ仕組みは [`Notifier`] で外から渡す。製品は tokio の `Notify`、模型は loom の `Notify` を使う。
 

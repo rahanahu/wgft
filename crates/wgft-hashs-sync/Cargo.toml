@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# loom は試験だけの依存で、`--cfg loom` の試験の build にだけ入る (common-design.md の loom の模型の規則)。
+# loom は試験だけの依存で、`--cfg loom` の試験の build にだけ入る (loom の模型の規則)。
 # 製品の build には入らない。
 [target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"

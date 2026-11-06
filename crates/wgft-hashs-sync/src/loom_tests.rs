@@ -1,4 +1,4 @@
-//! loom の模型 (notes の common-design.md の「loom の最小の模型」のうち Hash S に当てるもの)。
+//! loom の模型 (Hash S の設計の記録の「loom の最小の模型」のうち Hash S に当てるもの)。
 //!
 //! `RUSTFLAGS="--cfg loom" cargo test -p wgft-hashs-sync --lib --release` で流す。模型は製品の型 ([`Ring`]、
 //! [`Bell`]、[`Demand`]、[`Ending`]) そのものを loom の同期の型で組んだものを使い、写しの模型は使わない。

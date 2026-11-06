@@ -1,7 +1,7 @@
-//! Hash S の正しさの関門 G0 の決定的な試験 (試作、notes の common-design.md の 6.2 節と independent-exploration.md
-//! の 8 節の E2 の「決定的な試験」)。`dataplane::tests` の子の module で、その試験の台 (2 つの device の組) を使う。
+//! Hash S の正しさの関門 G0 の決定的な試験 (試作、Hash S の設計の記録の G0 と実験の計画の「決定的な試験」)。
+//! `dataplane::tests` の子の module で、その試験の台 (2 つの device の組) を使う。
 //!
-//! - 届け方の規則 (6.8.2):TCP、UDP、ICMP、断片の行きと戻りが同じ区画に着く。区画の核を実際に動かし、SYN、
+//! - 届け方の規則:TCP、UDP、ICMP、断片の行きと戻りが同じ区画に着く。区画の核を実際に動かし、SYN、
 //!   データ、FIN、TIME_WAIT への SYN (RFC 6191 の使い直し)、RST、TCP を引用する ICMP の誤りが、SYN を受けた区画に
 //!   着き、その区画だけが答えることを確かめる。dial は agent に無いので試さない
 //! - 止まった区画の番号の遅れ (I6):区画 1 が在庫を持ったまま止まり、front かほかの区画が遅れの上限より多く

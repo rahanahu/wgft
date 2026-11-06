@@ -1,7 +1,7 @@
 //! Hash S:hash だけで区画を決める並列のデータプレーン (試作。製品に入れない)。
 //!
-//! 設計は notes の independent-exploration.md の 6.8 節、common-design.md、audit-whole.md (所有者の決定 2026-11-06:
-//! 役割を分けた Hash S) で、この module はその最小の試作である。
+//! 設計は Hash S の設計の記録 (所有者の決定 2026-11-06:役割を分けた Hash S) で、この module はその最小の試作で
+//! ある。
 //!
 //! - スレッド:区画の数 P = min(使える CPU, 8)、Linux でバッチが有効な時だけ。front のスレッドが区画 0 を実行し、
 //!   区画 1 から P - 1 はそれぞれ自分のスレッドと tokio の current-thread の実行環境で今の核と中継を動かす。P = 1
@@ -13,7 +13,7 @@
 //!   たびにトンネルの今の予約の番号を公開し、区画は暗号化の前と `sendmmsg` の直前に遅れを確かめる
 //! - 区画:受けたバッチを核に渡し、核の出力を在庫で暗号化して、複製したソケットから `sendmmsg` で送る。boost の
 //!   枠は区画に割り当てた枠の中だけで貸し、区画をまたいで回収しない
-//! - 複数のトンネル (6.8.10):device、ソケット、在庫、公開の番号はトンネルの番号で引く。今は N = 1 である
+//! - 複数のトンネル:device、ソケット、在庫、公開の番号はトンネルの番号で引く。今は N = 1 である
 
 pub(crate) mod front;
 pub(crate) mod part;
@@ -43,7 +43,7 @@ pub(crate) type Bell = wgft_hashs_sync::Bell<TokioNotify>;
 
 /// 区画の数の上限。8 を超える CPU を誰も試していない。
 pub(crate) const MAX_PARTS: usize = 8;
-/// 遅れの上限 L:相手の replay の窓 8128 の半分 (common-design の I6)。
+/// 遅れの上限 L:相手の replay の窓 8128 の半分。
 pub(crate) const LAG_LIMIT: u64 = 4064;
 /// 在庫を予約から使うまでの時間の上限 (I8)。区画は普通 µs の単位で使う。
 pub(crate) const STOCK_MAX_AGE: Duration = Duration::from_millis(100);
