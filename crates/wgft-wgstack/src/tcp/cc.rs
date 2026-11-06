@@ -6,7 +6,7 @@
 //! よらず最初の slow start で働きます。
 
 use super::ctx::Conn;
-use super::{MS, SEC};
+use super::{CWND_MAX, MS, SEC};
 use crate::config::Congestion;
 use crate::seq;
 
@@ -180,7 +180,7 @@ impl Conn<'_> {
         let add = k.frac.floor();
         if add >= 1.0 {
             k.frac -= add;
-            t.cwnd = u32_from_f64(go_min(f(i64::from(t.cwnd)) + add, f(1 << 30)));
+            t.cwnd = u32_from_f64(go_min(f(i64::from(t.cwnd)) + add, f(i64::from(CWND_MAX))));
         }
     }
 }

@@ -15,7 +15,7 @@
 use super::conn::{RecList, Tcb};
 use super::ctx::{Conn, u32_of};
 use super::rack::Which;
-use super::{MS, RTX_FAST};
+use super::{CWND_MAX, MS, RTX_FAST};
 use crate::buf::records::{REC_IN_Q, REC_IN_T, REC_LOST, REC_RTX, REC_SACKED, Record, RecordRing};
 use crate::seq;
 use crate::wire::Segment;
@@ -581,7 +581,7 @@ impl Conn<'_> {
         if k.prr_out == 0 && sndcnt < mss {
             sndcnt = mss; // 回復に入った時の最初の再送 (Linux と同じ)
         }
-        t.cwnd = u32_of((pipe + sndcnt).min(1 << 30));
+        t.cwnd = u32_of((pipe + sndcnt).min(i64::from(CWND_MAX)));
     }
 
     /// SACK を交渉した接続で、ACK の処理の後に回復に入るかを決め、回復の中なら窓を決めます。

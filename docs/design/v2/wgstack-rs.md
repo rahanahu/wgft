@@ -1681,7 +1681,6 @@ UDP と ICMP と断片の切り替えの行の件数は、git の集まり (348 
 | `set_go_compat_core_challenge` | challenge ACK と握手の途中の行、TIME_WAIT の枠と行の ACK を核の全体の予算だけで抑えます (記録の速さでは尽きません)。中身の無い受け入れられない segment への ACK は接続ごとに 500 ms に 1 回までで、時刻 0 の送信を「送っていない」とみなします | 接続、TIME_WAIT の行、握手の途中の行ごとに、速さを抑えた ACK のすべての種類が 500 ms に 1 回の制限を分け合い、時刻 0 の送信も数えます (RFC 5961 7 節、[challenge ACK の速さの制限](#challenge-ack-の速さの制限)) | 1460 件の記録を、同じ流れの 2 つ目の速さを抑えた ACK より後の応答まで照らし続けるため | 10 / 1460 (fuzzcore 1458、stream-tx 2。完全な集まりは 9111 件で、2026-11-07 に数えた値) | `challenge_budget_tests`、`dnat_peer_tests::a_challenge_ack_flood_*`、`attacker_cannot_observe_*`、`tcp_tests::rfc5961*` |
 | `set_go_compat_sent_at_zero` | 時刻 0 に作った SYN-ACK を「作っていない」とみなし、握手から RTT の標本を取りません | SYN-ACK の送った時刻を別の印 (`SynRow.sent`) で持つので、時刻 0 の握手からも標本を取ります (RFC 6298 2.2) | 1113 件の記録を、最初の RTO より後の応答まで照らし続けるため | 2 / 1113 (adversarial 626、fuzzcore 487) | `listen_tests::a_synack_sent_*`、`rtt_wire_*` |
 | `set_go_compat_pmtu_keep_cwnd` | PMTU の引き下げで送る MSS が小さくなっても輻輳の窓を縮めません | 新旧の MSS の比で窓を縮めます。ssthresh は変えません (RFC 5681 3.1) | 1396 件の記録を、PMTU の引き下げより後の応答の burst まで照らし続けるため | 6 / 1396 (adversarial 1391、sack-pmtu-split 5。完全な集まりの 9111 件を 2026-11-07 に数えた値) | `icmp_tests::pmtu_decrease_shrinks_cwnd_by_the_segment_size_ratio`、`pmtu_decrease_scales_a_non_initial_cwnd_and_leaves_ssthresh`、`pmtu_decrease_keeps_one_segment_of_cwnd`、`pmtu_decrease_scales_a_huge_cwnd_without_overflow`、`burst_after_pmtu_decrease_fits_ten_new_segments` |
-| `set_go_compat_shared_id` | UDP の datagram と echo の応答の IPv4 ID を、DF を立てた packet と同じ 1 つの数えから取ります (UDP は 0 を飛ばし、echo の応答は飛ばしません) | 別の数えから取り、0 を飛ばします (RFC 6864 4.3) | UDP と echo の応答の ID が TCP の segment と ICMP の誤りの数えで動くので、この記録を ID の違いより後の応答まで照らし続けるため | 15 / 15 (icmp-echo、udp-datagram、udp-large) | `icmp_tests::udp_ids_are_not_advanced_by_df_traffic`、`echo_replies_and_udp_share_a_counter_that_df_traffic_does_not_advance`、`open_id_counter_wraps_past_zero` |
 | `set_go_compat_echo_drop` | MTU を超える echo の応答を、断片に分けずに捨てて `icmp_dropped` に数えます | 断片に分けて全部返します (RFC 1122 3.2.2.6) | 5 件の記録を、大きな echo の応答より後の応答まで照らし続けるため | 5 / 5 (icmp-echo) | `icmp_tests::icmp_echo`、`oversized_echo_request_gets_a_fragmented_reply` |
 | `set_go_compat_df_frag` (試験の build だけ) | DF の立った断片を断片の誤りとして捨てます | 受け入れて再組み立てます (RFC 6864 4.3) | Go の再組み立ての golden を、DF の立った断片より後の手順まで照らし続けるため。記録の再生には当たる要求がありません | 0 / 0 (再組み立ての golden だけ。400 手順の 5 手目で食い違う) | `icmp_tests::fragments_with_df_set_are_reassembled`、`mixed_df_fragments_are_reassembled`、`frag::tests::accepts_dont_fragment_with_fragments` |
 | `set_go_compat_evict_silent` (試験の build だけ) | 期限を過ぎて掃除を待つ項目を追い出す時に、Time Exceeded を送りません | 追い出す前に知らせを返します (RFC 1122 3.3.2) | Go の再組み立ての golden を、期限を過ぎた項目の追い出しより後の手順まで照らし続けるため。記録の再生には当たる要求がありません | 0 / 0 (再組み立ての golden だけ。400 手順の 12 手目で食い違う) | `icmp_tests::evicting_an_expired_entry_sends_time_exceeded`、`eviction_time_exceeded_shares_the_icmp_rate_limit`、`frag::tests::evicted_expired_entry_reports_time_exceeded`、`eviction_ledger_invariant` |
@@ -1977,6 +1976,16 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
 - `Tcb` の行:次の ACK に載せる D-SACK の block と印は受け手の欄の行に置き、ACK を送るたびに印を書かず、立っている時だけ消します。
   受け手だけの接続が ACK ごとに後ろの行を書き換えないためです。
   PRR の欄と RecoverFS は SACK による回復の間だけ触るので `ConnCold` に置きました
+- RTT の標本の上限:標本は 2 段で切ります。
+  timestamp の標本は 31 bit の ms の差なので 2^31 - 1 ms (約 24.8 日) を超えず、`rtt_sample` はこれを上限にします。網が作れる標本は切れないので、RFC 6298 2.3 の SRTT と RTTVAR の更新は変わりません。
+  記録の送った時刻との差から測る標本 (timestamp の無い接続と握手) は、呼び手の時計が跳ぶと (核は `MAX_NOW` で止めます) 約 2^61 ns になり、`7 * srtt` が回って SRTT が負になり、TLP の期限と RACK の窓が過去になって早すぎる再送が起きました。
+  この標本は `RTO_MAX` (120 秒) で切ってから `rtt_sample` に渡します。再送していない記録が 120 秒を超えて確認されない状況は、RTO の上限が先頭の記録を再送させるので稀だと考えています (後ろの記録については未確認です)。RFC 6298 の更新から外れるのはその場合だけです。
+  2 つの上限で SRTT と RTTVAR は 2^54 ns 未満に収まり、`7 * srtt`、TLP の 2 倍、RACK の `reo_wnd_mult` (255 以下) との積が i64 に収まります。
+  Go の記録はどちらの上限にも当たらず、照合の切り替えは要りません
+- 回復の間の窓の水増し:SACK の無い接続の回復の間、重複 ACK ごとに窓へ SMSS を足します (RFC 5681 3.2 の 4)。
+  相手は重複 ACK をいくらでも送れるので、`wrapping_add` では約 310 万回で u32 を回り、窓が 1 SMSS に戻りました。
+  今は `saturating_add` の後に、`cwnd_on_ack` が ACK ごとに掛ける上限と同じ 1 << 30 (1 GiB) で止めます。
+  RFC 5681 は水増しの上限を定めません。この値は相手の窓の欄が表せる最大 (65535 << 14、約 1 GiB) とほぼ同じで、送信の輪 (最大 4 MiB) よりはるかに大きいので送信を縛らず、窓は byte の数を数えるだけなので核の保持の上界にも関わりません
 - 記録の輪の添字:記録の輪の容量は 2 の冪でないので、剰余を割り算の命令にしないよう、先頭からの位置を 1 回の引き算で折り返します。
   意味は変わりません
 - 記録の輪と受信のバッファの会計の誤用:記録の輪の `push_back` と `pop` は、満杯と空の前提を `debug_assert` でなく本当の検査にし、断ったら何も変えずに偽を返します。
