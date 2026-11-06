@@ -180,7 +180,7 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
 | TSopt の無い segment (RFC 7323 3.2):timestamp を交渉した後の TSopt の無い segment を捨てず、PAWS を飛ばします | 理由が無いため、直す候補です | ありません | 直す時 |
 | timestamp の offset (RFC 7323 7 節):接続ごとの乱数でなく、アドレスの組の鍵付きの hash の offset です | 同じ相手との接続をまたいで TSval が増え続け、相手の PAWS と RFC 6191 が効きます | 要りません | 接続の関係づけが問題になる利用が出た時 |
 | challenge ACK の速さの調整 (RFC 5961 7 節):核の全体で 1 秒に 500 から 1500 の固定で、管理者が変えられません | Device 全体の CPU と出力の費用を抑えます | ありません | 洪水の試験で正しい接続の回復が遅れた時 |
-| rescue の再送 (RFC 6675 4 節の NextSeg の規則 4):使いません | 理由が無いため、直す候補です (TLP が回復の末尾の損失を扱うと読めますが、確かめていません) | ありません | 直す時 |
+| rescue の再送 (RFC 6675 4 節の NextSeg の規則 4):使いません | 理由が無いため、直す候補ですが、直すかは測ってから決めます。TLP は回復の間は張らない (`tcp/rack.rs` の `tlp_eligible`、RFC 8985 7.2 も fast recovery の間を除きます) ので、回復の中で末尾が失われると RTO まで待つ見込みです (コードと RFC からの読みで、試験はしていません) | ありません | 測った結果で直すか理由を記録する時 |
 | TIME_WAIT を使い直す SYN (RFC 6191 2 節):受けない SYN を黙って捨てず、速さを抑えた ACK を返します。加えて次の 3 つの比べが RFC より厳しい形です:前の接続が timestamp を使えば TSval が厳密に大きい時だけ受け、等しい TSval で番号が大きい SYN を受けません。前の接続が timestamp を使わず新しい SYN が timestamp を持つ時も番号で比べます。番号の比べは `SEG.SEQ > RCV.NXT` で、RFC より 1 つ厳しい形です | ACK を返すのは、RFC 5961 4.2 と RFC 9293 の TIME-WAIT の SYN の扱いに沿います。3 つの比べは、理由が無いため、直す候補です | ありません | 直す時、または dial の側の TIME_WAIT の使い直しを決める時 |
 | Protocol Unreachable (RFC 1122 3.2.2.1):知らない protocol の datagram を数えて黙って捨てます | トンネルの相手は server だけで、server は TCP、UDP、ICMP のほかを送りません | ありません | ほかの protocol を運ぶ要望が出た時 |
 | Parameter Problem (RFC 1122 3.2.2.5):最初の断片の option の誤りにだけ返し、断片でない packet の option は確かめず、長さの崩れた packet は黙って捨てます | 理由が無いため、直す候補です | ありません | 直す時 |
