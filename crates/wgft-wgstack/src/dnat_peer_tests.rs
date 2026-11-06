@@ -34,7 +34,8 @@ use core::time::Duration;
 pub(crate) const VICTIM: u16 = 40000;
 /// 偽の segment を送る第三者が、自分で開いた接続のポートです。
 pub(crate) const ATTACKER: u16 = 50000;
-/// 1 秒の challenge ACK の予算の最大 (`Shared::challenge_allowed` の 3*LIMIT/2) を超える数です。
+/// 第三者が同じ時刻にまとめて送る数です。全体で 1 つの予算を持つ実装 (直す前の核の 1 秒の最大は 1500) なら、
+/// その予算を使い切ります。
 pub(crate) const FLOOD: usize = 1600;
 /// 直した後の challenge ACK の速さとして試験が仮定する、接続、TIME_WAIT の行、握手の途中の行のそれぞれで 1 回の
 /// ACK の後に次の ACK を返すまでの間隔です (`oow_ack` と同じ 500 ms)。直しが別の値を選ぶなら、この定数を合わせます。
@@ -263,12 +264,12 @@ fn blind_data_without_tsopt_is_dropped() {
     );
 }
 
-// ---- 核の全体の challenge ACK の予算 ----
+// ---- challenge ACK の速さの制限と、接続をまたぐ観測 ----
 
 /// 第三者が自分の接続で数える challenge ACK の数は、他人の接続に送った偽の segment が challenge ACK を引いたかに
-/// 依ってはいけません (RFC 5961 の Errata ID 4772、CVE-2016-5696)。核の予算は全体で 1 つなので、窓の内に当たった
-/// 偽の RST を同じ秒に予算の最大より多く送ると、第三者が数える数は 0 になり、外れなら 500 以上になります。第三者は
-/// 1 秒に 1 回、被害者の接続の窓の位置を確かめられます。
+/// 依ってはいけません (RFC 5961 の Errata ID 4772、CVE-2016-5696)。予算が全体で 1 つなら、窓の内に当たった偽の RST
+/// を同じ秒に予算の最大より多く送ると、第三者が数える数は 0 になり、外れなら 500 以上になります (直す前の核の値)。
+/// 第三者は 1 秒に 1 回、被害者の接続の窓の位置を確かめられます。
 /// 所有者が名指しした再現の試験 (3 件の 1 つ) です。直しの PR で ignore を外します。
 #[test]
 #[ignore = "reproduction: fixed by the follow-up PR"]
@@ -524,8 +525,9 @@ fn another_clients_stream_does_not_take_old_bytes_of_the_previous_client() {
     );
 }
 
-/// 上の回復は、TIME_WAIT の行が返す ACK に頼ります。この ACK は challenge ACK と同じ核の全体の予算から取るので、
-/// 第三者が自分の接続への SYN で予算を使い切り続けると、B の SYN には何も返らず、B は行の期限 (60 秒) まで開けません。
+/// 上の回復は、TIME_WAIT の行が返す ACK に頼ります。この ACK を他の流れと分け合う予算から取る実装 (直す前の核)
+/// では、第三者が自分の接続への SYN で予算を使い切り続けると、B の SYN には何も返らず、B は行の期限 (60 秒) まで
+/// 開けません。
 /// 所有者が名指しした再現の試験 (3 件の 1 つ) です。直しの PR で ignore を外します。
 #[test]
 #[ignore = "reproduction: fixed by the follow-up PR"]
@@ -620,4 +622,48 @@ fn rfc6191_rule1_old_fin_from_the_same_tick_does_not_end_the_new_stream() {
         let (got, st) = rule1_reuse_then_old_fin(row, |syn_ts| syn_ts);
         assert_eq!((got.len(), st), (2000, State::Established), "row={row}");
     }
+}
+
+// ---- IP の ID ----
+
+/// 第三者が自分の接続に SYN を送り、返った challenge ACK の IP の ID を返します。
+fn attacker_ack_ip_id(n: &mut TestNet, pa: &mut PeerConn) -> Option<u16> {
+    let s = pa.seg(FLAG_SYN, &[]);
+    n.inject(&s);
+    n.drain_raw()
+        .iter()
+        .find(|pkt| crate::testnet_tests::parse_out(pkt).rport == ATTACKER)
+        .map(|pkt| u16::from_be_bytes([pkt[4], pkt[5]]))
+}
+
+/// 第三者が自分の接続で見る IP の ID の進みは、他人の接続に送った偽の RST が challenge ACK を引いたかに依っては
+/// いけません。DF を立てた packet の ID が核の全体で 1 つの数えなら、被害者の接続の challenge ACK が数えを 1 つ
+/// 進めるので、第三者の 2 つの challenge ACK の ID の差は、当たりで 2、外れで 1 になります。
+#[test]
+#[ignore = "defect: global IP ID counter; fixed by a follow-up PR"]
+fn attacker_cannot_observe_a_spoofed_rst_hit_through_the_ip_id() {
+    let observe = |hit: bool| {
+        let (mut n, _, v) = established(&[VICTIM, ATTACKER]);
+        let (_, pv) = v[0];
+        let (_, mut pa) = v[1];
+        n.advance(Duration::from_secs(2));
+        n.drain();
+        let a1 = attacker_ack_ip_id(&mut n, &mut pa).expect("the first probe is answered");
+        let guess = if hit {
+            pv.snd.wrapping_add(100)
+        } else {
+            pv.snd.wrapping_add(1 << 31)
+        };
+        n.inject(&seg(VICTIM, guess, 0, FLAG_RST, None, b""));
+        n.drain(); // 被害者の challenge ACK は本当のクライアントへ向かい、第三者には届きません
+        n.advance(PER_FLOW_INTERVAL);
+        n.drain();
+        let a2 = attacker_ack_ip_id(&mut n, &mut pa).expect("the second probe is answered");
+        a2.wrapping_sub(a1)
+    };
+    let (hit, miss) = (observe(true), observe(false));
+    assert_eq!(
+        hit, miss,
+        "the IP ID step on the attacker's own flow reveals the victim's window ({hit} on a hit, {miss} on a miss)"
+    );
 }

@@ -1,15 +1,15 @@
 //! challenge ACK の予算を接続、TIME_WAIT の行、握手の途中の行ごとに分ける直しの受け入れの試験です。
 //!
-//! 直しは、核の全体で 1 つの予算 (`Shared::challenge_allowed`) を、接続、TIME_WAIT の行、握手の途中の行のそれぞれ
-//! の独立した速さの制限に替えます。1 つの流れ (接続か行) の間隔は固定の [`PER_FLOW_INTERVAL`] (500 ms) で、他の
-//! 流れの状態や流れの数で変わりません。核の全体の資源は、上限のある制御の輪、接続と行の数の上限、メモリの予算が
+//! 接続、TIME_WAIT の行、握手の途中の行は、それぞれ独立した速さの制限を持ちます (直す前の核は、全体で 1 つの
+//! 予算 `Shared::challenge_allowed` を持っていました)。1 つの流れ (接続か行) の間隔は固定の [`PER_FLOW_INTERVAL`]
+//! (500 ms) で、他の流れの状態や流れの数で変わりません。核の全体の資源は、上限のある制御の輪、接続と行の数の上限、メモリの予算が
 //! 守ります。challenge ACK だけの全体の上限は置きません。
 //!
 //! 全体の上限を置かない理由は 3 つです。共有の数え (流れの数を含む) は新しい観測の経路になります。流れの数で
 //! 間隔を伸ばすと、多くの接続の下で正しい相手への返事が数十秒遅れます。間隔を伸ばしても、同時に求める N 個の
 //! 流れの山は N のままで、守りとしては大きすぎます。
 //!
-//! 直しが別の間隔を選ぶなら、[`PER_FLOW_INTERVAL`] を合わせます。今の main で落ちる試験は
+//! 直しが別の間隔を選ぶなら、[`PER_FLOW_INTERVAL`] を合わせます。直す前の核で落ちる試験は
 //! `fixed by the follow-up PR` の理由で ignore にしてあります。今も直しの後も通るべき試験は ignore にしていません。
 
 #![expect(
@@ -33,8 +33,8 @@ use crate::testnet_tests::{Out, PeerConn, TSeg, TestNet, build_peer, parse_out, 
 use crate::wire::{FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN};
 use core::time::Duration;
 
-/// 今の main の核の全体の challenge ACK の予算の 1 秒あたりの最大です。第三者の需要がこれを超えることを確かめる
-/// のに使います。
+/// 直す前の核が持っていた全体の challenge ACK の予算の 1 秒あたりの最大です。第三者の需要が、全体で 1 つの予算なら
+/// 使い切る大きさであることを確かめるのに使います。
 const CORE_BUDGET_MAX: usize = 1500;
 
 /// 1 回の試しで同じ segment を送る数です。接続ごとの制限が無ければ、この数の ACK が返ります。
@@ -193,6 +193,249 @@ fn half_open_row_acks_follow_the_per_row_rate() {
     n.drain();
     assert_eq!(burst(&mut n, &other_syn, VICTIM), 1);
     assert_eq!(n.s.held().syn_rows, 1);
+}
+
+// ---- 流れの受け継ぎと枠の使い直し ----
+
+/// 被害者の接続の 4 つ組です。
+fn tuple(port: u16) -> crate::wire::Tuple {
+    crate::wire::Tuple {
+        laddr: crate::testnet_tests::DUT.to_bits(),
+        raddr: crate::testnet_tests::PEER.to_bits(),
+        lport: 80,
+        rport: port,
+    }
+}
+
+/// 窓の内で番号の合わない RST を 1 つ送り、`port` へ返った ACK の数を返します。
+fn rst_probe(n: &mut TestNet, port: u16, rcv_nxt: u32) -> usize {
+    n.inject(&seg(port, rcv_nxt.wrapping_add(1), 0, FLAG_RST, None, b""));
+    acks_to(&n.drain(), port)
+}
+
+/// 接続が TIME_WAIT の行に移っても、接続の速さの制限は行に受け継がれます。時刻 T の challenge ACK の後、行は
+/// T + 100 ms の RST に返さず、T + 500 ms の RST に返します。受け継がなければ、接続を閉じるだけで制限を外せます。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn the_limit_carries_from_a_connection_to_its_time_wait_row() {
+    let (mut n, _, v) = established(&[VICTIM]);
+    let (c, mut p) = v[0];
+    n.advance(Duration::from_secs(2));
+    assert_eq!(
+        rst_probe(&mut n, VICTIM, p.snd),
+        1,
+        "the challenge ACK at T"
+    );
+    n.s.close_conn(n.now, c);
+    let outs = n.drain();
+    p.absorb(&outs);
+    n.peer_ack(&mut p, &[]);
+    n.peer_fin(&mut p);
+    n.drain();
+    assert_eq!(n.s.held().tw_rows, 1);
+    n.advance(Duration::from_millis(100));
+    assert_eq!(
+        rst_probe(&mut n, VICTIM, p.snd),
+        0,
+        "the row inherits the limit"
+    );
+    n.advance(PER_FLOW_INTERVAL.saturating_sub(Duration::from_millis(100)));
+    assert_eq!(
+        rst_probe(&mut n, VICTIM, p.snd),
+        1,
+        "one again after the interval"
+    );
+}
+
+/// 握手の途中の行が接続になっても、行の速さの制限は接続に受け継がれます。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn the_limit_carries_from_a_half_open_row_to_its_connection() {
+    let mut n = TestNet::new(crate::testnet_tests::small_limits());
+    let l = n.listen(80);
+    n.advance(Duration::from_secs(2));
+    let irs = 1000;
+    let syn = new_syn(irs, 5000);
+    n.inject(&syn);
+    let outs = n.drain();
+    assert!(outs.len() == 1 && outs[0].flags == FLAG_SYN | FLAG_ACK);
+    let sa = outs[0].clone();
+    assert_eq!(
+        burst(&mut n, &new_syn(irs.wrapping_add(1 << 31), 5001), VICTIM),
+        1,
+        "the row ACK at T"
+    );
+    let c = finish(&mut n, l, &syn, &sa, 5002);
+    assert_eq!(state(&n, c), State::Established);
+    let rcv_nxt = irs.wrapping_add(1);
+    n.advance(Duration::from_millis(100));
+    assert_eq!(
+        rst_probe(&mut n, VICTIM, rcv_nxt),
+        0,
+        "the connection inherits the limit"
+    );
+    n.advance(PER_FLOW_INTERVAL.saturating_sub(Duration::from_millis(100)));
+    assert_eq!(
+        rst_probe(&mut n, VICTIM, rcv_nxt),
+        1,
+        "one again after the interval"
+    );
+}
+
+/// 被害者の TIME_WAIT の行が ACK を返してから外れ、第三者の新しい行が同じ枠を使っても (空きの枠は決まった順の
+/// LIFO です)、新しい行はすぐに ACK を返します。枠が前の流れの時刻を受け継げば、第三者は他人の行が最近 ACK を
+/// 返したかを観測できます。
+#[test]
+fn a_reused_time_wait_slot_does_not_inherit_the_previous_rows_limit() {
+    let (mut n, l, _, p, _) = time_wait(true, &[]);
+    n.advance(Duration::from_secs(2));
+    let victim_id = n.s.s.tw.find(tuple(VICTIM)).expect("the victim's row");
+    assert_eq!(
+        rst_probe(&mut n, VICTIM, p.snd),
+        1,
+        "the victim's row ACK at T"
+    );
+    n.inject(&seg(VICTIM, p.snd, 0, FLAG_RST, None, b""));
+    assert_eq!(
+        n.s.held().tw_rows,
+        0,
+        "the exact RST removes the victim's row"
+    );
+    n.advance(Duration::from_millis(100));
+    let mut pa = n.handshake(crate::dnat_peer_tests::ATTACKER, 80, true, true);
+    let ca = n.accept(l);
+    n.drain();
+    n.s.close_conn(n.now, ca);
+    let outs = n.drain();
+    pa.absorb(&outs);
+    n.peer_ack(&mut pa, &[]);
+    n.peer_fin(&mut pa);
+    n.drain();
+    let id = n.s.s.tw.find(tuple(crate::dnat_peer_tests::ATTACKER));
+    assert_eq!(
+        id,
+        Some(victim_id),
+        "the attacker's row takes the victim's slot"
+    );
+    assert_eq!(
+        rst_probe(&mut n, crate::dnat_peer_tests::ATTACKER, pa.snd),
+        1,
+        "the new row answers at once"
+    );
+}
+
+/// 握手の途中の行の枠の使い直しも、前の行の時刻を受け継ぎません。
+#[test]
+fn a_reused_half_open_slot_does_not_inherit_the_previous_rows_limit() {
+    let attacker = crate::dnat_peer_tests::ATTACKER;
+    let mut n = TestNet::new(crate::testnet_tests::small_limits());
+    n.listen(80);
+    n.advance(Duration::from_secs(2));
+    let irs = 1000;
+    n.inject(&new_syn(irs, 5000));
+    n.drain();
+    let victim_id = n.s.s.syn.find(tuple(VICTIM)).expect("the victim's row");
+    n.inject(&new_syn(irs.wrapping_add(1 << 31), 5001));
+    assert_eq!(acks_to(&n.drain(), VICTIM), 1, "the victim's row ACK at T");
+    n.inject(&seg(VICTIM, irs.wrapping_add(1), 0, FLAG_RST, None, b""));
+    assert_eq!(
+        n.s.held().syn_rows,
+        0,
+        "the exact RST removes the victim's row"
+    );
+    n.advance(Duration::from_millis(100));
+    n.inject(&new_syn(irs, 5000).with_port(attacker));
+    n.drain();
+    assert_eq!(
+        n.s.s.syn.find(tuple(attacker)),
+        Some(victim_id),
+        "the attacker's row takes the victim's slot"
+    );
+    n.inject(&new_syn(irs.wrapping_add(1 << 31), 5001).with_port(attacker));
+    assert_eq!(
+        acks_to(&n.drain(), attacker),
+        1,
+        "the new row answers at once"
+    );
+}
+
+/// 接続の枠の使い直しも、前の接続の時刻を受け継ぎません。
+#[test]
+fn a_reused_connection_slot_does_not_inherit_the_previous_connections_limit() {
+    let attacker = crate::dnat_peer_tests::ATTACKER;
+    let (mut n, l, v) = established(&[VICTIM]);
+    let (c, p) = v[0];
+    n.advance(Duration::from_secs(2));
+    assert_eq!(
+        rst_probe(&mut n, VICTIM, p.snd),
+        1,
+        "the victim's challenge ACK at T"
+    );
+    n.inject(&seg(VICTIM, p.snd, 0, FLAG_RST, None, b""));
+    assert_eq!(state(&n, c), State::Closed);
+    n.s.close_conn(n.now, c);
+    n.drain();
+    n.advance(Duration::from_millis(100));
+    let pa = n.handshake(attacker, 80, true, true);
+    let ca = n.accept(l);
+    n.drain();
+    assert_eq!(
+        ca.slot, c.slot,
+        "the attacker's connection takes the victim's slot"
+    );
+    assert_eq!(
+        rst_probe(&mut n, attacker, pa.snd),
+        1,
+        "the new connection answers at once"
+    );
+}
+
+/// 接続の中身の無い窓の外の segment への ACK は、challenge ACK と 1 つの速さの制限を分け合います。どちらを先に
+/// 返しても、もう一方は `PER_FLOW_INTERVAL` の間は返らず、その後に返ります。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn out_of_window_acks_share_the_limit_with_challenge_acks() {
+    for challenge_first in [true, false] {
+        let (mut n, _, v) = established(&[VICTIM]);
+        let (_, mut p) = v[0];
+        n.advance(Duration::from_secs(2));
+        let rcv_nxt = p.snd;
+        let mut oow = |n: &mut TestNet| {
+            let mut s = p.seg(FLAG_ACK, &[]);
+            s.seq = s.seq.wrapping_add(1 << 31);
+            n.inject(&s);
+            acks_to(&n.drain(), VICTIM)
+        };
+        let first = if challenge_first {
+            rst_probe(&mut n, VICTIM, rcv_nxt)
+        } else {
+            oow(&mut n)
+        };
+        assert_eq!(
+            first, 1,
+            "challenge_first={challenge_first}: the first ACK at T"
+        );
+        n.advance(Duration::from_millis(100));
+        let second = if challenge_first {
+            oow(&mut n)
+        } else {
+            rst_probe(&mut n, VICTIM, rcv_nxt)
+        };
+        assert_eq!(
+            second, 0,
+            "challenge_first={challenge_first}: the other kind shares the limit"
+        );
+        n.advance(PER_FLOW_INTERVAL.saturating_sub(Duration::from_millis(100)));
+        let third = if challenge_first {
+            oow(&mut n)
+        } else {
+            rst_probe(&mut n, VICTIM, rcv_nxt)
+        };
+        assert_eq!(
+            third, 1,
+            "challenge_first={challenge_first}: one again after the interval"
+        );
+    }
 }
 
 // ---- 核の全体の守り ----
