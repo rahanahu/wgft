@@ -15,7 +15,8 @@ use crate::sackpeer_tests::check_scoreboard;
 use crate::stack::Event;
 use crate::tcp::RTX_PMTU;
 use crate::testnet_tests::{
-    DUT, PEER, TEST_MTU, TestNet, build_icmp, build_udp, small_limits, split_ipv4,
+    DUT, PEER, PeerConn, TEST_MTU, TestNet, build_icmp, build_udp, parse_out, small_limits,
+    split_ipv4,
 };
 use crate::wire::{self, IP_HEADER_LEN, PROTO_ICMP, PROTO_UDP, parse_ipv4};
 use crate::{Error, seq};
@@ -667,4 +668,188 @@ fn pmtu_drop_recounts_the_loss_frontier() {
         n.s.conn(c.slot).t.loss_idx > 0,
         "the loss frontier did not move with the smaller MSS"
     );
+}
+
+// RFC 6864 4.3 と 5.2: DF を下ろした packet (UDP の datagram と echo の応答) の IPv4 ID は、DF を立てた packet
+// (TCP の segment と ICMP の誤り) の数えから独立でなければなりません。
+
+fn ip_id(p: &[u8]) -> u16 {
+    u16::from_be_bytes([p[4], p[5]])
+}
+
+/// 0 を飛ばす数えの次の値です。
+fn id_after(id: u16) -> u16 {
+    match id.wrapping_add(1) {
+        0 => 1,
+        n => n,
+    }
+}
+
+/// UDP の datagram を 1 つ送り、核が出した packet を返します。
+fn send_udp_and_drain(n: &mut TestNet, pc: crate::udp::UdpId, len: usize) -> Vec<Vec<u8>> {
+    n.s.send_to(n.now, pc, &vec![0x5a; len], PEER_UDP).unwrap();
+    let pkts = n.drain_raw();
+    assert!(
+        pkts.iter().all(|p| p[9] == PROTO_UDP),
+        "only UDP expected: {pkts:x?}"
+    );
+    pkts
+}
+
+/// DF を立てた packet を多数出させます。TCP の segment と、ICMP の誤り (Port Unreachable) です。相手が segment を
+/// ACK して窓を開き直すので、何度呼んでも TCP の segment が出ます。戻り値は出た TCP の segment の数です。
+fn emit_df_traffic(n: &mut TestNet, c: crate::tcp::conn::ConnId, peer: &mut PeerConn) -> usize {
+    let mut tcp = 0;
+    for _ in 0..4 {
+        n.s.write(n.now, c, &[0; 4000]).ok();
+        for i in 0..5u16 {
+            n.write(&build_udp(SocketAddrV4::new(PEER, 6000 + i), 9, b"x"));
+        }
+        let pkts = n.drain_raw();
+        for p in &pkts {
+            assert_eq!(p[6] & 0x40, 0x40, "DF clear on {p:x?}");
+        }
+        let outs: Vec<_> = pkts
+            .iter()
+            .filter(|p| p[9] == wire::PROTO_TCP)
+            .map(|p| parse_out(p))
+            .collect();
+        tcp += pkts.iter().filter(|p| p[9] == wire::PROTO_TCP).count();
+        peer.absorb(&outs);
+        n.peer_ack(peer, &[]);
+        n.drain_raw();
+    }
+    assert!(tcp >= 8, "only {tcp} TCP segments");
+    tcp
+}
+
+/// UDP の datagram の間に TCP の segment と ICMP の誤りを送っても、UDP の ID は進みません
+/// (RFC 6864 4.3、5.2: 非 atomic の datagram の ID は独立した数えから取ります)。
+#[test]
+fn udp_ids_are_not_advanced_by_df_traffic() {
+    let mut n = TestNet::new(small_limits());
+    let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    let (c, mut peer) = n.accepted(true);
+    n.drain_raw();
+    let mut prev = {
+        let a = send_udp_and_drain(&mut n, pc, 100);
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0][6] & 0x40, 0, "DF set on UDP");
+        ip_id(&a[0])
+    };
+    for round in 0..3 {
+        emit_df_traffic(&mut n, c, &mut peer);
+        let b = send_udp_and_drain(&mut n, pc, 100);
+        assert_eq!(b.len(), 1);
+        assert_eq!(
+            ip_id(&b[0]),
+            id_after(prev),
+            "round {round}: the UDP ID counter was advanced by TCP or ICMP error traffic"
+        );
+        prev = ip_id(&b[0]);
+    }
+}
+
+/// echo の応答も非 atomic で、UDP と同じ数えに従います。DF を立てた packet は数えを進めません。
+#[test]
+fn echo_replies_and_udp_share_a_counter_that_df_traffic_does_not_advance() {
+    let mut n = TestNet::new(small_limits());
+    let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    let (c, mut peer) = n.accepted(true);
+    n.drain_raw();
+    let first = ip_id(&send_udp_and_drain(&mut n, pc, 100)[0]);
+    emit_df_traffic(&mut n, c, &mut peer);
+    n.write(&build_icmp(PEER, &[ECHO, 0, 0, 0, 0, 1, 0, 1, b'x']));
+    let reply = n.drain_raw();
+    assert_eq!(reply.len(), 1);
+    assert_eq!(reply[0][6] & 0x40, 0, "DF set on the echo reply");
+    assert_eq!(ip_id(&reply[0]), id_after(first), "echo reply ID");
+    emit_df_traffic(&mut n, c, &mut peer);
+    let last = ip_id(&send_udp_and_drain(&mut n, pc, 100)[0]);
+    assert_eq!(
+        last,
+        id_after(id_after(first)),
+        "UDP ID after the echo reply"
+    );
+}
+
+/// 断片に分けた datagram の断片は 1 つの ID を共有し、次の datagram は次の ID を使います。間に DF を立てた
+/// packet があっても数えは進みません。
+#[test]
+fn fragmented_udp_shares_one_id_and_ignores_df_traffic() {
+    let mut n = TestNet::new(small_limits());
+    let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    let (c, mut peer) = n.accepted(true);
+    n.drain_raw();
+    let a = send_udp_and_drain(&mut n, pc, 3000);
+    assert!(a.len() >= 3, "{} fragments", a.len());
+    let id_a = ip_id(&a[0]);
+    for p in &a {
+        assert_eq!(ip_id(p), id_a, "fragments of one datagram differ in ID");
+        assert_eq!(p[6] & 0x40, 0, "DF set on a fragment");
+    }
+    emit_df_traffic(&mut n, c, &mut peer);
+    let b = send_udp_and_drain(&mut n, pc, 3000);
+    let id_b = ip_id(&b[0]);
+    assert!(b.iter().all(|p| ip_id(p) == id_b));
+    assert_eq!(id_b, id_after(id_a), "the next datagram's ID");
+}
+
+/// 間に何も送らなければ、断片は 1 つの ID を共有し、次の datagram は別の ID を使います (現行の挙動の確認です)。
+#[test]
+fn fragmented_udp_ids_without_other_traffic() {
+    let mut n = TestNet::new(small_limits());
+    let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    let a = send_udp_and_drain(&mut n, pc, 3000);
+    let b = send_udp_and_drain(&mut n, pc, 3000);
+    assert!(a.len() >= 3 && b.len() >= 3);
+    assert!(a.iter().all(|p| ip_id(p) == ip_id(&a[0])));
+    assert!(b.iter().all(|p| ip_id(p) == ip_id(&b[0])));
+    assert_ne!(ip_id(&a[0]), ip_id(&b[0]));
+}
+
+fn echo_reply_id(n: &mut TestNet) -> u16 {
+    n.write(&build_icmp(PEER, &[ECHO, 0, 0, 0, 0, 1, 0, 1, b'x']));
+    let r = n.drain_raw();
+    assert_eq!(r.len(), 1);
+    ip_id(&r[0])
+}
+
+/// 非 atomic の数えが 16 bit を一周するとき、UDP の datagram も echo の応答も 0xffff の次に 1 を使います。
+/// 0 は使いません (RFC 6864 の読み方は PR の説明に従います)。
+#[test]
+fn open_id_counter_wraps_past_zero() {
+    let mut n = TestNet::new(small_limits());
+    let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    n.s.s.ip_id_open = 0xfffe;
+    assert_eq!(ip_id(&send_udp_and_drain(&mut n, pc, 10)[0]), 0xffff);
+    assert_eq!(ip_id(&send_udp_and_drain(&mut n, pc, 10)[0]), 1);
+    n.s.s.ip_id_open = 0xfffe;
+    assert_eq!(echo_reply_id(&mut n), 0xffff);
+    assert_eq!(echo_reply_id(&mut n), 1);
+    n.s.s.ip_id_open = 0xfffe;
+    assert_eq!(echo_reply_id(&mut n), 0xffff);
+    assert_eq!(ip_id(&send_udp_and_drain(&mut n, pc, 10)[0]), 1);
+    assert_eq!(echo_reply_id(&mut n), 2);
+}
+
+/// 凍結した Go との照合の切り替えでは、数えを共有し、UDP は 0 を飛ばし、echo の応答は飛ばしません。
+#[cfg(feature = "harness")]
+#[test]
+fn go_compat_shared_id_wrap_skips_zero_for_udp_only() {
+    crate::stack::set_go_compat_shared_id(true);
+    let mut n = TestNet::new(small_limits());
+    let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    n.s.s.ip_id = 0xfffe;
+    assert_eq!(ip_id(&send_udp_and_drain(&mut n, pc, 10)[0]), 0xffff);
+    assert_eq!(
+        ip_id(&send_udp_and_drain(&mut n, pc, 10)[0]),
+        1,
+        "UDP skips 0"
+    );
+    n.s.s.ip_id = 0xfffe;
+    assert_eq!(echo_reply_id(&mut n), 0xffff);
+    assert_eq!(echo_reply_id(&mut n), 0, "an echo reply does not skip 0");
+    assert_eq!(echo_reply_id(&mut n), 1);
+    crate::stack::set_go_compat_shared_id(false);
 }

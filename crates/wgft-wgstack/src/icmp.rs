@@ -217,7 +217,7 @@ impl Shared {
             self.stats.icmp_dropped += 1;
             return;
         }
-        let id = self.next_id();
+        let id = self.next_open_id();
         let Some(b) = self.out.ctl.slot() else {
             self.refused(LogKind::CtlDropped, now);
             return;

@@ -1232,10 +1232,14 @@ impl<H: Hook> Stack<H> {
         g.peer_addr = to.ip().to_bits();
         g.peer_port = to.port();
         s.udp.put(TX, gid, data);
-        let mut ip_id = s.next_id();
-        if ip_id == 0 {
-            ip_id = s.next_id();
-        }
+        let ip_id = s.next_open_id();
+        // 凍結した Go は UDP の送信で 0 を飛ばす (echo の応答では飛ばさない)
+        #[cfg(feature = "harness")]
+        let ip_id = if crate::stack::go_compat_shared_id() && ip_id == 0 {
+            s.next_open_id()
+        } else {
+            ip_id
+        };
         let csum = s.udp.checksum(gid, s.addr, to.ip().to_bits());
         let g = &mut s.udp.dg[TX][usize::from(gid)];
         g.ip_id = ip_id;

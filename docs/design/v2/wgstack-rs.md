@@ -142,12 +142,9 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
 | 初期の窓 (RFC 5681 3.1):IW と黙った後の窓は 10 × SMSS で、RFC 5681 の上限 (SMSS により 2 から 4 segment) を超えます。RFC 6928 (Experimental) の 14600 byte の上限も使いません | 参照の Linux と同じ値にして差を減らします | 送り始めの burst が網の溢れを生みえます。1500 を超える MTU では RFC 6928 の上限も超え、MTU 9216 では約 90 KB になります | 1500 を超える MTU を支える構成を作る時、または IW の標準が変わった時 |
 | SACK の取り消しの疑いによる早い再送 (RFC 6298 5 節の冒頭):累積の確認の後も先頭の記録が SACK 済みなら、再送のタイマーを max(SRTT/2, 10 ms) に早めます。RTT が約 400 ms 未満の経路では、前の送信から 1 RTO 未満の再送になりえます | 受け手の SACK の取り消しを早く直すためです (Linux と同じ時期) | 正しい受け手では起きず、取り消しの時だけ起きます。起きると窓を 1 MSS にして RTO を後退させるので、網には保守的な向きです | 取り消しの疑いの RTO が性能の記録に多く出た時 |
 | RTO の後の SACK の情報 (RFC 2018 5 節と 5.1 節):最初の RTO では、先頭が SACK 済みでなければ SACK の印を保ち、SACK 済みの記録を送り直しません。印を消すのは同じ SND.UNA の 2 回目の RTO か、先頭が SACK 済みの時だけです。左端の segment を送り直す MUST は満たします | 受け手の持つデータを送り直さないためです。RFC 6675 5.1 が触れる Errata 1610 は、取り消しの確かな検査があれば SACK の情報を保てるとします | 受け手が先頭以外の SACK 済みのデータを捨てると、最初の RTO はそれを送り直さず、次の RTO まで回復が遅れます。データは失いません | RFC 2018 の改訂か、取り消す受け手との相互運用の問題が見つかった時 |
-| IPv4 の ID の速さ (RFC 6864 4.3 の MUST NOT と 5.2 の MUST):非 atomic の datagram (DF を下ろす UDP の datagram と echo の応答) の ID を MDL (2 分) の間に繰り返さないために送る速さを抑えることを、していません | 1 秒に約 546 の非 atomic の datagram で止めると、中継の目的に合いません | 速さは核の ID の消費の速さで、今は DF を立てた TCP の segment も含みます。数えを分けた後は、非 atomic の datagram だけの速さになります。1420 byte の packet で約 6 Mbit/s を超えると要件から外れ、約 25 Mbit/s を超えると ID の一周が相手の再組み立ての期限 (30 秒) より短くなります。断片の一部を失った古い datagram と新しい datagram が組み違えうるのは、断片に分ける大きさの UDP を中継する時だけで、主な害は損失の連鎖です。組み違えた datagram の大半は UDP の checksum で捨てられます (計算からの見積もりで、測っていません) | 断片に分ける大きさの UDP を高い速さで中継する用途が見つかった時 |
+| IPv4 の ID の速さ (RFC 6864 4.3 の MUST NOT と 5.2 の MUST):非 atomic の datagram (DF を下ろす UDP の datagram と echo の応答) の ID を MDL (2 分) の間に繰り返さないために送る速さを抑えることを、していません | 1 秒に約 546 の非 atomic の datagram で止めると、中継の目的に合いません | 速さは非 atomic の datagram の ID の消費の速さで、DF を立てた TCP の segment と ICMP の誤りは数えません。1420 byte の packet で約 6 Mbit/s を超えると要件から外れ、約 25 Mbit/s を超えると ID の一周が相手の再組み立ての期限 (30 秒) より短くなります。断片の一部を失った古い datagram と新しい datagram が組み違えうるのは、断片に分ける大きさの UDP を中継する時だけで、主な害は損失の連鎖です。組み違えた datagram の大半は UDP の checksum で捨てられます (計算からの見積もりで、測っていません) | 断片に分ける大きさの UDP を高い速さで中継する用途が見つかった時 |
 | 552 未満の Next-Hop MTU (RFC 1191 3 節):next-hop MTU が 552 未満の Datagram Too Big を捨て、PMTU を下げません | 小さな MTU で segment の数と管理の費用を増やす攻撃を防ぐためです ([packet の検査](../userspace/packet-validation.md))。DF を下ろして 552 で送る直しは、TCP の segment を非 atomic にして IPv4 の ID の要件を広げるので採りません | 途中の区間の MTU が 552 未満の相手には大きな segment が届かず、発見が収束しません。agent に届く ICMP の誤りの送信元は server だけなので、起きる経路は限られます | MTU が 552 未満の経路の利用者が出た時、または PLPMTUD を足す時。直すなら、DF を立てたまま 552 で止めます |
 | 再組み立ての Time Exceeded の速さの制限 (RFC 1122 3.3.2):送る ICMP の誤りを核の全体で 1 秒に 1000 までに抑えるので、再組み立ての期限が切れても Time Exceeded を送らないことがあります | 反射と CPU の費用を抑えるためです ([UDP、ICMP、再組み立て](../userspace/wgstack.md#udpicmp再組み立て)) | 断片を失った送り手が Time Exceeded を受けない場合があります。この誤りで送り方を変える送り手は少ないと見込みます (確かめていません) | ICMP の誤りの速さの制限を変える時 |
-
-IPv4 の ID の行のうち、核の全体の 1 つの数えを TCP、ICMP、UDP が共有する所は、別の PR で直しを準備中です ([直しを準備中の逸脱](#直しを準備中の逸脱))。
-その PR が入ったら、この行は速さを抑えない所だけの記録になります。
 
 ### 持たない機能
 
@@ -215,7 +212,6 @@ SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表
 直しが入ったら行を消します。
 
 - RFC 5681 3 節:HyStart++ (RFC 9406) の外の slow start でも 1 ACK の増分の上限 L を 2 にします
-- RFC 6864 4.3:IPv4 の ID の数えを核の全体で 1 つにし、DF を立てた TCP の segment も非 atomic の datagram と同じ数えを進めます
 - RFC 1122 3.2.2:先頭でない断片に ICMP の誤り (Parameter Problem) を返します
 - RFC 1122 3.2.1.3 と 3.2.2、RFC 9293 MUST-63:単一の host を表さない送信元の datagram を捨てず、そうした送信元に ICMP の誤りを送りえます (agent では送信元が server の 1 つのアドレスに限られるので起きません)
 - RFC 1122 3.2.2.6:MTU を超える echo の応答を、切らずに捨てます
@@ -481,6 +477,7 @@ boost の変化は知らせに入れず、hook だけで伝えます ([boost の
   時計はデータプレーンの時計で、Linux と macOS では一時停止の間に止まり、Windows ではスリープの間も進みます ([agent の置き換えの時計](agent-parity.md#時計))
 - 乱数:作成の時に 64 byte の種を渡します。
   Go と同じく、先頭の 16 byte を ISN の鍵、次の 16 byte を表の hash の鍵、残りの 32 byte を ChaCha8 の種にし、timestamp の鍵、IP の ID の始めの値、challenge ACK の揺らぎ、区間の treap の優先度は ChaCha8 から引きます。
+  DF を下ろした datagram の ID の数え (`ip_id_open`) の始めの値は ChaCha8 から引かず、ISN の鍵から用途の印で導くので、ChaCha8 の列は Go と同じです。
   製品は OS の乱数から種を作り、試験は固定の種を渡します
 - ChaCha8:bit の一致のため、Go の `math/rand/v2` の `ChaCha8` と同じ列を出す生成器を wgft の中で書きます。
   C2SP の `chacha8rand` の仕様から書き、Go のコードは写しません。
@@ -1422,6 +1419,8 @@ Go の記録との照合だけが、それぞれの照合用の切り替えで G
 製品の挙動は、表の最後の列の試験が守ります。
 影響する記録は、git の集まり (348 件) と完全な集まり (9053 件) の件数 (git / 完全) で、2026-11-06 に数えた値です。
 完全な集まりは Go の fuzz の cache が育つと増えるので、件数はその時点の値です。
+UDP と ICMP と断片の切り替えの行の件数は、git の集まり (348 件) と完全な集まり (9087 件) を 2026-11-06 に数えた値です。
+再組み立ての golden だけが使う切り替えは、記録を照らさないので 0 / 0 とし、golden の中で最初に食い違う手順を書きます。
 
 | 切り替え | Go の挙動 | Rust の挙動 | 切り替えにする理由 | 影響する記録 (git / 完全) | 製品の挙動を守る試験 |
 | --- | --- | --- | --- | --- | --- |
@@ -1431,6 +1430,7 @@ Go の記録との照合だけが、それぞれの照合用の切り替えで G
 | `set_go_compat_synack_rto` | SYN-ACK を再送した接続の最初の RTO は 1 秒のままです | 握手が RTT の標本を与えなかった接続は、確立の時に RTO を 3 秒にします。cookie の値の行も含みます (RFC 6298 5.7) | 520 件の記録を、最初の RTO より後の応答まで照らし続けるため | 7 / 520 (fuzzcore) | `listen_tests::rfc6298_*` |
 | `set_go_compat_tw_no_paws` | TIME_WAIT の枠と行で PAWS をせず、古い TSval の FIN の写しでも期限を数え直します | TIME_WAIT の枠と行も PAWS で古い TSval の segment を捨てて ACK を返します。RST の例外と RFC 6191 の SYN の判定は PAWS の前です (RFC 7323 5.3) | 1 件の記録を、PAWS の ACK より後の応答まで照らし続けるため | 0 / 1 (stream-rx/seed-44) | `tcp_tests::rfc7323_*` |
 | `set_go_compat_sent_at_zero` | 時刻 0 に作った SYN-ACK を「作っていない」とみなし、握手から RTT の標本を取りません | SYN-ACK の送った時刻を別の印 (`SynRow.sent`) で持つので、時刻 0 の握手からも標本を取ります (RFC 6298 2.2) | 1113 件の記録を、最初の RTO より後の応答まで照らし続けるため | 2 / 1113 (adversarial 626、fuzzcore 487) | `listen_tests::a_synack_sent_*`、`rtt_wire_*` |
+| `set_go_compat_shared_id` | UDP の datagram と echo の応答の IPv4 ID を、DF を立てた packet と同じ 1 つの数えから取ります (UDP は 0 を飛ばし、echo の応答は飛ばしません) | 別の数えから取り、0 を飛ばします (RFC 6864 4.3) | UDP と echo の応答の ID が TCP の segment と ICMP の誤りの数えで動くので、この記録を ID の違いより後の応答まで照らし続けるため | 15 / 15 (icmp-echo、udp-datagram、udp-large) | `icmp_tests::udp_ids_are_not_advanced_by_df_traffic`、`echo_replies_and_udp_share_a_counter_that_df_traffic_does_not_advance`、`open_id_counter_wraps_past_zero` |
 
 ## 置き換えの判定
 
@@ -1516,7 +1516,7 @@ Go の試験の道具を変えるときは、製品の Go のコードを変え�
 - 時刻:タイマーの輪の 1 ms の tick と切り上げ、ns の整数の算術。
   `handle_timeout` は期限の来たタイマーを新しい `now` で 1 回ずつ動かし、Go の `Tick` と同じく期限の時刻に戻って動かしません
 - 出力の順:4 つの組の deficit round robin、順番の list の順、制御の輪の順
-- 番号:IP の ID の数え上げ、ISN と timestamp の offset の作り方
+- 番号:IP の ID の数え上げ (UDP と echo の応答の ID が Go と同じ 1 つの数えになるのは、`set_go_compat_shared_id` が真の照合用の核だけです)、ISN と timestamp の offset の作り方
 - 浮動小数点の算術:CUBIC は `float64` の四則と 3 乗根と切り捨てを使います。
   四則は IEEE 754 で同じですが、Go のコンパイラは target によって積和を 1 つの FMA の命令にまとめ、丸めが変わります。
   このため記録は linux/amd64 の `GOAMD64=v1` で作り、記録の meta に `GOARCH` と `GOAMD64` を残します。
@@ -1804,6 +1804,15 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   核の datagram の件数の予算の比べ (空きの list が先に尽きます)、閉じた endpoint の送り残しが今の chunk を外す時の世代の比べ (その chunk は送り残しが持つ間ほかの endpoint に渡りません)、checksum の 0 を 0xffff にする所 (`write_udp_header` も同じ置き換えをします)、Fragmentation Needed の引用の送信元の比べ (接続の表を引用の送信元で引くので見つかりません)、ICMP の誤りの後続の断片の守り (呼び手は後続の断片を渡しません)、再組み立ての知らせの後続の断片の守りと最初の断片の有無 (`param_problem_ok` と `timeout_quote` が同じ条件で断ります)
 - 不変条件:`check_invariants` は、UDP の chunk と datagram の空きの list、核と endpoint の予算と保持する chunk と datagram の一致、区分の枠の使っている数、受信と送信の FIFO、待ちの list、ping の行を確かめます。
   核の chunk の置き場の数は、接続の輪と UDP の chunk の和と比べます
+- 非 atomic の datagram の IPv4 ID:DF を下ろした packet (UDP の datagram と echo の応答) は、DF を立てた packet (TCP の segment と ICMP の誤り) とは別の数えから ID を取ります。
+  RFC 6864 4.3 は、非 atomic の datagram の ID が重ならない間隔を保つことを求めるためです。
+  DF を立てた packet は断片に分けないので、数えは進めません。
+  別の数えの始めの値は ISN の鍵から用途の印で導き、生成器から引かないので、種の配分と乱数の列は Go と同じです。
+  数えは 0 を飛ばします。
+  凍結した Go は 1 つの数えを全部で使うので、Go との照合だけ元に戻す照合用の切り替え (`set_go_compat_shared_id`) があります。
+  置き場所、スコープ、`WgstackDut` が持つ値は `set_go_compat_rto_l2` と同じで、切り替えが真の核は UDP と echo の応答の ID を DF を立てた packet と同じ数えから取ります。
+  Go は UDP の送信では 0 を飛ばし、echo の応答では飛ばさないので、切り替えもその違いを写します。
+  この意図した違いは、照合の上でだけ消えます
 
 ### handle の層で決めたこと
 
