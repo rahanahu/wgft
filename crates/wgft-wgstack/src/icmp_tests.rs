@@ -853,3 +853,25 @@ fn go_compat_shared_id_wrap_skips_zero_for_udp_only() {
     assert_eq!(echo_reply_id(&mut n), 1);
     crate::stack::set_go_compat_shared_id(false);
 }
+
+/// 先頭でない断片の option が不正でも、ICMP の Parameter Problem は返さず、黙って捨てます (RFC 1122 3.2.2:
+/// 先頭でない断片への ICMP の誤りは MUST NOT)。上の `param_problem_for_fragment_options` の offset 8 の組は
+/// 現行の挙動を固定しているので、直す時にその組を外します。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn non_initial_fragment_with_bad_options_gets_no_icmp() {
+    for (offset, more) in [(8, false), (8, true), (1400, false)] {
+        for opts in [[0x82u8, 1, 0, 0], [0x07, 0x40, 0, 0]] {
+            let mut n = TestNet::new(small_limits());
+            let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+            n.write(&frag_with_options(offset, more, &opts, b"abcdefgh"));
+            let pkts = n.drain_raw();
+            assert!(
+                pkts.is_empty(),
+                "offset {offset} more {more} opts {opts:x?}: replied {pkts:x?}"
+            );
+            let mut b = [0u8; 64];
+            assert_eq!(n.s.recv_from(n.now, pc, &mut b), Err(Error::WouldBlock));
+        }
+    }
+}
