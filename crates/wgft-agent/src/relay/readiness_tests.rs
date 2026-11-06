@@ -11,7 +11,7 @@
 //! 大きいバッファの貸出数は `BULK_LENT` (cfg(test) の数え) で見る。数えはプロセスで 1 つなので、貸出数を
 //! 読む試験は cargo-nextest の下でだけ流す (`held_tests` と同じ)。
 
-#![allow(
+#![expect(
     clippy::many_single_char_names,
     reason = "m, c, s are the manager, the tunnel client and the LAN stream, as in the neighbouring tests"
 )]
@@ -25,19 +25,13 @@ use tokio::time::Instant;
 use wgft_proto::Proto;
 
 use super::Manager;
+use super::held_tests::counted_alone;
 use super::pipe::{BULK_LENT, BULK_WAIT};
 use super::testpeer::{Client, Outcome, Peer};
 use super::tests::{rule, targets, wait_for};
 use crate::flowpool::Limits;
 
 const WAIT: Duration = Duration::from_secs(5);
-
-fn counted_alone() -> bool {
-    match std::env::var_os("NEXTEST_EXECUTION_MODE") {
-        Some(mode) => mode == "process-per-test",
-        None => std::env::var_os("NEXTEST").is_some(),
-    }
-}
 
 fn lent() -> usize {
     BULK_LENT.load(std::sync::atomic::Ordering::Relaxed)
@@ -121,6 +115,18 @@ async fn bytes_after_a_short_read_from_the_lan_arrive_in_order() {
         assert!(read_tun(&mut c, msg.len()).await == msg, "round {i}");
         nap(i).await;
     }
+    // 競り合い:書いて、短い待ちの後にもう 1 byte。短い読みの後の待ちに入る前後に 2 つ目が届く並びを、
+    // 毎回、2 つとも届くまで待って確かめる。途中で 1 つでも取りこぼせば、次の書き込みまで届かず止まる
+    for i in 0..300 {
+        let first = pattern(u8::try_from(i % 200).unwrap(), 1 + i % 50);
+        let second = [u8::try_from(i % 251).unwrap()];
+        s.write_all(&first).await.unwrap();
+        nap(i).await;
+        s.write_all(&second).await.unwrap();
+        let mut want = first.clone();
+        want.extend_from_slice(&second);
+        assert!(read_tun(&mut c, want.len()).await == want, "race round {i}");
+    }
     // 待たずに続けて書く:短い読みと次の待ちの間に byte が届く並びを含む
     let mut sent = Vec::new();
     for i in 0..400 {
@@ -147,6 +153,18 @@ async fn bytes_after_a_short_read_from_the_tunnel_arrive_in_order() {
         c.send(&msg);
         assert!(read_lan(&mut s, msg.len()).await == msg, "round {i}");
         nap(i).await;
+    }
+    // 競り合い:書いて、短い待ちの後にもう 1 byte。短い読みの後の待ちに入る前後に 2 つ目が届く並びを、
+    // 毎回、2 つとも届くまで待って確かめる。途中で 1 つでも取りこぼせば、次の書き込みまで届かず止まる
+    for i in 0..300 {
+        let first = pattern(u8::try_from(i % 200).unwrap(), 1 + i % 50);
+        let second = [u8::try_from(i % 251).unwrap()];
+        c.send(&first);
+        nap(i).await;
+        c.send(&second);
+        let mut want = first.clone();
+        want.extend_from_slice(&second);
+        assert!(read_lan(&mut s, want.len()).await == want, "race round {i}");
     }
     let mut sent = Vec::new();
     for i in 0..400 {
@@ -250,9 +268,10 @@ async fn eof_from_the_tunnel_after_a_short_read_half_closes_the_lan() {
     }
 }
 
-/// 短い読みの後に LAN の側が RST で切ると、中継が終わってトンネルの側が閉じ、枠が戻る。
+/// 短い読みの後に LAN の側が RST で切ると、中継が終わってトンネルの側が閉じ、枠が戻る。製品は読みの誤りの後、
+/// トンネルの側を FIN で閉じる (Go の PipeHold の規則)。ここでは閉じ方を RST と FIN のどちらでも認める。
 #[tokio::test]
-async fn a_reset_from_the_lan_after_a_short_read_resets_the_tunnel() {
+async fn a_reset_from_the_lan_after_a_short_read_ends_the_tunnel_side() {
     let peer = Peer::start().await;
     let (mut m, mut c, mut s) = setup(&peer).await;
     let msg = pattern(1, 100);
@@ -358,9 +377,14 @@ async fn the_bulk_buffer_is_returned_after_the_idle_wait_and_not_before() {
     let peer = Peer::start().await;
     let (mut m, mut c, mut s) = setup(&peer).await;
     let base = lent();
-    borrow_from_the_lan(&mut c, &mut s, base).await;
-    // 最後のデータ:短い 1 つ。大きいバッファを持ったまま受ける
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // 最後のデータ:短い 1 つ。大きいバッファを持ったまま受ける。借りた後、書く直前に貸出を確かめ、
+    // 負荷で待ちが延びて正当に返却済みなら借り直してやり直す
+    loop {
+        borrow_from_the_lan(&mut c, &mut s, base).await;
+        if lent() > base {
+            break;
+        }
+    }
     let t0 = Instant::now();
     s.write_all(b"last").await.unwrap();
     assert_eq!(read_tun(&mut c, 4).await, b"last");
@@ -378,8 +402,12 @@ async fn the_bulk_buffer_of_the_tunnel_side_is_returned_after_the_idle_wait_and_
     let peer = Peer::start().await;
     let (mut m, mut c, mut s) = setup(&peer).await;
     let base = lent();
-    borrow_from_the_tunnel(&mut c, &mut s, base).await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    loop {
+        borrow_from_the_tunnel(&mut c, &mut s, base).await;
+        if lent() > base {
+            break;
+        }
+    }
     let t0 = Instant::now();
     c.send(b"last");
     assert_eq!(read_lan(&mut s, 4).await, b"last");
@@ -400,12 +428,17 @@ async fn a_stream_with_gaps_shorter_than_the_wait_keeps_its_bulk_buffer() {
     borrow_from_the_lan(&mut c, &mut s, base).await;
     let gap = BULK_WAIT * 2 / 5;
     // 合計は BULK_WAIT の数倍。途中で返れば、貸出数が減っている
+    let mut last = Instant::now();
     for i in 0..20u8 {
         tokio::time::sleep(gap).await;
-        assert!(
-            lent() > base,
-            "the bulk buffer was returned while data kept coming (round {i})"
-        );
+        // 負荷で実際の間隔が延びたなら、正当に返却済みでありうるので、その回は確かめない
+        if last.elapsed() < BULK_WAIT * 3 / 4 {
+            assert!(
+                lent() > base,
+                "the bulk buffer was returned while data kept coming (round {i})"
+            );
+        }
+        last = Instant::now();
         let msg = pattern(i, 100);
         s.write_all(&msg).await.unwrap();
         assert!(read_tun(&mut c, 100).await == msg, "the bytes differ");
@@ -429,12 +462,17 @@ async fn a_tunnel_side_stream_with_gaps_shorter_than_the_wait_keeps_its_bulk_buf
     let base = lent();
     borrow_from_the_tunnel(&mut c, &mut s, base).await;
     let gap = BULK_WAIT * 2 / 5;
+    let mut last = Instant::now();
     for i in 0..20u8 {
         tokio::time::sleep(gap).await;
-        assert!(
-            lent() > base,
-            "the bulk buffer was returned while data kept coming (round {i})"
-        );
+        // 負荷で実際の間隔が延びたなら、正当に返却済みでありうるので、その回は確かめない
+        if last.elapsed() < BULK_WAIT * 3 / 4 {
+            assert!(
+                lent() > base,
+                "the bulk buffer was returned while data kept coming (round {i})"
+            );
+        }
+        last = Instant::now();
         let msg = pattern(i, 100);
         c.send(&msg);
         assert!(read_lan(&mut s, 100).await == msg, "the bytes differ");
@@ -492,5 +530,44 @@ async fn data_is_not_lost_or_reordered_across_a_release_and_a_re_borrow() {
     let got_up = read_lan(&mut s, up.len()).await;
     assert!(got_down == down, "LAN to tunnel differs");
     assert!(got_up == up, "tunnel to LAN differs");
+    m.close().await;
+}
+
+/// このプロセスの CPU 時間 (user と system) を clock tick で返す。Linux だけ。
+#[cfg(target_os = "linux")]
+fn cpu_ticks() -> u64 {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+    // コマンド名は括弧に囲まれ空白を含みうるので、最後の ')' の後から数える。utime は 14 番目、stime は 15 番目
+    let rest = &stat[stat.rfind(')').unwrap() + 2..];
+    let f: Vec<&str> = rest.split(' ').collect();
+    f[11].parse::<u64>().unwrap() + f[12].parse::<u64>().unwrap()
+}
+
+/// 大きいバッファを返して黙った中継は、起き続けない。発火済みのタイマーで空回りすると CPU 時間が
+/// 無通信の間じゅう使われる。製品に hook を足さず、プロセスの CPU 時間を無通信の 1 秒で見る。
+/// 通常は 0 tick で、期限が過去のタイマーを毎回張り直す空回りは約 5 tick、タイマーを介さない空回りは約 100 tick
+/// なので、上限は 3 tick とする。
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_idle_relay_that_returned_its_bulk_buffer_does_not_keep_waking() {
+    if !counted_alone() {
+        eprintln!("skipped: the lent count is per process; run under cargo-nextest");
+        return;
+    }
+    let peer = Peer::start().await;
+    let (mut m, mut c, mut s) = setup(&peer).await;
+    let base = lent();
+    borrow_from_the_lan(&mut c, &mut s, base).await;
+    borrow_from_the_tunnel(&mut c, &mut s, base + 1).await;
+    wait_for("both bulk buffers to come back", || lent() <= base).await;
+    // 落ち着くまで待ってから測る
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let before = cpu_ticks();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let used = cpu_ticks() - before;
+    assert!(used < 3, "an idle relay used {used} ticks of CPU in 1 s");
+    // 眠った後も、中継は動く
+    s.write_all(b"awake").await.unwrap();
+    assert_eq!(read_tun(&mut c, 5).await, b"awake");
     m.close().await;
 }

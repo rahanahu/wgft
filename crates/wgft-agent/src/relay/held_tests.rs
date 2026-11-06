@@ -55,7 +55,7 @@ const UDP_IDLE: Duration = Duration::from_secs(2);
 
 /// 他の試験と同じプロセスで流れていないか。cargo-nextest は試験ごとにプロセスを分け、そのことを
 /// `NEXTEST_EXECUTION_MODE` で示す。古い版はこの変数を持たず、`NEXTEST` だけを置く。
-fn counted_alone() -> bool {
+pub(super) fn counted_alone() -> bool {
     match std::env::var_os("NEXTEST_EXECUTION_MODE") {
         Some(mode) => mode == "process-per-test",
         None => std::env::var_os("NEXTEST").is_some(),
