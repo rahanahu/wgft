@@ -1,6 +1,7 @@
 //! 手で進める時計の核と、トンネルの側の出入り口です。Go の試験の補助 `testNet` に当たります。
 
 use std::cell::{Cell, RefCell};
+use std::fmt::{self, Write as _};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::Ipv4Addr;
 use std::time::Duration;
@@ -139,47 +140,117 @@ pub(crate) fn put_budget(b: Budget) {
     BUDGET.with_borrow_mut(|slot| *slot = Some(b));
 }
 
-/// `stats` の数がどれも `seen` の値より減っていないことを確かめ、`seen` を今の値に替えます。`text` は書き出しの
-/// 作業用の置き場です。`Stats` は欄を列挙する口を持たないので、Debug の出力の数字の並び (配列の欄を含みます)
-/// を欄の値として読みます。欄の名前に数字があっても、名前は核を作ってから変わらず、変わらない値は減らない
-/// ので、比べる結果は変わりません。
-fn check_stats_monotonic(stats: &wgft_wgstack::Stats, seen: &mut Vec<u64>, text: &mut String) {
-    use std::fmt::Write as _;
-    text.clear();
-    write!(text, "{stats:?}").expect("write to a String");
-    if let Err(e) = stats_not_decreasing(text, seen) {
-        panic!("{e}: {stats:?}");
+/// `Stats` の数の欄の数の上限です。今は 70 弱で、配列の欄 (`retrans`) の要素を含みます。
+const STATS_MAX: usize = 160;
+
+/// `Stats` の数が減らないことを見張る控えです。堆を使いません (保持の試験が数える確保に入らないよう、固定の
+/// 配列だけで持ちます)。
+///
+/// `Stats` は欄を列挙する口を持たないので、Debug の出力に流れる数字の並び (配列の欄を含みます) を欄の値として読み
+/// ます。欄の名前に数字があっても、名前は核を作ってから変わらず、変わらない値は減らないので、比べる結果は変わりません。
+#[derive(Debug)]
+struct StatsWatch {
+    seen: [u64; STATS_MAX],
+    /// 控えの数です。0 は初めてを示します。
+    len: usize,
+}
+
+impl StatsWatch {
+    const fn new() -> Self {
+        Self {
+            seen: [0; STATS_MAX],
+            len: 0,
+        }
+    }
+
+    /// 今の `stats` を控えと比べ、控えを今の値に替えます。減った数があれば、その説明を返します。
+    fn observe(&mut self, stats: &wgft_wgstack::Stats) -> Result<(), String> {
+        let mut scan = NumScan {
+            watch: self,
+            first: false,
+            cur: 0,
+            in_num: false,
+            i: 0,
+            err: None,
+        };
+        scan.first = scan.watch.len == 0;
+        // Debug の書き出しは文字列を作らず、数字の並びを走査器へ直接流す
+        write!(scan, "{stats:?}").expect("scan Stats");
+        scan.end_number();
+        let (first, i, err) = (scan.first, scan.i, scan.err);
+        if let Some(e) = err {
+            return Err(e);
+        }
+        if first {
+            self.len = i;
+        } else if i != self.len {
+            return Err("Stats has fewer numbers than before".to_string());
+        }
+        Ok(())
     }
 }
 
-/// Debug の出力 `text` の数字の並びを `seen` と比べます。初めて (`seen` が空) は `seen` を作るだけです。
-fn stats_not_decreasing(text: &str, seen: &mut Vec<u64>) -> Result<(), String> {
-    let first = seen.is_empty();
-    let mut i = 0;
-    let mut digits = text
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|d| !d.is_empty());
-    for d in &mut digits {
-        let value: u64 = d
-            .parse()
-            .map_err(|_| format!("a Stats number {d} is not a u64"))?;
-        if first {
-            seen.push(value);
-        } else {
-            let old = seen
-                .get_mut(i)
-                .ok_or("Stats has more numbers than before")?;
-            if value < *old {
-                return Err(format!("Stats number {i} decreased from {old} to {value}"));
-            }
-            *old = value;
+/// Debug の出力の数字の並びを読み、`StatsWatch` の控えと比べる書き込み先です。
+struct NumScan<'a> {
+    watch: &'a mut StatsWatch,
+    first: bool,
+    cur: u64,
+    in_num: bool,
+    i: usize,
+    err: Option<String>,
+}
+
+impl NumScan<'_> {
+    fn end_number(&mut self) {
+        if !self.in_num {
+            return;
         }
-        i += 1;
+        self.in_num = false;
+        let value = core::mem::take(&mut self.cur);
+        let i = self.i;
+        self.i += 1;
+        if self.err.is_some() {
+            return;
+        }
+        if i >= STATS_MAX {
+            self.err = Some(format!("Stats has more than {STATS_MAX} numbers"));
+        } else if self.first {
+            self.watch.seen[i] = value;
+        } else if i >= self.watch.len {
+            self.err = Some("Stats has more numbers than before".to_string());
+        } else if value < self.watch.seen[i] {
+            self.err = Some(format!(
+                "Stats number {i} decreased from {} to {value}",
+                self.watch.seen[i]
+            ));
+        } else {
+            self.watch.seen[i] = value;
+        }
     }
-    if !first && i != seen.len() {
-        return Err("Stats has fewer numbers than before".to_string());
+}
+
+impl fmt::Write for NumScan<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for b in s.bytes() {
+            if b.is_ascii_digit() {
+                self.cur = self
+                    .cur
+                    .saturating_mul(10)
+                    .saturating_add(u64::from(b - b'0'));
+                self.in_num = true;
+            } else {
+                self.end_number();
+            }
+        }
+        Ok(())
     }
-    Ok(())
+}
+
+/// `stats` の数がどれも前の段より減っていないことを確かめます。
+fn check_stats_monotonic(stats: &wgft_wgstack::Stats, watch: &mut StatsWatch) {
+    if let Err(e) = watch.observe(stats) {
+        panic!("{e}: {stats:?}");
+    }
 }
 
 #[cfg(test)]
@@ -190,20 +261,24 @@ mod tests {
     #[test]
     fn stats_monotonic_covers_array_fields() {
         let mut stats = wgft_wgstack::Stats::default();
-        let mut seen = Vec::new();
-        let mut text = String::new();
+        let mut watch = StatsWatch::new();
         stats.retrans[3] = 5;
         stats.rtos = 2;
-        check_stats_monotonic(&stats, &mut seen, &mut text);
+        check_stats_monotonic(&stats, &mut watch);
         stats.retrans[3] = 6;
-        check_stats_monotonic(&stats, &mut seen, &mut text);
-        check_stats_monotonic(&stats, &mut seen, &mut text);
+        check_stats_monotonic(&stats, &mut watch);
+        check_stats_monotonic(&stats, &mut watch);
+        assert!(
+            watch.len > 60 && watch.len < STATS_MAX,
+            "{} numbers",
+            watch.len
+        );
         stats.retrans[3] = 5;
-        let err = stats_not_decreasing(&format!("{stats:?}"), &mut seen).unwrap_err();
+        let err = watch.observe(&stats).unwrap_err();
         assert!(err.contains("decreased from 6 to 5"), "{err}");
         stats.retrans[3] = 7;
         stats.rtos = 1;
-        let err = stats_not_decreasing(&format!("{stats:?}"), &mut seen).unwrap_err();
+        let err = watch.observe(&stats).unwrap_err();
         assert!(err.contains("decreased from 2 to 1"), "{err}");
     }
 }
@@ -223,8 +298,7 @@ pub struct Net<H: Hook> {
     touched: TouchedCheck,
     digest: DefaultHasher,
     /// 前の段の `Stats` の数です。数が減らないことを確かめるのに使います。
-    stats_seen: Vec<u64>,
-    stats_text: String,
+    stats_watch: StatsWatch,
 }
 
 impl<H: Hook> Net<H> {
@@ -266,8 +340,7 @@ impl<H: Hook> Net<H> {
             options,
             touched,
             digest: DefaultHasher::new(),
-            stats_seen: Vec::new(),
-            stats_text: String::new(),
+            stats_watch: StatsWatch::new(),
         }
     }
 
@@ -408,7 +481,7 @@ impl<H: Hook> Net<H> {
         }
         // 統計の数は増えるだけです。検査なしの build では回り込みが panic にならないので、減ったかどうかで
         // 見つけます。`Stats` は欄を列挙する口を持たないので、Debug の出力から数の欄を読みます。
-        check_stats_monotonic(&stack.stats(), &mut self.stats_seen, &mut self.stats_text);
+        check_stats_monotonic(&stack.stats(), &mut self.stats_watch);
         let h = stack.held();
         let l = &self.limits;
         assert!(
