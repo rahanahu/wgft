@@ -26,7 +26,9 @@ fn rsts(outs: &[crate::testnet_tests::Out]) -> usize {
 }
 
 /// 区間が 1 つある接続の会計を壊して穴を埋める segment を送ると、会計の不整合がちょうど 1 つ数えられ、RST が 1 つ出て、
-/// `read` が `Error::Accounting` を返します。後の `read` と時間の経過は、RST も不整合も重ねません。
+/// RST と不整合は直ちに起きます。`check_read` なら、`read` は届いて確認済みの順序どおりの byte を先に返し (壊れたのは順序外
+/// の帳簿だけで、`read_off..nxt_off` の byte は無事です)、読み切った後に `Error::Accounting` を返します。
+/// 後の `read` と時間の経過は、RST も不整合も重ねません。
 fn hole_fill_after_skew(skew: Skew, check_read: bool) {
     let mut n = TestNet::new(small_limits());
     let (c, mut p) = n.accepted(false);
@@ -59,12 +61,23 @@ fn hole_fill_after_skew(skew: Skew, check_read: bool) {
     assert_eq!(rsts(&outs), 1, "{skew:?}: one RST");
     let mut buf = [0u8; 400];
     if check_read {
+        let got = n.s.read(n.now, c, &mut buf);
         assert_eq!(
-            n.s.read(n.now, c, &mut buf),
-            Err(Error::Accounting),
-            "{skew:?}: read after the fault"
+            got,
+            Ok(200),
+            "{skew:?}: the received bytes are still readable"
         );
-        assert_eq!(n.s.read(n.now, c, &mut buf), Err(Error::Accounting));
+        assert!(
+            buf[..100].iter().all(|&b| b == 2) && buf[100..200].iter().all(|&b| b == 1),
+            "{skew:?}: the bytes read are the bytes sent, and nothing beyond nxt_off"
+        );
+        for i in 0..2 {
+            assert_eq!(
+                n.s.read(n.now, c, &mut buf),
+                Err(Error::Accounting),
+                "{skew:?}: read {i} after the data is drained"
+            );
+        }
     }
     n.advance(Duration::from_secs(5));
     let later = n.drain();
@@ -86,16 +99,15 @@ fn skewed_ooo_bytes_on_a_hole_fill_faults_the_connection_once() {
     hole_fill_after_skew(Skew::OooBytes, false);
 }
 
-/// 同じ場面で `read` は、バッファに残った未読を返さずに `Error::Accounting` を返します (接続は閉じています)。
+/// 同じ場面で `read` は、確認済みの未読の byte を先に返し、読み切った後に `Error::Accounting` を返します。会計の誤りは
+/// 順序外の帳簿だけにあり、順序どおりの byte は無事なので、届いたデータを捨てません。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
-fn skewed_interval_count_on_a_hole_fill_makes_read_fail() {
+fn skewed_interval_count_on_a_hole_fill_keeps_data_then_fails_read() {
     hole_fill_after_skew(Skew::IntervalCount, true);
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
-fn skewed_ooo_bytes_on_a_hole_fill_makes_read_fail() {
+fn skewed_ooo_bytes_on_a_hole_fill_keeps_data_then_fails_read() {
     hole_fill_after_skew(Skew::OooBytes, true);
 }
 
