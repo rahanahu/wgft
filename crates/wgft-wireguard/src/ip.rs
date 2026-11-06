@@ -66,6 +66,11 @@ pub(crate) fn decapsulate_ecn(packet: &mut [u8], outer_ecn: u8) -> bool {
     let Some(header) = packet.first_chunk_mut::<IPV4_MIN_HEADER>() else {
         return true;
     };
+    // 呼び手は IPv4 と確かめた packet だけを渡す。IPv6 の byte 1 は traffic class と flow label に
+    // またがるので、ほかの版の packet は書き換えない
+    if header[0] >> 4 != 4 {
+        return true;
+    }
     let tos = header[1];
     let inner = tos & ECN_MASK;
     let Some(ecn) = egress_ecn(inner, outer) else {
@@ -224,5 +229,17 @@ pub(crate) mod tests {
         assert_eq!(got, p);
         assert!(!decapsulate_ecn(&mut got, 0b1111_1111));
         assert_eq!(got, p, "a dropped packet is left as it was");
+    }
+
+    #[test]
+    fn a_packet_that_is_not_ipv4_is_never_rewritten() {
+        let mut v6 = vec![0u8; 40];
+        v6[0] = 0x60;
+        v6[1] = 0x0a;
+        for outer in 0..4 {
+            let mut got = v6.clone();
+            assert!(decapsulate_ecn(&mut got, outer));
+            assert_eq!(got, v6, "outer {outer}");
+        }
     }
 }

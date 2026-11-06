@@ -67,7 +67,7 @@ Go の v1 の agent と仕様の項目ごとに、Rust の agent の扱いを挙
 | MSS | netstack の MTU から 40 を引いた値を示す | 仕様のとおり (核)。netstack の MTU は下の行のとおり 16 の倍数に切り下げた値なので、1420 なら 1368 |
 | keepalive の ping | [tunnel.md の keepalive の ping](../spec/tunnel.md#keepalive-の-ping) | wgstack の ping の endpoint から送る |
 | MTU | server は 576 から 9216 を送る。v1 の agent は検査しない | 576 から 9216 は device の層に渡し、外なら 1420 を使う。device の層は 16 の倍数に切り下げた値 (1420 なら 1408) を核に渡す ([MTU と詰め物](wireguard-device.md#mtu-と詰め物)) |
-| 外側の IP の ECN の欄 | 仕様に項目はありません。v1 の wireguard-go は外側の ECN を読まず、内側の packet を変えません | 受ける向きは RFC 6040 の表で内側に写し、外側 CE と内側 Not-ECT の packet を捨てて数えます ([外側の ECN](wireguard-device.md#外側の-ecn-rfc-6040))。Windows では読みません。送る外側は Not-ECT です |
+| 外側の IP の ECN の欄 | 仕様に項目はありません。v1 の wireguard-go は外側の ECN を読まず、内側の packet を変えません | 受ける向きは RFC 6040 の表で内側に写し、外側 CE と内側 Not-ECT の packet を捨てて数え、英語の警告を 1 分に 1 回まで出します ([外側の ECN](wireguard-device.md#外側の-ecn-rfc-6040))。Windows では読みません。送る外側は Not-ECT です |
 | WireGuard のソケットのバッファ | [socket-buffers.md](../userspace/socket-buffers.md)。7 MiB を要求し、FORCE も試し、トンネルを立てるたびに測り、条件に届かなければ英語の 1 行を出す | 仕様のとおり。`agent doctor` の `tunnel.socket_buffers` も載せる |
 | 受信の誤りで止まらないこと | [tunnel.md の受信の goroutine の停止](../spec/tunnel.md#go-の性質受信の-goroutine-の停止)。Windows の `WSAECONNRESET` | データプレーンが Windows で `SIO_UDP_CONNRESET` を切り、受信の誤りを数えて読み続ける |
 | サスペンドの間の時計 | [tunnel.md のサスペンドの間の時計](../spec/tunnel.md#go-の性質サスペンドの間の時計)。Windows ではスリープの間も進む時計 | データプレーンの時計が持ち ([時計](#時計))、トンネルの監視も同じ時計で測る |
@@ -458,7 +458,9 @@ Go の recording を使う `send_to` の振る舞いは変えないので、dive
 - 外側の ECN:Unix では bind の前に `IP_RECVTOS` を有効にし、datagram ごとの外側の TOS を制御の message で受けます。
   device の層はその ECN の欄を RFC 6040 の表で内側の packet に写します ([外側の ECN](wireguard-device.md#外側の-ecn-rfc-6040))。
   有効にできなかったときは英語の 1 行をプロセスで 1 回だけ出し、外側を Not-ECT とみなします。
-  Windows は外側の TOS を読まず、外側を Not-ECT とみなします
+  Windows は外側の TOS を読まず、外側を Not-ECT とみなします。
+  IPv6 の待ち受けでも外側の TOS を読みません。
+  今の agent は IPv4 の待ち受けだけを使うので、この場合は起きません
 - Windows:bind の前に `SIO_UDP_CONNRESET` を切ります。
   切れなかったときは英語の 1 行を出して続けます。
   受信の誤りは数えて読み続けるので、切れなくても受信は止まりません
