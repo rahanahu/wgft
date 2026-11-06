@@ -1,16 +1,16 @@
 //! challenge ACK の予算を接続、TIME_WAIT の行、握手の途中の行ごとに分ける直しの受け入れの試験です。
 //!
 //! 直しは、核の全体で 1 つの予算 (`Shared::challenge_allowed`) を、接続、TIME_WAIT の行、握手の途中の行のそれぞれ
-//! の独立した速さの制限に替え、多くの接続で出力を使い切る攻撃に備える核の全体の守り (Resource Guard) を残します。
-//! 全体の守りは、接続をまたぐ側路も、他人の接続の回復を止める DoS も作ってはいけません。
+//! の独立した速さの制限に替えます。1 つの流れ (接続か行) の間隔は固定の [`PER_FLOW_INTERVAL`] (500 ms) で、他の
+//! 流れの状態や流れの数で変わりません。核の全体の資源は、上限のある制御の輪、接続と行の数の上限、メモリの予算が
+//! 守ります。challenge ACK だけの全体の上限は置きません。
 //!
-//! 仮定する値は 2 つです。直しが別の値を選ぶなら、定数を合わせます。
+//! 全体の上限を置かない理由は 3 つです。共有の数え (流れの数を含む) は新しい観測の経路になります。流れの数で
+//! 間隔を伸ばすと、多くの接続の下で正しい相手への返事が数十秒遅れます。間隔を伸ばしても、同時に求める N 個の
+//! 流れの山は N のままで、守りとしては大きすぎます。
 //!
-//! - [`PER_FLOW_INTERVAL`]:1 つの接続か行が ACK を返した後に、次の ACK を返すまでの間隔 (500 ms) です
-//! - [`GUARD_MAX_PER_SEC`]:核の全体の challenge ACK の出力の 1 秒あたりの上限 (今の予算の最大と同じ 1500) です
-//!
-//! 今の main で落ちる試験は `fixed by the follow-up PR` の理由で ignore にしてあります。今も直しの後も通るべき
-//! 試験は ignore にしていません。
+//! 直しが別の間隔を選ぶなら、[`PER_FLOW_INTERVAL`] を合わせます。今の main で落ちる試験は
+//! `fixed by the follow-up PR` の理由で ignore にしてあります。今も直しの後も通るべき試験は ignore にしていません。
 
 #![expect(
     clippy::disallowed_macros,
@@ -33,8 +33,9 @@ use crate::testnet_tests::{Out, PeerConn, TSeg, TestNet, build_peer, parse_out, 
 use crate::wire::{FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN};
 use core::time::Duration;
 
-/// 核の全体の challenge ACK の出力の 1 秒あたりの上限として試験が仮定する値です。
-const GUARD_MAX_PER_SEC: usize = 1500;
+/// 今の main の核の全体の challenge ACK の予算の 1 秒あたりの最大です。第三者の需要がこれを超えることを確かめる
+/// のに使います。
+const CORE_BUDGET_MAX: usize = 1500;
 
 /// 1 回の試しで同じ segment を送る数です。接続ごとの制限が無ければ、この数の ACK が返ります。
 const BURST: usize = 5;
@@ -197,7 +198,7 @@ fn half_open_row_acks_follow_the_per_row_rate() {
 // ---- 核の全体の守り ----
 
 /// 全体の守りの試験の表の大きさです。第三者は被害者の接続のほかのすべての枠と行を使い、接続と行ごとの速さの
-/// 制限の内でも、需要が [`GUARD_MAX_PER_SEC`] を超えるようにします。
+/// 制限の内でも、需要が [`CORE_BUDGET_MAX`] を超えるようにします。
 fn guard_limits() -> Limits {
     Limits {
         max_flows: 64,
@@ -378,7 +379,7 @@ fn the_global_guard_does_not_reveal_another_connections_window() {
     let observe = |hit: bool| {
         let (mut n, victim, mut eps) = guard_net();
         assert!(
-            2 * eps.len() > GUARD_MAX_PER_SEC,
+            2 * eps.len() > CORE_BUDGET_MAX,
             "the attacker's demand must exceed the guard"
         );
         raw_advance_to(&mut n, START);
@@ -423,27 +424,265 @@ fn the_global_guard_does_not_silence_an_idle_connection() {
     );
 }
 
-/// 第三者が手元のすべてで 100 ms ごとに ACK を引こうとしても、核の全体の challenge ACK の出力は 1 秒に
-/// [`GUARD_MAX_PER_SEC`] を超えません。
-#[test]
-fn the_global_guard_bounds_the_total_output() {
-    let (mut n, _, mut eps) = guard_net();
-    for sec in 0..2u32 {
-        let mut total = 0;
-        for tick in 0..10u32 {
-            raw_advance_to(
-                &mut n,
-                START
-                    + Duration::from_secs(sec.into())
-                    + Duration::from_millis(100 * u64::from(tick)),
-            );
-            total += attacker_round(&mut n, &mut eps);
-        }
-        assert!(
-            total <= GUARD_MAX_PER_SEC,
-            "{total} challenge ACKs in second {sec} for {} endpoints",
-            eps.len()
-        );
+/// 試しの刻みです。第三者は刻みごとに手元のすべてで ACK を引こうとします。
+const TICK: Duration = Duration::from_millis(100);
+/// 大量の試しを続ける刻みの数 (3 秒) です。
+const MASS_TICKS: u32 = 30;
+/// 待ち受けの無いポートです。ここへの SYN には制御の輪から RST を返します。
+const CLOSED_PORT: u16 = 81;
+/// 刻みごとに待ち受けの無いポートへ送る SYN と、echo request の数です。合わせて制御の輪の枠より多くします。
+const RSTS_PER_TICK: usize = 300;
+const ECHOS_PER_TICK: usize = 100;
+
+/// 刻み `k` の時刻です。
+fn tick_at(k: u32) -> Duration {
+    START + TICK * k
+}
+
+/// 不変条件の確かめも出力の読み出しもせずに packet を渡します。出力は刻みの終わりにまとめて読みます。
+fn push(n: &mut TestNet, pkt: &[u8]) {
+    n.s.handle_packet(n.now, pkt);
+}
+
+/// 第三者の手元 `e` の ACK を引く segment です。
+fn trigger(e: &mut Endpoint) -> TSeg {
+    match e {
+        Endpoint::Conn(p) => p.seg(FLAG_SYN, &[]),
+        Endpoint::Tw(port) => new_syn(1, 1).with_port(*port),
+        Endpoint::Half(port, irs) => new_syn(irs.wrapping_add(1 << 31), 5000).with_port(*port),
     }
-    n.check();
+}
+
+/// この thread の CPU の時間 (/proc/thread-self/stat の utime と stime、clock tick の単位) です。読めなければ
+/// `None` です。
+fn thread_cpu_ticks() -> Option<u64> {
+    let stat = std::fs::read_to_string("/proc/thread-self/stat").ok()?;
+    let rest = stat.rsplit_once(") ")?.1;
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    Some(f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?)
+}
+
+/// 大量の試しの測った値です。
+#[derive(Debug, Default)]
+struct Mass {
+    /// 1 秒ごとの、第三者と被害者への ACK の数です。
+    acks_per_sec: Vec<usize>,
+    /// 刻みの終わり (読み出しの前) の制御の輪の枠の数の最大です。
+    ring_max: usize,
+    ring_slots: usize,
+    /// 刻みごとに返った RST の数の最小と、echo の応答の数の最大です。
+    rst_min: usize,
+    echo_max: usize,
+    /// 捨てた数の差分です:(合計、TCP の制御、ICMP の誤り、echo の応答)。
+    drops: (u64, u64, u64, u64),
+    /// 1 つの流れが `PER_FLOW_INTERVAL` より短い間に返した ACK の数です。
+    interval_violations: usize,
+    /// 0 刻みから `PER_FLOW_INTERVAL` ごとの刻みに ACK を 1 つずつ受けた、という予定から外れた流れの数です。
+    off_schedule: usize,
+    /// 刻みの中で、流れが受けた segment より多く返した ACK の数です。
+    amplified: usize,
+    /// 刻みの外 (タイマー) で第三者と被害者へ返した ACK だけの segment の数です。
+    timer_acks: usize,
+    wall: Duration,
+    cpu_ticks: Option<u64>,
+}
+
+/// 第三者の手元のすべてと被害者が刻みごとに同時に ACK を引こうとし、同じ刻みに制御の輪を満たす RST と echo を
+/// 混ぜます。出力は刻みの終わりにまとめて読みます。
+fn mass_run() -> Mass {
+    use std::collections::HashMap;
+    let (mut n, victim, mut eps) = guard_net();
+    let mut m = Mass {
+        ring_slots: guard_limits().ctl_slots,
+        rst_min: usize::MAX,
+        ..Mass::default()
+    };
+    let flows: Vec<u16> = eps.iter().map(Endpoint::port).chain([VICTIM]).collect();
+    let mut acked: HashMap<u16, Vec<u32>> = HashMap::new();
+    let before = n.s.stats();
+    let victim_rst = seg(VICTIM, victim.snd.wrapping_add(1), 0, FLAG_RST, None, b"");
+    let echo = {
+        let mut msg = vec![0u8; 64];
+        msg[0] = crate::icmp::ECHO;
+        msg
+    };
+    let every_echo = eps.len() / ECHOS_PER_TICK;
+    let every_rst = eps.len() / RSTS_PER_TICK;
+    let cpu0 = thread_cpu_ticks();
+    let t0 = std::time::Instant::now();
+    for k in 0..MASS_TICKS {
+        n.now = crate::time::Time::ZERO + tick_at(k);
+        n.s.handle_timeout(n.now);
+        // 刻みの外の出力 (握手の途中の行の SYN-ACK の再送など) を読みます。
+        for o in raw_drain(&mut n) {
+            if o.flags == FLAG_ACK && flows.contains(&o.rport) {
+                m.timer_acks += 1;
+            }
+        }
+        for (i, e) in eps.iter_mut().enumerate() {
+            push(&mut n, &build_peer(&trigger(e)));
+            if i % every_echo == 0 {
+                push(
+                    &mut n,
+                    &crate::testnet_tests::build_icmp(crate::testnet_tests::PEER, &echo),
+                );
+            }
+            if i % every_rst == 0 {
+                let mut s = new_syn(9, 9).with_port(60000 + (i / every_rst) as u16);
+                s.dport = CLOSED_PORT;
+                push(&mut n, &build_peer(&s));
+            }
+        }
+        push(&mut n, &build_peer(&victim_rst));
+        m.ring_max = m.ring_max.max(n.s.held().ctl_queued);
+        let mut per_flow: HashMap<u16, usize> = HashMap::new();
+        let (mut rsts, mut echos) = (0, 0);
+        let mut b = vec![0u8; 2048];
+        while let Some(len) = n.s.poll_transmit(n.now, &mut b) {
+            let ip = crate::wire::parse_ipv4(&b[..len]).expect("a bad IPv4 packet");
+            if ip.proto == crate::wire::PROTO_ICMP {
+                echos += 1;
+                continue;
+            }
+            let o = parse_out(&b[..len]);
+            if o.lport == CLOSED_PORT && o.has(FLAG_RST) {
+                rsts += 1;
+            } else if o.flags == FLAG_ACK && flows.contains(&o.rport) {
+                *per_flow.entry(o.rport).or_default() += 1;
+            }
+        }
+        for (&port, &c) in &per_flow {
+            // 刻みの中で、どの流れも segment を 1 つだけ受けました。
+            m.amplified += c.saturating_sub(1);
+            let ticks = acked.entry(port).or_default();
+            if let Some(&j) = ticks.last()
+                && TICK * (k - j) < PER_FLOW_INTERVAL
+            {
+                m.interval_violations += c;
+            }
+            ticks.push(k);
+        }
+        let acks: usize = per_flow.values().sum();
+        let sec = (TICK * k).as_secs() as usize;
+        if m.acks_per_sec.len() <= sec {
+            m.acks_per_sec.push(0);
+        }
+        m.acks_per_sec[sec] += acks;
+        m.rst_min = m.rst_min.min(rsts);
+        m.echo_max = m.echo_max.max(echos);
+        n.s.check_invariants().unwrap();
+    }
+    m.wall = t0.elapsed();
+    let per = (PER_FLOW_INTERVAL.as_millis() / TICK.as_millis()) as usize;
+    let want: Vec<u32> = (0..MASS_TICKS).step_by(per).collect();
+    m.off_schedule = flows.iter().filter(|p| acked.get(p) != Some(&want)).count();
+    m.cpu_ticks = cpu0.zip(thread_cpu_ticks()).map(|(a, b)| b - a);
+    let after = n.s.stats();
+    m.drops = (
+        after.ctl_dropped - before.ctl_dropped,
+        after.ctl_dropped_tcp - before.ctl_dropped_tcp,
+        after.ctl_dropped_icmp_error - before.ctl_dropped_icmp_error,
+        after.ctl_dropped_echo - before.ctl_dropped_echo,
+    );
+    println!(
+        "mass: {} flows, {MASS_TICKS} ticks of {TICK:?}; ACKs per second {:?}; ring max {} of {}; \
+         RSTs per tick >= {}; echo replies per tick <= {}; drops (total, tcp, icmp_error, echo) {:?}; \
+         interval violations {}; flows off the per-flow schedule {}; amplified {}; timer ACKs {}; loop wall {:?}, thread CPU {:?} clock ticks",
+        flows.len(),
+        m.acks_per_sec,
+        m.ring_max,
+        m.ring_slots,
+        m.rst_min,
+        m.echo_max,
+        m.drops,
+        m.interval_violations,
+        m.off_schedule,
+        m.amplified,
+        m.timer_acks,
+        m.wall,
+        m.cpu_ticks
+    );
+    m
+}
+
+/// 大量の試しの下でも、設計が保証することを確かめます。ACK は受けた segment への返事だけで増えず (刻みの中で
+/// 流れごとに 1 つまで、刻みの外では返さない)、制御の輪は枠の数を超えず、捨てた数は種類ごとに数えて合計に合い、
+/// echo の洪水の下でも RST は echo の上限の外の枠 (`ctl_slots` - `ctl_slots / 4`) を使えます。RST が捨てられない
+/// ことは求めません。測った値は `--nocapture` で表示します。
+#[test]
+fn mass_requests_keep_the_ring_rules_and_never_amplify() {
+    let m = mass_run();
+    assert_eq!(m.amplified, 0, "more ACKs than received segments");
+    assert_eq!(m.timer_acks, 0, "ACK-only segments sent from timers");
+    assert!(
+        m.ring_max <= m.ring_slots,
+        "ring {} of {}",
+        m.ring_max,
+        m.ring_slots
+    );
+    let (total, tcp, icmp_error, echo) = m.drops;
+    assert_eq!(
+        total,
+        tcp + icmp_error + echo,
+        "drops by kind {:?}",
+        m.drops
+    );
+    let echo_cap = (m.ring_slots / 4).max(1);
+    let reserved = m.ring_slots - echo_cap;
+    assert!(
+        m.rst_min >= RSTS_PER_TICK.min(reserved),
+        "only {} RSTs in a tick; the ring promises {reserved} slots outside the echo cap",
+        m.rst_min
+    );
+    assert!(
+        m.echo_max <= echo_cap,
+        "{} echo replies in a tick",
+        m.echo_max
+    );
+}
+
+/// 大量の試しの下でも、1 つの流れは `PER_FLOW_INTERVAL` に ACK を 1 つまでしか返さず、他の流れの数に関わらず
+/// `PER_FLOW_INTERVAL` ごとに必ず 1 つ返します (0、5、10 … 刻み)。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn mass_requests_get_one_ack_per_flow_per_interval() {
+    let m = mass_run();
+    assert_eq!(m.interval_violations, 0, "ACKs inside a flow's interval");
+    assert_eq!(m.off_schedule, 0, "flows not answered once per interval");
+}
+
+/// 被害者の接続が 100 ms ごとに窓の内の RST を受けた時に ACK を返した刻みを返します。`others` なら、同じ刻みに
+/// 第三者の手元のすべても ACK を引こうとします。
+fn victim_ack_ticks(others: bool) -> Vec<u32> {
+    let (mut n, victim, mut eps) = if others {
+        guard_net()
+    } else {
+        let mut n = TestNet::with_seed(guard_limits(), [7; 64]);
+        let l = n.listen(80);
+        let (_, victim) = raw_open(&mut n, l, VICTIM).expect("the victim's connection");
+        (n, victim, Vec::new())
+    };
+    let rst = seg(VICTIM, victim.snd.wrapping_add(1), 0, FLAG_RST, None, b"");
+    let mut got = Vec::new();
+    for k in 0..MASS_TICKS {
+        raw_advance_to(&mut n, tick_at(k));
+        attacker_round(&mut n, &mut eps);
+        if acks_to(&raw(&mut n, &rst), VICTIM) > 0 {
+            got.push(k);
+        }
+    }
+    got
+}
+
+/// 1 つの流れの間隔は、他の流れが 0 でも、2000 を超える流れが同じ刻みに求めていても同じです。100 ms ごとの
+/// 試しで、ACK は 500 ms ごと (5 刻みごと) に返ります。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn one_flows_interval_does_not_depend_on_other_flows() {
+    let per = (PER_FLOW_INTERVAL.as_millis() / TICK.as_millis()) as usize;
+    let want: Vec<u32> = (0..MASS_TICKS).step_by(per).collect();
+    let alone = victim_ack_ticks(false);
+    let crowded = victim_ack_ticks(true);
+    assert_eq!(alone, want, "alone");
+    assert_eq!(crowded, want, "with 2239 other flows");
 }
