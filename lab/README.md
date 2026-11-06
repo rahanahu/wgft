@@ -377,7 +377,10 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus
   agentd は incusbr0 の上の agent の VM のアドレスで待ち、ホストが 2 台に置いた token を持たない要求を断ります
 - 解析:VM ごとの byte あたりの CPU は 2 通りに数えます。
   2 つの腕の判定に使うのは `AGENTVMGUEST` の行 (`AGENTVMGUESTRATIO`) です。
-  agent の VM の vCPU のスレッドがゲストのモードで走った時間 (`host_agent_vcpu_guest_s`) を、受け手が読んだ byte で割った値 (`agentvm_guest_s_per_gb`) の比です。
+  agent の VM の vCPU のスレッドがゲストのモードで走った時間を、受け手が読んだ byte で割った値 (`agentvm_guest_s_per_gb`) の比です。
+  ゲストのモードの時間には、vCPU のスレッドの実行時間 (schedstat) から KVM の時間と qemu のユーザー空間の時間を引いた値 (`host_agent_vcpu_s` - `_kvm_s` - `_qemu_s`) を使います。
+  tick で数えた `host_agent_vcpu_guest_s` は使いません (下の「ゲストのモードの時間の入力」)。
+  KVM の時間と qemu の時間のフィールドが無い古い `paired.log` だけは、tick の値のままです。
   Rust の agent ではプロセスとその NIC のカーネルの仕事、カーネルモードではカーネルの WireGuard の仕事を含みます。
   `AGENTVM` の行はゲストの `/proc/stat` から数えた同じ量 (`agentvm_cpu_s_per_gb`) で、参考の値です。
   `PEERVMGUEST` と `PEERVM` の行は相手の VM の同じ 2 つの値です。
@@ -386,24 +389,42 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus
 - ゲストの `/proc/stat` で判定しない理由:ゲストのカーネルは idle の vCPU で tick を止めます。
   そのため、idle の vCPU で走って idle に戻る割り込みと softirq の時間は、ほとんどが idle に数えられます。
   `--placement apart` の Rust の agent は NIC の割り込みの vCPU (CPU 0) にほかの仕事を置かないので、その vCPU の受信の softirq が数えられません。
-  2 vCPU の送る向きの 4 stream では、CPU 0 の忙しさが `/proc/stat` で 0.11、ゲストの perf の標本で 0.20、ゲストのモードの時間で 0.31 でした (2026-11-06)。
-  2 から 8 vCPU の最大負荷の測定 (2026-11-05) では、ゲストのモードの時間は Rust の agent で `/proc/stat` の 1.11 から 1.35 倍、カーネルモードで 0.95 から 1.22 倍でした。
+  2 vCPU の送る向きの 4 stream では、CPU 0 の忙しさが `/proc/stat` で 0.11、ゲストの perf の標本で 0.20、ゲストのモードの時間 (tick の値) で 0.31 でした (2026-11-06)。
+  2 から 8 vCPU の最大負荷の測定 (2026-11-05) では、ゲストのモードの時間 (tick の値) は Rust の agent で `/proc/stat` の 1.11 から 1.35 倍、カーネルモードで 0.95 から 1.22 倍でした。
   vCPU がほかの仕事で忙しいときは 2 つの値はほぼ一致します。
-  ゲストの perf の標本はゲストのモードの時間より小さく出ます。
+  ゲストの perf の標本は、ゲストのモードの時間 (tick の値) より小さく出ます。
   割り込みを止めた区間の標本が idle の側に数えられるためと考えられます
 - `AGENTVMGUEST` が数えないもの:ゲストのモードの外のホストの費用です。
   vCPU のスレッドのホストのカーネルの時間 (VM exit の処理、割り込みの注入、halt polling。`host_<vm>_vcpu_kvm_s`) と qemu のユーザー空間の時間 (`_vcpu_qemu_s`) を含みません。
   vhost の worker と qemu のほかのスレッド (I/O の処理など。`host_<vm>_vhost_s`、`_other_s`)、vCPU を固定したホストの CPU の irq と softirq (`_vcpucpu_irq_s`)、ホストのブリッジと tap の処理、vCPU が実行を待った時間 (`_vcpu_wait_s`) も含みません。
   これらは `HOSTAGENT` と `HOSTPEER` の行と `host_*` の値で別に見ます。
+  次の 3 つの数 (5 から 11%、約 2.5%、1 から 5%) は、tick の値での測定です。
   ゲストは VM exit とホストの割り込みの時間も自分の忙しさに数えるので、1 vCPU で埋まった VM では `AGENTVMGUEST` が `/proc/stat` より 5 から 11% 小さくなります。
   2 つの腕で同じように小さくなるので、最大負荷の 1 vCPU の 9 組で比の動きは約 2.5% 以内でした (RTT 20 ms の送る向きの 4 stream の 1 組だけ 6%)。
   最大の半分の固定負荷では 1 vCPU にも idle があり、比は 1 から 5% 動きました。
   ゲストが idle の間に自分で polling する設定 (cpuidle の POLL の状態や haltpoll の driver) では、その polling もゲストのモードの時間に入ります。
   今のラボのゲストは `cpuidle_driver=none` で、idle では HLT で止まります (`guestinfo.txt`)。
-  値は clock tick で数えるので、10 秒の窓で約 1% の粒度です。
+  tick の値は clock tick で数えるので、10 秒の窓で約 1% の粒度です。KVM の時間と qemu の時間も同じ粒度です。
   窓の両端はホストの 0.5 秒ごとの標本の間を直線で補うので、10 秒の実行で最大約 2.5% の誤差が入りえます。
   この誤差は 2 つの腕でほぼ打ち消し合います。
-  agent の VM のホストの halt polling を切っても、ゲストのモードの時間は変わりませんでした (2026-11-06、2 vCPU)
+  agent の VM のホストの halt polling を切っても、ゲストのモードの時間 (tick の値) は変わりませんでした (2026-11-06、2 vCPU)
+- ゲストのモードの時間の入力:`AGENTVMGUESTRATIO` と `PEERVMGUESTRATIO` の入力は、run ごとの vCPU のスレッドの実行時間 - KVM の時間 - qemu のユーザー空間の時間です。
+  ホストの `/proc/<pid>/task/<tid>/stat` の guest_time (tick の数) は、idle の多い vCPU で過大に数えることがあり、使いません。
+  2026-11-07 にホストの perf (ref-cycles のゲストの計数、tick に依らない) と、1 vCPU の軽い負荷、2 vCPU の軽い負荷、2 vCPU の最大負荷の 3 つの測定で並べました。各腕 4 run です。
+  agent の VM の rust と kernel の比は、perf の値 1.018、0.985、1.136 に対し、この入力が 1.017、0.967、1.132、tick の値が 0.992、0.888、1.115 でした。
+  この入力の比は 2% 以内、tick の比は最大 10% ずれました。ただし各腕 4 run の点推定で、区間は perf の値でも ±0.02 から ±0.05 あります。
+  絶対値では、この入力は perf より agent の VM で 1 から 7%、相手の VM で 2 から 11% 大きく出ます。この残りは腕で揃いません (2 vCPU の軽い負荷では kernel が 1.045 倍、rust が 1.007 倍)。
+  相手の VM の tick の値は最大 30% ずれました。相手の VM の比は perf と並べていません。
+  ホストの perf に触れられるときの基準の確認は、perf のゲストの計数 (`perf stat -a -A -C <vCPU を固定した CPU> -e ref-cycles:G`) です。実行時間 - KVM の時間 - qemu の時間と並べます
+- tick の値の診断:`AGENTVMGUESTCONSISTENCY` の行は、tick の値の (ゲストのモードの時間 + KVM の時間 + qemu の時間) ÷ vCPU の実行時間が、1 から `GUEST_CONSISTENCY_TOL` (2%、`lab/tcpquality.py`) を超えて外れた run の数、検査した数、1 から最も離れた値 (`worst`)、この入力を使った run の数を腕ごとに出します。
+  診断だけで、組は外しません。
+  2% は判断で、データの切れ目ではありません。分子と分母は同じ補間した窓を使い、最大負荷で食い違いのない測定は ±0.5% に収まります。
+  A+ の 0.25 倍の固定負荷 (2026-11-07、`aplus-v4` の `fixed25-down-s1`) では、両方の腕で外れ、整合の値が最大 1.152 に達しました。
+  一方の腕の外れが 2 以上で、もう一方の 2 倍以上なら、`peer_bound` と同じ規則で `WARN guest_inconsistent` を出します。これも情報です。
+  相手の VM (`PEERVMGUEST`) も同じ入力と同じ診断 (`PEERVMGUESTCONSISTENCY`) です。
+  フィールドの無い run があれば `unchecked=N` を付け、その run は tick の値のままです。
+  フィールドの無い古い log では `AGENTVMGUESTCONSISTENCY unavailable` を出し、tick の値で従来どおり数えます。
+  合否の線と合格の行は変えていません
 - 改訂:2026-11-07 に、VM の byte あたりの CPU の判定を `AGENTVMRATIO` (ゲストの `/proc/stat`) から `AGENTVMGUESTRATIO` に替えました。
   合否の線は変えていません。
   `host_agent_vcpu_guest_s` を記録した前の測定は、今の `tcpquality.py cpupaired` で `paired.log` を解析し直すと両方の行が出ます
