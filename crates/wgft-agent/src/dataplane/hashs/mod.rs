@@ -1,16 +1,18 @@
 //! Hash S:hash だけで区画を決める並列のデータプレーン (試作。製品に入れない)。
 //!
-//! 設計は notes の independent-exploration.md の 6.8 節と common-design.md で、この module はその最小の試作 (E2a)
-//! である。
+//! 設計は notes の independent-exploration.md の 6.8 節、common-design.md、audit-whole.md (所有者の決定 2026-11-06:
+//! 役割を分けた Hash S) で、この module はその最小の試作である。
 //!
-//! - スレッド:区画の数 P = min(使える CPU, 8)。front のスレッドが区画 0 を実行し、区画 1 から P - 1 はそれぞれ
-//!   自分のスレッドと tokio の current-thread の実行環境で今の核と中継を動かす。P = 1 は今の Inline の駆動である
-//! - front:外側のソケットを読み、復号し、replay の窓を確定し、内側の packet を R0 の鍵 ([`steer`]) で区画に振る。
-//!   UDP、ICMP、解釈できない packet は区画 0 で処理する。WireGuard の device とその timer を 1 人で持つ
+//! - スレッド:区画の数 P = min(使える CPU, 8)、Linux でバッチが有効な時だけ。front のスレッドが区画 0 を実行し、
+//!   区画 1 から P - 1 はそれぞれ自分のスレッドと tokio の current-thread の実行環境で今の核と中継を動かす。P = 1
+//!   は今の Inline の駆動である。Windows と macOS は P = 1
+//! - front:外側のソケットを読み、復号し、replay の窓を確定し、WireGuard の device とその timer と番号の在庫を
+//!   1 人で持つ。区画 0 の核で UDP、ICMP、再組み立て、解釈できない packet を処理し、TCP を持たない。TCP は R0 の鍵
+//!   ([`steer`]) で区画 1 から P - 1 に振る
 //! - 番号の在庫:front は区画に渡すデータに相乗りで在庫を付け、区画が求めた時に需要の数だけ補充する。予約の
 //!   たびにトンネルの今の予約の番号を公開し、区画は暗号化の前と `sendmmsg` の直前に遅れを確かめる
-//! - 区画:受けたバッチを核に渡し、核の出力を在庫で暗号化して、複製したソケットから `sendmmsg` で送る。UDP が
-//!   直近 100 ms に働いていれば、1 回の送りの byte を B / (P - 1) までにする
+//! - 区画:受けたバッチを核に渡し、核の出力を在庫で暗号化して、複製したソケットから `sendmmsg` で送る。boost の
+//!   枠は区画に割り当てた枠の中だけで貸し、区画をまたいで回収しない
 //! - 複数のトンネル (6.8.10):device、ソケット、在庫、公開の番号はトンネルの番号で引く。今は N = 1 である
 
 pub(crate) mod front;
@@ -47,8 +49,6 @@ pub(crate) const LAG_LIMIT: u64 = 4064;
 pub(crate) const STOCK_MAX_AGE: Duration = Duration::from_millis(100);
 /// データに相乗りで付ける在庫の上限。
 pub(crate) const PIGGYBACK_MAX: usize = 8;
-/// UDP が働いているとみなす時間。区画 0 が直近にこの時間の内に UDP を送るか受けた。
-pub(crate) const UDP_ACTIVE: Duration = Duration::from_millis(100);
 /// 区画ごとのバッチの数。front から区画への輪と、戻りの輪の容量。
 pub(crate) const LANE_BATCHES: usize = 8;
 /// バッチ 1 つの packet の byte。
@@ -83,22 +83,6 @@ pub(crate) fn part_count(batched: bool) -> usize {
     std::thread::available_parallelism()
         .map_or(1, std::num::NonZero::get)
         .clamp(1, MAX_PARTS)
-}
-
-/// E2a' の比べの腕 (区画 0 に TCP を置かない) を選ぶか。ラボと試験の build だけが `WGFT_LAB_HASHS_TCP0=0` (実行の時の値か
-/// build の時の値) で選べる。製品の build は常に E2a (区画 0 にも TCP を振る)。
-pub(crate) fn no_tcp_on_zero() -> bool {
-    #[cfg(any(test, feature = "lab-observe"))]
-    {
-        std::env::var("WGFT_LAB_HASHS_TCP0")
-            .ok()
-            .or_else(|| option_env!("WGFT_LAB_HASHS_TCP0").map(str::to_owned))
-            .is_some_and(|v| v == "0")
-    }
-    #[cfg(not(any(test, feature = "lab-observe")))]
-    {
-        false
-    }
 }
 
 /// 区画 1 つが起動の時に確保する byte のうち、バッチの置き場の外のもの:front との受け渡しのバッチ、在庫の置き場、
@@ -297,15 +281,13 @@ pub(crate) struct Counts {
     pub(crate) requests: AtomicU64,
     /// 区画が送った datagram。
     pub(crate) part_sent: AtomicU64,
-    /// UDP が働いている間の上限で短くした区画の送り。
-    pub(crate) udp_capped: AtomicU64,
 }
 
 impl Counts {
     pub(crate) fn line(&self) -> String {
         let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
         format!(
-            "hash-s: lane_drops={} tcp_fragments={} lag_drops={} lag_reseals={} age_drops={} eagain_drops={} overflow_drops={} piggybacked={} refilled={} requests={} part_sent={} udp_capped={}",
+            "hash-s: lane_drops={} tcp_fragments={} lag_drops={} lag_reseals={} age_drops={} eagain_drops={} overflow_drops={} piggybacked={} refilled={} requests={} part_sent={}",
             g(&self.lane_drops),
             g(&self.tcp_fragments),
             g(&self.lag_drops),
@@ -317,7 +299,6 @@ impl Counts {
             g(&self.refilled),
             g(&self.requests),
             g(&self.part_sent),
-            g(&self.udp_capped),
         )
     }
 }
@@ -329,20 +310,15 @@ pub(crate) struct Hub {
     pub(crate) tunnels: Box<[TunnelShared]>,
     /// 区画ごとの輪。番号 0 は使わない (区画 0 は front が実行する)。
     pub(crate) links: Box<[Link]>,
-    /// front の起こしの知らせ (在庫の求め、枠が欲しい、世代の終わり)。
+    /// front の起こしの知らせ (在庫の求め、世代の終わり)。
     pub(crate) front_bell: Bell,
     /// どれかのスレッドが終わった。全員が終わる。
     pub(crate) ending: Ending,
-    /// 区画 0 が最後に UDP を送るか受けた時刻 (`epoch` からの ns)。
-    pub(crate) last_udp: AtomicU64,
-    pub(crate) epoch: Instant,
-    /// 1 回の送りの byte の上限 B (Inline の 1 バッチ)。UDP が働いている間、区画は B / (P - 1) までにする。
-    pub(crate) batch_cap: usize,
     pub(crate) counts: Counts,
 }
 
 impl Hub {
-    pub(crate) fn new(parts: usize, tunnels: usize, batch_cap: usize, epoch: Instant) -> Self {
+    pub(crate) fn new(parts: usize, tunnels: usize) -> Self {
         Self {
             tunnels: (0..tunnels)
                 .map(|_| TunnelShared {
@@ -352,9 +328,6 @@ impl Hub {
             links: (0..parts).map(|_| Link::new()).collect(),
             front_bell: Bell::default(),
             ending: Ending::default(),
-            last_udp: AtomicU64::new(0),
-            epoch,
-            batch_cap,
             counts: Counts::default(),
         }
     }
@@ -372,44 +345,6 @@ impl Hub {
 
     pub(crate) fn is_ending(&self) -> bool {
         self.ending.is_ended()
-    }
-
-    /// 区画 0 が UDP を送るか受けた。
-    pub(crate) fn note_udp(&self, now: Instant) {
-        let ns = u64::try_from(now.saturating_duration_since(self.epoch).as_nanos()).unwrap_or(0);
-        self.last_udp.store(ns.max(1), Ordering::Relaxed);
-    }
-
-    /// UDP が直近 [`UDP_ACTIVE`] の内に働いたか。
-    pub(crate) fn udp_active(&self, now: Instant) -> bool {
-        let last = self.last_udp.load(Ordering::Relaxed);
-        if last == 0 {
-            return false;
-        }
-        let now = u64::try_from(now.saturating_duration_since(self.epoch).as_nanos()).unwrap_or(0);
-        now.saturating_sub(last) < u64::try_from(UDP_ACTIVE.as_nanos()).unwrap_or(u64::MAX)
-    }
-
-    /// 区画 1 つの 1 回の送りの byte の上限。UDP が働いていなければ上限なし。
-    pub(crate) fn send_cap(&self, now: Instant) -> usize {
-        if self.parts() > 1 && self.udp_active(now) {
-            self.counts.udp_capped.fetch_add(1, Ordering::Relaxed);
-            (self.batch_cap / (self.parts() - 1)).max(1)
-        } else {
-            usize::MAX
-        }
-    }
-
-    /// 区画 `except` 以外の全員を起こす (枠が欲しい)。
-    pub(crate) fn ring_others(&self, except: usize) {
-        if except != 0 {
-            self.front_bell.ring();
-        }
-        for (k, l) in self.links.iter().enumerate().skip(1) {
-            if k != except {
-                l.bell.ring();
-            }
-        }
     }
 
     /// 在庫 `it` が使えるか:遅れが [`LAG_LIMIT`] 以下で、予約から [`STOCK_MAX_AGE`] 以内。

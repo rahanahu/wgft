@@ -50,12 +50,6 @@ pub trait Hook {
 
     /// 接続を floor に戻した後に呼びます。
     fn boost_returned(&mut self, _conn: ConnId) {}
-
-    /// Hash S の区画が分け合う boost の枠の集まりです (試作)。区画の核 ([`crate::BoostPool::view`] の `Budget`
-    /// を持つ核) だけが使います。既定は `None` で、1 つの核は自分の `Budget` の枠だけを使います。
-    fn boost_pool(&self) -> Option<&crate::BoostPool> {
-        None
-    }
 }
 
 // 凍結した Go の記録との照合のためだけに、RTO の後の slow start を Go と同じ L = 2 に戻す切り替えです。feature `harness`

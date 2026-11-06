@@ -73,22 +73,6 @@ pub trait Upper: 'static {
 
     /// Closes everything and returns the budget for the next generation.
     fn close(self, now: Instant) -> Self::Budget;
-
-    /// Hash S prototype: when another partition wants a boost slot, returns this partition's
-    /// idle holders' slots to the shared pool and the number returned. A layer without a shared
-    /// pool returns 0.
-    fn release_wanted(&mut self, _now: Instant) -> usize {
-        0
-    }
-
-    /// Hash S prototype: whether this layer raised the slot-wanted flag since the last call, so
-    /// that the driver wakes the other partitions.
-    fn take_boost_wanted(&mut self) -> bool {
-        false
-    }
-
-    /// Hash S prototype: returns the boost slots this layer freed to the shared pool.
-    fn sync_boost(&mut self) {}
 }
 
 /// What the data plane passes to the factory of the layer above, on the data plane thread.

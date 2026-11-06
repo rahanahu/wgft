@@ -570,8 +570,11 @@ mod tests {
         let port = 8080u16;
         let addr = std::net::SocketAddrV4::new(AGENT_IP, port);
         let (taken, held) = tokio::sync::oneshot::channel::<()>();
+        // Hash S の試作:TCP の待ち受けは TCP の区画にあるので、区画 1 (P = 1 では区画 0) の核で取る
+        let k = usize::from(peer.agent().partitions() > 1);
         peer.agent()
-            .call(move |net| {
+            .handle()
+            .call_on(k, move |net| {
                 let l = wgft_netstack::TcpListener::bind(net, addr).unwrap();
                 tokio::task::spawn_local(async move {
                     let _ = held.await;

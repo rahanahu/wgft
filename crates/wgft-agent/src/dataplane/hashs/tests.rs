@@ -11,7 +11,7 @@
 //! - WireGuard の timer (I8):相乗りの在庫が使われずに捨てられても、相手が黙った後のハンドシェイクの時機が Inline
 //!   と同じ
 //!
-//! boost の飢えの試験は核の crate (`wgft-wgstack` の `hashs_tests.rs`)、loom の模型は `wgft-hashs-sync` にある。
+//! boost の枠を区画に割り当てる試験は核の crate (`wgft-wgstack` の `hashs_tests.rs`)、loom の模型は `wgft-hashs-sync` にある。
 #![expect(clippy::cast_possible_truncation, reason = "test packets")]
 
 use std::cell::{Cell, RefCell};
@@ -21,9 +21,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use wgft_wgstack::{
-    BoostPolicy, BoostPool, Budget, Config, Limits, NoHook, Partition, Stack, Time,
-};
+use wgft_wgstack::{BoostPolicy, Budget, Config, Limits, NoHook, Partition, Stack, Time};
 use wgft_wireguard::DropReason;
 
 use super::super::batch::{TxBatch, tx_store};
@@ -47,11 +45,11 @@ const ACK: u8 = 0x10;
 
 fn checksum(data: &[u8], init: u32) -> u16 {
     let mut sum = init;
-    let mut chunks = data.chunks_exact(2);
-    for c in &mut chunks {
-        sum += u32::from(u16::from_be_bytes([c[0], c[1]]));
+    let (pairs, rest) = data.as_chunks::<2>();
+    for c in pairs {
+        sum += u32::from(u16::from_be_bytes(*c));
     }
-    if let [last] = chunks.remainder() {
+    if let [last] = rest {
         sum += u32::from(*last) << 8;
     }
     while sum > 0xffff {
@@ -76,7 +74,6 @@ fn ipv4(src: Ipv4Addr, dst: Ipv4Addr, proto: u8, frag: u16, body: &[u8]) -> Vec<
     p
 }
 
-#[expect(clippy::too_many_arguments, reason = "the fields of a segment")]
 fn tcp(
     src: SocketAddrV4,
     dst: SocketAddrV4,
@@ -123,37 +120,34 @@ fn icmp(src: Ipv4Addr, dst: Ipv4Addr, ty: u8, code: u8, quoted: &[u8]) -> Vec<u8
 }
 
 #[test]
-fn the_no_tcp_on_zero_arm_keeps_tcp_off_partition_0() {
-    let steer = Steer::new(4, AGENT).without_tcp_on_zero();
-    let mut used = [0usize; 4];
-    for i in 0..3000u32 {
-        let remote = SocketAddrV4::new(Ipv4Addr::from(0x0a00_0000 + i * 31), 1024 + i as u16);
-        let local = SocketAddrV4::new(AGENT, 80);
-        let Route::Part(k) = steer.inbound(0, &tcp(remote, local, i, 0, SYN, &[])) else {
-            panic!("routed");
-        };
-        used[k] += 1;
-        assert_eq!(steer.outbound(0, &tcp(local, remote, 1, i, ACK, &[])), k);
-        assert_eq!(steer.inbound(0, &udp(remote, local, 0)), Route::Part(0));
+fn the_front_runs_no_tcp_at_any_p() {
+    for parts in [2, 3, 4, 8] {
+        let steer = Steer::new(parts, AGENT);
+        let mut used = vec![0usize; parts];
+        for i in 0..2000u32 {
+            let remote = SocketAddrV4::new(Ipv4Addr::from(0x0a00_0000 + i * 31), 1024 + i as u16);
+            let local = SocketAddrV4::new(AGENT, 80);
+            let Route::Part(k) = steer.inbound(0, &tcp(remote, local, i, 0, SYN, &[])) else {
+                panic!("routed");
+            };
+            used[k] += 1;
+            assert_eq!(steer.outbound(0, &tcp(local, remote, 1, i, ACK, &[])), k);
+        }
+        assert_eq!(used[0], 0, "P = {parts}: no TCP on the front");
+        let fair = 2000 / (parts - 1);
+        assert!(
+            used[1..].iter().all(|&n| n > fair / 2),
+            "P = {parts}: {used:?}"
+        );
     }
-    assert_eq!(used[0], 0);
-    assert!(used[1..].iter().all(|&n| n > 800), "{used:?}");
-    // P = 2 では外さない (TCP の区画が 1 つになる)
-    let two = Steer::new(2, AGENT).without_tcp_on_zero();
-    let zero = (0..200u16).any(|p| {
-        two.inbound(
-            0,
-            &tcp(
-                SocketAddrV4::new(REMOTE, 2000 + p),
-                SocketAddrV4::new(AGENT, 80),
-                0,
-                0,
-                SYN,
-                &[],
-            ),
-        ) == Route::Part(0)
-    });
-    assert!(zero);
+    // P = 1 は Inline:何も振らない
+    let one = Steer::new(1, AGENT);
+    let remote = SocketAddrV4::new(REMOTE, 4000);
+    let local = SocketAddrV4::new(AGENT, 80);
+    assert_eq!(
+        one.inbound(0, &tcp(remote, local, 0, 0, SYN, &[])),
+        Route::Part(0)
+    );
 }
 
 #[test]
@@ -210,8 +204,9 @@ fn both_directions_of_every_flow_reach_the_same_partition() {
             Route::Part(0)
         );
     }
+    assert_eq!(used[0], 0, "the front runs no TCP");
     assert!(
-        used.iter().all(|&n| n > 800),
+        used[1..].iter().all(|&n| n > 1000),
         "the hash spreads the flows: {used:?}"
     );
     let remote = SocketAddrV4::new(REMOTE, 40000);
@@ -253,14 +248,12 @@ fn both_directions_of_every_flow_reach_the_same_partition() {
 /// 区画の核 `parts` 個と振り分け。packet を区画に渡し、どの区画が何を答えたかを集める。
 struct Cores {
     steer: Steer,
-    cores: Vec<Stack<NoHook>>,
+    parts: Vec<Stack<NoHook>>,
     now: Time,
-    _pool: Arc<BoostPool>,
 }
 
 impl Cores {
     fn new(parts: usize) -> Self {
-        let pool = Arc::new(BoostPool::new(Budget::new().unwrap()).unwrap());
         let limits = Limits {
             max_flows: 64,
             accept_queue: 16,
@@ -269,7 +262,7 @@ impl Cores {
             ctl_slots: 32,
             ..Limits::default()
         };
-        let cores = (0..parts)
+        let cores: Vec<_> = (0..parts)
             .map(|k| {
                 let config = Config {
                     limits: crate::dataplane::stack::part_limits(limits, k, parts),
@@ -281,14 +274,13 @@ impl Cores {
                     }),
                     ..Config::new(AGENT, 1420)
                 };
-                Stack::new(config, pool.view().unwrap(), &[k as u8 + 1; 64], NoHook).unwrap()
+                Stack::new(config, Budget::empty().unwrap(), &[k as u8 + 1; 64], NoHook).unwrap()
             })
             .collect();
         Self {
             steer: Steer::new(parts, AGENT),
-            cores,
+            parts: cores,
             now: Time::ZERO,
-            _pool: pool,
         }
     }
 
@@ -297,7 +289,7 @@ impl Cores {
         let Route::Part(k) = self.steer.inbound(0, p) else {
             panic!("not routed");
         };
-        self.cores[k].handle_packet(self.now, p);
+        self.parts[k].handle_packet(self.now, p);
         k
     }
 
@@ -305,7 +297,7 @@ impl Cores {
     fn outputs(&mut self) -> Vec<(usize, Vec<u8>)> {
         let mut out = Vec::new();
         let mut buf = vec![0u8; 2048];
-        for (k, c) in self.cores.iter_mut().enumerate() {
+        for (k, c) in self.parts.iter_mut().enumerate() {
             while let Some(n) = c.poll_transmit(self.now, &mut buf) {
                 let p = buf[..n].to_vec();
                 assert_eq!(
@@ -322,7 +314,7 @@ impl Cores {
 
     fn advance(&mut self, d: Duration) {
         self.now = self.now + d;
-        for c in &mut self.cores {
+        for c in &mut self.parts {
             c.handle_timeout(self.now);
         }
     }
@@ -340,9 +332,12 @@ fn flags_of(p: &[u8]) -> u8 {
 fn a_flow_lives_and_ends_inside_its_partition() {
     let parts = 4;
     let mut n = Cores::new(parts);
-    let mut ls = Vec::new();
-    for c in &mut n.cores {
-        ls.push(c.listen_tcp(n.now, SocketAddrV4::new(AGENT, 80)).unwrap());
+    // TCP の待ち受けは TCP の区画 1 から P - 1 だけで開く (製品の中継と同じ)
+    let mut ls = vec![None];
+    for c in n.parts.iter_mut().skip(1) {
+        ls.push(Some(
+            c.listen_tcp(n.now, SocketAddrV4::new(AGENT, 80)).unwrap(),
+        ));
     }
     let local = SocketAddrV4::new(AGENT, 80);
     // 各区画に当たる相手のポートを 1 つずつ探す
@@ -353,8 +348,9 @@ fn a_flow_lives_and_ends_inside_its_partition() {
             flows[k].get_or_insert(remote);
         }
     }
-    for (k, remote) in flows.into_iter().enumerate() {
-        let remote = remote.expect("a port for every partition");
+    assert!(flows[0].is_none(), "no TCP flow is steered to the front");
+    for (k, remote) in flows.into_iter().enumerate().skip(1) {
+        let remote = remote.expect("a port for every TCP partition");
         // 握手:SYN、SYN-ACK、最後の ACK。accept は区画 k だけで成功する
         assert_eq!(n.deliver(&tcp(remote, local, 1000, 0, SYN, &[])), k);
         let out = n.outputs();
@@ -363,10 +359,13 @@ fn a_flow_lives_and_ends_inside_its_partition() {
         assert_eq!(flags_of(&out[0].1), SYN | ACK);
         let iss = seq_of(&out[0].1);
         n.deliver(&tcp(remote, local, 1001, iss + 1, ACK, &[]));
-        assert!(n.outputs().is_empty());
+        assert_eq!(n.outputs().len(), 0);
         let mut accepted = None;
-        for (j, c) in n.cores.iter_mut().enumerate() {
-            match c.accept(n.now, ls[j]) {
+        for (j, c) in n.parts.iter_mut().enumerate() {
+            let Some(l) = ls[j] else {
+                continue;
+            };
+            match c.accept(n.now, l) {
                 Ok((id, from)) => {
                     assert_eq!(j, k, "only the partition that got the SYN accepts");
                     assert_eq!(from, remote);
@@ -379,8 +378,8 @@ fn a_flow_lives_and_ends_inside_its_partition() {
         // データ、agent の側からの close、相手の FIN。TIME_WAIT は区画 k に残る
         n.deliver(&tcp(remote, local, 1001, iss + 1, ACK, b"hello"));
         let mut b = [0u8; 16];
-        assert_eq!(n.cores[k].read(n.now, id, &mut b).unwrap(), 5);
-        n.cores[k].close_conn(n.now, id);
+        assert_eq!(n.parts[k].read(n.now, id, &mut b).unwrap(), 5);
+        n.parts[k].close_conn(n.now, id);
         n.advance(Duration::from_millis(250));
         let out = n.outputs();
         assert!(out.iter().all(|(j, _)| *j == k));
@@ -409,7 +408,7 @@ fn a_flow_lives_and_ends_inside_its_partition() {
         let _ = n.outputs();
         // RST も区画 k に着き、握手の途中の行を消す
         assert_eq!(n.deliver(&tcp(remote, local, 90_001, 0, RST, &[])), k);
-        assert!(n.outputs().is_empty());
+        assert_eq!(n.outputs().len(), 0);
     }
     // UDP は区画 0 だけが受ける
     assert_eq!(
@@ -463,7 +462,7 @@ impl Lanes {
     fn new(parts: usize) -> Self {
         let mut t = Bench::new(0);
         t.connected();
-        let hub = Arc::new(Hub::new(parts, 1, 64 * 1452, clock::now()));
+        let hub = Arc::new(Hub::new(parts, 1));
         let front = Front::new(Arc::clone(&hub), Steer::new(parts, AGENT_IP), t.b_pub);
         Self { t, front, hub }
     }
@@ -484,7 +483,7 @@ impl Lanes {
     }
 
     /// 相手 (B) に datagram を渡し、受けた packet の数を返す。
-    fn to_server(&mut self, datagrams: &[Vec<u8>]) -> usize {
+    fn deliver_to_server(&mut self, datagrams: &[Vec<u8>]) -> usize {
         let now = clock::now();
         let mut plain = vec![0u8; usize::from(u16::MAX)];
         let mut got = 0;
@@ -513,7 +512,7 @@ impl Lanes {
             sent.push(out[..len].to_vec());
         }
         self.front.publish();
-        assert_eq!(self.to_server(&sent), n);
+        assert_eq!(self.deliver_to_server(&sent), n);
     }
 
     fn replayed(&self) -> u64 {
@@ -544,7 +543,7 @@ fn a_stalled_partition_drops_lagging_stock_and_the_peer_replays_nothing() {
     let now = clock::now();
     let (pulled, state) = local1.with(|s| p1.send_batch(s, &mut sink, now, 64));
     assert_eq!((pulled, state), (10, PartSent::Starved));
-    assert!(sink.sent.is_empty());
+    assert_eq!(sink.sent.len(), 0);
     assert_eq!(
         l.hub
             .counts
@@ -559,7 +558,7 @@ fn a_stalled_partition_drops_lagging_stock_and_the_peer_replays_nothing() {
     assert_eq!(state, PartSent::Idle);
     assert_eq!(sink.sent.len(), 10);
     let sent = std::mem::take(&mut sink.sent);
-    assert_eq!(l.to_server(&sent), 10);
+    assert_eq!(l.deliver_to_server(&sent), 10);
     assert_eq!(l.replayed(), 0, "the peer's replay window dropped nothing");
 }
 
@@ -572,7 +571,7 @@ fn the_test_detects_a_lagging_counter() {
     l.front_sends(9000);
     let mut out = vec![0u8; l.t.a.max_transmit_len()];
     let len = stale.seal.seal(&tcp_packet(1, 100), &mut out).unwrap();
-    assert_eq!(l.to_server(&[out[..len].to_vec()]), 0);
+    assert_eq!(l.deliver_to_server(&[out[..len].to_vec()]), 0);
     assert_eq!(l.replayed(), 1);
 }
 
@@ -599,7 +598,7 @@ fn another_partition_sending_makes_the_stalled_one_drop_its_stock() {
         }
         let sent = std::mem::take(&mut sink2.sent);
         total += sent.len();
-        assert_eq!(l.to_server(&sent), sent.len());
+        assert_eq!(l.deliver_to_server(&sent), sent.len());
     }
     stub_out(&local1, 5);
     let mut sink1 = PartRecorder::default();
@@ -611,7 +610,7 @@ fn another_partition_sending_makes_the_stalled_one_drop_its_stock() {
     let now = clock::now();
     local1.with(|s| p1.send_batch(s, &mut sink1, now, 64));
     let sent = std::mem::take(&mut sink1.sent);
-    assert_eq!(l.to_server(&sent), 5);
+    assert_eq!(l.deliver_to_server(&sent), 5);
     assert_eq!(l.replayed(), 0);
 }
 
@@ -646,7 +645,7 @@ fn would_block_drops_the_unsent_stock_and_reseals_after() {
     assert_eq!(state, PartSent::Idle);
     let sent = std::mem::take(&mut sink.sent);
     assert_eq!(sent.len(), 8);
-    assert_eq!(l.to_server(&sent), 8, "every packet arrives once");
+    assert_eq!(l.deliver_to_server(&sent), 8, "every packet arrives once");
     assert_eq!(l.replayed(), 0);
 }
 
@@ -688,7 +687,7 @@ fn the_check_before_sendmmsg_reseals_lagging_datagrams() {
         p1.flush_for_test(&mut sink, clock::now()),
         Err(PartSent::Starved)
     );
-    assert!(sink.sent.is_empty(), "nothing lagging went out");
+    assert_eq!(sink.sent.len(), 0, "nothing lagging went out");
     assert_eq!(
         l.hub
             .counts
@@ -703,7 +702,7 @@ fn the_check_before_sendmmsg_reseals_lagging_datagrams() {
     local1.with(|s| p1.send_batch(s, &mut sink, now, 64));
     let sent = std::mem::take(&mut sink.sent);
     assert_eq!(sent.len(), 4);
-    assert_eq!(l.to_server(&sent), 4);
+    assert_eq!(l.deliver_to_server(&sent), 4);
     assert_eq!(l.replayed(), 0);
 }
 

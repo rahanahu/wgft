@@ -3,13 +3,12 @@
 //! 1 回の起床:
 //!
 //! 1. front から受けたバッチの packet を核に渡し、添えられた在庫を自分の在庫に足し、空にしたバッチを返す
-//! 2. 時刻の来た timer を回し、ほかの区画が boost の枠を欲しがっていれば需要の無い保有者の枠を返す
+//! 2. 時刻の来た timer を回す
 //! 3. 送信の相:核から packet を引き、在庫で暗号化し、複製したソケットから `sendmmsg` で送る。在庫が足りなければ
 //!    平文を送信の枠に残して front に求め、届いてから暗号化する。暗号化の前と `sendmmsg` の直前に遅れを確かめ、
 //!    上限を超えた在庫を捨てて暗号化し直す。`EAGAIN` で送れなかった datagram の在庫は捨て、書けるようになったら
-//!    新しい在庫で暗号化し直す。予約から送るまでに `.await` を置かない。UDP が働いている間は 1 回の送りの byte を
-//!    B / (P - 1) までにする
-//! 4. 起床の終わりに waker を起こし、ログを出し、boost の枠を返す
+//!    新しい在庫で暗号化し直す。予約から送るまでに `.await` を置かない。
+//! 4. 起床の終わりに waker を起こし、ログを出す
 //!
 //! 区画のソケットは front のソケットの複製で、書けることだけを待つ (読める知らせで全区画が起きないため)。
 
@@ -280,10 +279,10 @@ impl PartSend {
             return (0, PartSent::Blocked);
         }
         // 在庫を待つ平文があれば先に暗号化して送る
-        if let Some((p0, s0)) = self.reseal_from {
-            if !self.seal(p0, s0, now) {
-                return (0, PartSent::Starved);
-            }
+        if let Some((p0, s0)) = self.reseal_from
+            && !self.seal(p0, s0, now)
+        {
+            return (0, PartSent::Starved);
         }
         if self.tx.is_pending() {
             match self.flush(sink, now) {
@@ -291,17 +290,14 @@ impl PartSend {
                 Err(s) => return (0, s),
             }
         }
-        let cap = self.hub.send_cap(now);
         let vlen = vlen.clamp(1, self.tx.slots());
         let mut pulled = 0;
-        let mut bytes = 0;
-        while pulled < vlen && bytes < cap {
+        while pulled < vlen {
             let Some(len) = upper.poll_transmit(now, self.tx.packet_slot(pulled)) else {
                 break;
             };
             self.tx.set_len(pulled, len);
             pulled += 1;
-            bytes += len;
         }
         if pulled == 0 {
             return (0, PartSent::Idle);
@@ -411,7 +407,6 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
             if upper.poll_timeout().is_some_and(|t| t <= now) {
                 upper.handle_timeout(now);
             }
-            upper.release_wanted(now);
             let mut done = 0;
             loop {
                 let vlen = pace.units(BATCH_TIME, send.tx.slots());
@@ -429,10 +424,6 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
                 }
             }
             let _ = done;
-            if upper.take_boost_wanted() {
-                hub.ring_others(k);
-            }
-            upper.sync_boost();
             upper.poll_wakers(&mut wakers);
             while let Some(line) = upper.poll_log() {
                 crate::logf!("{line}");

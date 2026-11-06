@@ -9,7 +9,7 @@
 //! - 在庫の求めに応える:区画が求めた数だけ予約し、輪で渡して起こす。セッションが無ければハンドシェイクを始める
 //! - 送信の相:区画 0 の核の出力を Inline と同じく device で暗号化して送る。予約の通し番号を引いた packet の数だけ
 //!   進め (1 つの packet は高々 1 つの番号を使う)、相の終わりに公開する
-//! - 起床の終わり:Inline の仕事に加え、boost の枠の「枠が欲しい」を見て枠を返し、自分が立てたらほかを起こす
+//! - 起床の終わり:Inline と同じ (device の event、waker、ログ、timer)
 
 use std::io;
 use std::net::SocketAddr;
@@ -23,10 +23,10 @@ use tokio::sync::mpsc;
 use wgft_wireguard::{Device, Event, PublicKey};
 
 use super::super::batch::{BATCH_TIME, Pace, RxBatch, WAKE_BUDGET, each_packet, rx_store};
-use super::super::driver::{Io, ONE_SLOT_CAP, Outbox, Rest, Sent, Sink, Source, decrypt, earliest};
-use super::super::{
-    Command, Local, Settings, SocketBuffers, Status, Upper, clock, duration_to_nanos,
+use super::super::driver::{
+    Io, ONE_SLOT_CAP, Outbox, Rest, Sent, Sink, Source, decrypt, finish_wake,
 };
+use super::super::{Command, Local, Settings, SocketBuffers, Status, Upper, clock};
 use super::steer::{Route, Steer};
 use super::{Batch, Hub, Item, PIGGYBACK_MAX};
 
@@ -87,13 +87,11 @@ impl Front {
     pub(crate) fn stage(&mut self, k: usize, p: &[u8], device: &mut Device, now: Instant) {
         loop {
             if self.cur[k].is_none() {
-                match self.hub.links[k].to_front.pop() {
-                    Some(b) => self.cur[k] = Some(b),
-                    None => {
-                        self.hub.counts.lane_drops.fetch_add(1, Ordering::Relaxed);
-                        return;
-                    }
-                }
+                let Some(b) = self.hub.links[k].to_front.pop() else {
+                    self.hub.counts.lane_drops.fetch_add(1, Ordering::Relaxed);
+                    return;
+                };
+                self.cur[k] = Some(b);
             }
             let Some(b) = self.cur[k].as_mut() else {
                 return;
@@ -248,9 +246,6 @@ async fn receive_batch<U: Upper>(
         let (udp, others) = each_packet(&rx.plain[..end], true, |p| upper.handle_packet(now, p));
         (end, udp, others)
     };
-    if udp > 0 {
-        front.hub.note_udp(now);
-    }
     if others == 0 {
         return Ok((n, Duration::ZERO));
     }
@@ -313,17 +308,12 @@ fn send_batch<U: Upper>(
     let tx = &mut outbox.tx;
     let vlen = vlen.clamp(1, tx.slots());
     let mut pulled = 0;
-    let mut udp = false;
     while pulled < vlen {
         let Some(len) = upper.poll_transmit(now, tx.packet_slot(pulled)) else {
             break;
         };
         tx.set_len(pulled, len);
-        udp |= tx.is_udp_slot(pulled);
         pulled += 1;
-    }
-    if udp {
-        front.hub.note_udp(now);
     }
     front.used(pulled);
     for udp in [true, false] {
@@ -404,37 +394,6 @@ fn spent(start: Instant, timed: bool, now: Instant, done: usize) -> bool {
     }
 }
 
-/// 起床の終わり (Inline の `finish_wake` に boost の枠の受け渡しを足したもの)。
-fn finish_wake<U: Upper>(
-    local: &Local<U>,
-    device: &mut Device,
-    hub: &Hub,
-    events: &mpsc::Sender<Event>,
-    high_water: &AtomicU64,
-    wakers: &mut Vec<Waker>,
-    now: Instant,
-) -> Option<Instant> {
-    let mut guard = local.0.borrow();
-    let upper = &mut *guard;
-    while let Some(event) = device.poll_event() {
-        let _ = events.try_send(event);
-    }
-    upper.release_wanted(now);
-    if upper.take_boost_wanted() {
-        hub.ring_others(0);
-    }
-    upper.sync_boost();
-    upper.poll_wakers(wakers);
-    while let Some(line) = upper.poll_log() {
-        crate::logf!("{line}");
-    }
-    high_water.store(
-        duration_to_nanos(device.unix_high_water()),
-        Ordering::Relaxed,
-    );
-    earliest(device.poll_timeout(), upper.poll_timeout())
-}
-
 /// front の駆動の task。Inline の `drive` と同じく、止める命令で最後の送り出しに要るものを返す。
 #[expect(
     clippy::too_many_arguments,
@@ -477,7 +436,7 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
                 "a partition thread of this tunnel generation ended",
             ));
         }
-        // 知らせの回数は起床の始めに読む。この起床の間に区画が求めや「枠が欲しい」で起こせば、眠らずに続ける
+        // 知らせの回数は起床の始めに読む。この起床の間に区画が在庫を求めて起こせば、眠らずに続ける
         let seen = hub.front_bell.prepare();
         let start = clock::now();
         let mut now = start;
@@ -530,7 +489,7 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
         );
         front.publish();
         let more = rx_more || tx_more;
-        let deadline = finish_wake(&local, device, &hub, &events, high_water, &mut wakers, now);
+        let deadline = finish_wake(&local, device, &events, high_water, &mut wakers);
         for waker in wakers.drain(..) {
             waker.wake();
         }
@@ -576,6 +535,6 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
     }
     front.collect_sent(device);
     let gso = io.gso;
-    drop(io);
+    let _ = io;
     Ok(Rest::new(socket, outbox, peer, gso))
 }

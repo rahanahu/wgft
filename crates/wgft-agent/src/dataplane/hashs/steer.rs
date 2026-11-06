@@ -1,12 +1,12 @@
-//! Hash S の振り分け (試作、independent-exploration.md の 6.8.2 節の規則 R0)。
+//! Hash S の振り分け (試作、役割を分けた形、所有者の決定 2026-11-06)。
 //!
-//! 鍵は向きによらない (トンネルの番号、protocol、ローカルのポート、相手のアドレス、相手のポート) で、受けた packet
-//! では (dst のポート、src、src のポート)、送る packet では (src のポート、dst、dst のポート) から作る。agent の側は
-//! いつも 1 つのアドレスなので、行きと戻りは同じ区画に着く。hash は起動ごとの乱数の鍵の SipHash (標準の
-//! `RandomState`) で、核の ISN、timestamp、cookie の鍵とは別の値である。
+//! TCP は向きによらない鍵 (トンネルの番号、protocol、ローカルのポート、相手のアドレス、相手のポート) の hash で区画 1
+//! から P - 1 に振る。鍵は受けた packet では (dst のポート、src、src のポート)、送る packet では (src のポート、dst、
+//! dst のポート) から作る。agent の側はいつも 1 つのアドレスなので、行きと戻りは同じ区画に着く。hash は起動ごとの
+//! 乱数の鍵の SipHash (標準の `RandomState`) で、核の ISN、timestamp、cookie の鍵とは別の値である。
 //!
-//! 区画 0 に送るもの:UDP、ICMP (TCP を引用する誤りを除く)、知らない protocol、自分のアドレス宛てでない packet、
-//! 解釈できない packet。TCP の断片は試作では捨てて数える (E2 の範囲)。
+//! 区画 0 (front) に送るもの:UDP、ICMP (TCP を引用する誤りを除く)、知らない protocol、自分のアドレス宛てでない
+//! packet、解釈できない packet。TCP の断片は試作では捨てて数える (E2 の範囲)。P = 1 では何も振らない (Inline)。
 
 use std::hash::{BuildHasher, RandomState};
 
@@ -32,8 +32,6 @@ pub(crate) enum Route {
 pub(crate) struct Steer {
     hasher: RandomState,
     parts: usize,
-    /// TCP を振る最初の区画。0 は E2a (区画 0 にも振る)、1 は E2a' (区画 0 に TCP を置かない、P ≥ 3 だけ)。
-    tcp_lo: usize,
     /// 自分のトンネルのアドレス (network の順の値)。
     addr: u32,
 }
@@ -44,17 +42,8 @@ impl Steer {
         Self {
             hasher: RandomState::new(),
             parts: parts.max(1),
-            tcp_lo: 0,
             addr: addr.to_bits(),
         }
-    }
-
-    /// E2a' の比べの腕:TCP を区画 1 から P - 1 にだけ振る。P が 3 未満なら何もしない (TCP の区画が 1 つになる)。
-    pub(crate) fn without_tcp_on_zero(mut self) -> Self {
-        if self.parts >= 3 {
-            self.tcp_lo = 1;
-        }
-        self
     }
 
     /// 区画の数。
@@ -63,13 +52,18 @@ impl Steer {
         self.parts
     }
 
-    /// TCP の流れの区画。区画 0 から P - 1 に一様に振る (E2a)。
+    /// TCP の流れの区画。区画 1 から P - 1 に一様に振る。P = 1 では 0。
     fn tcp(&self, tunnel: u16, lport: u16, raddr: u32, rport: u16) -> usize {
+        if self.parts <= 1 {
+            return 0;
+        }
         let h = self
             .hasher
             .hash_one((tunnel, IPPROTO_TCP, lport, raddr, rport));
         // 掛けて上位を取る。剰余より偏りが小さい
-        self.tcp_lo + ((u128::from(h) * (self.parts - self.tcp_lo) as u128) >> 64) as usize
+        let span = u64::try_from(self.parts - 1).unwrap_or(1);
+        let k = (u128::from(h) * u128::from(span)) >> 64;
+        1 + usize::try_from(k).unwrap_or(0)
     }
 
     /// トンネル `tunnel` から受けた復号済みの IPv4 の packet の行き先。
@@ -81,15 +75,11 @@ impl Steer {
             return Route::Part(0);
         }
         match h.proto {
-            IPPROTO_TCP => {
-                if h.fragment {
-                    return Route::TcpFragment;
-                }
-                match ports(p, h.ihl) {
-                    Some((sport, dport)) => Route::Part(self.tcp(tunnel, dport, h.src, sport)),
-                    None => Route::Part(0),
-                }
-            }
+            IPPROTO_TCP if h.fragment => Route::TcpFragment,
+            IPPROTO_TCP => match ports(p, h.ihl) {
+                Some((sport, dport)) => Route::Part(self.tcp(tunnel, dport, h.src, sport)),
+                None => Route::Part(0),
+            },
             IPPROTO_ICMP if !h.fragment => Route::Part(self.icmp(tunnel, &p[h.ihl..])),
             _ => Route::Part(0),
         }

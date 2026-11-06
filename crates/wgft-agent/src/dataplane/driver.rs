@@ -368,6 +368,10 @@ pub(super) fn pump<U: Upper>(
 /// 読んだ datagram をすべて復号してから、UDP の packet を先に上の層に渡す。残りの packet もあれば、
 /// 起こす waker を起こして順を譲り、中継の task が UDP の datagram を先に運べるようにしてから、残りを
 /// 読んだ順に渡す。核に渡す TCP の segment の順は変えない。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the device is passed beside the layer above"
+)]
 pub(super) async fn receive_batch<U: Upper>(
     local: &Local<U>,
     device: &mut Device,
@@ -510,6 +514,10 @@ impl Wake {
 
 /// 送信の相:時刻の来た timer を回し、受信の相が予算を使い切っても少なくとも 1 つのバッチを行う。送る向きが
 /// 受ける向きに飢えないためである。予算で止めて上の層にまだ送るものが残るかを返す。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the device is passed beside the layer above"
+)]
 fn send_phase<U: Upper>(
     local: &Local<U>,
     device: &mut Device,
@@ -552,7 +560,7 @@ fn send_phase<U: Upper>(
 }
 
 /// 起床の終わり:device の event を流し、上の層の waker とログを引き、水位を残し、次の timer の時刻を返す。
-fn finish_wake<U: Upper>(
+pub(super) fn finish_wake<U: Upper>(
     local: &Local<U>,
     device: &mut Device,
     events: &mpsc::Sender<Event>,
@@ -578,6 +586,10 @@ fn finish_wake<U: Upper>(
 
 /// 駆動の task。命令の channel が閉じるか止める命令で、最後の送り出しに要るものを返す。上の層の中の
 /// panic の後と、ソケットの準備を待てなくなったときに誤りを返す。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the device is passed beside the layer above"
+)]
 pub(super) async fn drive<U: Upper>(
     local: Local<U>,
     device: &mut Device,

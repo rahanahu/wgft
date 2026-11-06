@@ -38,7 +38,7 @@ mod wheel;
 mod wire;
 
 pub use bound::{Bound, Held};
-pub use budget::{BoostPool, Budget, BudgetError};
+pub use budget::{Budget, BudgetError};
 pub use config::{
     BoostPolicy, Config, ConfigError, Congestion, Limits, MAX_MTU, MIN_MTU, Partition,
 };

@@ -218,8 +218,11 @@ async fn reports_unsupported_unusable_and_failed_listeners() {
     // 核のポート 80 を先に取っておく
     let addr = std::net::SocketAddrV4::new(AGENT_IP, 80);
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    // Hash S の試作:TCP の待ち受けは TCP の区画にあるので、区画 1 (P = 1 では区画 0) の核で取る
+    let k = usize::from(peer.agent().partitions() > 1);
     peer.agent()
-        .call(move |net| {
+        .handle()
+        .call_on(k, move |net| {
             let l = TcpListener::bind(net, addr).unwrap();
             tokio::task::spawn_local(async move {
                 let _ = stopped.await;

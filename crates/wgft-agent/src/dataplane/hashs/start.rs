@@ -1,7 +1,7 @@
 //! Hash S の世代の始めと終わり (試作)。
 //!
-//! front のスレッド (区画 0) と区画 1 から P - 1 のスレッドを立てる。boost の枠は前の世代の `Budget` から作る
-//! 集まり ([`BoostPool`]) で分け合い、止める時に区画の `Budget` を集まりに返して 1 つの `Budget` に戻す。どれかの
+//! front のスレッド (区画 0) と区画 1 から P - 1 のスレッドを立てる。boost の枠は前の世代の `Budget` から TCP の区画
+//! に割り当て ([`Budget::take_part`])、止める時に区画の `Budget` を戻して 1 つの `Budget` にする。どれかの
 //! スレッドが終わると ([`EndGuard`])、全員を起こして世代を終える。
 
 use std::cell::{Cell, RefCell};
@@ -15,7 +15,7 @@ use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::{mpsc, oneshot};
 use wgft_netstack::{LanHook, LanSocket, Netstack};
-use wgft_wgstack::{BoostPool, Budget, Partition};
+use wgft_wgstack::{Budget, Partition};
 use wgft_wireguard::{Device, DeviceConfig, Event};
 
 use super::super::batch::tx_store;
@@ -112,14 +112,37 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
                 }
             },
         };
-        let pool = match BoostPool::new(budget) {
-            Ok(p) => Arc::new(p),
-            Err(budget) => {
+        // boost の枠を TCP の区画 1 から P - 1 に割り当てる。区画は割り当てた枠の中だけで貸し、回収する
+        let mut whole = budget;
+        let mut part_budgets = Vec::new();
+        for k in 1..parts {
+            match whole.take_part(k - 1, parts - 1) {
+                Ok(b) => part_budgets.push(b),
+                Err(e) => {
+                    for b in part_budgets {
+                        whole.give_back(b);
+                    }
+                    return Err(fail(
+                        io::Error::other(format!("split the TCP/IP memory budget: {e}")),
+                        Carry {
+                            unix_high_water: floor,
+                            budget: Some(whole),
+                        },
+                    ));
+                }
+            }
+        }
+        let front_budget = match Budget::empty() {
+            Ok(b) => b,
+            Err(e) => {
+                for b in part_budgets {
+                    whole.give_back(b);
+                }
                 return Err(fail(
-                    io::Error::other("share the boost slots between the partitions"),
+                    io::Error::other(format!("allocate the TCP/IP memory budget: {e}")),
                     Carry {
                         unix_high_water: floor,
-                        budget: Some(budget),
+                        budget: Some(whole),
                     },
                 ));
             }
@@ -128,18 +151,9 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
             Ok(s) => s,
             Err(e) => return Err(fail(e, Carry::first(floor))),
         };
-        let batching = settings.batching.running();
         let (mtu, max_datagram) = (device.mtu(), device.max_transmit_len());
-        let hub = Arc::new(Hub::new(
-            parts,
-            1,
-            batching.slots() * max_datagram,
-            clock::now(),
-        ));
-        let mut steer = Steer::new(parts, stack.addr);
-        if super::no_tcp_on_zero() {
-            steer = steer.without_tcp_on_zero();
-        }
+        let hub = Arc::new(Hub::new(parts, 1));
+        let steer = Steer::new(parts, stack.addr);
         let peer = device.peers().next();
         let high_water = Arc::new(AtomicU64::new(duration_to_nanos(device.unix_high_water())));
         let (commands, command_rx) = mpsc::channel(16);
@@ -150,6 +164,7 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
         let mut part_threads = Vec::new();
         let mut readies = Vec::new();
         let mut started = Ok(());
+        let mut budgets = part_budgets.into_iter();
         for k in 1..parts {
             let sock = match socket.try_clone() {
                 Ok(s) => s,
@@ -160,7 +175,10 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
             };
             let (tx, rx) = mpsc::channel(16);
             let (ready_tx, ready) = oneshot::channel();
-            let (hub, pool) = (Arc::clone(&hub), Arc::clone(&pool));
+            let hub = Arc::clone(&hub);
+            let Some(budget) = budgets.next() else {
+                break;
+            };
             let part = Partition {
                 index: u16::try_from(k).unwrap_or(u16::MAX),
                 count: u16::try_from(parts).unwrap_or(u16::MAX),
@@ -178,7 +196,7 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
                         mtu,
                         max_datagram,
                         part,
-                        pool,
+                        budget,
                         rx,
                         ready_tx,
                     )
@@ -200,7 +218,6 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
         let (ready_tx, ready) = oneshot::channel();
         let thread_high_water = Arc::clone(&high_water);
         let buffers_for_thread = buffers.clone();
-        let front_pool = Arc::clone(&pool);
         let front_hub = Arc::clone(&hub);
         let part0 = Partition {
             index: 0,
@@ -218,7 +235,7 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
                         settings,
                         stack,
                         part0,
-                        front_pool,
+                        front_budget,
                         Front::new(front_hub, steer, peer),
                         command_rx,
                         event_tx,
@@ -227,8 +244,7 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
                     )
                 })
                 .map_err(Some),
-            (Ok(()), None) => Err(None),
-            (Err(_), _) => Err(None),
+            (Ok(()), None) | (Err(_), _) => Err(None),
         };
         let mut error = match (&thread, started) {
             (Ok(_), Ok(())) => None,
@@ -239,13 +255,12 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
                 "the device has no peer",
             )),
         };
-        if error.is_none() {
-            if let Ok(Err(e)) | Err(e) = ready
+        if error.is_none()
+            && let Ok(Err(e)) | Err(e) = ready
                 .await
                 .map_err(|_| io::Error::other("the data plane thread ended while starting"))
-            {
-                error = Some(e);
-            }
+        {
+            error = Some(e);
         }
         for r in readies {
             if error.is_some() {
@@ -267,10 +282,12 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
             parts: part_cmds,
             part_threads,
             rejoin: Some(Box::new(move |budgets| {
-                for b in budgets.into_iter().flatten() {
-                    pool.put_back(b);
+                // 区画 0 (front) の Budget は枠を持たない。区画 1 から P - 1 の枠を戻し、どれかが panic で失われて
+                // いれば次の世代は新しい Budget を作る
+                for b in budgets.into_iter().skip(1).flatten() {
+                    whole.give_back(b);
                 }
-                Arc::try_unwrap(pool).ok().and_then(BoostPool::into_budget)
+                whole.is_whole().then_some(whole)
             })),
         };
         if let Some(error) = error {
@@ -285,12 +302,8 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
             });
         }
         crate::logf!(
-            "tunnel: the data plane runs {parts} partitions (Hash S prototype){}",
-            if super::no_tcp_on_zero() && parts >= 3 {
-                "; no TCP on partition 0"
-            } else {
-                ""
-            }
+            "tunnel: the data plane runs {parts} partitions (Hash S prototype): the front and {} TCP partitions",
+            parts - 1
         );
         Ok(dp)
     }
@@ -362,7 +375,7 @@ fn run_part<T: LanSocket + 'static>(
     mtu: usize,
     max_datagram: usize,
     part: Partition,
-    pool: Arc<BoostPool>,
+    budget: Budget,
     commands: mpsc::Receiver<Command<Stack<T>>>,
     ready: Ready,
 ) -> Option<Budget> {
@@ -389,14 +402,13 @@ fn run_part<T: LanSocket + 'static>(
             return None;
         }
     };
-    let upper = match make_part::<T>(stack, clock::now(), mtu, part, &pool) {
+    let upper = match make_part::<T>(stack, clock::now(), mtu, part, budget) {
         Ok(u) => u,
         Err(e) => {
-            let _ = ready.send(Err(e));
-            return None;
+            let _ = ready.send(Err(e.error));
+            return e.budget;
         }
     };
-    drop(pool);
     let shared = Rc::new(Shared {
         inner: RefCell::new(upper),
         poisoned: Cell::new(false),
@@ -467,7 +479,7 @@ fn run_front<T: LanSocket + 'static>(
     settings: Settings,
     stack: StackSettings,
     part: Partition,
-    pool: Arc<BoostPool>,
+    budget: Budget,
     mut front: Front,
     commands: mpsc::Receiver<Command<Stack<T>>>,
     events: mpsc::Sender<Event>,
@@ -511,17 +523,16 @@ fn run_front<T: LanSocket + 'static>(
             };
         }
     };
-    let upper = match make_part::<T>(stack, clock::now(), device.mtu(), part, &pool) {
+    let upper = match make_part::<T>(stack, clock::now(), device.mtu(), part, budget) {
         Ok(u) => u,
         Err(e) => {
-            ready_send(Err(e));
+            ready_send(Err(e.error));
             return Exit {
                 unix_high_water,
-                budget: None,
+                budget: e.budget,
             };
         }
     };
-    drop(pool);
     let shared = Rc::new(Shared {
         inner: RefCell::new(upper),
         poisoned: Cell::new(false),

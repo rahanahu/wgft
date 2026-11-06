@@ -645,8 +645,8 @@ impl Manager {
             return;
         }
         let opened: Vec<(Key, SocketAddrV4)> = specs.iter().map(|s| (s.key, s.addr)).collect();
-        // Hash S の試作:TCP の待ち受けは全区画で開く。区画 1 から P - 1 で先に開き、区画 0 で開いた後に、全区画が
-        // 開けた時だけ成功にする。どれかが失敗したら、開けた区画を閉じてから失敗を返す
+        // Hash S の試作:TCP の待ち受けは TCP の区画 1 から P - 1 の全部で開き、全部が開けた時だけ成功にする。
+        // どれかが失敗したら、開けた区画を閉じてから失敗を返す。UDP の待ち受けは front (区画 0) で開く
         let mut others: BTreeMap<Key, Vec<Result<Running, String>>> = BTreeMap::new();
         for k in 1..self.dataplane.partitions() {
             let tcp: Vec<Spec> = specs
@@ -687,14 +687,9 @@ impl Manager {
             .call(move |net| {
                 specs
                     .into_iter()
-                    .map(|s| {
-                        let key = s.key;
-                        let budget = Arc::clone(&s.budget);
-                        let first = start(net, s);
-                        match others.remove(&key) {
-                            Some(rest) => all_partitions(first, rest, &budget),
-                            None => first,
-                        }
+                    .map(|s| match others.remove(&s.key) {
+                        Some(parts) => all_partitions(parts, &s.budget),
+                        None => start(net, s),
                     })
                     .collect()
             })
@@ -903,17 +898,16 @@ fn start_tcp(net: &Net, s: Spec) -> Result<Running, String> {
     Ok(Running { stop, task })
 }
 
-/// Hash S の試作:全区画の待ち受けを 1 つの [`Running`] にまとめる。どれかが失敗したら、開けた区画に止める
-/// 知らせを送って失敗を返す。まとめた task は区画 0 にあり、止める知らせで全区画に止める知らせを送り、全部の
+/// Hash S の試作:TCP の区画 1 から P - 1 の待ち受けを 1 つの [`Running`] にまとめる。どれかが失敗したら、開けた区画に止める
+/// 知らせを送って失敗を返す。まとめた task は区画 0 (front) にあり、止める知らせで全区画に止める知らせを送り、全部の
 /// 終わりを待つ。まとめた task が abort されれば、区画の止める口が落ちて区画の task も止まる。
 fn all_partitions(
-    first: Result<Running, String>,
-    rest: Vec<Result<Running, String>>,
+    parts: Vec<Result<Running, String>>,
     budget: &flowpool::Listener,
 ) -> Result<Running, String> {
     let mut ok = Vec::new();
     let mut err = None;
-    for r in std::iter::once(first).chain(rest) {
+    for r in parts {
         match r {
             Ok(x) => ok.push(x),
             Err(e) => {

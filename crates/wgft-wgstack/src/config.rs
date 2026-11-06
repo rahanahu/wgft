@@ -121,7 +121,8 @@ pub struct Config {
 /// を区画ごとに持ちます。
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Partition {
-    /// 区画の番号です。0 は front のスレッドが実行し、UDP と DF の無い出力を持ちます。
+    /// 区画の番号です。0 は front のスレッドが実行し、UDP、ICMP、再組み立てを持ち、TCP を持ちません。1 から P - 1 は
+    /// TCP だけを持ちます (役割を分けた Hash S、所有者の決定 2026-11-06)。
     pub index: u16,
     /// 区画の数 P です。2 以上です。
     pub count: u16,
@@ -150,10 +151,10 @@ impl Partition {
         (u16::try_from(base).unwrap_or(0), span)
     }
 
-    /// challenge ACK の bucket の割り当ての分母です。全区画の和が今の 1 つの核の上限を超えないように、上限を P で
-    /// 割ります。
+    /// challenge ACK の bucket の割り当ての分母です。challenge ACK を出すのは TCP を持つ区画 1 から P - 1 なので、
+    /// 全区画の和が今の 1 つの核の上限を超えないように、上限を P - 1 で割ります。
     pub(crate) fn challenge_share(&self) -> u64 {
-        u64::from(self.count.max(1))
+        u64::from(self.count.saturating_sub(1).max(1))
     }
 }
 
