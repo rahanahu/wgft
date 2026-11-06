@@ -6,9 +6,10 @@
 //! 古い segment も、転送された偽の segment も止めません。ここでは `handle_packet` に渡る packet の列だけで、
 //! timestamp、RST、challenge ACK、TIME_WAIT の使い直しの挙動を確かめます。
 //!
-//! 安全な今の挙動を確かめる試験は通ります。欠陥を示す試験は `defect`、RFC の範囲の危険を示す試験は `hazard`、
-//! 所有者が残している既知の外れを示す試験は `known deviation` の理由で ignore にしてあります。各件の説明は PR の
-//! 本文にあります。
+//! 安全な今の挙動を確かめる試験は通ります。所有者が名指しした欠陥の再現の試験と、直しの後に通るべき試験は
+//! `fixed by the follow-up PR` を含む理由で ignore にしてあります (後者は `challenge_budget_tests`)。RFC の範囲の
+//! 危険を示す試験は `hazard`、所有者が残している既知の外れを示す試験は `known deviation` の理由で ignore にして
+//! あります。各件の説明は PR の本文にあります。
 
 #![expect(
     clippy::disallowed_macros,
@@ -30,13 +31,23 @@ use core::time::Duration;
 
 /// 正しいクライアントのポートです。TIME_WAIT の試験では、前の接続のクライアント A と、同じトンネルの側の 4 つ組を
 /// 使う後のクライアント B が共に使います。
-const VICTIM: u16 = 40000;
+pub(crate) const VICTIM: u16 = 40000;
 /// 偽の segment を送る第三者が、自分で開いた接続のポートです。
-const ATTACKER: u16 = 50000;
+pub(crate) const ATTACKER: u16 = 50000;
 /// 1 秒の challenge ACK の予算の最大 (`Shared::challenge_allowed` の 3*LIMIT/2) を超える数です。
-const FLOOD: usize = 1600;
+pub(crate) const FLOOD: usize = 1600;
+/// 直した後の challenge ACK の速さとして試験が仮定する、接続、TIME_WAIT の行、握手の途中の行のそれぞれで 1 回の
+/// ACK の後に次の ACK を返すまでの間隔です (`oow_ack` と同じ 500 ms)。直しが別の値を選ぶなら、この定数を合わせます。
+pub(crate) const PER_FLOW_INTERVAL: Duration = Duration::from_millis(500);
 
-fn seg(sport: u16, seq: u32, ack: u32, flags: u8, ts: Option<(u32, u32)>, payload: &[u8]) -> TSeg {
+pub(crate) fn seg(
+    sport: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    ts: Option<(u32, u32)>,
+    payload: &[u8],
+) -> TSeg {
     TSeg {
         sport,
         dport: 80,
@@ -51,7 +62,7 @@ fn seg(sport: u16, seq: u32, ack: u32, flags: u8, ts: Option<(u32, u32)>, payloa
 }
 
 /// 80 番で待ち受け、`ports` の各ポートから timestamp と窓の scale を付けて接続を開きます。
-fn established(ports: &[u16]) -> (TestNet, ListenerId, Vec<(ConnId, PeerConn)>) {
+pub(crate) fn established(ports: &[u16]) -> (TestNet, ListenerId, Vec<(ConnId, PeerConn)>) {
     let mut n = TestNet::new(small_limits());
     let l = n.listen(80);
     let mut v = Vec::new();
@@ -64,17 +75,17 @@ fn established(ports: &[u16]) -> (TestNet, ListenerId, Vec<(ConnId, PeerConn)>) 
     (n, l, v)
 }
 
-fn to(outs: &[Out], port: u16) -> Vec<&Out> {
+pub(crate) fn to(outs: &[Out], port: u16) -> Vec<&Out> {
     outs.iter().filter(|o| o.rport == port).collect()
 }
 
-fn state(n: &TestNet, c: ConnId) -> State {
+pub(crate) fn state(n: &TestNet, c: ConnId) -> State {
     n.s.conns.tcb(c.slot).state
 }
 
 /// 第三者が自分の接続に SYN を `FLOOD` 回送り、返った challenge ACK の数を返します。確立した接続への SYN には、
 /// 番号を問わず challenge ACK を返す決まりです (RFC 5961 4.2)。
-fn attacker_flood(n: &mut TestNet, pa: &mut PeerConn) -> usize {
+pub(crate) fn attacker_flood(n: &mut TestNet, pa: &mut PeerConn) -> usize {
     let mut got = 0;
     for _ in 0..FLOOD {
         let s = pa.seg(FLAG_SYN, &[]);
@@ -166,6 +177,9 @@ fn spoofed_rst_handling_does_not_depend_on_tsopt() {
         Some((p.ts_val - 1000, 0)),
         Some((p.ts_val + (1 << 30), 0)),
     ] {
+        // 接続ごとの challenge ACK の速さの制限を越えないように、試しの間を空けます。
+        n.advance(PER_FLOW_INTERVAL);
+        n.drain();
         n.inject(&seg(
             VICTIM,
             rcv_nxt.wrapping_add(1 << 31),
@@ -208,6 +222,8 @@ fn blind_data_with_an_ack_outside_the_range_gets_a_challenge_ack() {
     let (c, p) = v[0];
     let bad_ack = p.rcv.wrapping_add(1 << 31);
     for ts in [None, Some((p.ts_val + 1, p.dut_ts))] {
+        n.advance(PER_FLOW_INTERVAL);
+        n.drain();
         n.inject(&seg(VICTIM, p.snd, bad_ack, FLAG_ACK, ts, b"EVIL"));
         let outs = n.drain();
         assert!(
@@ -253,8 +269,9 @@ fn blind_data_without_tsopt_is_dropped() {
 /// 依ってはいけません (RFC 5961 の Errata ID 4772、CVE-2016-5696)。核の予算は全体で 1 つなので、窓の内に当たった
 /// 偽の RST を同じ秒に予算の最大より多く送ると、第三者が数える数は 0 になり、外れなら 500 以上になります。第三者は
 /// 1 秒に 1 回、被害者の接続の窓の位置を確かめられます。
+/// 所有者が名指しした再現の試験 (3 件の 1 つ) です。直しの PR で ignore を外します。
 #[test]
-#[ignore = "defect: see PR body"]
+#[ignore = "reproduction: fixed by the follow-up PR"]
 fn attacker_cannot_observe_whether_a_spoofed_rst_hit_the_window() {
     let observe = |hit: bool| {
         let (mut n, _, v) = established(&[VICTIM, ATTACKER]);
@@ -282,18 +299,21 @@ fn attacker_cannot_observe_whether_a_spoofed_rst_hit_the_window() {
 
 /// 第三者が自分の接続への SYN で予算を使い切っても、被害者の接続の challenge ACK は返ります。クライアントが再起動して
 /// 同じポートから新しい SYN を送る半開きの回復は、この challenge ACK に RST を返すことで進みます (RFC 5961 4.2)。
+/// 所有者が名指しした再現の試験 (3 件の 1 つ) です。直しの PR で ignore を外します。
 #[test]
-#[ignore = "defect: see PR body"]
+#[ignore = "reproduction: fixed by the follow-up PR"]
 fn a_challenge_ack_flood_does_not_silence_another_connection() {
     let (mut n, _, v) = established(&[VICTIM, ATTACKER]);
     let (c, pv) = v[0];
     let (_, mut pa) = v[1];
     n.advance(Duration::from_secs(2));
-    n.drain();
-    assert!(attacker_flood(&mut n, &mut pa) > 0);
     // 再起動したクライアントの新しい SYN です。番号と TSval は前の接続と関係ありません。TSval が TS.Recent より
     // 小さい SYN は PAWS の ACK (接続ごとの 500 ms の制限) を受けるので、大きい TSval と TSopt の無い SYN を見ます。
+    // 被害者の接続の速さの制限に掛からないように、2 つの SYN の間を空け、そのたびに第三者が予算を使い切ります。
     for ts in [Some((pv.ts_val.wrapping_add(1 << 20), 0)), None] {
+        n.advance(PER_FLOW_INTERVAL);
+        n.drain();
+        assert!(attacker_flood(&mut n, &mut pa) > 0);
         let syn = TSeg {
             mss: 1380,
             ws: Some(7),
@@ -322,7 +342,7 @@ fn a_challenge_ack_flood_does_not_silence_another_connection() {
 
 /// 核が先に閉じ、相手 A の FIN で TIME_WAIT に入った状態です。`row` なら接続を手放して行に移します。返す
 /// `PeerConn` の `snd` は前の接続の RCV.NXT、`ts_val` は TS.Recent、`rcv` は前の接続の核の SND.NXT です。
-fn time_wait(
+pub(crate) fn time_wait(
     row: bool,
     extra: &[u16],
 ) -> (
@@ -357,7 +377,7 @@ fn time_wait(
     (n, l, c, p, v)
 }
 
-fn new_syn(seq: u32, ts_val: u32) -> TSeg {
+pub(crate) fn new_syn(seq: u32, ts_val: u32) -> TSeg {
     TSeg {
         mss: 1380,
         ws: Some(7),
@@ -366,7 +386,7 @@ fn new_syn(seq: u32, ts_val: u32) -> TSeg {
 }
 
 /// SYN-ACK に最後の ACK を返し、新しい接続を受け取ります。最後の ACK の TSval は `ts_val` です。
-fn finish(n: &mut TestNet, l: ListenerId, syn: &TSeg, sa: &Out, ts_val: u32) -> ConnId {
+pub(crate) fn finish(n: &mut TestNet, l: ListenerId, syn: &TSeg, sa: &Out, ts_val: u32) -> ConnId {
     let sa_ts = sa.ts.map_or(0, |(v, _)| v);
     n.inject(&seg(
         VICTIM,
@@ -506,8 +526,9 @@ fn another_clients_stream_does_not_take_old_bytes_of_the_previous_client() {
 
 /// 上の回復は、TIME_WAIT の行が返す ACK に頼ります。この ACK は challenge ACK と同じ核の全体の予算から取るので、
 /// 第三者が自分の接続への SYN で予算を使い切り続けると、B の SYN には何も返らず、B は行の期限 (60 秒) まで開けません。
+/// 所有者が名指しした再現の試験 (3 件の 1 つ) です。直しの PR で ignore を外します。
 #[test]
-#[ignore = "defect: see PR body"]
+#[ignore = "reproduction: fixed by the follow-up PR"]
 fn a_challenge_ack_flood_does_not_block_time_wait_reuse() {
     let (mut n, _, _, p, mut v) = time_wait(true, &[ATTACKER]);
     let (_, mut pa) = v.remove(0);
