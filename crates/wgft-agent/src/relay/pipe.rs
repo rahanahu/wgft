@@ -279,28 +279,19 @@ fn try_read_lan(lan: &LanStream, dst: &mut [u8]) -> io::Result<usize> {
 
 /// 求めた長さより少なく読めたら、ソケットの待ち行列は空になった。それを `WouldBlock` として try_io に
 /// 返して準備の印を消させ、次の読みが EAGAIN になるのを避ける (driver.rs の UDP と同じ手)。
-/// ただし FIN や誤りが待ち行列の後ろに付いているときは、エッジ型の通知がもう済んでいて、印を消すと
-/// EOF や誤りを永久に待つ。閉包の中で今の準備を見て、読みの閉じか誤りの印があれば消さない。
-/// 見る準備は try_io が消す印の世代と同じかそれより新しいので、見落とした知らせは世代が新しく残る
+/// 待ち行列の後ろの FIN や RST はエッジ型の通知が済んでいても失わない。tokio は準備を消すとき
+/// 読みの閉じの印を残すので、次の `readable` はすぐ解けて 0 か誤りを読む (tokio 1.54 の
+/// `ScheduledIo::clear_readiness`。上げるときは EOF の試験で確かめる)。
+/// 閉包を呼ぶ前の印の世代だけが消えるので、その間に届いた知らせは残る
 #[cfg(target_os = "linux")]
 fn try_read_lan(lan: &LanStream, dst: &mut [u8]) -> io::Result<usize> {
-    use std::pin::pin;
-    use std::task::{Context, Poll, Waker};
     let want = dst.len();
     let mut short = None;
     let got = lan.try_io(tokio::io::Interest::READABLE, || {
         let n = lan.try_read(dst)?;
         if n > 0 && n < want {
-            let mut cx = Context::from_waker(Waker::noop());
-            let mut ready = pin!(lan.ready(tokio::io::Interest::READABLE));
-            let closing = match ready.as_mut().poll(&mut cx) {
-                Poll::Ready(Ok(r)) => r.is_read_closed() || r.is_error(),
-                _ => false,
-            };
-            if !closing {
-                short = Some(n);
-                return Err(io::ErrorKind::WouldBlock.into());
-            }
+            short = Some(n);
+            return Err(io::ErrorKind::WouldBlock.into());
         }
         Ok(n)
     });
