@@ -317,6 +317,13 @@ mod tests {
         );
         assert_eq!(
             ns.log_text(LogLine {
+                kind: LogKind::WscaleClamped,
+                count: 3
+            }),
+            "wgstack: treated window scale options above 14 as 14 in received SYNs; the peer may be misconfigured; 3 since the tunnel was built"
+        );
+        assert_eq!(
+            ns.log_text(LogLine {
                 kind: LogKind::MssFloor,
                 count: 2
             }),

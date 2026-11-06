@@ -173,8 +173,10 @@ fn wscale_above_14_is_counted_and_logged_on_a_listener_row() {
     for ws in [15, 16, 255] {
         let mut n = TestNet::new(small_limits());
         let l = n.listen(80);
+        let before = n.s.stats().wscale_clamped;
         open(&mut n, l, 40000, Some(ws));
         assert_ne!(n.s.stats(), base, "scale {ws} was not counted");
+        assert_eq!(n.s.stats().wscale_clamped, before + 1, "scale {ws}");
         let lines = logs(&mut n);
         assert_eq!(
             lines.len(),
@@ -182,6 +184,7 @@ fn wscale_above_14_is_counted_and_logged_on_a_listener_row() {
             "scale {ws}: want one log line, got {lines:?}"
         );
         assert_eq!(lines[0].count, 1, "scale {ws}");
+        assert_eq!(lines[0].kind, crate::LogKind::WscaleClamped, "scale {ws}");
     }
 }
 
@@ -195,9 +198,11 @@ fn wscale_above_14_is_counted_and_logged_on_the_cookie_path() {
     for ws in [15, 255] {
         let (mut n, _) = flooded();
         logs(&mut n);
+        let before = n.s.stats().wscale_clamped;
         n.inject(&syn(41000, Some(ws)));
         n.drain();
         assert_ne!(n.s.stats(), base, "scale {ws} was not counted");
+        assert_eq!(n.s.stats().wscale_clamped, before + 1, "scale {ws}");
         let lines = logs(&mut n);
         assert_eq!(
             lines.len(),
@@ -205,6 +210,7 @@ fn wscale_above_14_is_counted_and_logged_on_the_cookie_path() {
             "scale {ws}: want one log line, got {lines:?}"
         );
         assert_eq!(lines[0].count, 1, "scale {ws}");
+        assert_eq!(lines[0].kind, crate::LogKind::WscaleClamped, "scale {ws}");
     }
 }
 
@@ -220,10 +226,17 @@ fn wscale_log_passes_the_once_a_minute_gate_and_keeps_the_count() {
     assert_eq!(first.len(), 1, "{first:?}");
     assert_eq!(first[0].count, 1);
     let kind = first[0].kind;
+    assert_eq!(kind, crate::LogKind::WscaleClamped);
+    assert_eq!(n.s.stats().wscale_clamped, 1);
 
     n.inject(&syn(40002, Some(15)));
     n.drain();
     assert!(logs(&mut n).is_empty(), "a second line inside the minute");
+    assert_eq!(
+        n.s.stats().wscale_clamped,
+        2,
+        "the second SYN was not counted"
+    );
 
     n.advance(Duration::from_secs(61));
     n.drain();
@@ -240,6 +253,7 @@ fn wscale_log_passes_the_once_a_minute_gate_and_keeps_the_count() {
         vec![3],
         "{third:?}"
     );
+    assert_eq!(n.s.stats().wscale_clamped, 3);
 }
 
 /// 14 を超える scale は握手を止めません (SYN-ACK を返し、接続を作ります)。記録のための失敗や遅れが無いことの対照
