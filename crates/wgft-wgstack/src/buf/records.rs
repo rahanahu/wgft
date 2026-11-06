@@ -88,19 +88,26 @@ impl RecordRing {
         &self.recs[self.slot(i)]
     }
 
-    /// 末尾に記録を足します。呼び手は満杯でないことを確かめます。
-    pub(crate) fn push_back(&mut self, rec: Record) {
-        debug_assert!(!self.full());
+    /// 末尾に記録を足します。満杯なら何も変えずに false を返します (先頭の記録を上書きしません)。呼び手は
+    /// 満杯でないことを確かめ、false を会計の不整合として扱います。
+    pub(crate) fn push_back(&mut self, rec: Record) -> bool {
+        if self.n >= self.recs.len() {
+            return false;
+        }
         let j = self.slot(self.n);
         self.recs[j] = rec;
-        self.n += 1;
+        self.n += 1; // n < 容量なので溢れない
+        true
     }
 
-    /// 先頭の記録を外します。
-    pub(crate) fn pop(&mut self) {
-        debug_assert!(self.n > 0);
+    /// 先頭の記録を外します。空なら何も変えずに false を返します。
+    pub(crate) fn pop(&mut self) -> bool {
+        let Some(n) = self.n.checked_sub(1) else {
+            return false;
+        };
         self.head = self.slot(1);
-        self.n -= 1;
+        self.n = n;
+        true
     }
 
     /// 配列のすべての記録 (使っていない位置を含む) から印 `mask` を消します。世代の番号が一周した時に使います。
@@ -184,7 +191,6 @@ mod tests {
 
     /// 満杯の輪に足しても、先頭の記録を上書きせず、数は容量を超えません。
     #[test]
-    #[ignore = "fixed by the follow-up PR"]
     fn limits_push_on_a_full_ring_is_refused() {
         let mut r = ring(3);
         for s in 1..=3 {
@@ -197,7 +203,6 @@ mod tests {
 
     /// 空の輪から外しても、数は 0 のままで、次の足しが正しく働きます。
     #[test]
-    #[ignore = "fixed by the follow-up PR"]
     fn limits_pop_on_an_empty_ring_is_refused() {
         let mut r = ring(3);
         r.pop();

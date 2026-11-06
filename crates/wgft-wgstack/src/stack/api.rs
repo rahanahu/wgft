@@ -243,6 +243,13 @@ impl<H: Hook> Stack<H> {
             }
             return Ok(n);
         }
+        if c.b.rcv.read_off > c.b.rcv.nxt_off {
+            // 読み取りの位置が受信の位置を超えています (会計の不整合)。EOF や WouldBlock にせず接続を閉じます。
+            // 位置を揃えてから閉じるので、以後の read は誤りを重ねて数えません。
+            c.b.rcv.read_off = c.b.rcv.nxt_off;
+            c.accounting_fault(now);
+            return Err(Error::Accounting);
+        }
         if c.t.fin_rcvd || (c.t.state == State::Closed && c.t.err.is_none()) {
             return Ok(0);
         }

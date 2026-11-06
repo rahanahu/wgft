@@ -77,6 +77,9 @@ pub(crate) struct RecvBuf {
     free: u16,
     /// 配列のうち一度でも節に使った数です。
     used: u16,
+    /// 会計の不変条件が崩れたことを呼び手に知らせる印です。崩れたら区間を空にして立て、呼び手が [`RecvBuf::take_fault`] で
+    /// 受けて会計の不整合として接続を閉じます。
+    fault: bool,
     seed: u64,
     ctr: u64,
     /// 最近触れた区間の始まり (offset の下位 32 bit) で、新しい順です。
@@ -124,6 +127,7 @@ impl RecvBuf {
             root: 0,
             free: 0,
             used: 0,
+            fault: false,
             seed,
             ctr: 0,
             recent: [0; SACK_RECENT],
@@ -142,6 +146,7 @@ impl RecvBuf {
         self.read_off = 0;
         self.nxt_off = 0;
         self.clear_intervals();
+        self.fault = false;
         self.seed = seed;
         self.ctr = 0;
     }
@@ -166,8 +171,39 @@ impl RecvBuf {
         self.full(self.node(k).end)
     }
 
+    /// 未読の byte 数です。不変条件 `read_off <= nxt_off` が崩れていれば 0 を返します (`read` は何も写しません)。
     pub(crate) fn unread(&self) -> u64 {
-        self.nxt_off - self.read_off
+        self.nxt_off.saturating_sub(self.read_off)
+    }
+
+    /// 会計の不変条件が崩れた印を返して下ろします。立っていれば、区間はすべて空にしてあります。呼び手は接続を
+    /// 会計の不整合として閉じます。
+    pub(crate) fn take_fault(&mut self) -> bool {
+        core::mem::take(&mut self.fault)
+    }
+
+    /// 区間の数 `n` から `k` を引きます。足りなければ 0 にして印を立てます (崩れた状態を黙って続けません)。
+    fn sub_n(&mut self, k: usize) {
+        self.n = self.n.checked_sub(k).unwrap_or_else(|| {
+            self.fault = true;
+            0
+        });
+    }
+
+    /// 順序外の byte の合計 `ooo` から `k` を引きます。足りなければ 0 にして印を立てます。
+    fn sub_ooo(&mut self, k: u64) {
+        self.ooo = self.ooo.checked_sub(k).unwrap_or_else(|| {
+            self.fault = true;
+            0
+        });
+    }
+
+    /// 印が立っていれば区間をすべて捨てます。木と数と合計が食い違ったままの表を使い続けないためで、捨てたデータは
+    /// 相手が再送します (RFC 2018 8 節の取り消しと同じ)。
+    fn settle(&mut self) {
+        if self.fault {
+            self.clear_intervals();
+        }
     }
 
     /// 使っている区間の数です。
@@ -247,6 +283,10 @@ impl RecvBuf {
     /// 8 節の取り消し)。`limit` をまたぐ区間は `limit` で切ります。捨てた区間の最近の印も外します。順序どおりの
     /// データは捨てません。呼び手は `nxt_off <= limit` を保証します。捨てた byte の数を返します。
     pub(crate) fn renege(&mut self, mut limit: u64, max_n: usize) -> u64 {
+        // limit は呼び手が 1 以上を渡す。0 では `limit - 1` が回るので、何も捨てずに返す。
+        if limit == 0 {
+            return 0;
+        }
         if self.n > max_n
             && let Some(s) = self.nth_start(max_n)
         {
@@ -257,19 +297,21 @@ impl RecvBuf {
         }
         let before = self.ooo;
         // 始まりが limit より前の区間を残します。limit は 1 以上です。
-        let (keep, drop) = self.split_start_up_to(self.root, limit - 1);
-        self.n -= self.release(drop);
+        let (keep, drop) = self.split_start_up_to(self.root, limit.saturating_sub(1));
+        let freed = self.release(drop);
+        self.sub_n(freed);
         if keep != 0 {
             let last = self.last_node(keep);
             let end = self.k_end(last);
             if end > limit {
-                self.ooo -= end - limit;
+                self.sub_ooo(end - limit);
                 self.node_mut(last).end = low32(limit);
             }
         }
         self.root = keep;
         self.forget_recent(|x| x >= limit);
-        before - self.ooo
+        self.settle();
+        before.saturating_sub(self.ooo)
     }
 
     /// 始まりの順で `i` 番目 (0 から) の区間の始まりです。
@@ -325,7 +367,7 @@ impl RecvBuf {
             return 0;
         }
         let x = *self.node(t);
-        self.ooo -= u64::from(x.end.wrapping_sub(x.start));
+        self.sub_ooo(u64::from(x.end.wrapping_sub(x.start)));
         let free = self.free;
         let n = self.node_mut(t);
         n.l = free;
@@ -515,11 +557,23 @@ impl RecvBuf {
     /// offset `off` からの `data` を入れます。`limit` を超える分は捨てます。`limit` は広告した窓の右端と
     /// `read_off + cap` の小さい方です。順序外のデータで新しい区間が要り、区間が上限の数だけあるときは、
     /// segment 全体を捨てます。既存の区間を伸ばすか穴を埋める segment は受け入れます。
+    pub(crate) fn insert(
+        &mut self,
+        off: u64,
+        data: &[u8],
+        limit: u64,
+        pool: &mut ChunkPool,
+    ) -> InsertResult {
+        let res = self.insert_inner(off, data, limit, pool);
+        self.settle();
+        res
+    }
+
     #[expect(
         clippy::many_single_char_names,
         reason = "the names follow the Go code"
     )]
-    pub(crate) fn insert(
+    fn insert_inner(
         &mut self,
         mut off: u64,
         mut data: &[u8],
@@ -569,7 +623,8 @@ impl RecvBuf {
                     (res.dup_lo, res.dup_hi) = (st, end.min(en)); // 届いていた区間と重なる部分
                 }
                 end = end.max(self.k_end(self.last_node(m)));
-                self.n -= self.release(m);
+                let freed = self.release(m);
+                self.sub_n(freed);
                 res.filled = true;
                 self.forget_recent(|x| x < end); // 順序どおりの範囲に入った区間の印
             }
@@ -623,7 +678,8 @@ impl RecvBuf {
                 (res.dup_lo, res.dup_hi) = (lo, hi); // 既存の区間と重なる部分
             }
             let (ns, ne) = (off.min(self.k_start(f)), end.max(self.k_end(g)));
-            self.n -= self.release(m);
+            let freed = self.release(m);
+            self.sub_n(freed);
             let k = self.alloc(ns, ne); // 返したばかりの節があるので取れます
             self.n += 1;
             self.ooo += ne - ns;
