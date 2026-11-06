@@ -66,43 +66,38 @@ pub struct Listener {
     path: PathBuf,
 }
 
-/// ソケットのファイルを、作った瞬間から持ち主だけが繋げる権限で作る (Unix)。bind が作るファイルの
-/// 権限は umask だけで決まるので、bind の間だけ umask を 0177 にする。既にあったデータディレクトリの
-/// 権限は変えない (仕様) ので、0755 のディレクトリで umask が 0 だと、bind の後の chmod までの間に
-/// 他の利用者が繋げるためである。umask はプロセスで 1 つなので、その間に他のスレッドが作るファイルと
-/// ディレクトリも狭い権限になる。その間に他のスレッドはディレクトリを作らず、狭めても困るファイルは無い。
-fn bind_private(socket: &Socket, addr: &SockAddr) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        // SAFETY: umask はプロセスの値を置き換えて前の値を返すだけで、メモリに触れない
-        let old = unsafe { libc::umask(0o177) };
-        let r = socket.bind(addr);
-        // SAFETY: 同じ。前の値に戻す
-        unsafe { libc::umask(old) };
-        r
-    }
-    #[cfg(not(unix))]
-    socket.bind(addr)
+/// ソケットを `path` に bind する。umask は変えない。umask はプロセスで 1 つなので、変えると同時に
+/// 他のスレッドが作るファイルとディレクトリの権限も狭まる。bind が作るファイルの権限は umask しだいで
+/// 緩いことがあるが、AF_UNIX の stream は listen までの connect を全て拒むので、listen の前に
+/// [`Listener::restrict`] で 0600 にすれば、他の利用者が繋げる間は無い。
+fn bind_socket(socket: &Socket, path: &Path) -> Result<(), BindError> {
+    socket.bind(&sock_addr(path)?).map_err(BindError::Io)
+}
+
+/// 権限が、グループや他の利用者の接続を許さないか。接続にはソケットのファイルの書き込み権が要る。
+#[cfg(unix)]
+fn mode_blocks_others(mode: u32) -> bool {
+    mode & 0o022 == 0
 }
 
 impl Listener {
-    /// `path` に待ち受けを開く。同じパスの古いファイルは先に消す。権限は Unix では 0600 (失敗は無視)、
-    /// Windows では開いた直後に 3 者だけの DACL を付け、付けられなければ閉じて [`BindError::Security`]
-    /// を返す。
+    /// `path` に待ち受けを開く。同じパスの古いファイルは先に消す。Unix では listen の前に 0600 にする。
+    /// chmod の失敗は、グループや他の利用者が書ける権限が残るときだけ誤りにする。Windows では開いた
+    /// 直後に 3 者だけの DACL を付け、付けられなければ閉じて [`BindError::Security`] を返す。
     ///
     /// # Errors
     ///
     /// パスが長すぎるか、開けなければ誤りを返す。
     pub fn bind(path: &Path) -> Result<Listener, BindError> {
         // 古いファイルを消す前にアドレスを確かめる。長すぎるパスでは何も消さない
-        let addr = sock_addr(path)?;
+        sock_addr(path)?;
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(BindError::Io(e)),
         }
         let socket = Socket::new(Domain::UNIX, Type::STREAM, None).map_err(BindError::Io)?;
-        bind_private(&socket, &addr).map_err(BindError::Io)?;
+        bind_socket(&socket, path)?;
         // ここから先の失敗ではファイルを残さない
         let l = Listener {
             socket,
@@ -114,15 +109,22 @@ impl Listener {
     }
 
     #[cfg(unix)]
-    #[expect(
-        clippy::unnecessary_wraps,
-        reason = "the same signature as the Windows version"
-    )]
     fn restrict(&self) -> Result<(), BindError> {
         use std::os::unix::fs::PermissionsExt;
-        // 失敗は無視する。bind が 0600 で作り、ディレクトリを作ったときは 0700 なので、他の利用者は
-        // もともと届かない
-        let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+        // listen の前に呼ぶので、0600 にするまで誰も繋げない。chmod は持ち主でないボリュームなどで失敗
+        // するため、失敗は、グループや他の利用者が書ける権限が残るときだけ誤りにしてソケットを消す
+        if std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600)).is_err() {
+            let mode = std::fs::metadata(&self.path)
+                .map_err(BindError::Io)?
+                .permissions()
+                .mode();
+            if !mode_blocks_others(mode) {
+                return Err(BindError::Io(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "cannot restrict the control socket to its owner",
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -284,7 +286,7 @@ mod tests {
 
     /// 短い名前のディレクトリ。macOS の一時ディレクトリは長く、`sun_path` に収まりにくい。
     fn short_dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("wgft-cs-{}-{name}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("wgft-sk-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -451,27 +453,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// bind が作るソケットのファイルは、chmod の前から持ち主だけのものである。umask が 0 でも変わらない。
-    /// umask はプロセスで 1 つなので、試験ごとにプロセスを分ける cargo-nextest の下でだけ確かめる。
     #[cfg(unix)]
     #[test]
-    fn the_socket_is_private_from_its_creation() {
-        use std::os::unix::fs::PermissionsExt;
-        if std::env::var_os("NEXTEST_EXECUTION_MODE").is_none_or(|m| m != "process-per-test") {
-            eprintln!("skipped: the umask is per process; this test runs only under cargo-nextest");
-            return;
-        }
-        let d = short_dir("umask");
-        let p = d.join("a.sock");
-        // SAFETY: umask はプロセスの値を置き換えるだけである
-        let old = unsafe { libc::umask(0) };
-        let socket = Socket::new(Domain::UNIX, Type::STREAM, None).unwrap();
-        bind_private(&socket, &sock_addr(&p).unwrap()).unwrap();
-        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
-        // SAFETY: 同じ。umask は bind_private が戻した 0 のままである
-        let now = unsafe { libc::umask(old) };
-        assert_eq!(now, 0, "bind_private restores the umask");
-        assert_eq!(mode, 0o600);
+    fn only_a_mode_without_group_or_other_write_blocks_others() {
+        assert!(mode_blocks_others(0o600));
+        assert!(mode_blocks_others(0o644));
+        assert!(mode_blocks_others(0o400));
+        assert!(!mode_blocks_others(0o620));
+        assert!(!mode_blocks_others(0o602));
+        assert!(!mode_blocks_others(0o666));
+    }
+
+    /// bind の間に他のスレッドが作るファイルの権限は、umask の影響を受けない。
+    #[cfg(unix)]
+    #[test]
+    fn bind_does_not_narrow_files_made_by_other_threads() {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let d = short_dir("race");
+        let other = d.join("o");
+        std::fs::create_dir(&other).unwrap();
+        // 試験を動かす umask が何でも、基準のディレクトリと同じ権限になるはずである
+        let reference = d.join("ref");
+        std::fs::DirBuilder::new()
+            .mode(0o777)
+            .create(&reference)
+            .unwrap();
+        let want = std::fs::metadata(&reference).unwrap().permissions().mode();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|sc| {
+            let h = sc.spawn(|| {
+                let mut bad = 0;
+                let mut i = 0u32;
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    let q = other.join(i.to_string());
+                    std::fs::DirBuilder::new().mode(0o777).create(&q).unwrap();
+                    if std::fs::metadata(&q).unwrap().permissions().mode() != want {
+                        bad += 1;
+                    }
+                    i += 1;
+                }
+                bad
+            });
+            for n in 0..200 {
+                let _l = Listener::bind(&d.join(format!("s{}", n % 3))).unwrap();
+            }
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(h.join().unwrap(), 0, "a directory got a narrowed mode");
+        });
         let _ = std::fs::remove_dir_all(&d);
     }
 
