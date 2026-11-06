@@ -17,7 +17,7 @@
 //! - absent:hash で引く行のうち、記録が手元に無い行です。`--prune` が無ければ残します
 //!
 //! new と changed の行は、分類 (意図した違いか退行か) を人が決めてから `--reason` で理由を渡します。
-//! `--reason` が無ければ一覧を書かずに 1 で終えます。`--check` は一覧を書かず、作り直した一覧が今の一覧と
+//! `--reason` が無ければ一覧を書かずに 1 で終えます。`--check` は一覧を書かず、new か changed の行があるか、作り直した一覧が今の一覧と
 //! 違えば 1 で終えます。標準出力には、食い違ったすべての記録を `<鍵>\t<要求>\t<応答の SHA-256>\t<状態>` の
 //! 1 行ずつで、鍵の順に出します (`--report` はそのファイルにも書きます)。鍵は名前か `sha256:<hash>` です。
 //! 基の核と変えた核で同じ集まりを照らした出力を比べると、変更で生じた違いが分かります。
@@ -225,9 +225,9 @@ fn main() {
         dir.display()
     );
     let new_text = rec::write_full_divergences(&rows);
-    let unclassified =
-        (counts.get("new").copied().unwrap_or(0) + counts.get("changed").copied().unwrap_or(0)) > 0
-            && a.reason.is_none();
+    let fresh =
+        counts.get("new").copied().unwrap_or(0) + counts.get("changed").copied().unwrap_or(0);
+    let unclassified = fresh > 0 && a.reason.is_none();
     if counts.contains_key("invariant") {
         eprintln!(
             "divergences_full: a core invariant broke; that is a regression, not a divergence"
@@ -235,6 +235,14 @@ fn main() {
         process::exit(1);
     }
     if a.check {
+        // --reason の無い実行では new と changed の行を new_text に入れないので、new だけが増えても new_text は
+        // 今の一覧と同じになる。新しい違いと変わった違いは、一覧の比べとは別にここで落とす
+        if fresh > 0 {
+            eprintln!(
+                "divergences_full: {fresh} new or changed differences need a classification; run without --check and pass --reason after classifying them"
+            );
+            process::exit(1);
+        }
         if new_text != old_text {
             eprintln!(
                 "divergences_full: {} is not what this set and core give",
