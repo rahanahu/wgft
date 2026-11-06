@@ -70,8 +70,9 @@ impl Link {
         let sealed = vec![0; device.max_transmit_len()];
         let batch = batching.then(|| {
             let fd = socket.as_raw_fd();
-            // データプレーンと同じく、GRO を有効にし、GSO の有無を調べる
+            // データプレーンと同じく、GRO と datagram ごとの TOS を有効にし、GSO の有無を調べる
             let _ = sys::enable_gro(fd);
+            let _ = wgft_udp_batch::one::enable_recv_tos(fd);
             Batch {
                 rx: RxBatch::new(MAX_SLOTS, true, device.max_transmit_len()),
                 tx: TxBatch::new(MAX_SLOTS, true, device.mtu(), device.max_transmit_len()),
@@ -197,9 +198,9 @@ impl Link {
             };
             let device = &mut self.device;
             let mut delivered = 0;
-            b.rx.decrypt_each(n, |from, datagram, out| {
+            b.rx.decrypt_each(n, |from, ecn, datagram, out| {
                 read += 1;
-                match device.handle_datagram(now, from, datagram, out) {
+                match device.handle_datagram_with_ecn(now, from, ecn, datagram, out) {
                     Some(got) => {
                         delivered += 1;
                         got

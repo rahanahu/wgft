@@ -341,6 +341,28 @@ fn inner_packets_that_are_not_ipv4_are_dropped_on_receive() {
 }
 
 #[test]
+fn outer_ce_on_a_not_ect_packet_is_dropped_for_its_own_reason() {
+    // RFC 6040 4.2 の表の全体は tests/rfc6040_decap.rs が確かめる。ここでは捨てた理由だけを見る
+    let mut n = Net::new();
+    n.connect();
+    let now = n.now();
+    let mut out = vec![0u8; usize::from(u16::MAX)];
+    let plain = ipv4_packet(SERVER_IP, AGENT_IP, b"x");
+    let datagram = n.b.proto.encapsulate(0, now, &plain).unwrap().unwrap();
+    let got =
+        n.a.handle_datagram_with_ecn(now, n.b_addr, 0b11, &datagram, &mut out);
+    assert_eq!(got, None);
+    assert_eq!(n.a.drops().get(DropReason::CeOnNotEct), 1);
+    assert_eq!(n.a.drops().total(), 1);
+    // 外側の DSCP の bit は見ない:外側の TOS が EF と ECT(0) でも、Not-ECT の packet は変わらず届く
+    let datagram = n.b.proto.encapsulate(0, now, &plain).unwrap().unwrap();
+    let len =
+        n.a.handle_datagram_with_ecn(now, n.b_addr, 0b1011_1010, &datagram, &mut out)
+            .unwrap();
+    assert_eq!(out[..len], plain[..]);
+}
+
+#[test]
 fn garbage_gets_no_answer_and_does_not_move_the_endpoint() {
     let mut n = Net::new();
     n.connect();

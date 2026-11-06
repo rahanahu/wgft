@@ -37,7 +37,7 @@ sanstun を別の実装に替える必要が出た場合は、`protocol.rs` を�
 
 | 入力 | 関数 | 中身 |
 | --- | --- | --- |
-| UDP の datagram | `handle_datagram(now, from, datagram, out)` | 届いた datagram と送信元のアドレス、復号の行き先の呼び手の buffer |
+| UDP の datagram | `handle_datagram_with_ecn(now, from, outer_ecn, datagram, out)` | 届いた datagram と送信元のアドレス、datagram を運んだ外側の IP の header の ECN の欄 ([外側の ECN](#外側の-ecn-rfc-6040))、復号の行き先の呼び手の buffer。`handle_datagram(now, from, datagram, out)` は外側を Not-ECT として扱います |
 | トンネルの中の packet | `handle_packet(now, packet, out)` | トンネルの側から送る IPv4 の packet、暗号文の行き先の呼び手の buffer |
 | timer | `handle_timeout(now)` | ハンドシェイクの再送、鍵の更新、keepalive、期限切れ |
 
@@ -193,6 +193,43 @@ IPv4 の断片は再組み立てせず、そのまま渡します。
 v1 で wireguard-go が netstack の TUN の Write に渡したときと同じ分担です。
 ヘッダの checksum は確かめません。
 wireguard-go と Linux の WireGuard も確かめず、packet を受け取る IP の層が確かめます。
+
+### 外側の ECN (RFC 6040)
+
+device の層はトンネルの出口として、外側の IP の header の ECN の欄を RFC 6040 4.2 の表 (Figure 4) で内側の packet に写します。
+WireGuard は IETF の規格の外ですが、RFC 9601 6 節は UDP の header をはさむ tunnel にも RFC 6040 に従うことを勧めます (RECOMMENDED)。
+呼び手は datagram ごとの外側の ECN を `handle_datagram_with_ecn` に渡します。
+値は外側の TOS の byte で、device は下位 2 bit だけを見ます。
+socket から値を受け取る方法は [WireGuard の UDP のソケット](agent-parity.md#wireguard-の-udp-のソケット)にあります。
+
+| 内側 \ 外側 | Not-ECT | ECT(0) | ECT(1) | CE |
+| --- | --- | --- | --- | --- |
+| Not-ECT | Not-ECT | Not-ECT | Not-ECT | 捨てる |
+| ECT(0) | ECT(0) | ECT(0) | ECT(1) | CE |
+| ECT(1) | ECT(1) | ECT(1) | ECT(1) | CE |
+| CE | CE | CE | CE | CE |
+
+- 捨てる組:外側 CE と内側 Not-ECT の packet は捨て、`DropReason::CeOnNotEct` で数えます (MUST)。
+  内側が Not-ECT のときは、外側の ECT も渡しません (MUST)
+- 書き換え:そのほかの組では、内側と外側のうち重い印 (CE、ECT(1)、ECT(0)、Not-ECT の順) にします (MUST)。
+  書き換えるのは TOS の byte の下位 2 bit だけで、DSCP の 6 bit は変えません。
+  IPv4 の header checksum は RFC 1624 の差分の式で直します。
+  device の層は checksum を確かめないので、元の checksum が誤っていれば、直した後も同じだけ誤ったままになり、受け取る IP の層が捨てます
+- 当てる packet:中身の検査と AllowedIPs の検査を通った packet だけに表を当てます。
+  先の検査で捨てる packet は、その検査の理由で数えます
+- 費用:外側が Not-ECT なら、外側の値を比べるだけで packet を読みません。
+  外側が ECT か CE なら内側の 1 byte を読み、印が変わるときだけ TOS と checksum の 3 byte を書きます。
+  packet ごとの確保はありません
+- 送る向き:送る datagram の外側の ECN は device でなく socket が決め、agent は Not-ECT のままにします。
+  RFC 6040 の compatibility mode と同じ外形です。
+  RFC 9601 4 節は、出口が外側の ECN を写すと分からない間は外側を Not-ECT にすることを求めます。
+  agent は WireGuard の層では server の出口が外側の CE を写すかを知らないので、normal mode (内側の ECN を外側に写す) は採りません
+- 使われない組の記録 (SHOULD からの外れ):RFC 6040 4.2 は、表で今は使われない組を記録することを求めます (SHOULD)。
+  対象は、内側 Not-ECT と外側 ECT(0)、ECT(1)、CE、内側 CE と外側 ECT(1)、内側 ECT(1) と外側 ECT(0) の組です。
+  device の層は、捨てる組を理由ごとの数に出すほかは記録せず、表のとおりに渡します。
+  device は sans-IO でログを持たず、組ごとの記録には状態の読み出しに数を足す必要があるためです。
+  記録の得は測っていません。
+  経路が ECN の欄を書き換える疑いを調べる必要が出たときに、組ごとの数を足すことを見直します
 
 ### MTU と詰め物
 
@@ -350,6 +387,8 @@ device の層の試験 `a_restarted_server_is_reached_again_by_traffic` は、�
 - 単体の試験:鍵、prefix、経路表、IPv4 の検査、キュー。経路表は wireguard-go の `TestTrieIPv4` (Linux の `selftest/allowedips.h` から移したもの) の場合を写し、素朴な最長一致の模型との一致と、近道と表の引きの一致を proptest で確かめます。
 - device の試験:2 つの `Device` を偽の時計と手で運ぶネットワークで向かい合わせます。
   ハンドシェイク、双方向のデータ、詰め物の除去、AllowedIPs の外の送信元、経路の無い宛先、MTU、IPv4 でない中身、誤りに返事をしないこと、再送された datagram、ハンドシェイクの開始、応答で endpoint が動かず返事もしないこと、roaming、知らない鍵、詰め物の長い packet の保持量、待つ packet の上界と順序、キューの上界、鍵の更新、persistent keepalive、応答の側で待つ間の keepalive の規則、期限切れと再試行、一度も使わなかったトンネルの期限切れ、timer の短縮、両側の再起動、時刻の戻り、決定性、設定の誤りと範囲の外の値を確かめます。
+- RFC 6040:`tests/rfc6040_decap.rs` が、公開の API だけで表の 16 通り、IP の option を持つ header の checksum、datagram ごとの外側の値、捨てた後のセッションを確かめます。
+  データプレーンの `dataplane::tests::ecn` (Linux だけ) は、本物の UDP のソケットで datagram ごとに TOS を付けて送り、ソケットから device までの道と、送る datagram の外側が Not-ECT であることを確かめます。
 - fuzz:`crates/wgft-wireguard/fuzz` の `inbound` です。
   本物の相手の datagram を壊したもの、任意のバイト列、相手が検査を通さずに暗号化した任意の中身を agent の側に渡し、時計を進めます。
   任意の中身は crate の feature の `fuzzing` が開ける口で暗号化します。
@@ -407,7 +446,7 @@ sanstun を改変 (fork やパッチ) しない所有者の方針に従い、受
 | 負荷の判定と開始の上限 | ハンドシェイクの待ち行列の長さ、ピアごとに 1 秒あたり 50 回 | 1 秒あたり 100 回で cookie を求め、送信元ごとの bucket で絞ります | 未確認の節に書きました |
 | TAI64N のナノ秒 | 2^24 ナノ秒の単位に丸めます | 丸めません | 未確認の節に書きました |
 | persistent keepalive | 送るか受けるたびに延びる timer | 通信の有無に依らず間隔ごと | 上の「起動、再試行、期限切れ」に書きました |
-| DSCP と ECN | ハンドシェイクに AF41 を付け、ECN を RFC 6040 で写します | どちらもしません | 中の wgstack は ECN を使わず、agent の 1 つのピアでは優先度の印の利点が小さいためです |
+| DSCP と ECN | ハンドシェイクに AF41 を付け、ECN を RFC 6040 で写します | DSCP は付けません。ECN は受ける向きだけを RFC 6040 で写し、送る外側は Not-ECT です ([外側の ECN](#外側の-ecn-rfc-6040))。Windows では外側の ECN を読みません | agent の 1 つのピアでは優先度の印の利点が小さいためです。送る外側を写さない理由は同じ節にあります |
 | 経路の無い宛先 | Linux は ICMP の宛先到達不能を返します | 黙って捨て、`NoRoute` で数えます | agent の宛先は server の /32 だけで、核が経路を選ぶので起きません |
 
 ## 判断と理由
@@ -456,6 +495,15 @@ sanstun を改変 (fork やパッチ) しない所有者の方針に従い、受
   ラボの `e2e.sh` の 3000 バイトの UDP は server から agent への向きだけを断片にし、ラボの echo の返事は短いので、agent が断片に分ける向きは通りません。
 - Windows と macOS では、CI が build と単体の試験を流すだけです。
   実機の相互運用は確かめていません。
+- 外側の ECN の受け取りは、Linux のループバックの試験で、バッチの道と 1 つずつの道を確かめています。
+  macOS の `IP_RECVTOS` の制御の message は実機で確かめていません。
+  Windows は外側の ECN を読まず、外側を Not-ECT とみなします (この変更の前と同じ挙動です)。
+  Windows の socket の層で受け取るには `WSARecvMsg` が要り、Rust の agent が使う socket2 は Windows で `recvmsg` を持たないためです。
+- UDP の GRO がまとめた buffer は TOS の制御の message を 1 つしか持たないので、データプレーンはその値をすべての segment に使います。
+  GRO は TOS の違う datagram をまとめないと見込みます。
+  GRO のまとまりは 1 つの header を写して元の packet に分け直せることが前提で、TOS の違う packet をまとめると、転送する経路で分け直した packet の ECN が変わるためです。
+  この見込みは実機の NIC の GRO で確かめていません。
+  ラボの veth は GRO を行わないと見込み ([agent-throughput.md](agent-throughput.md#バッチの作り))、ループバックの試験で別々に送った datagram がまとまるかも確かめていないので、試験がこの組を通るかは分かりません。
 - ホストの一時停止:device は呼び手が渡す `Instant` だけを時計に使うので、停止の間の時間を数えるかは呼び手の時計の選び方で決まります。
   `Instant::now()` をそのまま渡すと、Linux の `CLOCK_MONOTONIC` と macOS の時計は停止の間に進まず、device は壁時計では 180 秒より古いセッションをまだ新しいとみなし、相手はそれを捨てます。
   この場合は、返事の無いデータの 15 秒後に始まるハンドシェイクで回復すると見込みますが、確かめていません。

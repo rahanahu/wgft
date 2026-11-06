@@ -1,13 +1,13 @@
 [package]
 name = "wgft-udp-batch"
-description = "The agent's tunnel batch store and Linux batch system calls: recvmmsg, sendmmsg, UDP GRO and GSO"
+description = "The agent's tunnel batch store, Linux batch system calls (recvmmsg, sendmmsg, UDP GRO and GSO) and the Unix single receive with the outer TOS"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-[target."cfg(target_os = \"linux\")".dependencies]
+[target."cfg(unix)".dependencies]
 libc.workspace = true
 
 [lints]

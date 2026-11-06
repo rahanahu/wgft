@@ -337,7 +337,6 @@ async fn outer_not_ect_delivers_the_inner_packet_unchanged_through_the_socket() 
 // 以下は、外側の ECN を device へ運ぶ修正が入るまで通らない。
 
 #[tokio::test]
-#[ignore = "fixed by the follow-up PR"]
 async fn outer_ce_with_inner_not_ect_is_dropped_and_counted() {
     let (a, mut peer) = up(Vec::new()).await;
     peer.send(&inner(SERVER_IP, AGENT_IP, NOT_ECT, 1), CE);
@@ -354,7 +353,6 @@ async fn outer_ce_with_inner_not_ect_is_dropped_and_counted() {
 }
 
 #[tokio::test]
-#[ignore = "fixed by the follow-up PR"]
 async fn outer_ce_with_inner_ect_arrives_as_inner_ce_with_a_valid_checksum() {
     let (a, mut peer) = up(Vec::new()).await;
     for (i, ecn) in [ECT0, ECT1].into_iter().enumerate() {
@@ -377,7 +375,6 @@ async fn outer_ce_with_inner_ect_arrives_as_inner_ce_with_a_valid_checksum() {
 }
 
 #[tokio::test]
-#[ignore = "fixed by the follow-up PR"]
 async fn a_burst_keeps_each_datagrams_own_outer_ecn() {
     // 同じ大きさの datagram を続けて送り、受信の batch (recvmmsg) と、核が許せば UDP GRO に
     // 同じ大きさの datagram がまとまる状況を作る。外側の ECN は 1 つごとに変え、16 通りの組を 3 周する

@@ -29,8 +29,7 @@ use tokio::sync::mpsc;
 use wgft_wireguard::{Device, Event, PublicKey, Transmit};
 
 use super::batch::{
-    BATCH_TIME, Pace, RX_SLOT, RxBatch, RxMeta, TxBatch, WAKE_BUDGET, each_packet, rx_store,
-    tx_store,
+    BATCH_TIME, Pace, RxBatch, TxBatch, WAKE_BUDGET, each_packet, rx_store, tx_store,
 };
 use super::{Command, Local, Settings, SocketBuffers, Status, Upper, clock, duration_to_nanos};
 use crate::batching::Batching;
@@ -149,13 +148,27 @@ impl Source for Io<'_> {
             };
         }
         let _ = vlen;
-        let (n, from) = self.socket.try_recv_from(&mut rx.data[..RX_SLOT])?;
-        rx.meta[0] = RxMeta {
-            from: Some(from),
-            len: u32::try_from(n).unwrap_or(0),
-            seg: 0,
-        };
-        Ok(1)
+        // Unix では recvmsg で datagram ごとの外側の TOS も読む
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let fd = self.socket.as_raw_fd();
+            self.socket
+                .try_io(tokio::io::Interest::READABLE, || rx.recv_one(fd))
+        }
+        // Windows は外側の TOS を読まず、外側を Not-ECT とみなす
+        #[cfg(not(unix))]
+        {
+            use super::batch::{RX_SLOT, RxMeta};
+            let (n, from) = self.socket.try_recv_from(&mut rx.data[..RX_SLOT])?;
+            rx.meta[0] = RxMeta {
+                from: Some(from),
+                len: u32::try_from(n).unwrap_or(0),
+                seg: 0,
+                ecn: 0,
+            };
+            Ok(1)
+        }
     }
 }
 
@@ -426,10 +439,12 @@ pub(super) async fn receive_batch<U: Upper>(
 
 /// 埋めた `n` 個の枠の datagram を、GRO がまとめた列は segment ごとに、device の層で平文の領域に
 /// 詰めて復号する。平文の領域の使った長さを返す。平文は暗号文より短いので、領域は足りる。
+/// datagram ごとに、それを運んだ外側の IP の header の ECN を device の層に渡す (RFC 6040 の写し)。
+/// GRO がまとめた枠の segment は、枠の 1 つの値を使う。
 fn decrypt(device: &mut Device, rx: &mut RxBatch, n: usize, now: Instant) -> usize {
-    rx.decrypt_each(n, |from, datagram, out| {
+    rx.decrypt_each(n, |from, ecn, datagram, out| {
         device
-            .handle_datagram(now, from, datagram, out)
+            .handle_datagram_with_ecn(now, from, ecn, datagram, out)
             .unwrap_or(0)
     })
 }

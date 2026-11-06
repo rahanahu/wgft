@@ -1,5 +1,6 @@
-//! Linux の `recvmmsg` と `sendmmsg`、UDP の GRO (`UDP_GRO`) と GSO (`UDP_SEGMENT`)。agent のデータプレーンの
-//! unsafe はこの module の system call の包みだけに置く。
+//! Linux の `recvmmsg` と `sendmmsg`、UDP の GRO (`UDP_GRO`) と GSO (`UDP_SEGMENT`)、受けた datagram の
+//! IP の TOS (`IP_TOS` の制御の message)。agent のデータプレーンの unsafe は、この module と 1 つずつの受信の
+//! [`crate::one`] の system call の包みだけに置く。
 //!
 //! 見出し (`mmsghdr`)、`iovec`、宛先の名前、制御の領域の配列は、バッチの置き場が起動の時に 1 回だけ連続して
 //! 確保し (`Headers`)、呼び出しのたびに使う枠の分だけ書き直す。書き直すのは、カーネルが
@@ -12,7 +13,8 @@ use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::fd::RawFd;
 
-use crate::{Msg, RxBatch, RxMeta, Sealed, TxBatch};
+use crate::one::{field, socklen, to_usize};
+use crate::{EMPTY_META, Msg, RxBatch, RxMeta, Sealed, TxBatch};
 
 /// The size of `struct cmsghdr`, and the alignment of a control message.
 const CMSG_HDR: usize = size_of::<libc::cmsghdr>();
@@ -30,9 +32,9 @@ const fn cmsg_len(n: usize) -> usize {
     cmsg_align(CMSG_HDR) + n
 }
 
-/// One message's control area: room for the one control message the data plane sends or reads,
-/// `UDP_SEGMENT` (a `u16`) or `UDP_GRO` (an `int`).
-const CTRL_LEN: usize = cmsg_space(size_of::<libc::c_int>());
+/// One message's control area: room for the control messages the data plane sends or reads,
+/// `UDP_SEGMENT` (a `u16`) on send, `UDP_GRO` (an `int`) and `IP_TOS` (a byte) on receive.
+const CTRL_LEN: usize = cmsg_space(size_of::<libc::c_int>()) + cmsg_space(1);
 
 #[derive(Clone, Copy)]
 #[repr(C, align(8))]
@@ -180,21 +182,6 @@ pub fn has_gso(fd: RawFd) -> bool {
     rc == 0
 }
 
-/// A length for a header field whose type differs between the C libraries: `size_t` in glibc,
-/// `int` or `socklen_t` in musl.
-fn field<T: TryFrom<usize> + Default>(n: usize) -> T {
-    T::try_from(n).unwrap_or_default()
-}
-
-/// A header field's length as `usize`, whatever its type in this C library.
-fn to_usize<T: TryInto<usize>>(n: T) -> usize {
-    n.try_into().unwrap_or(0)
-}
-
-fn socklen(n: usize) -> libc::socklen_t {
-    libc::socklen_t::try_from(n).unwrap_or(libc::socklen_t::MAX)
-}
-
 /// The layout of the receive slots in `RxBatch::data`.
 #[derive(Clone, Copy)]
 struct Parts {
@@ -262,20 +249,19 @@ fn recv(
         .zip(&h.names[..n])
         .zip(&h.ctrl[..n])
     {
-        // 切り詰められた datagram と、GRO の segment の長さを失った buffer は、分けられないので捨てる
+        // 切り詰められた datagram と、GRO の segment の長さか外側の ECN を失った buffer は、分けられないか
+        // 正しく渡せないので捨てる
         if m.msg_hdr.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0 {
             *truncated += 1;
-            *slot = RxMeta {
-                from: None,
-                len: 0,
-                seg: 0,
-            };
+            *slot = EMPTY_META;
             continue;
         }
+        let (seg, ecn) = read_control(ctrl, to_usize(m.msg_hdr.msg_controllen));
         *slot = RxMeta {
             from: name_to_addr(name),
             len: m.msg_len,
-            seg: gro_segment(ctrl, to_usize(m.msg_hdr.msg_controllen)),
+            seg,
+            ecn,
         };
     }
     Ok(n)
@@ -348,10 +334,13 @@ fn write_segment(ctrl: &mut Ctrl, seg: u32) {
     b[data..data + 2].copy_from_slice(&seg.to_ne_bytes());
 }
 
-/// The segment size of a `UDP_GRO` control message among the first `len` bytes of `ctrl`, or 0
-/// when the datagram came alone.
-fn gro_segment(ctrl: &Ctrl, len: usize) -> u32 {
+/// What the control messages among the first `len` bytes of `ctrl` say: the segment size of a
+/// `UDP_GRO` message, or 0 when the datagram came alone, and the ECN field (the low two bits) of
+/// an `IP_TOS` message, or 0 (Not-ECT) when the socket does not ask for it. A UDP GRO buffer has
+/// one `IP_TOS` message, which holds for each of its segments.
+fn read_control(ctrl: &Ctrl, len: usize) -> (u32, u8) {
     let b = &ctrl.0[..len.min(CTRL_LEN)];
+    let (mut seg, mut ecn) = (0, 0);
     let mut off = 0;
     while off + CMSG_HDR <= b.len() {
         let word = |at: usize| -> [u8; 4] { [b[at], b[at + 1], b[at + 2], b[at + 3]] };
@@ -365,11 +354,13 @@ fn gro_segment(ctrl: &Ctrl, len: usize) -> u32 {
         }
         let data = off + cmsg_align(CMSG_HDR);
         if level == libc::SOL_UDP && kind == libc::UDP_GRO && data + 4 <= b.len() {
-            return u32::try_from(i32::from_ne_bytes(word(data))).unwrap_or(0);
+            seg = u32::try_from(i32::from_ne_bytes(word(data))).unwrap_or(0);
+        } else if level == libc::IPPROTO_IP && kind == libc::IP_TOS && data < b.len() {
+            ecn = b[data] & 0b11;
         }
         off += cmsg_align(size);
     }
-    0
+    (seg, ecn)
 }
 
 /// The address the kernel wrote into a name buffer. An IPv4 socket writes a `sockaddr_in`, whose
@@ -419,14 +410,15 @@ mod tests {
     #[test]
     fn the_control_layout_matches_libc() {
         // SAFETY: 引数の長さから値を計算するだけである
-        let (space_int, space_u16, len_u16) = unsafe {
+        let (space_int, space_byte, space_u16, len_u16) = unsafe {
             (
                 libc::CMSG_SPACE(4) as usize,
+                libc::CMSG_SPACE(1) as usize,
                 libc::CMSG_SPACE(2) as usize,
                 libc::CMSG_LEN(2) as usize,
             )
         };
-        assert_eq!(CTRL_LEN, space_int);
+        assert_eq!(CTRL_LEN, space_int + space_byte);
         assert_eq!(cmsg_space(2), space_u16);
         assert_eq!(cmsg_len(2), len_u16);
     }
@@ -450,7 +442,35 @@ mod tests {
         c.0[CMSG_ALIGN + 4..CMSG_ALIGN + 8].copy_from_slice(&libc::UDP_GRO.to_ne_bytes());
         let data = cmsg_align(CMSG_HDR);
         c.0[data..data + 4].copy_from_slice(&1452i32.to_ne_bytes());
-        assert_eq!(gro_segment(&c, CTRL_LEN), 1452);
-        assert_eq!(gro_segment(&c, 0), 0);
+        assert_eq!(read_control(&c, CTRL_LEN), (1452, 0));
+        assert_eq!(read_control(&c, 0), (0, 0));
+    }
+
+    /// `IP_TOS` の制御の message を `at` から書く。値は 1 byte である。
+    fn write_tos(c: &mut Ctrl, at: usize, tos: u8) {
+        let b = &mut c.0[at..];
+        b[..CMSG_ALIGN].copy_from_slice(&cmsg_len(1).to_ne_bytes());
+        b[CMSG_ALIGN..CMSG_ALIGN + 4].copy_from_slice(&libc::IPPROTO_IP.to_ne_bytes());
+        b[CMSG_ALIGN + 4..CMSG_ALIGN + 8].copy_from_slice(&libc::IP_TOS.to_ne_bytes());
+        b[cmsg_align(CMSG_HDR)] = tos;
+    }
+
+    #[test]
+    fn the_tos_message_gives_the_ecn_field_alone_or_after_gro() {
+        // TOS だけ:DSCP の bit は捨て、ECN の 2 bit だけを返す
+        let mut c = Ctrl([0; CTRL_LEN]);
+        write_tos(&mut c, 0, 0b1011_1011);
+        assert_eq!(read_control(&c, cmsg_space(1)), (0, 0b11));
+        // GRO の後ろに TOS:両方を読む。制御の領域はちょうど 2 つの message の大きさである
+        let mut c = Ctrl([0; CTRL_LEN]);
+        let data = cmsg_align(CMSG_HDR);
+        c.0[..CMSG_ALIGN].copy_from_slice(&cmsg_len(4).to_ne_bytes());
+        c.0[CMSG_ALIGN..CMSG_ALIGN + 4].copy_from_slice(&libc::SOL_UDP.to_ne_bytes());
+        c.0[CMSG_ALIGN + 4..CMSG_ALIGN + 8].copy_from_slice(&libc::UDP_GRO.to_ne_bytes());
+        c.0[data..data + 4].copy_from_slice(&1452i32.to_ne_bytes());
+        write_tos(&mut c, cmsg_space(4), 0b10);
+        assert_eq!(read_control(&c, CTRL_LEN), (1452, 0b10));
+        // 書かれた長さの外の message は読まない
+        assert_eq!(read_control(&c, cmsg_space(4)), (1452, 0));
     }
 }

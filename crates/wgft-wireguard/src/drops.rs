@@ -19,6 +19,9 @@ pub enum DropReason {
     InvalidInnerPacket,
     /// The decrypted packet's source is not in the sending peer's allowed IPs.
     DisallowedSource,
+    /// The outer IP header was marked CE but the decrypted packet is not ECN-capable (Not-ECT):
+    /// RFC 6040 section 4.2 requires the tunnel egress to drop it.
+    CeOnNotEct,
     /// No peer's allowed IPs hold the outbound packet's destination.
     NoRoute,
     /// The peer to send to has no endpoint yet.
@@ -37,7 +40,7 @@ pub enum DropReason {
 
 impl DropReason {
     /// Every reason, in declaration order.
-    pub const ALL: [DropReason; 15] = [
+    pub const ALL: [DropReason; 16] = [
         DropReason::Malformed,
         DropReason::Unauthenticated,
         DropReason::Replayed,
@@ -46,6 +49,7 @@ impl DropReason {
         DropReason::NoSession,
         DropReason::InvalidInnerPacket,
         DropReason::DisallowedSource,
+        DropReason::CeOnNotEct,
         DropReason::NoRoute,
         DropReason::NoEndpoint,
         DropReason::TooBig,
@@ -67,6 +71,7 @@ impl DropReason {
             DropReason::NoSession => "no-session",
             DropReason::InvalidInnerPacket => "invalid-inner-packet",
             DropReason::DisallowedSource => "disallowed-source",
+            DropReason::CeOnNotEct => "ce-on-not-ect",
             DropReason::NoRoute => "no-route",
             DropReason::NoEndpoint => "no-endpoint",
             DropReason::TooBig => "too-big",

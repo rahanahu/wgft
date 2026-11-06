@@ -6,7 +6,10 @@
 
 use std::time::Duration;
 
-pub(super) use wgft_udp_batch::{RX_SLOT, RxBatch, RxMeta, TxBatch, each_packet};
+pub(super) use wgft_udp_batch::{RxBatch, TxBatch, each_packet};
+// 1 つずつ受ける Windows の道と試験だけが、枠と見出しを直に書く
+#[cfg(any(test, not(unix)))]
+pub(super) use wgft_udp_batch::{RX_SLOT, RxMeta};
 
 use crate::batching::Batching;
 
