@@ -360,6 +360,12 @@ def cpupaired_ratios(data, logfile):
                 ("host_peer_s_per_gb", "HOSTPEER", "host_qemu_share", None)):
             if " %s=" % key in text:
                 rc = cpupaired_key(data, key, vm=vcpus is not None, pre=pre, share_key=share, vcpus=vcpus) or rc
+        # each VM's guest-mode time from the host (add_guest_keys), which counts the softirq on idle vCPUs
+        for key, pre, share, vcpus in (
+                ("agentvm_guest_s_per_gb", "AGENTVMGUEST", "agentvm_guest_share", int(plan.get("vcpus", "4"))),
+                ("peervm_guest_s_per_gb", "PEERVMGUEST", "peervm_guest_share", int(plan.get("peer_vcpus", "4")))):
+            if any(key in r for r in data[2].values()):
+                rc = cpupaired_key(data, key, vm=True, pre=pre, share_key=share, vcpus=vcpus) or rc
     rc = paired_ratio(data, "overall_mbit", "MBITRATIO", sender_check=True) or rc
     return rc
 
@@ -426,8 +432,29 @@ def load_paired(logfile):
         if r.get("arm") not in ("x", "y") or r.get("vm") not in ("a", "b"):
             continue
         names[r["arm"]] = r.get("name", r["arm"])
+        add_guest_keys(r)
         runs[(int(r.get("round", 0)), int(r.get("run", 0)), r["arm"])] = r
     return plan, names, runs
+
+
+def add_guest_keys(r):
+    # with --split, each VM's CPU from the host's side: the time its vCPU threads spent in guest mode
+    # (host_<vm>_vcpu_guest_s, from hostwin), as <vm>vm_guest_s_per_gb and <vm>vm_guest_share. The guest's
+    # /proc/stat (agentvm_cpu_s_per_gb) misses most softirq and interrupt time that runs on an otherwise
+    # idle vCPU: its tick is stopped there, so that time counts as idle (perf in the agent VM saw 0.17-0.21
+    # CPU of softirq on the NIC's idle vCPU where /proc/stat had 0.04-0.07). The guest-mode time counts it,
+    # and leaves out KVM's halt polling and exits and the host's interrupts on the vCPU's CPU
+    try:
+        gb = float(r.get("bytes", "0") or 0) / 1e9
+        win = float(r.get("window_s", "0") or 0)
+    except ValueError:
+        return
+    for vm in ("agent", "peer"):
+        g = r.get("host_%s_vcpu_guest_s" % vm)
+        if g is None or gb <= 0 or win <= 0 or "%svm_guest_s_per_gb" % vm in r:
+            continue
+        r["%svm_guest_s_per_gb" % vm] = "%.3f" % (float(g) / gb)
+        r["%svm_guest_share" % vm] = "%.3f" % (float(g) / win)
 
 
 def planned_keys(plan, runs):
@@ -1945,6 +1972,14 @@ class HostSampler:
                     self.vhost_e[label] += dlt
             self.last[key] = vals
         parts = ["%s_pid=%s" % (label, pid)]
+        # each vCPU thread on its own, by the host CPU it is pinned to (pv<host CPU>): its run time (ns), guest
+        # time and system time (ticks), cumulative over the thread's life. Incus gives vCPU i the i-th CPU of
+        # limits.cpu, so hostwin numbers them in the order of the host CPUs
+        for tid, (comm, proc, allowed, vals) in sorted(threads.items()):
+            if self.kind.get((label, tid)) == "vcpu" and allowed.isdigit():
+                parts += ["%s_pv%s_run_ns=%d" % (label, allowed, vals["run"]),
+                          "%s_pv%s_guest=%d" % (label, allowed, vals["guest"]),
+                          "%s_pv%s_stime=%d" % (label, allowed, vals["stime"])]
         parts += ["%s_%s_ns=%d" % (label, c, tot[(c, "run")]) for c in ("vcpu", "vhost", "other")]
         parts += ["%s_vhostp_ns=%d" % (label, self.vhost_p[label]), "%s_vhoste_ns=%d" % (label, self.vhost_e[label])]
         for c in ("vcpu", "vhost", "other"):
@@ -2282,6 +2317,13 @@ def hostwin_line(r, rows, hz, pc, kvm=None):
             other = dl(lb + "_vcpucpu_busy") / hz - dl(lb + "_vcpu_ns") / 1e9
             add += ["host_%s_vcpucpu_irq_s=%.3f" % (lb, dl(lb + "_vcpucpu_irq") / hz),
                     "host_%s_vcpucpu_not_vcpu_s=%.3f" % (lb, other)]
+        pv = sorted(int(k[len(lb) + 3:-7]) for k in keys if k.startswith(lb + "_pv") and k.endswith("_run_ns"))
+        for i, n in enumerate(pv):
+            # per vCPU, in the order of the host CPUs: the thread's run time, its time in the guest and its time in
+            # KVM (exits, interrupt injection and halt polling), as shares of the window
+            add += ["host_%s_vcpu%d_run_share=%.3f" % (lb, i, dl("%s_pv%d_run_ns" % (lb, n)) / 1e9 / win),
+                    "host_%s_vcpu%d_guest_share=%.3f" % (lb, i, dl("%s_pv%d_guest" % (lb, n)) / hz / win),
+                    "host_%s_vcpu%d_kvm_share=%.3f" % (lb, i, dl("%s_pv%d_stime" % (lb, n)) / hz / win)]
         share = GUEST_SHARE.get(lb)
         if share and share in r and r.get("window_s"):
             # the vCPU threads' run time beyond what the guest counts as busy: halt polling, exits,
