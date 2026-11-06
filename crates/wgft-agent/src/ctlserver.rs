@@ -572,16 +572,14 @@ mod tests {
     #[test]
     fn a_started_rotate_key_is_waited_for_past_the_start_wait() {
         let (tx, rx) = sync_channel(1);
-        let state = Arc::new(RotateState::default());
-        let runtime = {
-            let state = Arc::clone(&state);
-            std::thread::spawn(move || {
-                assert!(state.start());
-                // 鍵の保存とトンネルの作り直しが、始まるのを待つ長さを越える
-                std::thread::sleep(Duration::from_millis(100));
-                let _ = tx.send(Ok("PUB".to_owned()));
-            })
-        };
+        let state = RotateState::default();
+        // 始まりは待つ側が動く前に済ませる。スレッドの中で始めると、負荷で遅れた間に取り下げが勝つ。
+        assert!(state.start());
+        let runtime = std::thread::spawn(move || {
+            // 鍵の保存とトンネルの作り直しが、始まるのを待つ長さを越える
+            std::thread::sleep(Duration::from_millis(100));
+            let _ = tx.send(Ok("PUB".to_owned()));
+        });
         let r = wait_rotate_key(
             &rx,
             &state,
