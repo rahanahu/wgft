@@ -299,6 +299,36 @@ impl Shared {
     }
 }
 
+/// RFC 1191 7 節の plateau の表です。大きい順です。
+const PLATEAUS: [u32; 11] = [
+    65535, 32000, 17914, 8166, 4352, 2002, 1492, 1006, 508, 296, 68,
+];
+
+/// Next-Hop MTU が 0 の Datagram Too Big から次の PMTU を見積もります (RFC 1191 4 節と 5 節)。
+/// `total_len` は引用した header の Total Length、`hdr_len` はその header の長さ (byte)、`pmtu` は今の PMTU です。
+///
+/// 5 節は次のように述べます。
+/// "Note: routers based on implementations derived from 4.2BSD Unix send an incorrect value for the Total Length
+/// of the original IP datagram. The value sent by these routers is the sum of the original Total Length and the
+/// original Header Length (expressed in octets). Since it is impossible for the host receiving such a Datagram Too
+/// Big message to know if it sent by one of these routers, the host must be conservative and assume that it is. If
+/// the Total Length field returned is not less than the current PMTU estimate, it must be reduced by 4 times the
+/// value of the returned Header Length field."
+/// 続けて "use as the next PMTU estimate the greatest plateau value that is less than the returned Total Length"
+/// とします。結果は下限の [`MIN_PMTU`] で止めます。
+fn estimate_pmtu(total_len: u32, hdr_len: usize, pmtu: u32) -> u32 {
+    let mut total = total_len;
+    if total >= pmtu {
+        // IHL (32 bit 語の数) の 4 倍は header の byte 数と等しい。
+        total = total.saturating_sub(u32::try_from(hdr_len).unwrap_or(0));
+    }
+    PLATEAUS
+        .into_iter()
+        .find(|&p| p < total)
+        .unwrap_or(MIN_PMTU)
+        .max(MIN_PMTU)
+}
+
 impl<H: Hook> Stack<H> {
     /// ICMP の入口です (Go の `inputICMP`)。
     pub(crate) fn input_icmp(&mut self, ip: &Ipv4<'_>, now: i64) {
@@ -343,8 +373,9 @@ impl<H: Hook> Stack<H> {
             self.s.stats.icmp_dropped += 1;
             return;
         }
+        // Next-Hop MTU が 0 の誤りは古い router の形です。見積もりは接続の今の PMTU が要るので、探した後に行います。
         let mtu = m.rest & 0xffff;
-        if mtu < MIN_PMTU {
+        if mtu != 0 && mtu < MIN_PMTU {
             self.s.stats.icmp_dropped += 1;
             return;
         }
@@ -362,6 +393,11 @@ impl<H: Hook> Stack<H> {
         };
         let c = self.conns.tcb(id);
         if c.generation == generation && c.in_index && c.state != State::Free {
+            let mtu = if mtu == 0 {
+                estimate_pmtu(u32::from(be16(q, 2)), qhl, c.pmtu)
+            } else {
+                mtu
+            };
             self.conn(id).pmtu_drop(seq, mtu, now);
         }
     }

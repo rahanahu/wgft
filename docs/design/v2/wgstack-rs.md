@@ -304,9 +304,6 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
 次の外れは理由が無いので、直す候補です。
 SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表にあります。
 
-- Next-Hop MTU が 0 の誤り (RFC 1191 3 節と 5 節、MUST):next-hop MTU を持たない古い形の Datagram Too Big を、552 未満の誤りと同じ検査で捨てます。
-  古い router の後ろの経路では PMTU を発見できません (そうした router がどれだけ残るかは確かめていません)。
-  直すなら、引用の Total Length から 5 節の手順と 7 節の plateau の表で見積もります
 - ECN (SHLD-8)
 - PMTU の引き下げと輻輳の窓 (RFC 5681 3.1)
 - 窓の scale の記録 (RFC 7323 2.3)

@@ -1438,7 +1438,6 @@ fn pmtu_after_with_mtu(mtu: usize, steps: &[(u16, u16)]) -> Vec<u32> {
 /// 最大の plateau を PMTU にし、552 で止めます。Total Length が今の PMTU 以上なら、5 節の 4.2BSD の注に従い
 /// 引用の header の長さの 4 倍を先に引きます (PMTU 1420 の接続で 1420 は 1400 になり 1006)。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn frag_needed_with_next_hop_mtu_zero_estimates_from_the_plateau_table() {
     assert_eq!(pmtu_after(&[(1420, 0)]), [1006]);
     assert_eq!(pmtu_after(&[(1300, 0)]), [1006]);
