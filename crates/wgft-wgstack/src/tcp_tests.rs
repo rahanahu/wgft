@@ -1632,13 +1632,11 @@ fn tw_newer_fin_restarts_the_timer(row: bool) {
 }
 
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc7323_time_wait_slot_drops_a_fin_with_an_older_tsval() {
     tw_paws_fin_does_not_restart_the_timer(false);
 }
 
 #[test]
-#[ignore = "fixed by the next commit"]
 fn rfc7323_time_wait_row_drops_a_fin_with_an_older_tsval() {
     tw_paws_fin_does_not_restart_the_timer(true);
 }
@@ -1841,6 +1839,29 @@ fn rfc7323_wire_time_wait_is_kept_alive_by_a_fin_with_a_valid_tsval() {
             outs.len() == 1 && outs[0].flags == FLAG_ACK,
             "row {row}: want an ACK, got {}",
             show(&outs)
+        );
+    }
+}
+
+/// 凍結した Go との照合用の切り替え (feature `harness` だけ):TIME_WAIT の枠と行で PAWS をせず、古い TSval の FIN の写しも
+/// 期限を数え直します。
+#[cfg(feature = "harness")]
+#[test]
+fn go_compat_switch_skips_paws_in_time_wait() {
+    for row in [false, true] {
+        crate::set_go_compat_tw_no_paws(true);
+        let (mut n, c, mut p) = paws_time_wait(row);
+        n.advance(Duration::from_secs(30));
+        let old = p.ts_val - 1000;
+        let s = paws_old_fin(&mut p, old);
+        n.inject(&s);
+        n.drain();
+        crate::set_go_compat_tw_no_paws(false);
+        n.advance(Duration::from_secs(31));
+        n.drain();
+        assert!(
+            paws_tw_alive(&n, c, row),
+            "the switch did not restore the timer restart on an old-TSval FIN (row {row})"
         );
     }
 }

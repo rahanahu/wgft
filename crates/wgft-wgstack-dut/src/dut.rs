@@ -156,6 +156,7 @@ struct Compat {
     dsack_snd_una: bool,
     row_rst: bool,
     synack_rto: bool,
+    tw_no_paws: bool,
 }
 
 impl Compat {
@@ -166,6 +167,7 @@ impl Compat {
             dsack_snd_una: wgft_wgstack::go_compat_dsack_snd_una(),
             row_rst: wgft_wgstack::go_compat_row_rst(),
             synack_rto: wgft_wgstack::go_compat_synack_rto(),
+            tw_no_paws: wgft_wgstack::go_compat_tw_no_paws(),
         }
     }
 
@@ -176,6 +178,7 @@ impl Compat {
             dsack_snd_una: on,
             row_rst: on,
             synack_rto: on,
+            tw_no_paws: on,
         }
     }
 
@@ -185,6 +188,7 @@ impl Compat {
         wgft_wgstack::set_go_compat_dsack_snd_una(self.dsack_snd_una);
         wgft_wgstack::set_go_compat_row_rst(self.row_rst);
         wgft_wgstack::set_go_compat_synack_rto(self.synack_rto);
+        wgft_wgstack::set_go_compat_tw_no_paws(self.tw_no_paws);
     }
 }
 
