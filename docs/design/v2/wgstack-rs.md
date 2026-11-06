@@ -213,7 +213,6 @@ SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表
 直しが入ったら行を消します。
 
 - RFC 5681 3 節:HyStart++ (RFC 9406) の外の slow start でも 1 ACK の増分の上限 L を 2 にします
-- RFC 1122 3.3.2:期限を過ぎた再組み立ての項目を追い出す時に Time Exceeded を送りません
 
 ## Go から Rust への対応
 
@@ -1430,6 +1429,7 @@ UDP と ICMP と断片の切り替えの行の件数は、git の集まり (348 
 | `set_go_compat_shared_id` | UDP の datagram と echo の応答の IPv4 ID を、DF を立てた packet と同じ 1 つの数えから取ります (UDP は 0 を飛ばし、echo の応答は飛ばしません) | 別の数えから取り、0 を飛ばします (RFC 6864 4.3) | UDP と echo の応答の ID が TCP の segment と ICMP の誤りの数えで動くので、この記録を ID の違いより後の応答まで照らし続けるため | 15 / 15 (icmp-echo、udp-datagram、udp-large) | `icmp_tests::udp_ids_are_not_advanced_by_df_traffic`、`echo_replies_and_udp_share_a_counter_that_df_traffic_does_not_advance`、`open_id_counter_wraps_past_zero` |
 | `set_go_compat_echo_drop` | MTU を超える echo の応答を、断片に分けずに捨てて `icmp_dropped` に数えます | 断片に分けて全部返します (RFC 1122 3.2.2.6) | 5 件の記録を、大きな echo の応答より後の応答まで照らし続けるため | 5 / 5 (icmp-echo) | `icmp_tests::icmp_echo`、`oversized_echo_request_gets_a_fragmented_reply` |
 | `set_go_compat_df_frag` (試験の build だけ) | DF の立った断片を断片の誤りとして捨てます | 受け入れて再組み立てます (RFC 6864 4.3) | Go の再組み立ての golden を、DF の立った断片より後の手順まで照らし続けるため。記録の再生には当たる要求がありません | 0 / 0 (再組み立ての golden だけ。400 手順の 5 手目で食い違う) | `icmp_tests::fragments_with_df_set_are_reassembled`、`mixed_df_fragments_are_reassembled`、`frag::tests::accepts_dont_fragment_with_fragments` |
+| `set_go_compat_evict_silent` (試験の build だけ) | 期限を過ぎて掃除を待つ項目を追い出す時に、Time Exceeded を送りません | 追い出す前に知らせを返します (RFC 1122 3.3.2) | Go の再組み立ての golden を、期限を過ぎた項目の追い出しより後の手順まで照らし続けるため。記録の再生には当たる要求がありません | 0 / 0 (再組み立ての golden だけ。400 手順の 12 手目で食い違う) | `icmp_tests::evicting_an_expired_entry_sends_time_exceeded`、`eviction_time_exceeded_shares_the_icmp_rate_limit`、`frag::tests::evicted_expired_entry_reports_time_exceeded`、`eviction_ledger_invariant` |
 
 ## 置き換えの判定
 
@@ -1852,6 +1852,15 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   断片に分けた側 (送り手か途中の router) は、さらに分けられないように断片に DF を立てうるので、DF の立った断片は正当です。
   凍結した Go は DF の立った断片を断片の誤りとして捨てます。
   Go の再組み立ての golden (`golden_tests`) の照合だけ、試験の build の thread ごとの切り替え (`set_go_compat_df_frag`) で Go と同じにします。
+  Go の記録の再生に当たる要求は無く、`WgstackDut` に切り替えはありません。
+  製品と harness の build には切り替えも読み出しもありません
+- 期限を過ぎた項目の追い出し:最初の断片を持つ項目が期限を過ぎ、掃除より先に表の追い出しで外れるときは、外す前に Time Exceeded (code 1) を送ります。
+  RFC 1122 3.3.2 は、最初の断片を受けた項目の期限切れに Time Exceeded を返すことを求めます。
+  表は項目を外すと、その知らせを返して処理を戻します (`Outcome::Rejected` の理由が `Expired`)。呼び手は知らせを送ってから同じ断片を処理し直し、外した項目の数で必ず終わります。
+  知らせは掃除の場合と同じ ICMP の誤りの速さの制限に従います。
+  期限前の項目と、最初の断片を持たない項目の追い出しは今までどおり黙って行います。
+  凍結した Go は期限を過ぎた項目も黙って追い出します。
+  Go の再組み立ての golden の照合だけ、試験の build の thread ごとの切り替え (`set_go_compat_evict_silent`) で Go と同じにします。
   Go の記録の再生に当たる要求は無く、`WgstackDut` に切り替えはありません。
   製品と harness の build には切り替えも読み出しもありません
 

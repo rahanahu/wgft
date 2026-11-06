@@ -1334,7 +1334,6 @@ fn assert_time_exceeded_for(pkts: &[Vec<u8>], first_fragment: &[u8]) {
 
 /// 期限を過ぎた項目が、掃除より先に表の追い出しで外れたとき、Time Exceeded を送ります。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn evicting_an_expired_entry_sends_time_exceeded() {
     let mut n = TestNet::new(small_limits());
     n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
@@ -1372,7 +1371,6 @@ fn evicting_an_expired_entry_without_the_first_fragment_sends_nothing() {
 
 /// 追い出しの Time Exceeded も、掃除と同じ速さの制限 (1 秒に 1000 個) に従います。
 #[test]
-#[ignore = "fixed by the next commit"]
 fn eviction_time_exceeded_shares_the_icmp_rate_limit() {
     let mut n = TestNet::new(small_limits());
     n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();

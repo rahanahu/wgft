@@ -552,17 +552,25 @@ fn eviction_order() {
 }
 
 #[test]
-fn evicted_expired_entry_is_silent() {
+fn evicted_expired_entry_reports_time_exceeded() {
+    // 鍵 1 は期限を過ぎていますが、まだ掃除していません。鍵 2 のために追い出す前に、その知らせを返します
+    // (RFC 1122 3.3.2)。呼び手は知らせを送った後に、同じ断片を処理し直します。
     let mut t = table(1, 2, 4096);
     hold(&mut t, &pkt(17, 1, 0, true, 0, &[], b"aaaaaaaa"), at(0));
-    // 鍵 1 は期限を過ぎていますが、まだ掃除していません。鍵 2 のために追い出すと、Time Exceeded は出ません。
-    hold(
-        &mut t,
-        &pkt(17, 2, 0, true, 0, &[], b"bbbbbbbb"),
-        at(3 * SEC),
-    );
+    let second = pkt(17, 2, 0, true, 0, &[], b"bbbbbbbb");
+    let n = rejected(t.process(&second, at(3 * SEC)));
+    assert!(n.reason == Reason::Expired && n.has_first);
     assert_eq!(t.evicted(), 1);
+    hold(&mut t, &second, at(3 * SEC));
     assert!(t.sweep_next(at(3 * SEC)).is_none());
+    want_ids(&t, &[2]);
+    // 凍結した Go は黙って追い出します。
+    let mut t = table(1, 2, 4096);
+    crate::stack::set_go_compat_evict_silent(true);
+    hold(&mut t, &pkt(17, 1, 0, true, 0, &[], b"aaaaaaaa"), at(0));
+    hold(&mut t, &second, at(3 * SEC));
+    crate::stack::set_go_compat_evict_silent(false);
+    assert_eq!(t.evicted(), 1);
     want_ids(&t, &[2]);
 }
 
@@ -646,6 +654,8 @@ fn check_ledger(t: &Table, step: usize) {
 
 #[test]
 fn eviction_ledger_invariant() {
+    // この台帳は期限を過ぎた項目の黙った追い出しを前提にするので、Go と同じ動作にします。
+    crate::stack::set_go_compat_evict_silent(true);
     let mut rng = ChaCha8::new([0x26; 32]);
     let mut n = |k: u64| -> usize { usize::try_from(rng.below(k)).unwrap() };
     let mut t = table(8, 24, 1 << 16);

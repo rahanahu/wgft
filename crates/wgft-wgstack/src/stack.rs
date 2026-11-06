@@ -239,6 +239,26 @@ pub(crate) fn go_compat_df_frag() -> bool {
     GO_COMPAT_DF_FRAG.with(std::cell::Cell::get)
 }
 
+// 期限を過ぎた項目を追い出すとき Time Exceeded を返さない切り替えです。凍結した Go は返さないので、Go の再組み立ての
+// golden との照合のためだけにあります。記録の再生には要りません。試験の build だけにあり、製品の build と harness の
+// build には切り替えも読み出しもありません。値は thread ごとで、既定は偽 (RFC 1122 3.3.2 のとおり返す) です。
+#[cfg(test)]
+thread_local! {
+    static GO_COMPAT_EVICT_SILENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 真にすると、この thread で駆動する再組み立ては期限を過ぎた項目の追い出しを黙って行います (凍結した Go と同じ)。
+#[cfg(test)]
+pub(crate) fn set_go_compat_evict_silent(on: bool) {
+    GO_COMPAT_EVICT_SILENT.with(|c| c.set(on));
+}
+
+/// 今の thread の値です。
+#[cfg(test)]
+pub(crate) fn go_compat_evict_silent() -> bool {
+    GO_COMPAT_EVICT_SILENT.with(std::cell::Cell::get)
+}
+
 /// 何もしない hook です。boost の戻りを常に許します。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoHook;

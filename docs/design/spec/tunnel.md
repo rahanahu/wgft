@@ -409,6 +409,7 @@ Go 以外の実装も同じ規則で行います。
   1 つの datagram だけで満ちるときは、その断片を捨てます ([表が満杯のときの扱い](../userspace/packet-validation.md#表が満杯のときの扱い))
 - 断片の検査:ヘッダの checksum、長さ、flag、option の形を確かめ、重なる断片と矛盾する断片はその datagram ごと捨てます。Rust の wgstack は DF の立った断片も受け入れます (RFC 6864 4.3) ([断片の検査](../userspace/packet-validation.md#断片の検査))
 - 断片への ICMP:期限を過ぎた項目のうち、最初の断片を持ち自分宛てのものにだけ Time Exceeded を返します。
+  Rust の wgstack は、期限を過ぎて掃除を待つ間に追い出す項目にも、最初の断片を持つなら追い出す前に Time Exceeded を返します (RFC 1122 3.3.2)。
   option の不正な断片には Parameter Problem を返します。Rust の wgstack は、先頭でない断片には返さず黙って捨てます (RFC 1122 3.2.2) ([断片に対する ICMP](../userspace/packet-validation.md#断片に対する-icmp))
 - ICMP の誤りの送信元:ICMP の誤りは、外側の送信元が引用された datagram の宛先と一致するときだけ受け入れ、それ以外は黙って捨てます ([ICMP の誤りの入口](../userspace/packet-validation.md#icmp-の誤りの入口))
 - Fragmentation Needed の下限:next-hop MTU が 552 より小さい Fragmentation Needed は捨てます ([Fragmentation Needed の MTU の下限](../userspace/packet-validation.md#fragmentation-needed-の-mtu-の下限))
