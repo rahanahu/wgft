@@ -59,9 +59,9 @@
   解析の `VMRATIO` の行がこの値の比です。
   5 つの namespace は 1 つの VM にあるので、client、LAN のホスト、server、ルータの分も含みます。
   同じ経路の 2 つの腕では、違うのはエージェントの側だけです。
-  カーネルモードの agent はプロセスが仕事をしないので、`kernel` の腕はこの値だけで比べます。
-  ゲストの `/proc/stat` は idle の vCPU で走る softirq をほとんど数えないので、この値は参考に使います。
-  VM の byte あたりの CPU の判定は、agent を専用の VM に置く測定 (`--split`) の `AGENTVMGUESTRATIO` で行います ([agent を専用の VM に置く](../../../lab/README.md#agent-を専用の-vm-に置く---split)、2026-11-07 の改訂)
+  ゲストの `/proc/stat` は idle の vCPU で走る softirq をほとんど数えないので、この値は参考の値です。
+  カーネルモードの agent はプロセスが仕事をしないので、`kernel` の腕との判定は VM の byte あたりの CPU で行います。
+  その判定の値は、agent を専用の VM に置く測定 (`--split`) の `AGENTVMGUESTRATIO` です ([agent を専用の VM に置く](../../../lab/README.md#agent-を専用の-vm-に置く---split)、2026-11-07 の改訂)
 - 詰まりの目安:エージェントの CPU の割合 (1 つの CPU に対する割合)、送り手のスレッドの CPU の割合、VM 全体で忙しい CPU の数 (4 個のうち) です
 
 ラボの経路には実際のホストと違う点が 1 つあります。

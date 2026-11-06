@@ -138,9 +138,25 @@ class CpuPaired(unittest.TestCase):
         self.assertIn("AGENTVMGUESTCPU arm=x name=new runs=8 cpu_s_per_gb=1.200 ", out)
         self.assertRegex(out, r"AGENTVMGUESTCPU arm=y .* agentvm_guest_share=0.10\n")
         self.assertIn("PEERVMGUESTRATIO x_over_y=1.000 ", out)
-        # without the host's samples there is no such line
+        # the decision lines come before the /proc/stat ones
+        self.assertLess(out.index("AGENTVMGUESTRATIO"), out.index("AGENTVMRATIO"))
+        # without the host's samples there is no guest ratio, and the log says the VM ratio is reference only
         rc, out = analyse(self.split_log(lambda rnd, run, arm: ""))
-        self.assertNotIn("GUEST", out)
+        self.assertNotIn("AGENTVMGUESTRATIO", out)
+        self.assertIn("AGENTVMGUEST unavailable: ", out)
+        self.assertIn("AGENTVMRATIO x_over_y=0.800 ", out)
+
+    def test_run_without_guest_time_is_left_out_of_the_guest_ratio_only(self):
+        def host(rnd, run, arm):
+            if (rnd, run, arm) == (2, 1, "x"):
+                return "bytes=1000000000 window_s=10"
+            return "bytes=1000000000 window_s=10 host_agent_vcpu_guest_s=%s" % ("1.2" if arm == "x" else "1.0")
+        rc, out = analyse(self.split_log(host))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("AGENTVMGUESTRATIO x_over_y=1.200 ci95_low=1.200 ci95_high=1.200 pairs=7 left_out=1 ", out)
+        self.assertIn("AGENTVMGUESTLEFT_OUT planned=8 used=7 missing=0 failed=1 ", out)
+        self.assertIn("AGENTVMRATIO x_over_y=0.800 ci95_low=0.800 ci95_high=0.800 pairs=8 left_out=0 ", out)
+        self.assertNotIn("AGENTVMGUEST unavailable", out)
 
     def test_placement_rejects_userspace_arms_with_more_threads(self):
         # --placement apart pins the agent to one CPU: only the rust and kernel arms. --rounds 3 is
