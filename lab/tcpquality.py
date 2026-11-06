@@ -1597,7 +1597,7 @@ def placement_parts(p, d, a, t):
     # interrupts per vCPU as fractions (<p>_nicirq_cpu<N>_frac), the vCPU that took most
     # (<p>_nicirq_top_cpu) and the vectors' effective affinity (<p>_nicirq_eff); and per sampled
     # thread label L the fraction of samples on each vCPU (<p>_thr_L_cpu<N>_frac), the share of
-    # samples in state R, its migrations, its wait for a CPU as a share of the window, and
+    # samples in state R, its migrations, its wait for a CPU and its run time on a CPU as shares of the window, and
     # <p>_thr_L_on_nicirq_frac, the chance that the thread was on the vCPU taking the NIC's
     # interrupts (the sum over vCPUs of the two fractions' products)
     out = []
@@ -1650,6 +1650,8 @@ def placement_parts(p, d, a, t):
             put("%s_thr_%s_mig" % (p, lb), d(q + "mig"), "%.0f")
         if d(q + "wait_us") is not None:
             put("%s_thr_%s_wait_share" % (p, lb), d(q + "wait_us") / 1e6 / t)
+        if d(q + "run_us") is not None:
+            put("%s_thr_%s_run_share" % (p, lb), d(q + "run_us") / 1e6 / t)
         if nic_frac:
             put("%s_thr_%s_on_nicirq_frac" % (p, lb), sum(v / n * nic_frac.get(c, 0) for c, v in on.items()), "%.2f")
     return out
