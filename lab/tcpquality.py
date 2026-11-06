@@ -354,10 +354,14 @@ def cpupaired_ratios(data, logfile):
         rc = cpupaired_key(data, "agent_cpu_s_per_gb", vm=False)
     with open(logfile) as f:
         text = f.read()
-    if " vm_cpu_s_per_gb=" in text:
+    def vm_lines():
         # with --split the VM line is both VMs together, so the busy share is checked against both
+        if " vm_cpu_s_per_gb=" not in text:
+            return 0
         vcpus = int(plan.get("vcpus", "4")) + (int(plan.get("peer_vcpus", "0")) if split else 0)
-        rc = cpupaired_key(data, "vm_cpu_s_per_gb", vm=True, vcpus=vcpus) or rc
+        return cpupaired_key(data, "vm_cpu_s_per_gb", vm=True, vcpus=vcpus)
+    if not split:
+        rc = vm_lines() or rc
     if split:
         # the agent VM alone: the agent's process and the kernel work of its NIC, or kernel WireGuard,
         # on the agent's vCPUs only; then the peer VM, and the host's threads of both VMs. Each VM first by
@@ -377,6 +381,9 @@ def cpupaired_ratios(data, logfile):
             elif pre == "AGENTVMGUEST" and " agentvm_cpu_s_per_gb=" in text:
                 print("AGENTVMGUEST unavailable: the runs carry no host_agent_vcpu_guest_s (no host samples); "
                       "AGENTVMRATIO is reference only")
+            if pre == "AGENTVMGUEST":
+                # the two VMs' /proc/stat together (VMRATIO), a reference value, after the decision lines
+                rc = vm_lines() or rc
     rc = paired_ratio(data, "overall_mbit", "MBITRATIO", sender_check=True) or rc
     return rc
 

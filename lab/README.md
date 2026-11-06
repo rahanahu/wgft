@@ -397,7 +397,7 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus
   これらは `HOSTAGENT` と `HOSTPEER` の行と `host_*` の値で別に見ます。
   ゲストは VM exit とホストの割り込みの時間も自分の忙しさに数えるので、1 vCPU で埋まった VM では `AGENTVMGUEST` が `/proc/stat` より 5 から 11% 小さくなります。
   2 つの腕で同じように小さくなるので、最大負荷の 1 vCPU の 9 組で比の動きは約 2.5% 以内でした (RTT 20 ms の送る向きの 4 stream の 1 組だけ 6%)。
-  最大の半分の固定負荷では 1 vCPU にも idle があり、比は 3 から 5% 動きました。
+  最大の半分の固定負荷では 1 vCPU にも idle があり、比は 1 から 5% 動きました。
   ゲストが idle の間に自分で polling する設定 (cpuidle の POLL の状態や haltpoll の driver) では、その polling もゲストのモードの時間に入ります。
   今のラボのゲストは `cpuidle_driver=none` で、idle では HLT で止まります (`guestinfo.txt`)。
   値は clock tick で数えるので、10 秒の窓で約 1% の粒度です。
