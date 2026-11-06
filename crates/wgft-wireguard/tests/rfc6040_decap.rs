@@ -355,6 +355,8 @@ fn each_datagram_uses_its_own_outer_ecn() {
         (ECT0, ECT0),
         (NOT_ECT, ECT1),
         (CE, NOT_ECT),
+        (NOT_ECT, CE),
+        (ECT1, CE),
     ];
     let before = drops_total(&pair.a);
     let mut want_drops = 0;
@@ -370,6 +372,7 @@ fn each_datagram_uses_its_own_outer_ecn() {
             Some(want) => assert_only_ecn_changed(&sent, &got.expect(&why), want, &why),
         }
     }
+    // 捨てる組 (内側 Not-ECT と外側 CE) は、隣り合わない 2 か所にある
     assert_eq!(want_drops, 2);
     assert_eq!(
         drops_total(&pair.a) - before,
