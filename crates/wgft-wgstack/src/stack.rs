@@ -196,6 +196,26 @@ pub fn go_compat_sent_at_zero() -> bool {
     GO_COMPAT_SENT_AT_ZERO.with(std::cell::Cell::get)
 }
 
+// 凍結した Go の記録との照合のためだけに、PMTU の引き下げで輻輳の窓を縮めない切り替えです (RFC 5681 3.1 は縮めることを勧める)。
+// feature `harness` の build だけにあり、値は thread ごとで、既定は偽です。
+#[cfg(feature = "harness")]
+thread_local! {
+    static GO_COMPAT_PMTU_KEEP_CWND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 真にすると、この thread で駆動する核は PMTU の引き下げで輻輳の窓を縮めません (凍結した Go と同じ)。核を駆動する前に
+/// 呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
+#[cfg(feature = "harness")]
+pub fn set_go_compat_pmtu_keep_cwnd(on: bool) {
+    GO_COMPAT_PMTU_KEEP_CWND.with(|c| c.set(on));
+}
+
+/// 今の thread の値です。
+#[cfg(feature = "harness")]
+pub fn go_compat_pmtu_keep_cwnd() -> bool {
+    GO_COMPAT_PMTU_KEEP_CWND.with(std::cell::Cell::get)
+}
+
 // 非 atomic の datagram (UDP と echo の応答) の IPv4 ID を、DF を立てた packet と同じ数えから取る切り替えです。
 // 凍結した Go は 1 つの数えを全部で使うので、Go の記録との照合のためだけにあります。feature `harness` の build
 // だけにあり、製品の build には切り替えも読み出しもありません。値は thread ごとで、既定は偽 (RFC 6864 4.3 の独立した数え) です。

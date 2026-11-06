@@ -49,12 +49,12 @@ pub use stack::{
 pub use stack::{Spare, TouchedCheck};
 #[cfg(feature = "harness")]
 pub use stack::{
-    go_compat_dsack_snd_una, go_compat_echo_drop, go_compat_row_rst, go_compat_rto_l2,
-    go_compat_sent_at_zero, go_compat_shared_id, go_compat_synack_rto, go_compat_tw_no_paws,
-    go_compat_tw_no_ts_recent, set_go_compat_dsack_snd_una, set_go_compat_echo_drop,
-    set_go_compat_row_rst, set_go_compat_rto_l2, set_go_compat_sent_at_zero,
-    set_go_compat_shared_id, set_go_compat_synack_rto, set_go_compat_tw_no_paws,
-    set_go_compat_tw_no_ts_recent,
+    go_compat_dsack_snd_una, go_compat_echo_drop, go_compat_pmtu_keep_cwnd, go_compat_row_rst,
+    go_compat_rto_l2, go_compat_sent_at_zero, go_compat_shared_id, go_compat_synack_rto,
+    go_compat_tw_no_paws, go_compat_tw_no_ts_recent, set_go_compat_dsack_snd_una,
+    set_go_compat_echo_drop, set_go_compat_pmtu_keep_cwnd, set_go_compat_row_rst,
+    set_go_compat_rto_l2, set_go_compat_sent_at_zero, set_go_compat_shared_id,
+    set_go_compat_synack_rto, set_go_compat_tw_no_paws, set_go_compat_tw_no_ts_recent,
 };
 pub use tcp::conn::ConnId;
 pub use time::Time;

@@ -495,6 +495,10 @@ fn assert_switches_off(when: &str) {
         !wgft_wgstack::go_compat_sent_at_zero(),
         "sent_at_zero {when}"
     );
+    assert!(
+        !wgft_wgstack::go_compat_pmtu_keep_cwnd(),
+        "pmtu_keep_cwnd {when}"
+    );
 }
 
 #[test]

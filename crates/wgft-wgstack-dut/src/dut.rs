@@ -161,6 +161,7 @@ struct Compat {
     sent_at_zero: bool,
     shared_id: bool,
     echo_drop: bool,
+    pmtu_keep_cwnd: bool,
 }
 
 impl Compat {
@@ -176,6 +177,7 @@ impl Compat {
             sent_at_zero: wgft_wgstack::go_compat_sent_at_zero(),
             shared_id: wgft_wgstack::go_compat_shared_id(),
             echo_drop: wgft_wgstack::go_compat_echo_drop(),
+            pmtu_keep_cwnd: wgft_wgstack::go_compat_pmtu_keep_cwnd(),
         }
     }
 
@@ -191,6 +193,7 @@ impl Compat {
             sent_at_zero: on,
             shared_id: on,
             echo_drop: on,
+            pmtu_keep_cwnd: on,
         }
     }
 
@@ -205,6 +208,7 @@ impl Compat {
         wgft_wgstack::set_go_compat_sent_at_zero(self.sent_at_zero);
         wgft_wgstack::set_go_compat_shared_id(self.shared_id);
         wgft_wgstack::set_go_compat_echo_drop(self.echo_drop);
+        wgft_wgstack::set_go_compat_pmtu_keep_cwnd(self.pmtu_keep_cwnd);
     }
 }
 

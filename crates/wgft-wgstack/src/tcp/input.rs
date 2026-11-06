@@ -363,7 +363,11 @@ impl Conn<'_> {
         // the old segment size to the new segment size." 窓は byte で持つので、新旧の MSS の比で縮めます。ssthresh は
         // RFC が触れず、損失で決めた値なので変えません。
         let new_mss = self.seg_mss();
-        if new_mss < old_mss {
+        #[cfg(feature = "harness")]
+        let keep = crate::stack::go_compat_pmtu_keep_cwnd(); // 凍結した Go の記録との照合用
+        #[cfg(not(feature = "harness"))]
+        let keep = false;
+        if new_mss < old_mss && !keep {
             let w = u64::from(self.t.cwnd) * u64::from(new_mss) / u64::from(old_mss);
             self.t.cwnd = u32::try_from(w).unwrap_or(u32::MAX).max(new_mss);
         }
