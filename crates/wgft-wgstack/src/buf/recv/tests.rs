@@ -18,6 +18,7 @@ use crate::buf::chunk::fail_chunks_after;
 use crate::rng::ChaCha8;
 use crate::seq;
 
+mod fault_wiring;
 mod limits;
 
 fn table(n: usize) -> FixedVec<Interval> {
