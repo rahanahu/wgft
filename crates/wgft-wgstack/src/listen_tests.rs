@@ -1196,3 +1196,57 @@ fn go_compat_switch_skips_the_rtt_sample_of_a_synack_sent_at_time_zero() {
         "the switch still took an RTT sample: the first RTO came after {d:?}"
     );
 }
+
+// 波形の試験:握手が時刻 0 でも RTT の標本を取り (RFC 6298 2.2)、最初のデータの再送が wire に現れる時刻は初期値の 1 秒
+// でなく、標本から決めた RTO (RFC 6298 の下限 200 ms を含む) になります。
+
+/// 握手を `start` に始め、50 ms 後の最後の ACK で確立し、100 byte を送って相手が確認しないまま再送が wire に現れる
+/// までの時間を 10 ms の刻みで返します。
+fn handshake_then_retransmit_delay(start: Duration) -> Duration {
+    let mut n = TestNet::new(small_limits());
+    n.advance(start);
+    let l = n.listen(80);
+    let mut p = n.syn_sack(40000, 80, false, false, false);
+    n.advance(Duration::from_millis(50));
+    n.peer_ack(&mut p, &[]);
+    let c = n.accept(l);
+    n.drain();
+    assert_eq!(n.s.write(n.now, c, &[7u8; 100]), Ok(100));
+    let sent = n.drain();
+    assert!(
+        sent.len() == 1 && sent[0].payload.len() == 100,
+        "{}",
+        show(&sent)
+    );
+    let mut waited = Duration::ZERO;
+    loop {
+        assert!(
+            waited < Duration::from_secs(30),
+            "no retransmission in 30 s"
+        );
+        n.advance(Duration::from_millis(10));
+        waited += Duration::from_millis(10);
+        if n.drain()
+            .iter()
+            .any(|o| o.seq == sent[0].seq && !o.payload.is_empty())
+        {
+            return waited;
+        }
+    }
+}
+
+#[test]
+fn rtt_wire_handshake_at_stack_time_zero_sets_the_rto_from_a_sample() {
+    let d = handshake_then_retransmit_delay(Duration::ZERO);
+    assert!(
+        d < Duration::from_millis(500),
+        "the data was retransmitted after {d:?}; the handshake at time 0 gave no RTT sample"
+    );
+}
+
+/// 対照:時刻 0 より後の握手は標本から RTO を決めます。
+#[test]
+fn rtt_wire_handshake_after_time_zero_sets_the_rto_from_a_sample() {
+    let d = handshake_then_retransmit_delay(Duration::from_millis(1));
+    assert!(d < Duration::from_millis(500), "retransmitted after {d:?}");
+}
