@@ -211,11 +211,18 @@ impl Link {
         }
     }
 
-    /// Runs the device's timer if it is due.
+    /// Runs the device's timer if it is due. A measured wake-up does this once, as the data plane
+    /// does after its receive phase.
     pub(super) fn tick(&mut self, now: Instant) {
         if self.device.poll_timeout().is_some_and(|t| t <= now) {
             self.device.handle_timeout(now);
         }
+    }
+
+    /// Reads the device's next deadline, as the data plane does at the end of each wake-up to set
+    /// its timer.
+    pub(super) fn end_wake(&self) {
+        std::hint::black_box(self.device.poll_timeout());
     }
 }
 

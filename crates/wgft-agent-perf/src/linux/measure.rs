@@ -19,6 +19,8 @@ const HAND_OFF_LIMIT: Duration = Duration::from_secs(5);
 
 pub(super) struct Plan {
     pub(super) packet: Vec<u8>,
+    /// The packet the server end sends back once per burst in `answer` mode.
+    pub(super) reply: Vec<u8>,
     pub(super) burst: usize,
     pub(super) bursts: u64,
     pub(super) cpu_peer: Option<usize>,
@@ -105,6 +107,7 @@ pub(super) fn measure_send(mut agent: Link, server: Link, plan: &Plan) -> Result
             let now = Instant::now();
             wait(&agent.socket, POLLOUT, 0)?;
             calls.wake += 1;
+            agent.tick(now);
             for _ in 0..plan.burst {
                 agent.encrypt(now, &plan.packet);
                 if agent.send_each() {
@@ -112,6 +115,7 @@ pub(super) fn measure_send(mut agent: Link, server: Link, plan: &Plan) -> Result
                 }
             }
             agent.send_pending(&mut calls)?;
+            agent.end_wake();
             cpu = cpu.plus(Cpu::now().since(start));
             target += plan.burst as u64;
             while seen < target {
@@ -132,7 +136,13 @@ enum Command {
     Burst(usize),
 }
 
-pub(super) fn measure_recv(mut server: Link, agent: Link, plan: &Plan) -> Result<Measured, Error> {
+/// `recv` mode, and with `answer` the `answer` mode: each measured wake-up also sends one reply.
+pub(super) fn measure_recv(
+    mut server: Link,
+    agent: Link,
+    plan: &Plan,
+    answer: bool,
+) -> Result<Measured, Error> {
     let (command_tx, command_rx) = mpsc::channel::<Command>();
     let (sent_tx, sent_rx) = mpsc::channel::<()>();
     let cpu_peer = plan.cpu_peer;
@@ -179,6 +189,13 @@ pub(super) fn measure_recv(mut server: Link, agent: Link, plan: &Plan) -> Result
             wait(&server.socket, POLLIN, 0)?;
             calls.wake += 1;
             let read = server.receive_all(now, &mut calls)?;
+            server.tick(now);
+            if answer {
+                // 受けたのと同じ起床で答える。core が接続ごとに起床ごと 1 つ返す ACK に当たる
+                server.encrypt(now, &plan.reply);
+                server.send_pending(&mut calls)?;
+            }
+            server.end_wake();
             cpu = cpu.plus(Cpu::now().since(start));
             if read != plan.burst as u64 {
                 return Err(Error::failed(format!(
@@ -224,6 +241,8 @@ fn sender_thread(
     sent.send(()).map_err(|e| Error::failed(e.to_string()))?;
     while let Ok(Command::Burst(n)) = commands.recv() {
         let now = Instant::now();
+        // `answer` mode の返事を読み捨てる。読むのは測る区間の外で、無ければ何もしない
+        agent.receive_all(now, &mut calls)?;
         for _ in 0..n {
             agent.encrypt(now, packet);
             if agent.send_each() {
