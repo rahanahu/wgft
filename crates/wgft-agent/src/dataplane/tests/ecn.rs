@@ -24,7 +24,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use socket2::{Domain, MaybeUninitSlice, MsgHdrMut, Protocol, SockAddr, Socket, Type};
-use wgft_wireguard::Device;
+use wgft_wireguard::{Device, DropReason};
 
 use super::{
     AGENT_IP, Budget, Dataplane, Made, SERVER_IP, Stub, UpperInit, agent_config, keys, loopback,
@@ -348,7 +348,9 @@ async fn outer_ce_with_inner_not_ect_is_dropped_and_counted() {
     .await;
     let seqs: Vec<u32> = agent_got(&a).await.iter().map(|p| seq_of(p)).collect();
     assert_eq!(seqs, vec![2], "the packet 1 must not be delivered");
-    assert_eq!(a.status().await.unwrap().drops.total(), 1);
+    let drops = a.status().await.unwrap().drops;
+    assert_eq!(drops.total(), 1);
+    assert_eq!(drops.get(DropReason::CeOnNotEct), 1);
     a.stop().await;
 }
 
@@ -412,6 +414,7 @@ async fn a_burst_keeps_each_datagrams_own_outer_ecn() {
     }
     let status = a.status().await.unwrap();
     assert_eq!(status.drops.total(), dropped);
+    assert_eq!(status.drops.get(DropReason::CeOnNotEct), dropped);
     assert_eq!(status.receive_truncated, 0);
     a.stop().await;
 }

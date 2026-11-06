@@ -173,3 +173,59 @@ fn the_tunnel_send_and_receive_allocate_nothing_per_packet() {
         "receive allocates {receive_calls} times for {N} datagrams; the allowance is 0"
     );
 }
+
+/// 外側の ECN を渡す受信 (`handle_datagram_with_ecn`) の、書き換えの道と捨てる道が確保しないこと。
+/// 外側 CE と内側 ECT(0) は内側を CE に直す道、外側 CE と内側 Not-ECT は数えて捨てる道である。
+#[test]
+fn the_outer_ecn_receive_paths_allocate_nothing() {
+    const CE: u8 = 0b11;
+    const ECT0: u8 = 0b10;
+    let mut pair = Pair::connected();
+    let mut plain = vec![0u8; usize::from(u16::MAX)];
+    for (inner_ecn, delivered) in [(ECT0, true), (0, false)] {
+        let mut packet = ipv4_packet(AGENT_IP, SERVER_IP, SIZE);
+        packet[1] = inner_ecn;
+        // 慣らし:内部の表が育ち切るまで流す
+        for _ in 0..64 {
+            let mut sealed = vec![0u8; pair.a.max_transmit_len()];
+            let out = pair
+                .a
+                .handle_packet(pair.now, &packet, &mut sealed)
+                .expect("a datagram");
+            let got = pair.b.handle_datagram_with_ecn(
+                pair.now,
+                pair.a_addr,
+                CE,
+                &sealed[..out.len],
+                &mut plain,
+            );
+            assert_eq!(got, delivered.then_some(SIZE));
+        }
+        let mut arena = vec![0u8; N * SLOT];
+        let mut lens = vec![0usize; N];
+        for (slot, len) in arena.as_chunks_mut::<SLOT>().0.iter_mut().zip(&mut lens) {
+            *len = pair
+                .a
+                .handle_packet(pair.now, &packet, slot)
+                .expect("a datagram")
+                .len;
+        }
+        let window = ThreadWindow::open();
+        for (slot, len) in arena.as_chunks::<SLOT>().0.iter().zip(&lens) {
+            let got = pair.b.handle_datagram_with_ecn(
+                pair.now,
+                pair.a_addr,
+                CE,
+                &slot[..*len],
+                &mut plain,
+            );
+            assert_eq!(got, delivered.then_some(SIZE));
+        }
+        let calls = window.calls();
+        eprintln!("outer CE over inner {inner_ecn:#04b}: {calls} calls for {N} datagrams");
+        assert_eq!(
+            calls, 0,
+            "receive with an outer CE over inner {inner_ecn:#04b} allocates {calls} times; the allowance is 0"
+        );
+    }
+}
