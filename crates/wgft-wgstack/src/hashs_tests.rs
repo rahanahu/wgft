@@ -5,6 +5,12 @@
 //!   `Budget` に戻る
 //! - 区画を持たない核は今と同じに動く (既存の試験のすべて)
 
+#![expect(
+    clippy::disallowed_types,
+    clippy::disallowed_methods,
+    reason = "tests collect connections"
+)]
+
 use crate::boost_tests::{DEMAND_BYTES, boosted, read_n, send_bulk, wide_limits};
 use crate::budget::Budget;
 use crate::config::{Config, Limits, Partition};
