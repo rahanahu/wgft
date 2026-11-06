@@ -284,6 +284,13 @@ impl Shared {
     /// `reuse` は TIME_WAIT の 4 つ組を使い直す時の前の接続の SND.NXT で、呼び手は行を作れる時だけ渡します。
     pub(crate) fn new_syn_row(&mut self, seg: &Segment<'_>, now: i64, reuse: Option<u32>) {
         let port = seg.tup.lport;
+        if self.listeners.by_port(port).is_none() {
+            return;
+        }
+        if seg.opt.wscale_clamped {
+            // 行を作る時も cookie で応える時も数えます。
+            self.note_wscale_clamped(now);
+        }
         let Some(l) = self.listeners.by_port(port) else {
             return;
         };

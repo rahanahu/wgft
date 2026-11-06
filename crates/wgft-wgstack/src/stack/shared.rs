@@ -101,6 +101,8 @@ impl Output {
 #[non_exhaustive]
 pub struct Stats {
     pub mss_floor_drops: u64,
+    /// 14 を超える窓の scale を示した SYN の数です。握手は止めず、14 で扱います (RFC 7323 2.3)。
+    pub wscale_clamped: u64,
     /// 握手の途中の表が満杯で捨てた SYN です。cookie で応えた SYN は数えません。
     pub syn_table_full: u64,
     /// SYN cookie を使う間に、accept の待ち行列か接続の枠が満杯で捨てた SYN です。
@@ -213,6 +215,8 @@ pub(crate) enum CtlKind {
 pub enum LogKind {
     /// MSS の下限より小さな MSS を示す SYN を捨てました。
     MssFloor,
+    /// 14 を超える窓の scale を示す SYN を、14 で扱いました。握手は続けます。
+    WscaleClamped,
     /// 握手の途中の表が満杯で SYN を捨てました。
     SynFull,
     /// 握手の途中の表が満杯で、SYN に cookie で応えました。`count` は応えた数です。
@@ -240,8 +244,9 @@ pub enum LogKind {
 }
 
 /// 門を通るログの種類です。`UdpFault` は 1 回だけ出すので門を持ちません。
-const LOG_KINDS: [LogKind; 11] = [
+const LOG_KINDS: [LogKind; 12] = [
     LogKind::MssFloor,
+    LogKind::WscaleClamped,
     LogKind::SynFull,
     LogKind::SynCookies,
     LogKind::SynAcceptFull,
@@ -355,6 +360,7 @@ impl Shared {
         let st = &mut self.stats;
         let c = match kind {
             LogKind::MssFloor => &mut st.mss_floor_drops,
+            LogKind::WscaleClamped => &mut st.wscale_clamped,
             LogKind::SynFull => &mut st.syn_table_full,
             LogKind::SynAcceptFull => &mut st.syn_accept_full,
             LogKind::AcceptOverflow => &mut st.accept_overflow,
@@ -381,6 +387,11 @@ impl Shared {
             CtlKind::Echo => self.stats.ctl_dropped_echo += 1,
         }
         self.refused(LogKind::CtlDropped, now);
+    }
+
+    /// 14 を超える窓の scale の SYN を数え、1 分に 1 回までログの材料にします (RFC 7323 2.3)。
+    pub(crate) fn note_wscale_clamped(&mut self, now: i64) {
+        self.refused(LogKind::WscaleClamped, now);
     }
 
     /// MSS の下限で SYN を捨てたことを数えます。

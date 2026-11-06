@@ -175,7 +175,6 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
 | ECN (SHLD-8、RFC 3168):交渉しません。核は輻輳を損失で知ります | 直す候補です。直す効果は server のモードとルールで違います ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))。ユーザー空間モードの server とカーネルモードのプロキシのルールでは、核の接続が通る区間で混みうるのはトンネルの外側の UDP の経路です。agent の device の層と UDP のソケットは、外側の IP の header の ECN の印を内側の packet に写さず、外側の packet に ECT も付けない (RFC 6040 の扱いを持たない) ので、核が ECN を交渉しても効果がありません。カーネルモードの DNAT のルールでは、内側の packet がクライアントと server の間のインターネットの経路を中身を変えずに渡ります。agent の device の層は内側の ECN の欄を変えず、外側が Not-ECT なら RFC 6040 の取り出しの規則も内側の欄を変えないので、その経路で付いた CE か、相手が返す ECE が核に届きえます (server の転送が内側の ECN の欄を保つかは確かめていません)。次の手順は、DNAT の経路で CE が保たれるかを確かめ、RFC 3168 の実装の提案と評価を行い、測ってから製品に採ることです | ありません | DNAT の経路で CE が保たれるかを確かめた時 |
 | 窓の右端 (SHLD-14):窓の欄を scale で切り下げるので、相手から見た右端が最大 2^scale - 1 byte 戻ります | 切り上げを繰り返すと右端が受信のバッファの外へ伸びるためです | ありません | 窓の縮みで送り手が止まる相手が見つかった時 |
 | 最小の RTO (RFC 6298 2.4):RTO = SRTT + max(4 × RTTVAR, 200 ms) で、1 秒に切り上げません | Linux の最小の RTO に合わせます | ありません | 不要な RTO の数が性能の記録で目立った時 |
-| 窓の scale の記録 (RFC 7323 2.3):14 を超える scale を黙って 14 にします | 理由が無いため、直す候補です | ありません | 直す時 |
 | RST の timestamp (RFC 7323 3.2、5.2):RST に TSopt を付けません。TSecr で RST を厳しく確かめる相手では、核の RST が受けられない恐れがあります | RFC 7323 5.2 は、RST に TSopt を付けることを、議論の途中で研究を進めるための推奨としています。受け手が TSecr で RST を厳しく確かめるのは MAY で、TSopt の無い segment を捨てる規則 (3.2) は RST を除きます。同じ節によれば、RFC 1323 は RST に timestamp を付けないよう勧めていたので、TSopt の無い RST を受けない受け手は、RFC 1323 に従う送り手の RST も受けないことになります (RFC からの読みです)。核の RST の相手は、server の中継か、server のカーネルモードの DNAT のルールではクライアントの OS です ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))。どちらも TSecr で RST を確かめるかは確かめていません。得を測れないので、RST を作るすべての所に 12 byte の option を足す直しは採りません | ありません | TSecr で RST を確かめ、TSopt の無い RST を受けない相手が見つかった時 |
 | TSopt の無い segment (RFC 7323 3.2):timestamp を交渉した後の TSopt の無い segment を捨てず、PAWS を飛ばします | [TSopt の無い segment と timestamp を使わなかった前の接続](#tsopt-の無い-segment-と-timestamp-を使わなかった前の接続) | ありません | 同じ節 |
 | timestamp の offset (RFC 7323 7 節):接続ごとの乱数でなく、アドレスの組の鍵付きの hash の offset です | 同じ相手との接続をまたいで TSval が増え続け、相手の PAWS と RFC 6191 が効きます | 要りません | 接続の関係づけが問題になる利用が出た時 |
@@ -304,7 +303,6 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
 SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表にあります。
 
 - ECN (SHLD-8)
-- 窓の scale の記録 (RFC 7323 2.3)
 - rescue の再送 (RFC 6675 4 節の規則 4)
 
 ### 直しを準備中の逸脱
@@ -652,6 +650,11 @@ hook はこれらの口を持たず、製品の hook と同じです。
 門は核の時刻で判定します。
 核はログを書かず、門を通った数を `poll_log` で出します。
 駆動の層がそれを英語の 1 行にしてログに出します。
+
+Go に無い種類として、14 を超える窓の scale を示す SYN を数えます (`Stats` の `wscale_clamped`、`LogKind::WscaleClamped`)。
+RFC 7323 2.3 は、14 を超える値を 14 で扱うこと (MUST) と、その誤りを記録すること (SHOULD) を求めます。
+値は SYN の option を読む所で 14 に切り下げ、切り下げた時だけ印を立てるので、データの経路には費用が増えません。
+待ち受けへの新しい SYN を、行を作る場合も cookie で応える場合も数え、1 分に 1 回までの門を通します。
 
 ### dial の側を足す継ぎ目
 

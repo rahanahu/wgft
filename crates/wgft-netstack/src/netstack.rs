@@ -189,6 +189,9 @@ impl<H: Hook> Netstack<H> {
             LogKind::MssFloor => format!(
                 "wgstack: dropped TCP handshakes that advertise an MSS below {MIN_MSS}; {n} dropped since the tunnel was built; peers that advertise a smaller MSS cannot connect through this tunnel"
             ),
+            LogKind::WscaleClamped => refused(
+                "treated window scale options above 14 as 14 in received SYNs; the peer may be misconfigured",
+            ),
             LogKind::SynFull => refused("dropped SYNs because the half-open table was full"),
             LogKind::SynCookies => refused(
                 "answered SYNs with SYN cookies because the half-open table was full; a SYN flood may be under way",
@@ -286,6 +289,7 @@ mod tests {
         let ns = netstack();
         let kinds = [
             LogKind::MssFloor,
+            LogKind::WscaleClamped,
             LogKind::SynFull,
             LogKind::SynCookies,
             LogKind::SynAcceptFull,
