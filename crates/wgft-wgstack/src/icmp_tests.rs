@@ -234,8 +234,19 @@ fn bound_echo_flood_fills_only_the_control_ring() {
     }
     n.s.check_invariants().unwrap();
     let h = n.s.held();
-    assert_eq!(h.ctl_queued, small_limits().ctl_slots);
+    // echo の応答が輪に置けるのは枠の 1/4 までで、洪水はそこで止まります。
+    let cap = (small_limits().ctl_slots / 4).max(1);
+    assert_eq!(h.ctl_queued, cap);
     assert!(n.s.stats().ctl_dropped > 0);
+    // 残りの枠はほかの制御の packet (ICMP の誤り) のために空いています。
+    let free = small_limits().ctl_slots - cap;
+    for i in 0..free as u16 {
+        n.s.handle_packet(
+            n.now,
+            &build_udp(SocketAddrV4::new(PEER, 6000 + i), 9, b"x"),
+        );
+    }
+    assert_eq!(n.s.held().ctl_queued, small_limits().ctl_slots);
     n.s.send_to(n.now, pc, b"still here", PEER_UDP).unwrap();
     let mut buf = vec![0u8; TEST_MTU];
     let mut udp = false;
