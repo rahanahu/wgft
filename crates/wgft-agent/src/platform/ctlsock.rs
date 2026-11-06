@@ -284,7 +284,7 @@ mod tests {
 
     /// 短い名前のディレクトリ。macOS の一時ディレクトリは長く、`sun_path` に収まりにくい。
     fn short_dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("wgft-cs-{}-{name}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("wgft-sk-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
