@@ -646,7 +646,6 @@ impl Device {
     }
 
     /// When to call [`Device::handle_timeout`] next. Calling it earlier is harmless.
-    ///
     #[must_use]
     pub fn poll_timeout(&self) -> Option<Instant> {
         // データプレーンは起床ごとに 2 回呼ぶので、iterator の連鎖でなく素の loop で書く

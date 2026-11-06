@@ -4,7 +4,7 @@
 # instruction counts of the batching work come from here.
 #
 #   scripts/agent-perf-stat.sh [--base REF] [--rounds N] [--packets N] [--burst N]
-#                              [--modes "send recv"] [--sizes "1408 64"]
+#                              [--modes "send recv answer"] [--sizes "1408 64"]
 #                              [--head-bin PATH] [--base-bin PATH] [--no-netns]
 #
 #   --base REF     also build REF in a temporary worktree and alternate base and head runs
@@ -13,6 +13,9 @@
 #                  tool is used if it has one, else the head's copy is laid over it.
 #   --rounds N     runs per arm and cell (default 7); the lines show the median and the range.
 #   --packets N    packets per run (default 200000), --burst N packets per burst (default 64).
+#   --modes "M..." the tool's modes to run (default "send recv"): send, recv, and answer, where
+#                  each wake both decrypts a burst and sends one reply, as a relayed TCP
+#                  download acknowledges once per wake.
 #   --head-bin P   use the prebuilt binary P instead of building (likewise --base-bin).
 #   --no-netns     measure on the host loopback instead of an unprivileged network namespace.
 #
