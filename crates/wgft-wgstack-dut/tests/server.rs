@@ -492,6 +492,10 @@ fn assert_switches_off(when: &str) {
         "tw_no_ts_recent {when}"
     );
     assert!(
+        !wgft_wgstack::go_compat_tw_reuse_strict(),
+        "tw_reuse_strict {when}"
+    );
+    assert!(
         !wgft_wgstack::go_compat_sent_at_zero(),
         "sent_at_zero {when}"
     );

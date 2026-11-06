@@ -170,10 +170,31 @@ pub fn set_go_compat_tw_no_ts_recent(on: bool) {
     GO_COMPAT_TW_NO_TS_RECENT.with(|c| c.set(on));
 }
 
+// 凍結した Go の記録との照合のためだけに、TIME_WAIT を使い直す SYN の比べを Go と同じ厳しい形にする切り替えです
+// (RFC 6191 2 節は等しい TSval で番号が大きい SYN と、番号が RCV.NXT に等しい SYN を受ける)。
+// feature `harness` の build だけにあり、値は thread ごとで、既定は偽です。
+#[cfg(feature = "harness")]
+thread_local! {
+    static GO_COMPAT_TW_REUSE_STRICT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 真にすると、この thread で駆動する核は TIME_WAIT を使い直す SYN を、TSval が厳密に大きい時と、番号が RCV.NXT より
+/// 大きい時だけ受けます (凍結した Go と同じ)。核を駆動する前に呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
+#[cfg(feature = "harness")]
+pub fn set_go_compat_tw_reuse_strict(on: bool) {
+    GO_COMPAT_TW_REUSE_STRICT.with(|c| c.set(on));
+}
+
 /// 今の thread の値です。
 #[cfg(feature = "harness")]
 pub fn go_compat_tw_no_ts_recent() -> bool {
     GO_COMPAT_TW_NO_TS_RECENT.with(std::cell::Cell::get)
+}
+
+/// 今の thread の値です。
+#[cfg(feature = "harness")]
+pub fn go_compat_tw_reuse_strict() -> bool {
+    GO_COMPAT_TW_REUSE_STRICT.with(std::cell::Cell::get)
 }
 
 // 凍結した Go の記録との照合のためだけに、時刻 0 に作った SYN-ACK を「作っていない」とみなし、RTT の標本にしない切り替えです

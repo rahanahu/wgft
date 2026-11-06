@@ -333,6 +333,15 @@ fn acceptable(r: &TwRow, seg: &Segment<'_>) -> bool {
 /// ことを求めます。それ以外は、シーケンス番号が前の接続の最後の番号 (RCV.NXT - 1) より大きい、
 /// つまり `SEG.SEQ >= RCV.NXT` であることだけを求めます。
 pub(crate) fn rfc6191(seg: &Segment<'_>, ts_ok: bool, ts_recent: u32, rcv_nxt: u32) -> bool {
+    #[cfg(feature = "harness")]
+    if crate::stack::go_compat_tw_reuse_strict() {
+        // 凍結した Go の記録との照合用
+        return if ts_ok && let Some((ts_val, _)) = seg.opt.ts {
+            seq::gt(ts_val, ts_recent)
+        } else {
+            seq::gt(seg.seq, rcv_nxt)
+        };
+    }
     if ts_ok && let Some((ts_val, _)) = seg.opt.ts {
         if seq::gt(ts_val, ts_recent) {
             return true;
