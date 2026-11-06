@@ -1257,3 +1257,48 @@ fn a_reply_needing_more_fragments_than_the_cap_is_dropped_whole() {
     n.write(&build_icmp(PEER, &[ECHO, 0, 0, 0, 0, 1, 0, 2, b'x']));
     assert_eq!(echo_replies(&n.drain_raw()).len(), 1);
 }
+
+/// DF を立てた断片も、ほかの断片と同じく再組み立てます (RFC 6864 4.3: DF=1 の断片は、途中の router が分けたものを
+/// 再び分けないという意味で、正当な断片です)。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn fragments_with_df_set_are_reassembled() {
+    let mut n = TestNet::new(small_limits());
+    let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    let msg: Vec<u8> = (0..3000u32).map(|i| i as u8).collect();
+    let mut frags = split_ipv4(&build_udp(PEER_UDP, 53, &msg), 1000, 79);
+    for f in &mut frags {
+        f[6] |= 0x40;
+        wire::set_ipv4_checksum(&mut f[..IP_HEADER_LEN]);
+    }
+    for f in frags.iter().rev() {
+        n.write(f);
+    }
+    let mut b = vec![0u8; 4000];
+    let (k, from) =
+        n.s.recv_from(n.now, pc, &mut b)
+            .unwrap_or_else(|e| panic!("{e:?}: {:?}", n.s.stats()));
+    assert_eq!((&b[..k], from), (&msg[..], PEER_UDP));
+    assert_eq!(n.s.held().frag_bytes, 0);
+    assert!(n.drain_raw().is_empty(), "unexpected reply");
+}
+
+/// DF の立った断片と立たない断片が混ざっても組み上がります。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn mixed_df_fragments_are_reassembled() {
+    let mut n = TestNet::new(small_limits());
+    let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+    let msg: Vec<u8> = (0..3000u32).map(|i| (i * 7) as u8).collect();
+    let mut frags = split_ipv4(&build_udp(PEER_UDP, 53, &msg), 1000, 80);
+    frags[1][6] |= 0x40;
+    wire::set_ipv4_checksum(&mut frags[1][..IP_HEADER_LEN]);
+    for f in &frags {
+        n.write(f);
+    }
+    let mut b = vec![0u8; 4000];
+    let (k, _) =
+        n.s.recv_from(n.now, pc, &mut b)
+            .unwrap_or_else(|e| panic!("{e:?}: {:?}", n.s.stats()));
+    assert_eq!(&b[..k], &msg[..]);
+}
