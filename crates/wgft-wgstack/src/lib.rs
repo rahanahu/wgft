@@ -87,6 +87,10 @@ mod boost_tests;
 #[cfg(test)]
 mod cc_tests;
 #[cfg(test)]
+mod challenge_budget_tests;
+#[cfg(test)]
+mod dnat_peer_tests;
+#[cfg(test)]
 mod golden_tests;
 #[cfg(test)]
 mod icmp_tests;
