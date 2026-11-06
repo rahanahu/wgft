@@ -123,7 +123,8 @@ Go の文書と食い違う点は、この文書が理由と共に挙げたも�
 - 害を抑えるもの (コードで確かめた範囲):
   - 核の ISN は RFC 6528 の鍵付きの hash と 4 µs ごとに進む時計で作り、TIME_WAIT を使い直す時は前の接続の SND.NXT の 65537 先より前に置きません (`Shared::isn`)。
     このため、核が前の接続で送った segment の番号は、新しい接続で相手が受け入れる範囲から外れやすくなります
-  - 新しい接続は、受け入れの判定 (RFC 9293 3.10.7.4) で受信の窓の外の segment を捨て、timestamp を使う接続では PAWS (RFC 7323) で古い TSval の segment を捨てます
+  - 新しい接続は、受け入れの判定 (RFC 9293 3.10.7.4) で受信の窓の外の segment を捨て、timestamp を使う接続では PAWS (RFC 7323) で古い TSval の segment を捨てます。
+    TSopt の無い segment は PAWS で比べません ([TSopt の無い segment と timestamp を使わなかった前の接続](#tsopt-の無い-segment-と-timestamp-を使わなかった前の接続))
   - RST は番号が RCV.NXT と一致する時だけ、確立した接続、握手の途中の行、TIME_WAIT の枠と行、FIN_WAIT_2 の行を終えます。
     窓の内で番号が合わない RST には、核の全体の速さの制限の内側で challenge ACK を返し、窓の外の RST は捨てます (RFC 5961 3.2)。
     窓の内の segment でも、ACK の値が受け入れの範囲の外なら challenge ACK を返します (RFC 5961 5.2)
@@ -177,11 +178,11 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
 | 最小の RTO (RFC 6298 2.4):RTO = SRTT + max(4 × RTTVAR, 200 ms) で、1 秒に切り上げません | Linux の最小の RTO に合わせます | ありません | 不要な RTO の数が性能の記録で目立った時 |
 | 窓の scale の記録 (RFC 7323 2.3):14 を超える scale を黙って 14 にします | 理由が無いため、直す候補です | ありません | 直す時 |
 | RST の timestamp (RFC 7323 3.2、5.2):RST に TSopt を付けません | 理由が無いため、直す候補です | ありません | 直す時 |
-| TSopt の無い segment (RFC 7323 3.2):timestamp を交渉した後の TSopt の無い segment を捨てず、PAWS を飛ばします | 理由が無いため、直す候補です | ありません | 直す時 |
+| TSopt の無い segment (RFC 7323 3.2):timestamp を交渉した後の TSopt の無い segment を捨てず、PAWS を飛ばします | [TSopt の無い segment と timestamp を使わなかった前の接続](#tsopt-の無い-segment-と-timestamp-を使わなかった前の接続) | ありません | 同じ節 |
 | timestamp の offset (RFC 7323 7 節):接続ごとの乱数でなく、アドレスの組の鍵付きの hash の offset です | 同じ相手との接続をまたいで TSval が増え続け、相手の PAWS と RFC 6191 が効きます | 要りません | 接続の関係づけが問題になる利用が出た時 |
 | challenge ACK の速さの調整 (RFC 5961 7 節):核の全体で 1 秒に 500 から 1500 の固定で、管理者が変えられません | Device 全体の CPU と出力の費用を抑えます | ありません | 洪水の試験で正しい接続の回復が遅れた時 |
 | rescue の再送 (RFC 6675 4 節の NextSeg の規則 4):使いません | 理由が無いため、直す候補ですが、直すかは測ってから決めます。TLP は回復の間は張らない (`tcp/rack.rs` の `tlp_eligible`、RFC 8985 7.2 も fast recovery の間を除きます) ので、回復の中で末尾が失われると RTO まで待つ見込みです (コードと RFC からの読みで、試験はしていません) | ありません | 測った結果で直すか理由を記録する時 |
-| TIME_WAIT を使い直す SYN (RFC 6191 2 節):受けない SYN を黙って捨てず、速さを抑えた ACK を返します。加えて次の 3 つの比べが RFC より厳しい形です:前の接続が timestamp を使えば TSval が厳密に大きい時だけ受け、等しい TSval で番号が大きい SYN を受けません。前の接続が timestamp を使わず新しい SYN が timestamp を持つ時も番号で比べます。番号の比べは `SEG.SEQ > RCV.NXT` で、RFC より 1 つ厳しい形です | ACK を返すのは、RFC 5961 4.2 と RFC 9293 の TIME-WAIT の SYN の扱いに沿います。3 つの比べは、理由が無いため、直す候補です | ありません | 直す時、または dial の側の TIME_WAIT の使い直しを決める時 |
+| TIME_WAIT を使い直す SYN (RFC 6191 2 節):受けない SYN を黙って捨てず、速さを抑えた ACK を返します。加えて次の 3 つの比べが RFC より厳しい形です:前の接続が timestamp を使えば TSval が厳密に大きい時だけ受け、等しい TSval で番号が大きい SYN を受けません。前の接続が timestamp を使わず新しい SYN が timestamp を持つ時も番号で比べます。番号の比べは `SEG.SEQ > RCV.NXT` で、RFC より 1 つ厳しい形です | ACK を返すのは、RFC 5961 4.2 と RFC 9293 の TIME-WAIT の SYN の扱いに沿います。前の接続が timestamp を使わない時の比べは、TSopt の無い segment と組で残します ([TSopt の無い segment と timestamp を使わなかった前の接続](#tsopt-の無い-segment-と-timestamp-を使わなかった前の接続))。残りの 2 つの比べは、理由が無いため、直す候補です | ありません | 直す時、または dial の側の TIME_WAIT の使い直しを決める時 |
 | Protocol Unreachable (RFC 1122 3.2.2.1):知らない protocol の datagram を数えて黙って捨てます | トンネルの相手は server だけで、server は TCP、UDP、ICMP のほかを送りません | ありません | ほかの protocol を運ぶ要望が出た時 |
 | Parameter Problem (RFC 1122 3.2.2.5):最初の断片の option の誤りにだけ返し、断片でない packet の option は確かめず、長さの崩れた packet は黙って捨てます | 理由が無いため、直す候補です | ありません | 直す時 |
 | 受けた TOS の受け渡し (RFC 1122 3.2.1.6):TCP と UDP に渡しません | 中継は L4 で終端し、受けた TOS を LAN の側へ運ぶ手段を持たないので、受け渡す相手がありません | ありません | DSCP を運ぶ要望が出た時 |
@@ -231,6 +232,73 @@ TIME_WAIT の 60 秒のほかに、次の MUST からの逸脱を例外として
   - 小さな窓を示し続ける相手が見つかった時
   - dial の側を足す時
 
+#### TSopt の無い segment と timestamp を使わなかった前の接続
+
+決定:次の 2 つの外れを組にして、既知の外れとして残します。
+片方だけを直すことはしません (2026-11-07)。
+
+核の TCP の相手は、server のモードとルールで違います ([server から agent への通信](../spec/tunnel.md#server-から-agent-への通信))。
+ユーザー空間モードの server とカーネルモードのプロキシのルールでは、相手は server の中継です。
+カーネルモードの DNAT のルールでは、server はインターネットのクライアントの packet を中身を変えずに転送するので、相手はクライアントの OS です。
+この節の「相手」は、この 2 つを指します。
+
+- 外れ:
+  - TSopt の無い segment (RFC 7323 3.2):RFC は、timestamp を交渉した接続について「If a non-<RST> segment is received without a TSopt, a TCP SHOULD silently drop the segment.」と書きます。
+    核は捨てず、PAWS を飛ばして普通に処理します。
+    同じ節の「A TCP MUST NOT abort a TCP connection because any segment lacks an expected TSopt.」は満たします
+  - timestamp を使わなかった前の接続への SYN (RFC 6191 2 節):RFC は TIME-WAIT の 4 つ組への SYN の扱いを「SHOULD occur as follows」として示します。
+    前の接続が timestamp を使わず、届いた SYN が timestamp を持つ時は、番号によらず SYN を受けます。
+    核は番号で比べ、番号が前の接続より先の SYN だけを受けます
+- 組にする理由:RFC 6191 は、この場合に番号を見ずに受ける理由を書きません。
+  RFC 7323 3.2 に従う受け手は、timestamp を使う新しい接続で TSopt の無い segment を捨てるので、timestamp を使わなかった前の接続の古い segment を番号によらず捨てられます。
+  番号を見ずに受ける規則は、この捨て方を前提にすると読めます (RFC からの読みです)。
+  核は TSopt の無い segment を捨てないので、SYN の比べだけを RFC どおりに緩めると、前の接続の古い segment が新しい接続の受信の窓に入りえます。
+  番号で比べる今の形では、新しい接続の番号が前の接続の番号より先から始まるので、前の接続の古い segment は新しい接続の受信の窓より前に落ち、受け入れの判定 (RFC 9293 3.10.7.4) で捨てられます
+- 残す理由:
+  - TSopt の無い segment を捨てる直しでは、相手が TSopt を付けない segment を送り続けると、核はそれを捨て続け、接続のデータが進まなくなります。
+    打ち切らない MUST を守っても、接続は止まります
+  - DNAT のルールでは、クライアントと server の間のインターネットの経路に、TCP の option を落とす機器がありえます。
+    RFC 7323 3.2 も、timestamp を時々落とす経路があり、一部の実装がそうした経路で動くよう受け入れの規則を緩めていると書きます。
+    捨てる直しは、そうした経路のクライアントの接続を止めます
+  - 番号によらず受ける直しで得をするのは、同じ 4 つ組の接続ごとに timestamp を使ったり使わなかったりする相手だけです。
+    そうする相手があるかは確かめていません
+  - 2 つを一緒に直すと、止まる危険を足して、まれな SYN の受け入れを得るだけです。
+    得を測れません
+- 安全の前提:
+  - 相手は、timestamp を交渉した接続の RST 以外のすべての segment に TSopt を付けます (RFC 7323 3.2 の MUST)。
+    このため、timestamp を使う接続の segment は、遅れて届く写しでも TSopt を持ち、PAWS で比べられます。
+    TSopt の無い segment が届くのは、timestamp を使わなかった前の接続の segment か、相手の誤りか、経路の機器が TSopt を落とした時です
+  - 新しい接続の番号は、前の接続の番号から離れています。
+    TIME_WAIT の行がある間は、上の番号の比べがこれを保ちます。
+    行が無くなった後は、相手の ISN の選び方だけがこれを保ちます ([TIME_WAIT の 60 秒](#time_wait-の-60-秒))
+- 第三者の segment:核は第三者の segment が届きうるものとして扱い、受け入れの判定と RFC 5961 の検査に頼ります。
+  カーネルモードの DNAT のルールでは、クライアントのアドレスを偽った第三者の segment も server の転送を通って核に届きえます
+- WireGuard の認証が防がないもの:WireGuard の認証は、前の接続の古い segment が混ざることを防ぎません。
+  server がトンネルに送った packet は、中継の segment でも DNAT で転送したクライアントの segment でも、遅れた segment や重複した segment でも、ほかの packet と同じく認証を通ります。
+  WireGuard の replay の窓が捨てるのは、受け取り済みの counter の datagram と、窓より古い counter の datagram です。
+  TCP の segment を送り直した datagram は新しい counter を持つので、捨てません。
+  このため、古い segment を除くのは TCP の番号と timestamp の検査です
+- 残る危険:
+  - 前の接続の TSopt の無い古い segment が新しい接続の受信の窓に入ると、核はそれを受け入れ、中継する byte の列が壊れます。
+    RFC 7323 3.2 も、期待した TSopt の無い segment を受け入れる受け手では、見つけられないデータの破損が起きうると書きます
+  - 新しい接続が、前の接続の古い segment が経路に残りうる間 (MSL、2 分) に約 4 GiB を受けて番号の空間を一周すると、古い segment の番号が受信の窓に入りえます。
+    この古い segment を捨てるのは PAWS の役目ですが、PAWS は TSopt の無い segment を比べません
+  - TIME_WAIT の行が 60 秒の期限、RST、表の満杯のどれかで消えた後は、SYN の番号の比べが働きません。
+    相手が同じ 4 つ組で始めた新しい接続の番号が前の接続の古い segment の近くにあると、古い segment が受信の窓に入りえます
+  - DNAT のルールでは、MASQUERADE が送信元を server のアドレスに書き換えるので、違うクライアントの接続が、核の TIME_WAIT の間に同じ 4 つ組を使いうると見込みます (確かめていません)。
+    その場合、前の接続と新しい接続の番号と timestamp は別の OS が選ぶので、上の番号の比べは前の接続の古い segment を離す保証になりません
+  - 相手が誤って TSopt を付けない segment と、経路の機器が TSopt を落とした segment は、PAWS を通らずに受け入れます。
+    その間は、同じ接続の古い写しを PAWS で捨てる守りがありません
+- 測った値:ありません。
+  相手が、timestamp を交渉した後に TSopt の無い segment (RST を除く) を送らないことも確かめていません
+- 見直す条件:
+  - 片方を直す時。
+    もう片方も同じ変更で見直します
+  - 前の接続の古い segment に起因するデータの破損が観測された時
+  - 接続ごとに timestamp を使ったり使わなかったりする相手が見つかった時
+  - DNAT のルールで、違うクライアントの接続が核の TIME_WAIT の間に同じ 4 つ組を使い直すことが確かめられた時
+  - 核を server を経ない相手に向ける時
+
 ### 理由の無い外れ
 
 次の外れは理由が無いので、直す候補です。
@@ -243,9 +311,8 @@ SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表
 - PMTU の引き下げと輻輳の窓 (RFC 5681 3.1)
 - 窓の scale の記録 (RFC 7323 2.3)
 - RST の timestamp (RFC 7323 3.2、5.2)
-- TSopt の無い segment (RFC 7323 3.2)
 - rescue の再送 (RFC 6675 4 節の規則 4)
-- TIME_WAIT を使い直す SYN の 3 つの厳しい比べ (RFC 6191 2 節)
+- TIME_WAIT を使い直す SYN の、等しい TSval の比べと番号の比べ (RFC 6191 2 節)
 - Parameter Problem (RFC 1122 3.2.2.5)
 
 ### 直しを準備中の逸脱
