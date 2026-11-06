@@ -782,7 +782,7 @@ pub(super) async fn drive<U: Upper>(
         }
     }
     #[cfg(feature = "lab-observe")]
-    crate::logf!("{}", inline_line());
+    crate::logf!("tunnel: {}", inline_line());
     let gso = io.gso;
     Ok(Rest {
         socket,

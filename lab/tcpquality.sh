@@ -382,7 +382,7 @@ cleanup() {
   vps ip link del wgft0 2>/dev/null
   vps nft delete table inet wgft 2>/dev/null
   if [ -n "$AGENT_AT" ]; then
-    agentsh stop "$ADATA" "$CG_ROOT" >/dev/null
+    agentsh stop "$ADATA" "$CG_ROOT" | grep '^AGENTCOUNTERS ' || true
   else
     ip netns exec "$HOME_NS" ip link del wgft0 2>/dev/null
     ip netns exec "$HOME_NS" nft delete table inet wgft_agent 2>/dev/null

@@ -135,6 +135,8 @@ case "${1:-}" in
     for p in $(ip netns pids "$HOME_NS" 2>/dev/null); do kill "$p" 2>/dev/null; done
     for _ in $(seq 1 50); do [ -z "$(ip netns pids "$HOME_NS" 2>/dev/null)" ] && break; sleep 0.2; done
     for p in $(ip netns pids "$HOME_NS" 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
+    # the lab-observe build's attribution lines (Hash S and Inline phase counters) of the agent that just stopped
+    grep -h 'tunnel: hash-s: \|tunnel: inline: ' /tmp/wgft-tq-agent-*.log 2>/dev/null | sed 's/^/AGENTCOUNTERS /'
     ip netns exec "$HOME_NS" ip link del wgft0 2>/dev/null
     ip netns exec "$HOME_NS" nft delete table inet wgft_agent 2>/dev/null
     rmdir "$cgroot"-* 2>/dev/null
