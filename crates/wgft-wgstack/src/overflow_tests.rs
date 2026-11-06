@@ -1,8 +1,7 @@
 //! 整数の溢れの監査 (RTT の標本と回復の窓) の反例の試験です。
 //!
 //! どちらも呼び手や相手が起こせる入力で、overflow-checks の有無の両方で同じ主張になるよう、panic を期待せず、
-//! 安全側の結果 (値が範囲に収まる、早すぎる再送が起きない) を確かめます。今の実装で落ちるものは
-//! `#[ignore]` です。
+//! 安全側の結果 (値が範囲に収まる、早すぎる再送が起きない) を確かめます。
 //!
 //! - 握手の RTT を測らなかった接続 (SYN-ACK を再送した) に、呼び手が時計を `Time::MAX` に跳ばして ACK を渡す
 //! - SACK の無い接続の回復の間に、同じ重複 ACK を 300 万回以上受ける (窓が `u32` を回る)
@@ -106,7 +105,6 @@ fn clock_jump_to_max(cc: Congestion, ts: bool) {
 }
 
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn clock_jump_to_max_keeps_the_rtt_estimate_in_range() {
     for cc in [Congestion::NewReno, Congestion::Cubic] {
         for ts in [false, true] {
@@ -186,7 +184,6 @@ fn dup_ack_flood_of_thousands_keeps_cwnd_bounded() {
 
 /// NewReno の回復の間に 3,200,000 回の重複 ACK を受けても、窓は回り込みません。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn dup_ack_flood_of_millions_keeps_cwnd_bounded() {
     dup_ack_flood(Congestion::NewReno, 3_200_000);
 }

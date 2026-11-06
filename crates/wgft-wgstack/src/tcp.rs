@@ -76,6 +76,11 @@ pub(crate) const RTO_INIT: i64 = SEC;
 pub(crate) const RTO_SYNACK_RETX: i64 = 3 * SEC;
 pub(crate) const RTO_MIN: i64 = 200 * MS;
 pub(crate) const RTO_MAX: i64 = 120 * SEC;
+
+/// 輻輳の窓の上限です (1 GiB)。相手の窓の欄が表せる最大の窓 (65535 << 14) とほぼ同じで、送信の輪 (最大 4 MiB) の
+/// 容量より桁違いに大きいので、実際の送信を縛りません。窓は byte の数を数えるだけで、この値で確保する量は
+/// 変わりません。`3 * mss` や `mss` を足しても u32 に収まります。
+pub(crate) const CWND_MAX: u32 = 1 << 30;
 /// 遅延 ACK の時間です。Linux の遅延 ACK の時間の最初の値と下限 (40 ms) と同じです。
 pub(crate) const DELACK_TIMEOUT: i64 = 40 * MS;
 /// 1 つの接続か行が速さを抑えた ACK を送ってから、次の ACK を許すまでの間隔です (RFC 5961 7 節)。

@@ -3,18 +3,32 @@
 use super::conn::State;
 use super::ctx::{Conn, u32_of};
 use super::sack::DUP_THRESH;
-use super::{MS, RTO_MAX, RTO_MIN, RTX_FAST, RTX_PARTIAL, ts_clock};
+use super::{CWND_MAX, MS, RTO_MAX, RTO_MIN, RTX_FAST, RTX_PARTIAL, ts_clock};
 use crate::buf::records::REC_RETRANSMITTED;
 use crate::seq;
 use crate::stack::ns;
 use crate::wire::{FLAG_FIN, Segment};
 
+/// RTT の標本の上限です (2^31 - 1 ms、約 24.8 日)。timestamp の標本は 31 bit の ms の差なのでこれを超えず、
+/// 相手の網が作れる標本は切れません。呼び手の時計の跳び (核は `MAX_NOW` で止める) だけがこれを超えます。
+/// この上限なら SRTT と RTTVAR は 2^54 ns 未満で、`7 * srtt` や TLP の 2 倍、RACK の `reo_wnd_mult` (255 以下) との
+/// 積が i64 に収まります。
+const RTT_SAMPLE_MAX: i64 = i32::MAX as i64 * MS;
+
 impl Conn<'_> {
-    /// RTT の測定値 `r` (ns) で SRTT、RTTVAR、RTO を更新します (RFC 6298 2 節)。
-    pub(crate) fn rtt_sample(&mut self, r: i64) {
+    /// RTT の測定値 `r` (ns) で SRTT、RTTVAR、RTO を更新し、更新に使った値を返します (負なら更新せずそのまま返し
+    /// ます)。
+    ///
+    /// 標本は `RTT_SAMPLE_MAX` (timestamp の標本が取りうる最大) で切ります。網が作れる標本は切れないので RFC 6298
+    /// 2.3 の規則は変わりません。呼び手の時計が跳ぶと (核は `MAX_NOW` で止める) 送った時刻との差が 2^61 ns になり、
+    /// `7 * srtt` が回って SRTT が負になりえました。切るのは網が作れない大きさの標本だけです。
+    ///
+    /// SRTT と RTTVAR は 2^54 ns 未満に収まります。RTO は従来どおり `RTO_MAX` で止まります。
+    pub(crate) fn rtt_sample(&mut self, r: i64) -> i64 {
         if r < 0 {
-            return;
+            return r;
         }
+        let r = r.min(RTT_SAMPLE_MAX);
         let t = &mut *self.t;
         t.tlp_sampled = true;
         if t.has_rtt {
@@ -29,6 +43,14 @@ impl Conn<'_> {
         }
         // 下限は RTO 全体ではなく RTTVAR の項に掛けます (Linux と同じ)。
         t.rto = (t.srtt + (4 * t.rttvar).max(RTO_MIN)).min(RTO_MAX);
+        r
+    }
+
+    /// 自分の時計の差 (記録の送った時刻との差) から測った標本で [`Conn::rtt_sample`] を呼びます。この標本は呼び手の
+    /// 時計の跳びで 2^61 ns にもなりえて、timestamp の標本のように網が上限を決めません。RTO が止まる `RTO_MAX`
+    /// で切ります。再送のタイマーの規則 (RFC 6298 2.4 と 2.5 の RTO の上限) の外に出る標本を平滑化に入れないためです。
+    pub(crate) fn clock_rtt_sample(&mut self, r: i64) -> i64 {
+        self.rtt_sample(r.min(RTO_MAX))
     }
 
     /// 相手が返した自分の TSval (TSecr) から RTT を測ります (RFC 7323 4.1)。自分の今の TSval より先の TSecr は、
@@ -44,9 +66,7 @@ impl Conn<'_> {
         if d < 0 {
             return -1;
         }
-        let r = i64::from(d) * MS;
-        self.rtt_sample(r);
-        r
+        self.rtt_sample(i64::from(d) * MS)
     }
 
     /// ACK の欄を処理します (RFC 9293、RFC 5681、RFC 6582、RFC 6675、RFC 8985)。
@@ -213,8 +233,7 @@ impl Conn<'_> {
             return self.ts_rtt_sample(ecr, now);
         }
         if sample >= 0 && !rtx_acked {
-            self.rtt_sample(sample);
-            return sample;
+            return self.clock_rtt_sample(sample);
         }
         -1
     }
@@ -262,7 +281,7 @@ impl Conn<'_> {
         } else {
             self.cong_avoid(acked, now);
         }
-        self.t.cwnd = self.t.cwnd.min(1 << 30);
+        self.t.cwnd = self.t.cwnd.min(CWND_MAX);
         if self.t.cwnd >= self.t.ssthresh {
             self.t.rto_slow_start = false; // RTO の後の slow start は窓が ssthresh に届いて終わります
         }
@@ -304,13 +323,15 @@ impl Conn<'_> {
         }
         let mss = self.seg_mss();
         if self.t.in_recovery {
-            self.t.cwnd = self.t.cwnd.wrapping_add(mss);
+            // 回復の間の水増し (RFC 5681 3.2 の 4) です。重複 ACK は相手がいくらでも送れるので、`cwnd_on_ack` が
+            // ACK ごとに掛ける上限と同じ 1 << 30 で止めます。
+            self.t.cwnd = self.t.cwnd.saturating_add(mss).min(CWND_MAX);
             return;
         }
         if self.t.dup_acks == DUP_THRESH && seq::gt(self.t.snd_una, self.t.recover) {
             self.enter_fast_recovery();
             let t = &mut *self.t;
-            t.cwnd = t.ssthresh.wrapping_add(3 * mss);
+            t.cwnd = t.ssthresh.saturating_add(3 * mss).min(CWND_MAX);
             t.fast_rtx = true;
             t.rtx_cause = RTX_FAST;
         }

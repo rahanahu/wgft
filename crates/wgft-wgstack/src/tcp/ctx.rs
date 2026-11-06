@@ -180,7 +180,7 @@ impl Conn<'_> {
                 sampled = self.ts_rtt_sample(ts_ecr, now) >= 0;
             }
         } else if !r.rtx && r.sent {
-            self.rtt_sample(now - crate::stack::ns(r.sent_at));
+            self.clock_rtt_sample(now - crate::stack::ns(r.sent_at));
             sampled = true;
         }
         // RFC 6298 5.7:SYN-ACK を再送して RTT の標本を取れなかった接続は、最初の RTO を 3 秒にします。
