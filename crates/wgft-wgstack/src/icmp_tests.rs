@@ -1393,3 +1393,137 @@ fn eviction_time_exceeded_shares_the_icmp_rate_limit() {
         "the eviction's Time Exceeded did not go through the shared limiter"
     );
 }
+
+// RFC 1191 の Next-Hop MTU が 0 の Datagram Too Big と、PMTU の引き下げでの輻輳の窓の試験です。
+
+/// 送信済みの先頭の segment を引用した Fragmentation Needed を作ります。`total_len` は引用した IP header の
+/// Total Length に書き、`mtu` は Next-Hop MTU の欄に書きます。引用の番号は SND.UNA です。
+fn frag_needed_quoting(pkts: &[Vec<u8>], total_len: u16, mtu: u16) -> Vec<u8> {
+    let mut q = pkts[0][..IP_HEADER_LEN + 8].to_vec();
+    q[2..4].copy_from_slice(&total_len.to_be_bytes());
+    let mut m = vec![0u8; 8 + q.len()];
+    m[0] = DST_UNREACH;
+    m[1] = 4;
+    m[6..8].copy_from_slice(&mtu.to_be_bytes());
+    m[8..].copy_from_slice(&q);
+    build_icmp(PEER, &m)
+}
+
+/// 1 つの接続に Fragmentation Needed を順に送り、そのたびの PMTU を返します。
+fn pmtu_after(steps: &[(u16, u16)]) -> Vec<u32> {
+    let mut n = TestNet::new(small_limits());
+    let (c, _) = n.accepted(true);
+    n.s.write(n.now, c, &[0; 3000]).unwrap();
+    let pkts = n.drain_raw();
+    steps
+        .iter()
+        .map(|&(total_len, mtu)| {
+            n.write(&frag_needed_quoting(&pkts, total_len, mtu));
+            n.s.conn(c.slot).t.pmtu
+        })
+        .collect()
+}
+
+/// RFC 1191 3 節:"Hosts MUST be able to deal with Datagram Too Big messages that do not include the next-hop
+/// MTU" で、4 節と 7 節は引用した datagram の Total Length から plateau の表で見積もります。Total Length 未満の
+/// 最大の plateau を PMTU にし、552 で止めます。Total Length が今の PMTU 以上なら、5 節の 4.2BSD の注に従い
+/// 引用の header の長さの 4 倍を先に引きます (PMTU 1420 の接続で 1420 は 1400 になり 1006)。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn frag_needed_with_next_hop_mtu_zero_estimates_from_the_plateau_table() {
+    assert_eq!(pmtu_after(&[(1420, 0)]), [1006]);
+    assert_eq!(pmtu_after(&[(1300, 0)]), [1006]);
+    assert_eq!(pmtu_after(&[(1200, 0)]), [1006]);
+    assert_eq!(pmtu_after(&[(600, 0)]), [552]);
+    // 1006 の後の 1006 の引用は 508 の plateau を 552 に引き上げた値へ、552 の後は下げません。
+    assert_eq!(
+        pmtu_after(&[(1420, 0), (1006, 0), (1006, 0)]),
+        [1006, 552, 552]
+    );
+}
+
+/// 対照:Next-Hop MTU が 0 でなければ、その値を使います (今の動作です)。
+#[test]
+fn frag_needed_with_a_next_hop_mtu_uses_it() {
+    assert_eq!(pmtu_after(&[(1420, 1000)]), [1000]);
+    assert_eq!(pmtu_after(&[(600, 1200)]), [1200]);
+    // 0 以外の 552 未満の値は今までどおり捨てます。
+    assert_eq!(pmtu_after(&[(1420, 300)]), [TEST_MTU as u32]);
+}
+
+/// 対照:Next-Hop MTU が 0 で、引用の Total Length が下限以下なら、PMTU を上げず接続も壊しません。
+/// すでに 552 の接続では 552 のままで、データは引き続き送れます。
+#[test]
+fn frag_needed_with_next_hop_mtu_zero_at_the_floor_changes_nothing() {
+    let mut n = TestNet::new(small_limits());
+    let (c, _) = n.accepted(true);
+    n.s.write(n.now, c, &[0; 3000]).unwrap();
+    let pkts = n.drain_raw();
+    n.write(&frag_needed_quoting(&pkts, 1420, 552));
+    assert_eq!(n.s.conn(c.slot).t.pmtu, 552);
+    for total_len in [552, 508, 400, 68] {
+        n.write(&frag_needed_quoting(&pkts, total_len, 0));
+        assert_eq!(n.s.conn(c.slot).t.pmtu, 552, "total length {total_len}");
+    }
+    n.s.write(n.now, c, &[0; 100]).unwrap();
+    assert!(!n.drain_raw().is_empty(), "the connection stopped sending");
+}
+
+/// 新しい PMTU を報告する接続を作り、報告の前後の `(seg_mss, cwnd)` を返します。`peer_mss` が `Some` なら
+/// 報告の前に相手の MSS をその値にします。
+fn cwnd_across_pmtu_report(
+    peer_mss: Option<u32>,
+    mtu: u16,
+    sack: bool,
+) -> ((u32, u32), (u32, u32)) {
+    let mut n = TestNet::new(small_limits());
+    let (c, _) = n.accepted_sack(true, sack);
+    if let Some(m) = peer_mss {
+        n.s.conn(c.slot).t.peer_mss = m;
+    }
+    n.s.write(n.now, c, &vec![0; 30_000]).unwrap();
+    let pkts = n.drain_raw();
+    let before = {
+        let cs = n.s.conn(c.slot);
+        (cs.seg_mss(), cs.t.cwnd)
+    };
+    n.write(&frag_needed_quoting(&pkts, TEST_MTU as u16, mtu));
+    let cs = n.s.conn(c.slot);
+    (before, (cs.seg_mss(), cs.t.cwnd))
+}
+
+/// RFC 5681 3.1:"When initial congestion windows of more than one segment are implemented along with Path MTU
+/// Discovery [RFC1191], and the MSS being used is found to be too large, the congestion window cwnd SHOULD be
+/// reduced to prevent large bursts of smaller segments. Specifically, cwnd SHOULD be reduced by the ratio of the
+/// old segment size to the new segment size." 初期窓は 10 segment なので、PMTU の引き下げの後の窓は同じ 10
+/// segment を新しい大きさで数えた byte になります。
+#[test]
+#[ignore = "fixed by the follow-up PR"]
+fn pmtu_decrease_shrinks_cwnd_by_the_segment_size_ratio() {
+    for sack in [false, true] {
+        let ((old_mss, old_cwnd), (new_mss, new_cwnd)) = cwnd_across_pmtu_report(None, 1000, sack);
+        assert!(new_mss < old_mss, "sack {sack}: the MSS did not shrink");
+        assert_eq!(
+            old_cwnd,
+            10 * old_mss,
+            "sack {sack}: unexpected initial window"
+        );
+        assert_eq!(
+            new_cwnd,
+            10 * new_mss,
+            "sack {sack}: cwnd {old_cwnd} -> {new_cwnd}"
+        );
+    }
+}
+
+/// 対照:MSS が小さくならない PMTU の報告は輻輳の窓を変えません。PMTU が今以上の報告と、PMTU は下がるが
+/// 相手の MSS が下限になっていて送る MSS が変わらない報告です。
+#[test]
+fn pmtu_report_that_keeps_the_mss_leaves_cwnd_alone() {
+    for sack in [false, true] {
+        let (before, after) = cwnd_across_pmtu_report(None, 1500, sack);
+        assert_eq!(before, after, "sack {sack}: PMTU not below the current one");
+        let (before, after) = cwnd_across_pmtu_report(Some(900), 1200, sack);
+        assert_eq!(before, after, "sack {sack}: peer MSS still the limit");
+    }
+}
