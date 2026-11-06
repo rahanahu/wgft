@@ -288,13 +288,52 @@ pub(crate) struct Counts {
     pub(crate) requests: AtomicU64,
     /// 区画が送った datagram。
     pub(crate) part_sent: AtomicU64,
+    // 以下は帰属の計数 (lab-observe と試験の build だけ)
+    /// 区画の起床の回数。
+    pub(crate) part_wakes: AtomicU64,
+    /// 区画が front から受けたバッチ。
+    pub(crate) part_lane_batches: AtomicU64,
+    /// 区画が front から受けた packet。
+    pub(crate) part_lane_pkts: AtomicU64,
+    /// 区画の `sendmmsg` の呼び出し。
+    pub(crate) part_calls: AtomicU64,
+    /// 区画が送った message (GSO の束は 1 つ)。
+    pub(crate) part_msgs: AtomicU64,
+    /// 区画が送った datagram の byte。
+    pub(crate) part_bytes: AtomicU64,
+    /// 区画の送りが在庫を待った回数。
+    pub(crate) part_starved: AtomicU64,
+    /// 区画が核から引いた packet。
+    pub(crate) part_pulled: AtomicU64,
+    /// 区画の起床の始めから眠るまでの時間 (ns)。
+    pub(crate) part_ns_busy: AtomicU64,
+    /// 区画が受けたバッチを核に渡した時間 (ns)。
+    pub(crate) part_ns_lane: AtomicU64,
+    /// 区画が核から packet を引いた時間 (ns)。
+    pub(crate) part_ns_pull: AtomicU64,
+    /// 区画が在庫で暗号化した時間 (ns、遅れの確かめを含む)。
+    pub(crate) part_ns_seal: AtomicU64,
+    /// 区画の `sendmmsg` の時間 (ns)。
+    pub(crate) part_ns_sys: AtomicU64,
+    /// front の起床の回数。
+    pub(crate) front_wakes: AtomicU64,
+    /// front の起床の始めから眠るまでの時間 (ns)。
+    pub(crate) front_ns_busy: AtomicU64,
+    /// front の受信の相の時間 (ns、復号と振り分けを含む)。
+    pub(crate) front_ns_rx: AtomicU64,
+    /// front が在庫の求めに応えた時間 (ns)。
+    pub(crate) front_ns_serve: AtomicU64,
+    /// front の送信の相の時間 (ns)。
+    pub(crate) front_ns_tx: AtomicU64,
+    /// front が区画のバッチに詰めた packet。
+    pub(crate) front_staged: AtomicU64,
 }
 
 impl Counts {
     pub(crate) fn line(&self) -> String {
         let g = |a: &AtomicU64| a.load(Ordering::Relaxed);
         format!(
-            "hash-s: lane_drops={} tcp_fragments={} lag_drops={} lag_reseals={} age_drops={} eagain_drops={} overflow_drops={} piggybacked={} refilled={} requests={} part_sent={}",
+            "hash-s: lane_drops={} tcp_fragments={} lag_drops={} lag_reseals={} age_drops={} eagain_drops={} overflow_drops={} piggybacked={} refilled={} requests={} part_sent={} part_wakes={} part_lane_batches={} part_lane_pkts={} part_calls={} part_msgs={} part_bytes={} part_starved={} part_pulled={} part_ns_busy={} part_ns_lane={} part_ns_pull={} part_ns_seal={} part_ns_sys={} front_wakes={} front_ns_busy={} front_ns_rx={} front_ns_serve={} front_ns_tx={} front_staged={}",
             g(&self.lane_drops),
             g(&self.tcp_fragments),
             g(&self.lag_drops),
@@ -306,6 +345,25 @@ impl Counts {
             g(&self.refilled),
             g(&self.requests),
             g(&self.part_sent),
+            g(&self.part_wakes),
+            g(&self.part_lane_batches),
+            g(&self.part_lane_pkts),
+            g(&self.part_calls),
+            g(&self.part_msgs),
+            g(&self.part_bytes),
+            g(&self.part_starved),
+            g(&self.part_pulled),
+            g(&self.part_ns_busy),
+            g(&self.part_ns_lane),
+            g(&self.part_ns_pull),
+            g(&self.part_ns_seal),
+            g(&self.part_ns_sys),
+            g(&self.front_wakes),
+            g(&self.front_ns_busy),
+            g(&self.front_ns_rx),
+            g(&self.front_ns_serve),
+            g(&self.front_ns_tx),
+            g(&self.front_staged),
         )
     }
 }
@@ -318,6 +376,20 @@ pub(crate) fn count(a: &AtomicU64, n: u64) {
     a.fetch_add(n, Ordering::Relaxed);
     #[cfg(not(any(test, feature = "lab-observe")))]
     let _ = (a, n);
+}
+
+/// 帰属の計数の時刻の始め。ラボと試験の build だけが時計を読み、製品の build では `None` で時計を読まない。
+#[inline]
+pub(crate) fn t0() -> Option<Instant> {
+    cfg!(any(test, feature = "lab-observe")).then(Instant::now)
+}
+
+/// [`t0`] からの時間 (ns) を `a` に足す。
+#[inline]
+pub(crate) fn t1(a: &AtomicU64, t: Option<Instant>) {
+    if let Some(t) = t {
+        count(a, u64::try_from(t.elapsed().as_nanos()).unwrap_or(u64::MAX));
+    }
 }
 
 /// 世代の全スレッドが分け合う値。

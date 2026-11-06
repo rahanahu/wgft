@@ -100,6 +100,7 @@ impl Front {
                 return;
             };
             if b.push(p) {
+                super::count(&self.hub.counts.front_staged, 1);
                 return;
             }
             if b.packets() == 0 {
@@ -439,8 +440,11 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
         // 知らせの回数は起床の始めに読む。この起床の間に区画が在庫を求めて起こせば、眠らずに続ける
         let seen = hub.front_bell.prepare();
         let start = clock::now();
+        let tb = super::t0();
+        super::count(&hub.counts.front_wakes, 1);
         let mut now = start;
         let mut rx_more = false;
+        let trx = super::t0();
         let mut rx_done = 0;
         loop {
             let vlen = if timed {
@@ -475,7 +479,11 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
                 break;
             }
         }
+        super::t1(&hub.counts.front_ns_rx, trx);
+        let ts = super::t0();
         front.serve(device, now);
+        super::t1(&hub.counts.front_ns_serve, ts);
+        let ttx = super::t0();
         let tx_more = send_phase(
             &local,
             device,
@@ -488,6 +496,7 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
             &mut now,
         );
         front.publish();
+        super::t1(&hub.counts.front_ns_tx, ttx);
         let more = rx_more || tx_more;
         let deadline = finish_wake(&local, device, &events, high_water, &mut wakers);
         for waker in wakers.drain(..) {
@@ -498,6 +507,7 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
             tokio::task::yield_now().await;
         }
         // 眠りの印を立てられなければ、この起床の間に知らせがあった。命令が飢えないよう select は通る
+        super::t1(&hub.counts.front_ns_busy, tb);
         let rung = !hub.front_bell.sleep(seen);
         tokio::select! {
             ready = socket.readable() => ready?,

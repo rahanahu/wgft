@@ -132,6 +132,16 @@ impl PartSend {
     /// packet の枠 `p0` からの平文を、datagram の枠 `s0` から在庫で暗号化する。在庫が足りなければ front に求め、
     /// 偽を返す (平文は残る)。
     fn seal(&mut self, p0: usize, s0: usize, now: Instant) -> bool {
+        let t = super::t0();
+        let ok = self.seal_inner(p0, s0, now);
+        super::t1(&self.hub.counts.part_ns_seal, t);
+        if !ok {
+            super::count(&self.hub.counts.part_starved, 1);
+        }
+        ok
+    }
+
+    fn seal_inner(&mut self, p0: usize, s0: usize, now: Instant) -> bool {
         self.drop_stale(now);
         let need = self.pulled - p0;
         if self.stock.len() < need {
@@ -194,7 +204,11 @@ impl PartSend {
                 }
                 continue;
             }
-            match sink.send(&mut self.tx) {
+            let t = super::t0();
+            let r = sink.send(&mut self.tx);
+            super::t1(&self.hub.counts.part_ns_sys, t);
+            super::count(&self.hub.counts.part_calls, 1);
+            match r {
                 Ok(0) => return Err(self.blocked()),
                 Ok(n) => {
                     let n = n.min(self.tx.n_msgs - self.tx.next);
@@ -212,6 +226,8 @@ impl PartSend {
                         })
                         .sum();
                     self.tx.next += n;
+                    super::count(&self.hub.counts.part_msgs, n as u64);
+                    super::count(&self.hub.counts.part_bytes, bytes);
                     let link = &self.hub.links[self.k];
                     link.stats.sent_bytes.fetch_add(bytes, Ordering::Relaxed);
                     super::count(&self.hub.counts.part_sent, sent as u64);
@@ -281,6 +297,7 @@ impl PartSend {
         }
         let vlen = vlen.clamp(1, self.tx.slots());
         let mut pulled = 0;
+        let t = super::t0();
         while pulled < vlen {
             let Some(len) = upper.poll_transmit(now, self.tx.packet_slot(pulled)) else {
                 break;
@@ -288,9 +305,11 @@ impl PartSend {
             self.tx.set_len(pulled, len);
             pulled += 1;
         }
+        super::t1(&self.hub.counts.part_ns_pull, t);
         if pulled == 0 {
             return (0, PartSent::Idle);
         }
+        super::count(&self.hub.counts.part_pulled, pulled as u64);
         self.pulled = pulled;
         if !self.seal(0, 0, now) {
             return (pulled, PartSent::Starved);
@@ -348,7 +367,9 @@ pub(crate) fn take_lane<U: Upper>(local: &Local<U>, send: &mut PartSend, now: In
     let hub = Arc::clone(&send.hub);
     let link = &hub.links[send.k];
     let mut n = 0;
+    let t = super::t0();
     while let Some(mut b) = link.to_part.pop() {
+        super::count(&hub.counts.part_lane_batches, 1);
         {
             let mut guard = local.0.borrow();
             b.each(|p| guard.handle_packet(now, p));
@@ -360,6 +381,8 @@ pub(crate) fn take_lane<U: Upper>(local: &Local<U>, send: &mut PartSend, now: In
         b.clear();
         let _ = link.to_front.push(b);
     }
+    super::count(&hub.counts.part_lane_pkts, n as u64);
+    super::t1(&hub.counts.part_ns_lane, t);
     n
 }
 
@@ -387,6 +410,8 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
         // 知らせの回数は輪を読む前に読む。この起床の間に front が渡せば、眠らずに続ける
         let seen = link.bell.prepare();
         let start = clock::now();
+        let tb = super::t0();
+        super::count(&hub.counts.part_wakes, 1);
         let mut now = start;
         take_lane(&local, send, now);
         let mut more = false;
@@ -425,6 +450,7 @@ pub(in crate::dataplane) async fn drive<U: Upper>(
         if more {
             tokio::task::yield_now().await;
         }
+        super::t1(&hub.counts.part_ns_busy, tb);
         let rung = !link.bell.sleep(seen);
         let blocked = send.is_blocked();
         tokio::select! {
