@@ -1506,7 +1506,6 @@ fn cwnd_across_pmtu_report(
 /// old segment size to the new segment size." 初期窓は 10 segment なので、PMTU の引き下げの後の窓は同じ 10
 /// segment を新しい大きさで数えた byte になります。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn pmtu_decrease_shrinks_cwnd_by_the_segment_size_ratio() {
     for sack in [false, true] {
         let ((old_mss, old_cwnd), (new_mss, new_cwnd)) = cwnd_across_pmtu_report(None, 1000, sack);

@@ -355,7 +355,18 @@ impl Conn<'_> {
         if mtu >= self.t.pmtu {
             return;
         }
+        let old_mss = self.seg_mss();
         self.t.pmtu = mtu;
+        // RFC 5681 3.1: "When initial congestion windows of more than one segment are implemented along with Path MTU
+        // Discovery [RFC1191], and the MSS being used is found to be too large, the congestion window cwnd SHOULD be
+        // reduced to prevent large bursts of smaller segments. Specifically, cwnd SHOULD be reduced by the ratio of
+        // the old segment size to the new segment size." 窓は byte で持つので、新旧の MSS の比で縮めます。ssthresh は
+        // RFC が触れず、損失で決めた値なので変えません。
+        let new_mss = self.seg_mss();
+        if new_mss < old_mss {
+            let w = u64::from(self.t.cwnd) * u64::from(new_mss) / u64::from(old_mss);
+            self.t.cwnd = u32::try_from(w).unwrap_or(u32::MAX).max(new_mss);
+        }
         if self.t.snd_max != self.t.snd_una {
             // 記録の境目は保ち、新しい大きさに入らない記録だけを損失にして送り直します (Linux と同じです)。
             // 入る記録は届いているかもしれないので、損失の印を付けません。
