@@ -779,5 +779,75 @@ class Placement(unittest.TestCase):
         self.assertEqual((got["agentvm_cpu_share"], got["agentvm_maxcpu"]), ("1.500", "1.00"))
 
 
+class ManyConnections(unittest.TestCase):
+    @staticmethod
+    def iperf_json(d, name, streams, seconds=10.0):
+        import json
+        path = os.path.join(d, name)
+        with open(path, "w") as f:
+            json.dump({"end": {"sum_received": {"bytes": sum(streams), "seconds": seconds,
+                                                "bits_per_second": sum(streams) * 8 / seconds},
+                               "sum_sent": {"bytes": sum(streams), "retransmits": 3},
+                               "streams": [{"receiver": {"bytes": b, "seconds": seconds}} for b in streams]}}, f)
+        return path
+
+    def test_iperf_adds_up_several_clients(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.iperf_json(d, "a.json", [1000000, 1000000])
+            b = self.iperf_json(d, "b.json", [1000000, 0], seconds=9.5)
+            p = subprocess.run([sys.executable, TQ, "iperf", a, b], capture_output=True, text=True)
+        got = dict(kv.split("=") for kv in p.stdout.split())
+        self.assertEqual((got["received"], got["duration_s"], got["retransmits"]), ("3000000", "10.000", "6"))
+        # Jain over the four streams: 3^2 / (4 * 3) in units of 1 MB
+        self.assertEqual((got["stream_jain"], got["stream_min_over_max"], got["stream_zero"]), ("0.7500", "0.000", "1"))
+        self.assertEqual((got["stream_min_mbit"], got["stream_max_mbit"]), ("0.000", "0.842"))
+
+    def test_iperf_fails_the_run_when_one_client_failed(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self.iperf_json(d, "a.json", [1000000, 1000000])
+            b = os.path.join(d, "b.json")
+            with open(b, "w") as f:
+                f.write('{"error": "unable to connect stream"}')
+            p = subprocess.run([sys.executable, TQ, "iperf", a, b], capture_output=True, text=True)
+        self.assertTrue(p.stdout.startswith("received=0 "), p.stdout)
+
+    def test_agent_log_counts_keeps_the_latest_count_of_each_kind(self):
+        log = "\n".join([
+            "2026/11/07 memory bound: 1981 MiB, derived from the flow caps",
+            "2026/11/07 wgstack: evicted the oldest TIME_WAIT rows because the table was full; 10 since the tunnel was built",
+            "2026/11/07 wgstack: evicted the oldest TIME_WAIT rows because the table was full; 250 since the tunnel was built",
+            "2026/11/07 wgstack: dropped control packets because the control output ring was full; 3 since the tunnel was built",
+            "2026/11/07 wgstack: dropped TCP handshakes that advertise an MSS below 64; 2 dropped since the tunnel was built; peers",
+            "2026/11/07 wgstack: dropped UDP datagrams because receiving sockets are not read fast enough; 4 over the per-socket "
+            "limit of 1 bytes and 2 datagrams, 5 over the tunnel budget of 3 bytes and 4 datagrams, since the tunnel was built",
+            "2026/11/07 tcp/41800: rule cap reached; refusing new connections",
+            "2026/11/07 wgstack: SomethingNew; 7 since the tunnel was built",
+        ])
+        self.assertEqual(tq.agent_log_counts(log), {
+            "agent_bound_mib": 1981, "wg_tw_evicted": 250, "wg_ctl_dropped": 3, "wg_mss_floor": 2,
+            "wg_udp_endpoint_full": 4, "wg_udp_tunnel_full": 5, "relay_tcp_refusing_lines": 1, "wg_other_lines": 1})
+
+    def test_manyconn_reads_a_churn_case(self):
+        line = ("PAIRED round=%d run=1 arm=%s vm=%s name=%s pass=1 sync=go bytes=4000000 window_s=10 "
+                "churn_rate=1000 churn_ok=10000 churn_planned=10000 churn_refused=0 churn_ok_per_s=1000.0 "
+                "churn_connect_p50_ms=0.5 churn_connect_p99_ms=%s host_agent_vcpu_guest_s=%s agent_rss_mib=40.0 "
+                "wg_tw_evicted=%d client_tcp_synretrans=4")
+        with tempfile.TemporaryDirectory() as d:
+            os.mkdir(os.path.join(d, "churn-1000"))
+            path = os.path.join(d, "churn-1000", "paired.log")
+            with open(path, "w") as f:
+                f.write("PLAN rounds=2 runs=1\n")
+                for rnd, arm, vm, name, p99, g, ev in ((1, "x", "a", "rust", "2.0", "1.0", 0), (1, "y", "b", "kernel", "1.0", "0.5", 0),
+                                                       (2, "x", "b", "rust", "4.0", "3.0", 9), (2, "y", "a", "kernel", "1.0", "0.5", 0)):
+                    f.write(line % (rnd, arm, vm, name, p99, g, ev) + "\n")
+            p = subprocess.run([sys.executable, TQ, "manyconn", path], capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        x = dict(kv.split("=") for kv in p.stdout.splitlines()[0].split()[1:])
+        self.assertEqual((x["case"], x["name"], x["runs"], x["churn_ok"], x["churn_connect_p99_ms"]),
+                         ("churn-1000", "rust", "2", "20000", "3"))
+        # median of 100 and 300 us per connection; the eviction count is the largest; SYN retransmits add up
+        self.assertEqual((x["agentvm_guest_us_per_conn"], x["wg_tw_evicted"], x["client_tcp_synretrans"]), ("200.0", "9", "8"))
+
+
 if __name__ == "__main__":
     unittest.main()

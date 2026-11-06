@@ -280,12 +280,14 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --tool iperf3 --udp-ping --kernel
 腕は `lab/tcpquality.sh` のユーザー空間モードの `gvisor`、`wgstack`、`rust` です。
 `gvisor` と `wgstack` は Go の agent をその netstack で動かし、`rust` は Rust の agent を動かします。
 `kernel` はカーネルの WireGuard とカーネルの TCP で、WireGuard と TCP の仕事がエージェントのプロセスの外にあります。
-エージェントの byte あたりの CPU がほぼ 0 になるので、`kernel` の腕は VM 全体の byte あたりの CPU だけで比べ、`--tool iperf3` を要します。
+エージェントの byte あたりの CPU がほぼ 0 になるので、`kernel` の腕は VM 全体の byte あたりの CPU だけで比べ、`--tool iperf3` か `--tool churn` を要します。
 `userspace` は `gvisor` と同じなので、腕にできません。
 `--tool iperf3` は転送を iperf3 にし、1 回の実行を 10 秒の転送にします。
 `--streams N` は iperf3 の並行の TCP 接続の数です。
+128 本を超える数は、iperf3 の client を 128 本ごとに分けて流します ([多数の接続を測る](#多数の接続を測る-labmanyconnsh))。
+`--tool churn` は転送の代わりに短い接続を `--churn-rate N` 本を毎秒、`--churn-seconds S` 秒 (既定 10) 開きます。
 iperf3 は送り手と受け手の byte あたりの CPU が `tcpquality.py` より小さいので、カーネルの速さの腕でも測る道具の CPU が値を占めません。
-`--udp-ping` は、`--tool iperf3` の実行ごとに、同じエージェントの UDP の規則を通る 100 byte の datagram の往復の時間を、何もしていない時と TCP の転送の間に測ります。
+`--udp-ping` は、`--tool iperf3` と `--tool churn` の実行ごとに、同じエージェントの UDP の規則を通る 100 byte の datagram の往復の時間を、何もしていない時と TCP の転送の間に測ります。
 解析の `LAT` の行が腕ごとの p50、p99、最大、jitter と失った数を、`LATRATIO` の行が転送の間の p50、p99、jitter と、何もしていない時の p99 と jitter の比を出します。
 `--bulk-mbit N` は iperf3 の stream ごとの速さを N Mbit/s で頭打ちにし、2 つの腕に同じ負荷を掛けます。
 `--agent-gso on` は、`fast` の経路で、エージェントの `eth0` の UDP の segmentation offload を切らずに測ります。
@@ -555,7 +557,7 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus
   `#` から後と空行は読みません。
   名前は英数字、`-`、`_` だけで、`--out` の直下のファイルとぶつからないように点を使えません。
   例は `up-s1 fast --direction up --streams 1` と `d10-down delay --delay-ms 10 --direction down` です
-- case ごとのフラグ:`--direction`、`--bytes`、`--tool`、`--streams`、`--udp-ping`、`--bulk-mbit`、`--agent-gso`、`--kernel-rmem-max`、`--delay-ms`、`--delay-rate-mbit`、`--delay-queue-pkts`、`--target`、`--rounds`、`--runs` です。
+- case ごとのフラグ:`--direction`、`--bytes`、`--tool`、`--streams`、`--churn-rate`、`--churn-seconds`、`--udp-ping`、`--bulk-mbit`、`--agent-gso`、`--kernel-rmem-max`、`--delay-ms`、`--delay-rate-mbit`、`--delay-queue-pkts`、`--target`、`--rounds`、`--runs` です。
   コマンド行に書いた値は全 case の既定になり、行の値がそれを上書きします。
   case の行でコマンド行の値を消すことはできません。
   case によって有無が変わるフラグ (`--udp-ping` など) は、コマンド行に書かず、要る case の行だけに書きます。
@@ -584,6 +586,49 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus
 - agent の VM の log:case の始めに agentd の log へ `== lab paired case <i> of <n> <名前> starts` の行を書くので、各 case の `agent-vm-logs.txt` を case の境で切れます
 - 未確認:`--cases` はまだラボで流していません。
   使い回した VM の組の値が、新しく立てた組の値と同じになるかも未確認です
+
+### 多数の接続を測る (`lab/manyconn.sh`)
+
+```sh
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/manyconn.sh run concurrent
+WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/manyconn.sh run churn --vcpus 1
+lab/manyconn.sh summary ~/.cache/wgft-lab/manyconn-churn-<日時>
+```
+
+`lab/manyconn.sh` は、多数の接続の下の agent を `--split` で測ります。
+測定の値を人が読むための台本で、合否の判定はせず、[suite.txt](suite.txt) にも入れません。
+1 つの組は 1 回の `lab/lab paired --split --cases` で、既定は `--vcpus 4 --placement apart --rounds 2 --runs 2` と腕 `rust kernel` です (`MANYCONN_ARMS` で替えられます)。
+後に書いた `lab paired` のオプションが既定を上書きします。
+CPU の判定の値は、各 case の `result.txt` の `AGENTVMGUESTRATIO` で、`AGENTVMRATIO` は参考の値です。
+
+- `concurrent`:全速の iperf3 の stream を 16、256、1024、2000 本、両方の向きに、`--udp-ping` 付きで流します。
+  2000 本と iperf3 の制御の接続 16 本の和は、agent の既定のフロー数の上限 (`WGFT_MAX_TCP_FLOWS` の 2048 から、1 つのルールが使えない予備の 4 を引いた数) に収まります
+- `fixed`:同じ本数で、stream の和が約 `MANYCONN_FIXED_MBIT` (既定 2048) Mbit/s になるように stream ごとの速さを抑えます。
+  2 つの腕に同じ負荷を掛け、UDP の往復の時間を比べます
+- `churn`:短い接続 (往復 200 byte ずつ、待ち受けの側が先に閉じる) を毎秒 500 から 16000 本、10 秒ずつ開きます。
+  毎秒 2000 本を 60 秒続ける case は、wgstack の TIME_WAIT の表 (65536 行を 60 秒、毎秒約 1092 本) を埋めて押し出させます
+
+`summary` は `tcpquality.py manyconn` で、case と腕ごとに中央値の表を出します。
+iperf3 の case は速さ、agent の VM の byte あたりの CPU、公平 (Jain の指数、最小と最大の stream)、UDP の往復の時間、agent の RSS と起動の行のメモリの上界、断った行と drop の数です。
+churn の case は、毎秒の完了数、確立と往復の時間の p50 と p99、断られた数、1 秒以上かかった確立の数、agent の VM の接続あたりの CPU です。
+
+`tcpquality.sh` の側の扱いは次のとおりです。
+
+- 128 本を超える stream:iperf3 は 1 つの client で 128 本までなので、128 本ごとに LAN のホストの iperf3 の server (25800 から)、範囲のルールの待ち受けのポート (41800 から)、client を 1 つずつ置き、client を 0.1 秒ずつずらして始めます。
+  byte と速さは足し、公平の値は全部の stream で数えます。
+  結果の行に `iperf_groups` が付きます
+- `TOOL=churn`:`tools/churn` の `churn run` が、`CHURN_RATE` 本を毎秒、`CHURN_S` 秒 (既定 10) 開きます。
+  前の接続の終わりを待たずに開くので、遅れても負荷は下がりません。
+  `CHURN_CLOSE=server` (既定) は LAN のホストが先に閉じ、agent の netstack が TIME_WAIT を持ちます。
+  `received` は完了した接続の往復の byte で、GB あたりの CPU に `2 × CHURN_SIZE / 1e9` を掛けると接続あたりになります
+- 送り元のアドレスごとの上限:client の namespace はアドレスが 1 つなので、stream と制御の接続の和が 120 以上の場合と churn では、server を `WGFT_MAX_TCP_FLOWS_PER_SOURCE=0` で起動します。
+  結果の行に `per_source_cap=off` が付きます
+- conntrack:churn では 2 台の VM の conntrack の表を `CT_MAX` (既定 1048576) まで広げます。
+  conntrack の TIME_WAIT は 120 秒なので、既定の表は毎秒数千本の接続で溢れ、その drop はラボを測ることになるためです
+- agent の状態:各実行の窓の後に、`tcpquality.py agentstat` が agent の RSS と VmHWM、起動の行のメモリの上界、wgstack の断った行と drop の行の最新の数 (`wg_*`)、中継の断った行の数、`home` の確立と TIME_WAIT の TCP のソケットと conntrack の数を結果の行に足します。
+  行の数は agent が同じ種類の行を出す間隔だけ遅れます。
+  制御の輪の drop は種類ごとの数を log に出さないので、和 (`wg_ctl_dropped`) だけです。
+  TIME_WAIT の表の行の数も出ないので、押し出した数 (`wg_tw_evicted`) で見ます
 
 ## 対応する VPS の環境
 

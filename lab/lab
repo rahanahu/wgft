@@ -867,7 +867,7 @@ paired_sync() {
 }
 
 # lab paired の使い方。lab help と引数の誤りの両方がこの 1 つの文字列を出す
-PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3] [--streams N] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local] [--placement apart|apart-mt] [--agent-load CPU:DUTY]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y, or with --split: paired --split [options] --cases FILE [--max-wall SECONDS] ARM_X ARM_Y"
+PAIRED_SYNOPSIS="paired [--rounds N] [--runs N] [--direction down|up] [--bytes N] [--tool tcpquality|iperf3|churn] [--streams N] [--churn-rate N [--churn-seconds S]] [--udp-ping] [--bulk-mbit N] [--agent-gso on|off] [--kernel-rmem-max BYTES] [--rust-target TRIPLE] [--base REF] [--base-rust-target TRIPLE] [--vcpus N] [--split [--peer-vcpus N] [--target lan|local] [--placement apart|apart-mt] [--agent-load CPU:DUTY]] [--delay-ms MS [--delay-rate-mbit N] [--delay-queue-pkts N]] [--x-agent-env WGFT_NAME=VALUE] [--y-agent-env WGFT_NAME=VALUE] [--out DIR] [--keep] fast|rate|delay ARM_X ARM_Y, or with --split: paired --split [options] --cases FILE [--max-wall SECONDS] ARM_X ARM_Y"
 
 # is_uint <値>:1 以上の整数か
 is_uint() { [[ $1 =~ ^[1-9][0-9]*$ ]]; }
@@ -884,8 +884,10 @@ paired_parse_args() {
       --runs) runs=${2:?--runs N}; shift 2 ;;
       --direction) direction=${2:?--direction down|up}; shift 2 ;;
       --bytes) bytes=${2:?--bytes N}; shift 2 ;;
-      --tool) tool=${2:?--tool tcpquality|iperf3}; shift 2 ;;
+      --tool) tool=${2:?--tool tcpquality|iperf3|churn}; shift 2 ;;
       --streams) streams=${2:?--streams N}; shift 2 ;;
+      --churn-rate) churnrate=${2:?--churn-rate N}; shift 2 ;;
+      --churn-seconds) churnsecs=${2:?--churn-seconds S}; shift 2 ;;
       --udp-ping) udpping=1; shift ;;
       --bulk-mbit) bulkmbit=${2:?--bulk-mbit N}; shift 2 ;;
       --agent-gso) agentgso=${2:?--agent-gso on|off}; shift 2 ;;
@@ -958,10 +960,16 @@ paired_validate() {
   require_uint --vcpus "$vcpus"
   [[ $direction == down || $direction == up ]] || die "--direction wants down or up"
   [[ -z $bytes ]] || require_uint --bytes "$bytes" "a whole number of bytes"
-  [[ -z $tool || $tool == tcpquality || $tool == iperf3 ]] || die "--tool wants tcpquality or iperf3"
+  [[ -z $tool || $tool == tcpquality || $tool == iperf3 || $tool == churn ]] || die "--tool wants tcpquality, iperf3 or churn"
   [[ -z $streams ]] || require_uint --streams "$streams"
   [[ -z $streams || $streams == 1 || $tool == iperf3 ]] || die "--streams above 1 needs --tool iperf3"
-  [[ -z $udpping || $tool == iperf3 ]] || die "--udp-ping needs --tool iperf3"
+  [[ -z $streams || $streams -le 128 || $target != local ]] || die "--streams above 128 needs the LAN host in the peer VM, not --target local"
+  # churn は短い接続を --churn-rate の速さで --churn-seconds 秒開く (lab/tcpquality.sh の TOOL=churn、tools/churn)
+  [[ $tool != churn ]] || { is_uint "$churnrate" && ((churnrate > 0)); } || die "--tool churn wants --churn-rate, the connections a second"
+  [[ -z $churnrate && -z $churnsecs || $tool == churn ]] || die "--churn-rate and --churn-seconds go with --tool churn"
+  [[ -z $churnsecs ]] || { is_uint "$churnsecs" && ((churnsecs > 0)); } || die "--churn-seconds wants a whole number of seconds of 1 or more"
+  [[ $tool != churn || $target != local ]] || die "--tool churn needs the LAN host in the peer VM, not --target local"
+  [[ -z $udpping || $tool == iperf3 || $tool == churn ]] || die "--udp-ping needs --tool iperf3 or churn"
   [[ -z $bulkmbit ]] || { is_uint "$bulkmbit" && [[ $tool == iperf3 ]]; } || die "--bulk-mbit wants a whole number of Mbit/s and --tool iperf3"
   [[ -z $agentgso || $agentgso == off || ( $agentgso == on && $path == fast ) ]] || die "--agent-gso wants off, or on with the fast path"
   [[ -z $rmemmax ]] || { is_uint "$rmemmax" && ((rmemmax >= 4096)); } || die "--kernel-rmem-max wants a whole number of bytes of 4096 or more"
@@ -991,7 +999,7 @@ paired_validate() {
       # 比べられるのは VM 全体の byte あたりの CPU (VMRATIO) だけで、その値は測る道具の CPU も含むので、道具の CPU が
       # 小さい --tool iperf3 で流す。
       # userspace は gvisor と同じ
-      kernel) [[ $tool == iperf3 ]] || die "arm $s: a kernel-mode agent spends almost no CPU in its process, so it is compared by the whole VM's CPU per byte only; use it with --tool iperf3" ;;
+      kernel) [[ $tool == iperf3 || $tool == churn ]] || die "arm $s: a kernel-mode agent spends almost no CPU in its process, so it is compared by the whole VM's CPU per byte only; use it with --tool iperf3 or churn" ;;
       userspace) die "arm $s: userspace runs the same agent as gvisor; name gvisor" ;;
       *) die "unknown arm $s; an arm is gvisor, wgstack, rust or, with --tool iperf3, kernel, or base:<one of them> with --base" ;;
     esac
@@ -1106,7 +1114,7 @@ paired_provision() {
 paired_header() {
   local kern=$PAIRED_KERN dirty=$PAIRED_DIRTY
   {
-    echo "lab paired: path $path, direction $direction, x=$spec_x y=$spec_y, $rounds rounds of $runs runs, tool ${tool:-tcpquality}, ${streams:-1} stream(s)${bulkmbit:+, capped at $bulkmbit Mbit/s per stream}${agentgso:+, agent UDP GSO $agentgso}${rmemmax:+, kernel receiver tcp_rmem max $rmemmax}${udpping:+, UDP round trips}"
+    echo "lab paired: path $path, direction $direction, x=$spec_x y=$spec_y, $rounds rounds of $runs runs, tool ${tool:-tcpquality}, ${streams:-1} stream(s)${churnrate:+, $churnrate connections a second for ${churnsecs:-10} s}${bulkmbit:+, capped at $bulkmbit Mbit/s per stream}${agentgso:+, agent UDP GSO $agentgso}${rmemmax:+, kernel receiver tcp_rmem max $rmemmax}${udpping:+, UDP round trips}"
     echo "lab paired: head $(git -C "$REPO" rev-parse HEAD)$dirty${base:+, base $(git -C "$REPO" rev-parse "$base^{commit}") ($base)}${WGFT_LAB_RUST_TARGET:+, head Rust target $WGFT_LAB_RUST_TARGET}${PAIRED_BASE_RUST_TARGET:+, base Rust target $PAIRED_BASE_RUST_TARGET}"
     if [[ -n $split ]]; then
       echo "lab paired: split: forwarding target ${target:-lan} (lan: a host on the LAN in the peer VM; local: on the agent's machine, over loopback)"
@@ -1328,6 +1336,8 @@ paired_round_env() {
   [[ -z $bytes ]] || env+=(BYTES="$bytes")
   [[ -z $tool ]] || env+=(TOOL="$tool")
   [[ -z $streams ]] || env+=(STREAMS="$streams")
+  [[ -z $churnrate ]] || env+=(CHURN_RATE="$churnrate")
+  [[ -z $churnsecs ]] || env+=(CHURN_S="$churnsecs")
   [[ -z $udpping ]] || env+=(UDPPING=1)
   [[ -z $bulkmbit ]] || env+=(IPERF_MBIT="$bulkmbit")
   [[ -z $agentgso ]] || env+=(AGENT_GSO="$agentgso")
@@ -1422,8 +1432,8 @@ paired_report() {
 # header.txt に使い回しの行を足す。case の前に両方の VM を splitcase.sh で戻し (残ったプロセス、netem、TCP の
 # バッファの sysctl)、--target の置き場所を合わせ、agentd と LAN の疎通を確かめる。失敗した case は次の case を
 # 止めず、VM の組が戻らないときだけ残りを流さない
-PAIRED_CASE_FLAGS="--direction --bytes --tool --streams --udp-ping --bulk-mbit --agent-gso --kernel-rmem-max --delay-ms --delay-rate-mbit --delay-queue-pkts --target --rounds --runs"
-PAIRED_CASE_VARS="direction bytes tool streams udpping bulkmbit agentgso rmemmax delayms delayrate delayqueue target rounds runs"
+PAIRED_CASE_FLAGS="--direction --bytes --tool --streams --churn-rate --churn-seconds --udp-ping --bulk-mbit --agent-gso --kernel-rmem-max --delay-ms --delay-rate-mbit --delay-queue-pkts --target --rounds --runs"
+PAIRED_CASE_VARS="direction bytes tool streams churnrate churnsecs udpping bulkmbit agentgso rmemmax delayms delayrate delayqueue target rounds runs"
 
 # paired_cases_read:FILE を読み、case_names、case_paths、case_flags に入れる
 paired_cases_read() {
@@ -1463,6 +1473,8 @@ paired_case_load() {
       --bytes) bytes=${f[1]} ;;
       --tool) tool=${f[1]} ;;
       --streams) streams=${f[1]} ;;
+      --churn-rate) churnrate=${f[1]} ;;
+      --churn-seconds) churnsecs=${f[1]} ;;
       --bulk-mbit) bulkmbit=${f[1]} ;;
       --agent-gso) agentgso=${f[1]} ;;
       --kernel-rmem-max) rmemmax=${f[1]} ;;
@@ -1600,7 +1612,7 @@ paired_cases_mark() {
 }
 
 cmd_paired() {
-  local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes="" tool="" streams="" udpping="" bulkmbit="" agentgso="" rmemmax="" rtarget_flag=""
+  local rounds=4 runs=3 base="" out="" keep="" vcpus=4 direction=down bytes="" tool="" streams="" churnrate="" churnsecs="" udpping="" bulkmbit="" agentgso="" rmemmax="" rtarget_flag=""
   local split="" peervcpus="" delayms="" delayrate="" delayqueue="" target="" placement="" agentload="" SPLIT_AGENT_CPUS="" SPLIT_AGENT_DP_CPUS="" SPLIT_AGENT_WORKER_CPUS="" SPLIT_PEER_RPS="" xagentenv="" yagentenv="" SPLIT_HOSTPOLL="" SPLIT_TAPS="" SPLIT_PEER_Q="" SPLIT_AGENT_AT="" SPLIT_QEMU_AGENT="" SPLIT_QEMU_PEER="" vms_order=(a b)
   local rest=() path spec_x spec_y uses_base rust pins=() names=() vms=() t0 run_timeout r
   local rc=0 fails=0 prev_offs=()
