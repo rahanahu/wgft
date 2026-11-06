@@ -397,6 +397,7 @@ server は、管理者が求めたときだけ、トンネルの中から agent 
 agent の netstack は、トンネルから届いた packet を netstack に渡す前に次の検査をします。
 これらは wgft 自身の規則で、v1 の 2 つの netstack (gVisor と wgstack) が同じ規則で行います。
 Go 以外の実装も同じ規則で行います。
+ただし Rust の wgstack は、RFC に合わせて次の項目が違います。違う所は各項目に書きます。
 
 - IPv4 だけ:IPv4 でない packet は捨てます
 - Total Length:IPv4 のヘッダの Total Length より後ろの byte を切り捨ててから扱います ([IPv4 の Total Length](../userspace/packet-validation.md#ipv4-の-total-length))
@@ -406,7 +407,7 @@ Go 以外の実装も同じ規則で行います。
   1 つの datagram だけで満ちるときは、その断片を捨てます ([表が満杯のときの扱い](../userspace/packet-validation.md#表が満杯のときの扱い))
 - 断片の検査:ヘッダの checksum、長さ、flag、option の形を確かめ、重なる断片と矛盾する断片はその datagram ごと捨てます ([断片の検査](../userspace/packet-validation.md#断片の検査))
 - 断片への ICMP:期限を過ぎた項目のうち、最初の断片を持ち自分宛てのものにだけ Time Exceeded を返します。
-  option の不正な断片には Parameter Problem を返します ([断片に対する ICMP](../userspace/packet-validation.md#断片に対する-icmp))
+  option の不正な断片には Parameter Problem を返します。Rust の wgstack は、先頭でない断片には返さず黙って捨てます (RFC 1122 3.2.2) ([断片に対する ICMP](../userspace/packet-validation.md#断片に対する-icmp))
 - ICMP の誤りの送信元:ICMP の誤りは、外側の送信元が引用された datagram の宛先と一致するときだけ受け入れ、それ以外は黙って捨てます ([ICMP の誤りの入口](../userspace/packet-validation.md#icmp-の誤りの入口))
 - Fragmentation Needed の下限:next-hop MTU が 552 より小さい Fragmentation Needed は捨てます ([Fragmentation Needed の MTU の下限](../userspace/packet-validation.md#fragmentation-needed-の-mtu-の下限))
 - MSS の下限:MSS の option の値が 536 より小さい SYN と SYN-ACK は捨て、ICMP も RST も返しません。

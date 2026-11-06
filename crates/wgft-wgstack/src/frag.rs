@@ -334,7 +334,11 @@ impl Notice {
             return None;
         }
         if saved[9] == 1 {
-            // ICMP:echo、timestamp、information の要求と応答だけに返します。
+            // ICMP:echo、timestamp、information の要求と応答だけに返します。種類は先頭の断片の中身にだけあり、
+            // 先頭でない断片の中身は読みません。
+            if be16(saved, 6) & 0x1fff != 0 {
+                return None;
+            }
             match saved[hlen] {
                 0 | 8 | 13 | 14 | 15 | 16 => {}
                 _ => return None,

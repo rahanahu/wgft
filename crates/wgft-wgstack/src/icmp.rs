@@ -140,7 +140,6 @@ impl Shared {
     /// 届いた packet `orig` への ICMP の誤り (Destination Unreachable、Time Exceeded、Parameter Problem) を制御の
     /// 輪に積みます。`rest` は ICMP の header の後半の 4 byte (pointer など) です。誤りの packet、先頭でない断片、
     /// 自分のアドレスでない宛先、broadcast と multicast の送信元には送りません (RFC 1122 3.2.2)。
-    /// `later_fragment` が真なら、先頭でない断片にも送ります (後続の断片の option の誤りへの Parameter Problem)。
     pub(crate) fn send_icmp_error_raw(
         &mut self,
         orig: &[u8],
@@ -148,7 +147,6 @@ impl Shared {
         code: u8,
         rest: u32,
         now: i64,
-        later_fragment: bool,
     ) {
         if orig.len() < IP_HEADER_LEN {
             return;
@@ -162,7 +160,8 @@ impl Shared {
         if dst != self.addr || src == 0 || src == u32::MAX || src >> 28 == 0xe {
             return;
         }
-        if !later_fragment && be16(orig, 6) & 0x1fff != 0 {
+        // 先頭でない断片は、ICMP の種類を読む前に捨てます。
+        if be16(orig, 6) & 0x1fff != 0 {
             return;
         }
         if orig[9] == PROTO_ICMP
@@ -206,7 +205,7 @@ impl Shared {
         rest: u32,
         now: i64,
     ) {
-        self.send_icmp_error_raw(ip.packet, typ, code, rest, now, false);
+        self.send_icmp_error_raw(ip.packet, typ, code, rest, now);
     }
 
     /// 自分のアドレス宛ての echo request に、制御の輪から echo reply を返します。

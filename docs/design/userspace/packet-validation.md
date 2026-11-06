@@ -36,8 +36,10 @@
   既知の差は 3 つあります。
   1 つ目として、後続の断片が copy bit の無い option を持つと、wgft はその断片を捨て、option の型の byte を指す Parameter Problem を返します。
   pointer の値は IPv4 ヘッダーの先頭からの offset で、この場合は 20 です。
+  Rust の wgstack は RFC 1122 3.2.2(先頭でない断片への ICMP の誤りは MUST NOT)に従い、この場合に Parameter Problem を返さず、断片を黙って捨てます。
   固定版の gVisor は、正しい Timestamp か Record Route の option を持つ後続の断片を受け入れて組み立てた(試験で同じ入力を与えて確かめた)。
   2 つ目として、Timestamp の flags が不正な後続の断片には、固定版の gVisor は flags の byte を指す pointer 23 を返し、wgft は 1 つ目と同じ pointer 20 を返します。
+  Rust の wgstack は後続の断片に Parameter Problem を返さないので、この差は Rust では起きません。
   3 つ目として、最初の断片が copy bit の無い option を、長さは正しく中身が不正な形で持つとき、固定版の gVisor はその断片に直ちに Parameter Problem を返して捨てます。
   wgft は option の中身を検査せずにその断片を保持します。
   datagram が完成すると、gVisor が組み立てた datagram を検査し、それを引用して同じ pointer の Parameter Problem を返します。
