@@ -1411,3 +1411,122 @@ fn rfc5961_challenge_acks_for_rows_obey_the_rate_limit() {
         "{acks} challenge ACKs sent and {dropped} suppressed out of 2000 in-window RSTs"
     );
 }
+
+// RFC 9293 3.10.7.4 の受け入れの表:SYN-RCVD の行は、窓が 0 より大きいとき、長さ 0 の segment なら
+// RCV.NXT =< SEG.SEQ < RCV.NXT+RCV.WND、長さのある segment なら最初か最後の byte が窓の内にあることを求めます。
+
+fn row_ack_seg(seq: u32, iss: u32, flags: u8, payload: &[u8]) -> TSeg {
+    TSeg {
+        sport: 40000,
+        dport: 80,
+        seq,
+        ack: iss + 1,
+        flags,
+        wnd: 65535,
+        payload: payload.to_vec(),
+        ..TSeg::default()
+    }
+}
+
+/// `seg` を送り、行が握手を終えて接続になったかを返します。
+fn row_promoted(n: &mut TestNet, seg: &TSeg) -> bool {
+    n.inject(seg);
+    n.drain();
+    n.s.held().syn_rows == 0
+}
+
+/// 右端 (RCV.NXT + RCV.WND) の SYN は窓の外で、RST を返さず行も外しません。窓の内の SYN は対照です。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn rfc9293_syn_rcvd_row_ignores_a_syn_at_the_right_window_edge() {
+    let syn = |seq| TSeg {
+        sport: 40000,
+        dport: 80,
+        seq,
+        flags: FLAG_SYN,
+        wnd: 65535,
+        mss: 1380,
+        ..TSeg::default()
+    };
+    let mut n = net();
+    let (rcv_nxt, wnd, _) = half_open(&mut n);
+    n.inject(&syn(rcv_nxt + wnd));
+    let outs = n.drain();
+    assert!(
+        n.s.held().syn_rows == 1 && outs.iter().all(|o| !o.has(FLAG_RST)),
+        "a SYN at RCV.NXT+RCV.WND reset the row: rows {} {}",
+        n.s.held().syn_rows,
+        show(&outs)
+    );
+    // 対照:窓の内の SYN は行を RST で外します。
+    let mut n = net();
+    let (rcv_nxt, wnd, _) = half_open(&mut n);
+    n.inject(&syn(rcv_nxt + wnd - 1));
+    let outs = n.drain();
+    assert!(
+        n.s.held().syn_rows == 0 && outs.iter().any(|o| o.has(FLAG_RST)),
+        "an in-window SYN: rows {} {}",
+        n.s.held().syn_rows,
+        show(&outs)
+    );
+}
+
+/// 右端の ACK は窓の外で、行を接続にしません。窓の内の ACK は対照です。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn rfc9293_syn_rcvd_row_is_not_promoted_by_an_ack_at_the_right_window_edge() {
+    let mut n = net();
+    let (rcv_nxt, wnd, iss) = half_open(&mut n);
+    assert!(
+        !row_promoted(&mut n, &row_ack_seg(rcv_nxt + wnd, iss, FLAG_ACK, &[])),
+        "an ACK at RCV.NXT+RCV.WND promoted the row"
+    );
+    for off in [wnd - 1, wnd / 2, 0] {
+        let mut n = net();
+        let (rcv_nxt, _, iss) = half_open(&mut n);
+        assert!(
+            row_promoted(&mut n, &row_ack_seg(rcv_nxt + off, iss, FLAG_ACK, &[])),
+            "an ACK at RCV.NXT+{off} did not promote the row"
+        );
+    }
+}
+
+/// 全体が RCV.NXT より前にあるデータ (最後の byte が RCV.NXT - 1) は受け入れられず、行を接続にしません。
+/// 最後の byte が RCV.NXT にかかるデータは対照です。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn rfc9293_syn_rcvd_row_rejects_data_that_ends_at_rcv_nxt() {
+    let mut n = net();
+    let (rcv_nxt, _, iss) = half_open(&mut n);
+    assert!(
+        !row_promoted(&mut n, &row_ack_seg(rcv_nxt - 2, iss, FLAG_ACK, b"ab")),
+        "data ending at RCV.NXT promoted the row"
+    );
+    let mut n = net();
+    let (rcv_nxt, _, iss) = half_open(&mut n);
+    assert!(
+        row_promoted(&mut n, &row_ack_seg(rcv_nxt - 2, iss, FLAG_ACK, b"abc")),
+        "data whose last byte is RCV.NXT did not promote the row"
+    );
+}
+
+/// 右端から始まるデータは窓の外です。右端をまたぐ (最初の byte が窓の内の) データは対照です。
+#[test]
+#[ignore = "fixed by the next commit"]
+fn rfc9293_syn_rcvd_row_rejects_data_that_starts_at_the_right_window_edge() {
+    let mut n = net();
+    let (rcv_nxt, wnd, iss) = half_open(&mut n);
+    assert!(
+        !row_promoted(&mut n, &row_ack_seg(rcv_nxt + wnd, iss, FLAG_ACK, b"x")),
+        "data starting at RCV.NXT+RCV.WND promoted the row"
+    );
+    let mut n = net();
+    let (rcv_nxt, wnd, iss) = half_open(&mut n);
+    assert!(
+        row_promoted(
+            &mut n,
+            &row_ack_seg(rcv_nxt + wnd - 1, iss, FLAG_ACK, b"xy")
+        ),
+        "data straddling the right edge did not promote the row"
+    );
+}
