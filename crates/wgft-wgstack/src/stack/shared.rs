@@ -13,7 +13,7 @@ use crate::fixed_vec::FixedVec;
 use crate::frag;
 use crate::icmp::Pings;
 use crate::index::Index;
-use crate::output::{CtlRing, Dlist};
+use crate::output::{AckRing, CtlRing, Dlist};
 use crate::rng::ChaCha8;
 use crate::seq;
 use crate::siphash::SipKey;
@@ -53,6 +53,8 @@ pub(crate) struct Output {
     /// 送るもののある行です。握手の途中の行は 0 から、TIME_WAIT の行は握手の途中の表の大きさから数えます。
     pub(crate) rows: Dlist,
     pub(crate) ctl: CtlRing,
+    /// 順序外の segment ごとの ACK の輪です。接続の組の一部として、接続が作る segment より先に送ります。
+    pub(crate) acks: AckRing,
     /// UDP の送信の FIFO にある datagram の数です。
     pub(crate) udp_queued: usize,
     pub(crate) cur: usize,
@@ -62,7 +64,7 @@ pub(crate) struct Output {
 impl Output {
     fn class_empty(&self, c: usize) -> bool {
         match c {
-            CLASS_CONN => self.conns.is_empty(),
+            CLASS_CONN => self.conns.is_empty() && self.acks.is_empty(),
             CLASS_ROW => self.rows.is_empty(),
             CLASS_CTL => self.ctl.len() == 0,
             CLASS_UDP => self.udp_queued == 0,
@@ -161,6 +163,8 @@ pub struct Stats {
     pub dup_acks_in: u64,
     pub acks_delayed: u64,
     pub acks_immediate: u64,
+    /// 重複した ACK の輪が満杯で、順序外の segment の ACK を前の ACK と合わせた回数です。
+    pub dup_acks_merged: u64,
     pub accounting_faults: u64,
     /// HyStart++ が Conservative Slow Start に入った回数です。
     pub hystart_css: u64,
@@ -534,6 +538,7 @@ mod tests {
             conns: Dlist::new(2).unwrap(),
             rows: Dlist::new(2).unwrap(),
             ctl: CtlRing::new(2, 64).unwrap(),
+            acks: AckRing::new(1).unwrap(),
             udp_queued: 0,
             cur: 0,
             deficit: [0; NUM_CLASSES],

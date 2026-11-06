@@ -229,9 +229,164 @@ impl CtlRing {
     }
 }
 
+/// 中身の無い ACK の packet の最大の長さです (IPv4 と TCP の header と option の最大)。
+pub(crate) const ACK_PACKET_MAX: usize =
+    crate::wire::IP_HEADER_LEN + crate::wire::TCP_HEADER_LEN + crate::wire::MAX_OPTION_LEN;
+
+/// 1 つの接続が重複した ACK の輪に積める ACK の数です。超えた分は今までどおり次の ACK と合わせます。
+///
+/// 8 にするのは次の理由です。送り手の高速の再送は重複した ACK を 3 つ (DupThresh) 待つので (RFC 5681 3.2、
+/// RFC 6675)、1 回の起床で積む ACK が 3 つあれば足ります。8 は、適合の台本の 8 つの順序外の segment (積む 7 つと
+/// 送信の相の 1 つ) と、損失の後に 1 回の起床で届く segment の数に余裕を残す値です。上限があると、1 つの接続が
+/// 輪を占めず、輪に残る ACK の timestamp が古くなる量も抑えられます。
+pub(crate) const ACKS_PER_CONN: u8 = 8;
+
+/// 重複した ACK の輪の項目の持ち主と長さです。
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct AckTag {
+    /// ACK を作った接続の枠と世代です。送る時に枠が別の接続に移っていれば捨てます。
+    pub(crate) slot: u32,
+    pub(crate) generation: u64,
+    len: u16,
+}
+
+/// 順序外の segment ごとの ACK を、送信の相まで持つ輪です (wgstack-rs.md の「起床ごとの ACK の合わせ」)。
+/// 枠の数は作成の時に固定し、1 枠は中身の無い ACK の最大の長さです。満杯なら呼び手は ACK を積まずに次の ACK と
+/// 合わせます。
+#[derive(Debug)]
+pub(crate) struct AckRing {
+    buf: FixedVec<u8>,
+    tags: FixedVec<AckTag>,
+    head: usize,
+    n: usize,
+}
+
+impl AckRing {
+    /// `slots` 枠の輪を確保します。
+    pub(crate) fn new(slots: usize) -> Result<Self, AllocError> {
+        let bytes = slots.checked_mul(ACK_PACKET_MAX).ok_or(AllocError)?;
+        Ok(Self {
+            buf: FixedVec::try_filled(bytes, |_| 0)?,
+            tags: FixedVec::try_filled(slots, |_| AckTag::default())?,
+            head: 0,
+            n: 0,
+        })
+    }
+
+    /// `slots` 枠の輪の配列の byte です。上界の式が使います。
+    pub(crate) const fn bytes_for(slots: usize) -> usize {
+        slots * (ACK_PACKET_MAX + size_of::<AckTag>())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.buf.heap_bytes() + self.tags.heap_bytes()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.n
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+
+    /// 積んだ項目の持ち主を先頭から渡します。不変条件の確かめが使います。
+    pub(crate) fn for_each_tag(&self, mut f: impl FnMut(AckTag)) {
+        for k in 0..self.n {
+            f(self.tags[(self.head + k) % self.tags.len()]);
+        }
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.n == self.tags.len()
+    }
+
+    /// 接続の枠 `slot` の世代 `generation` が作った packet `pkt` を末尾に積みます。満杯か packet が枠より長ければ
+    /// 積まずに偽を返します。
+    pub(crate) fn enqueue(&mut self, slot: u32, generation: u64, pkt: &[u8]) -> bool {
+        if self.is_full() || pkt.len() > ACK_PACKET_MAX {
+            return false;
+        }
+        let i = (self.head + self.n) % self.tags.len();
+        self.buf[i * ACK_PACKET_MAX..i * ACK_PACKET_MAX + pkt.len()].copy_from_slice(pkt);
+        self.tags[i] = AckTag {
+            slot,
+            generation,
+            len: u16::try_from(pkt.len()).unwrap_or(0),
+        };
+        self.n += 1;
+        true
+    }
+
+    /// 先頭の項目の持ち主です。空なら `None` です。
+    pub(crate) fn front(&self) -> Option<AckTag> {
+        (self.n > 0).then(|| self.tags[self.head])
+    }
+
+    /// 先頭の packet を `dst` に写して外し、写した長さを返します。空なら `None` です。
+    pub(crate) fn pop(&mut self, dst: &mut [u8]) -> Option<usize> {
+        let tag = self.front()?;
+        let i = self.head;
+        let len = usize::from(tag.len).min(dst.len());
+        dst[..len].copy_from_slice(&self.buf[i * ACK_PACKET_MAX..i * ACK_PACKET_MAX + len]);
+        self.skip();
+        Some(len)
+    }
+
+    /// 先頭の項目を送らずに外します。
+    pub(crate) fn skip(&mut self) {
+        if self.n > 0 {
+            self.head = (self.head + 1) % self.tags.len();
+            self.n -= 1;
+        }
+    }
+
+    /// 積んだ packet をすべて捨てます。
+    pub(crate) fn clear(&mut self) {
+        self.head = 0;
+        self.n = 0;
+    }
+
+    /// 積んだ項目の世代をすべて `generation` に書き換えます。枠の使い直しを写す試験が使います。
+    #[cfg(test)]
+    pub(crate) fn retag(&mut self, generation: u64) {
+        for t in self.tags.iter_mut() {
+            t.generation = generation;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ack_ring_is_fifo_bounded_and_tagged() {
+        let mut r = AckRing::new(2).unwrap();
+        assert!(r.enqueue(3, 7, b"abc"));
+        assert!(r.enqueue(4, 1, b"xy"));
+        assert!(r.is_full() && !r.enqueue(5, 0, b"z"), "a full ring refuses");
+        assert!(
+            !AckRing::new(1).unwrap().enqueue(0, 0, &[0; ACK_PACKET_MAX + 1]),
+            "a packet longer than a slot is refused"
+        );
+        let t = r.front().unwrap();
+        assert_eq!((t.slot, t.generation), (3, 7));
+        let mut out = [0u8; ACK_PACKET_MAX];
+        assert_eq!(r.pop(&mut out), Some(3));
+        assert_eq!(&out[..3], b"abc");
+        assert!(r.enqueue(5, 2, b"z"));
+        r.skip();
+        assert_eq!(r.front().map(|t| t.slot), Some(5));
+        assert_eq!(r.pop(&mut out), Some(1));
+        assert_eq!(&out[..1], b"z");
+        assert!(r.is_empty() && r.pop(&mut out).is_none());
+        assert!(r.enqueue(1, 1, b"q"));
+        r.clear();
+        assert_eq!(r.len(), 0);
+        assert_eq!(r.heap_bytes(), AckRing::bytes_for(2));
+    }
 
     #[test]
     fn dlist_keeps_order_and_ignores_repeats() {

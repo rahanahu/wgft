@@ -17,7 +17,7 @@ use crate::config::Limits;
 use crate::frag;
 use crate::icmp::{PING_ENDPOINTS, Pings};
 use crate::index;
-use crate::output::Dlist;
+use crate::output::{AckRing, Dlist};
 use crate::stack::{EventTargets, NoHook};
 use crate::tcp::NUM_TIMERS;
 use crate::tcp::conn;
@@ -164,7 +164,8 @@ pub(crate) fn fix_parts(l: &Limits, mtu: usize, stack_size: usize) -> FixParts {
         ),
         output: dlist(n)
             + dlist(l.syn_rows + l.tw_rows)
-            + b(l.ctl_slots * (mtu + size_of::<u16>())),
+            + b(l.ctl_slots * (mtu + size_of::<u16>()))
+            + b(AckRing::bytes_for(l.ctl_slots)),
         events: {
             let t = EventTargets::count(n);
             b(t) + dlist(t)
@@ -224,6 +225,8 @@ pub struct Held {
     pub accept_queued: usize,
     /// 制御の輪に積んだ packet です。
     pub ctl_queued: usize,
+    /// 重複した ACK の輪に積んだ ACK です。送る時に捨てる、閉じた接続の ACK を含みます。
+    pub ack_queued: usize,
     /// 送信と受信の輪が持つ chunk の byte です。
     pub chunk_bytes: usize,
     /// 置き場に残した chunk の数です。上限の分は上界の M_fix に入ります。

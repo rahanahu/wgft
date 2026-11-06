@@ -19,7 +19,8 @@ use wgft_tcpharness::dut::{Accepted, ClockedDut, Datagram, DutError, Op};
 use wgft_tcpharness::frame::{self, BoostEvent, Clock, ErrKind, Handle, Hello, MAX_FRAME, VERSION};
 use wgft_wgstack::{
     BoostPolicy, Budget, Closed, Config, Congestion, ConnId, Error, Held, Hook, Limits, ListenerId,
-    PingId, Spare, Stack, Time, TouchedCheck, UdpId, go_compat_rto_l2, set_go_compat_rto_l2,
+    PingId, Spare, Stack, Time, TouchedCheck, UdpId, go_compat_merge_ooo_acks, go_compat_rto_l2,
+    set_go_compat_merge_ooo_acks, set_go_compat_rto_l2,
 };
 
 /// `HELLO_OK` が返す engine の名前です。
@@ -146,11 +147,12 @@ pub fn limits_from_hello(ls: &[frame::Limit]) -> Result<Limits, HelloError> {
 }
 
 /// [`WgstackDut::sync_go_compat`] が返す値です。捨てると、照合用の切り替えを呼びの前の値に戻します。
-struct CompatGuard(bool);
+struct CompatGuard(bool, bool);
 
 impl Drop for CompatGuard {
     fn drop(&mut self) {
         set_go_compat_rto_l2(self.0);
+        set_go_compat_merge_ooo_acks(self.1);
     }
 }
 
@@ -163,7 +165,7 @@ pub struct WgstackDut {
     addr: Ipv4Addr,
     objs: Vec<Obj>,
     buf: Vec<u8>,
-    /// 照合用の切り替え ([`set_go_compat_rto_l2`]) をこの核に使うか。核を駆動する前に thread の値をこれに合わせる
+    /// 照合用の切り替え ([`set_go_compat_rto_l2`] と [`set_go_compat_merge_ooo_acks`]) をこの核に使うか。核を駆動する前に thread の値をこれに合わせる
     go_compat: bool,
 }
 
@@ -265,11 +267,12 @@ impl WgstackDut {
     }
 
     /// 核を駆動する間だけ、thread の照合用の切り替えをこの核の値にします。返した値を捨てると元の値に戻るので、
-    /// 呼びの外の thread は偽のままで、直接 `Stack` を駆動する核は製品と同じ L = 1 です
+    /// 呼びの外の thread は偽のままで、直接 `Stack` を駆動する核は製品と同じ L = 1 で、順序外の segment ごとに ACK を返します
     fn sync_go_compat(&self) -> CompatGuard {
-        let prev = go_compat_rto_l2();
+        let prev = CompatGuard(go_compat_rto_l2(), go_compat_merge_ooo_acks());
         set_go_compat_rto_l2(self.go_compat);
-        CompatGuard(prev)
+        set_go_compat_merge_ooo_acks(self.go_compat);
+        prev
     }
 
     fn build(h: &Hello, replay: bool) -> Result<Self, HelloError> {
@@ -290,7 +293,8 @@ impl WgstackDut {
                 h.limits.len()
             )));
         }
-        // 凍結した Go の記録は RTO の後も L = 2 なので、照合の核だけ Go と同じにする。それ以外の核は製品と同じ L = 1
+        // 凍結した Go の記録は RTO の後も L = 2 で、順序外の segment の ACK を 1 つに合わせるので、照合の核だけ Go と
+        // 同じにする。それ以外の核は製品と同じ L = 1 で、segment ごとに ACK を返す
         let config = Self::config(h, limits_from_hello(&h.limits)?);
         let budget = Budget::new().map_err(|e| HelloError(format!("wgstack: {e}")))?;
         let hook = DutHook::default();

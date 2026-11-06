@@ -34,7 +34,8 @@ var Known = map[string]tcpharness.Known{
 	"rfc2525-stretch-ack-burst-ooo/dupack-per-segment": {
 		Observed: "1 duplicate ACKs",
 		Reason: "wgstack-rs.md, per-wake ACK merging: eight out-of-order segments injected before the poll get one duplicate ACK, " +
-			"not one each as RFC 5681 3.2 asks. Measured: 1 duplicate ACK for 8 segments on the Rust core and on the frozen Go wgstack",
+			"not one each as RFC 5681 3.2 asks. Measured: 1 duplicate ACK for 8 segments on the frozen Go wgstack. " +
+			"The Rust core sends one per segment, so known-wgstack-rs.json has no such row",
 	},
 	"icmp-echo/oversized": {
 		Observed: "no reply",

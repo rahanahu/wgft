@@ -617,7 +617,8 @@ pub(super) async fn drive<U: Upper>(
         let mut now = start;
         let wake = Wake { start, timed };
         // 受信の相:ソケットが空になるか、予算が尽きるまでバッチを読む。核の出力は送信の相でまとめて
-        // 引くので、ACK は起床ごとに 1 回の割で作られる
+        // 引くので、順序どおりのデータの ACK は起床ごとに 1 回の割で作られる。順序外の segment の ACK は
+        // 核が segment ごとに作って持つ (wgstack-rs.md の「起床ごとの ACK の合わせ」)
         let mut rx_more = false;
         let mut rx_done = 0;
         loop {

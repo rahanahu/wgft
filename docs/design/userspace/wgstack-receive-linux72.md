@@ -166,7 +166,7 @@ SACK の圧縮の規則(RCV.NXT ごとの最初の 3 つをすぐに返し、4 �
 33% は、1 往復に ACK と送信の単位が 3 つずつある状態を保つ値として選ばれました。
 
 推奨:採りません。
-wgstack は SACK の圧縮を持ちません。順序外の segment には核がすぐ ACK を返すと決めますが、実際に送る ACK は 1 回の起床で接続ごとに最大 1 つです([今の wgstack との比べ](wgstack-performance.md#今の-wgstack-との比べ)の違い 3 と[起床ごとの ACK の合わせ](../v2/wgstack-rs.md#起床ごとの-ack-の合わせ))。
+wgstack は SACK の圧縮を持ちません。順序外の segment には、1 回の起床で複数を受けても、核が segment ごとにすぐ ACK を返します([今の wgstack との比べ](wgstack-performance.md#今の-wgstack-との比べ)の違い 3 と[起床ごとの ACK の合わせ](../v2/wgstack-rs.md#起床ごとの-ack-の合わせ))。
 この判断を変える材料は増えていません。
 
 ## 窓を超える segment
