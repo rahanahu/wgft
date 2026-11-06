@@ -122,3 +122,5 @@ mod touched_tests;
 mod undo_tests;
 #[cfg(test)]
 mod whitebox_tests;
+#[cfg(test)]
+mod wscale_tests;
