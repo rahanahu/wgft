@@ -136,6 +136,26 @@ pub fn go_compat_synack_rto() -> bool {
     GO_COMPAT_SYNACK_RTO.with(std::cell::Cell::get)
 }
 
+// 凍結した Go の記録との照合のためだけに、TIME_WAIT の枠と行で PAWS をしない切り替えです (RFC 7323 5.3 は PAWS を求める)。
+// feature `harness` の build だけにあり、値は thread ごとで、既定は偽です。
+#[cfg(feature = "harness")]
+thread_local! {
+    static GO_COMPAT_TW_NO_PAWS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 真にすると、この thread で駆動する核は TIME_WAIT の枠と行で PAWS をしません (凍結した Go と同じ)。核を駆動する前に
+/// 呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
+#[cfg(feature = "harness")]
+pub fn set_go_compat_tw_no_paws(on: bool) {
+    GO_COMPAT_TW_NO_PAWS.with(|c| c.set(on));
+}
+
+/// 今の thread の値です。
+#[cfg(feature = "harness")]
+pub fn go_compat_tw_no_paws() -> bool {
+    GO_COMPAT_TW_NO_PAWS.with(std::cell::Cell::get)
+}
+
 /// 何もしない hook です。boost の戻りを常に許します。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoHook;

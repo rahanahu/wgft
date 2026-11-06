@@ -167,6 +167,22 @@ impl Conn<'_> {
             self.challenge_ack(now);
             return false;
         }
+        // PAWS (RFC 7323 5.3)。RST と SYN は上で扱ったので、古い TSval の segment は ACK を返して捨て、FIN の写しで
+        // 期限を数え直しません。TIME_WAIT は 60 秒で終わるので、TS.Recent の古さ (5.5) は見ません。
+        #[cfg(feature = "harness")]
+        let paws = !crate::stack::go_compat_tw_no_paws(); // 凍結した Go の記録との照合用
+        #[cfg(not(feature = "harness"))]
+        let paws = true;
+        if paws
+            && self.t.ts_ok
+            && seg
+                .opt
+                .ts
+                .is_some_and(|(v, _)| seq::lt(v, self.t.ts_recent))
+        {
+            self.oow_ack(seg, now);
+            return false;
+        }
         let n = u32::try_from(seg.payload.len()).unwrap_or(0);
         if seg.has(FLAG_FIN) && seg.seq.wrapping_add(n).wrapping_add(1) == self.t.rcv_nxt {
             self.t.ack_now = true;

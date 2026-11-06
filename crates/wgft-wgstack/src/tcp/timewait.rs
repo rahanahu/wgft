@@ -461,6 +461,20 @@ impl Shared {
             self.tw_ack(id, now, true);
             return true;
         }
+        // PAWS (RFC 7323 5.3)。RST と SYN は上で扱ったので、古い TSval の segment は速さを抑えた ACK を返して捨て、
+        // FIN の写しで期限を数え直しません。
+        #[cfg(feature = "harness")]
+        let paws = !crate::stack::go_compat_tw_no_paws(); // 凍結した Go の記録との照合用
+        #[cfg(not(feature = "harness"))]
+        let paws = true;
+        if paws
+            && r.state == TwState::TimeWait
+            && r.ts_ok
+            && ts_val.is_some_and(|v| seq::lt(v, r.ts_recent))
+        {
+            self.tw_ack(id, now, true);
+            return true;
+        }
         if r.state == TwState::FinWait2 {
             // 確立した接続と同じく、PAWS と窓の外の segment には速さを抑えた ACK を返すだけにします
             // (RFC 7323 5.3、RFC 9293 3.10.7.4)。窓の外の古いデータで行を外させません。

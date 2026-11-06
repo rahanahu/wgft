@@ -390,6 +390,7 @@ FIN_WAIT_2 の行が相手の FIN で TIME_WAIT に移ったときは、list の
 外した行の 4 つ組にその後届いた segment は、どの接続にも当たらない segment として扱います。
 
 TIME_WAIT の行は再送された FIN に ACK を返し、Linux と同じく期限を 60 秒から数え直して list の末尾に付け直します。
+Rust 版は、行も枠も PAWS(RFC 7323 5.3)で古い TSval の segment を捨てて速さを抑えた ACK を返すので、期限を数え直すのは PAWS を通った FIN の写しだけです。RST と RFC 6191 の SYN は PAWS の前に判定します。凍結した Go は PAWS をしません。
 RFC 6191 の条件を満たす新しい SYN を受けたら、行を外して待ち受けに渡します。
 [行に移る条件](#行に移る条件)を満たさずに枠に残る TIME_WAIT の接続も、同じ SYN を同じ規則で扱います。
 このとき枠の接続は CLOSED になり、アプリケーションの読み取りには、それまでに受けたデータと `io.EOF` を返します。
@@ -668,6 +669,7 @@ CLOSED の枠は 4 つ組の hash の表から外れ、送信の輪を返しま�
   RTO の値は、黙った後の輻輳の窓の戻し(RFC 5681 4.1)の閾値、窓の probe の間隔、黙った後に遅らせずに返す ACK(quickack)の閾値にも使います
 - RFC 7323:窓の scale、timestamp による RTT の測定、PAWS を持ちます。
   TS.Recent を 24 日を超えて更新していない接続は、PAWS で比べずに受け入れます(5.5 節)。
+  Rust 版は TIME_WAIT の枠と行でも PAWS をします。TIME_WAIT は 60 秒で終わるので 5.5 節の比べはしません。凍結した Go は TIME_WAIT で PAWS をしません。
   窓の scale は boost の 4 MiB を広告できる値を握手の時に決めます。
   広告する窓の欄は、窓の右端までの byte を scale で割って切り下げた値です。
   右端そのものは後ろへ戻さず、切り下げで右端が最大 2^scale - 1 byte 手前に見えることは窓の scale の性質として受け入れます。

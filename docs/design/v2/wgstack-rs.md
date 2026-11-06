@@ -214,7 +214,6 @@ SHOULD の行の内容は[SHOULD からの外れ](#should-からの外れ)の表
 次の逸脱は別の PR で直すので、例外として記録しません。
 直しが入ったら行を消します。
 
-- RFC 7323 5.3:TIME_WAIT の接続と行で PAWS を行いません
 - RFC 5681 3 節:HyStart++ (RFC 9406) の外の slow start でも 1 ACK の増分の上限 L を 2 にします
 - RFC 6864 4.3:IPv4 の ID の数えを核の全体で 1 つにし、DF を立てた TCP の segment も非 atomic の datagram と同じ数えを進めます
 - RFC 1122 3.2.2:先頭でない断片に ICMP の誤り (Parameter Problem) を返します
@@ -1430,6 +1429,7 @@ Go の記録との照合だけが、それぞれの照合用の切り替えで G
 | `set_go_compat_dsack_snd_una` | D-SACK の判定で先頭の block を SND.UNA と比べます | 同じ packet の累積の ACK と比べます (RFC 2883 5 節) | 26 件の記録を、並べ替えられた古い ACK より後の応答まで照らし続けるため | 0 / 26 (adversarial) | `undo_tests::rfc2883_*` |
 | `set_go_compat_row_rst` | 握手の途中の行は窓の内のどの RST でも消え、受け入れの判定は窓の右端を含みます。TIME_WAIT の枠と行、FIN_WAIT_2 の行は窓の内で番号の合わない RST に challenge ACK を返しません | 番号が IRS + 1 か RCV.NXT に等しい RST だけが消え、窓の内の他の RST には challenge ACK を返します。受け入れの判定は右端を含みません (RFC 5961 3.2、RFC 9293 3.10.7.4) | 72 件の記録を、行の RST より後の応答まで照らし続けるため | 0 / 72 (fuzzcore) | `tcp_tests::rfc5961_*`、`rfc9293_syn_rcvd_*` |
 | `set_go_compat_synack_rto` | SYN-ACK を再送した接続の最初の RTO は 1 秒のままです | 握手が RTT の標本を与えなかった接続は、確立の時に RTO を 3 秒にします。cookie の値の行も含みます (RFC 6298 5.7) | 520 件の記録を、最初の RTO より後の応答まで照らし続けるため | 7 / 520 (fuzzcore) | `listen_tests::rfc6298_*` |
+| `set_go_compat_tw_no_paws` | TIME_WAIT の枠と行で PAWS をせず、古い TSval の FIN の写しでも期限を数え直します | TIME_WAIT の枠と行も PAWS で古い TSval の segment を捨てて ACK を返します。RST の例外と RFC 6191 の SYN の判定は PAWS の前です (RFC 7323 5.3) | 1 件の記録を、PAWS の ACK より後の応答まで照らし続けるため | 0 / 1 (stream-rx/seed-44) | `tcp_tests::rfc7323_*` |
 
 ## 置き換えの判定
 
