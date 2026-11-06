@@ -1557,7 +1557,6 @@ fn next_hop_mtu_zero_boundaries() {
 /// MTU で、設定の上限は 9216 です。表の 65535、32000、17914 は公開の API では届かないので、この試験の対象外です
 /// (核に試験専用の口を足していません)。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn next_hop_mtu_zero_reaches_every_plateau() {
     const PLATEAUS: [u16; 7] = [8166, 4352, 2002, 1492, 1006, 508, 296];
     // 核の MTU は上限の 9216 とし、どの段にも今の PMTU 未満の Total Length で入ります。
