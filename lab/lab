@@ -494,6 +494,7 @@ suite_make_vm() {
       inc config device add "$name" eth1 nic nictype=bridged parent="$SUITE_NIC_NET" queue.tx.length="${PAIRED_TAP_QLEN:-4096}" >/dev/null || return 1
     fi
     suite_boot || return 1
+    [[ -z ${WGFT_LAB_GUEST_CMDLINE:-} ]] || suite_guest_cmdline || return 1
     cmd_net up
   else
     info "template '$tmpl' has no snapshot '$SNAPSHOT'; provisioning '$name' from $IMAGE instead, which is slow"
@@ -502,6 +503,20 @@ suite_make_vm() {
     inc config device add "$name" repo disk source="$REPO" path="$SHARE" readonly=true >/dev/null || return 1
     cmd_up
   fi
+}
+
+# suite_guest_cmdline:WGFT_LAB_GUEST_CMDLINE (ゲストのカーネルの引数、空白区切り) を GRUB の既定に足し、VM を起動し直して
+# /proc/cmdline に入ったことを確かめる。複製元は変えない。VM を消せば消える
+suite_guest_cmdline() {
+  local w
+  in_vm sh -c 'printf "GRUB_CMDLINE_LINUX_DEFAULT=\"\$GRUB_CMDLINE_LINUX_DEFAULT %s\"\n" "$1" > /etc/default/grub.d/99-wgft-lab.cfg && update-grub && sync' \
+    sh "$WGFT_LAB_GUEST_CMDLINE" >/dev/null 2>&1 || { info "$VM: cannot add '$WGFT_LAB_GUEST_CMDLINE' to the kernel command line"; return 1; }
+  inc stop "$VM" --force >/dev/null 2>&1 || true
+  suite_boot || return 1
+  for w in $WGFT_LAB_GUEST_CMDLINE; do
+    in_vm sh -c 'tr " " "\n" </proc/cmdline | grep -qxF -- "$1"' sh "$w" \
+      || { info "$VM: the kernel command line has no '$w' after the restart: $(in_vm cat /proc/cmdline)"; return 1; }
+  done
 }
 
 # suite_barrier <dir...>:すべての shard の VM が用意できる (ready) か、用意に失敗する (failed) まで待つ。
