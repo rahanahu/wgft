@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 
 use super::super::batch::{BATCH_TIME, Pace, TxBatch, WAKE_BUDGET};
 use super::super::{Command, Local, Upper, clock};
-use super::{Freshness, Hub, Item, STOCK_CAP};
+use super::{Freshness, Hub, Item, REFILL_LOW, REFILL_TARGET, STOCK_CAP};
 
 /// 区画の送りの状態。
 pub(crate) struct PartSend {
@@ -145,7 +145,7 @@ impl PartSend {
         self.drop_stale(now);
         let need = self.pulled - p0;
         if self.stock.len() < need {
-            let ask = u32::try_from(need).unwrap_or(u32::MAX);
+            let ask = u32::try_from(need.max(REFILL_TARGET)).unwrap_or(u32::MAX);
             self.hub.links[self.k].demand.ask(ask, &self.hub.front_bell);
             super::count(&self.hub.counts.requests, 1);
             self.reseal_from = Some((p0, s0));
@@ -166,6 +166,12 @@ impl PartSend {
             }
         }
         self.reseal_from = None;
+        // 先回りの補充:次のバッチの分を今求めておく。front は眠っていれば起き、起きていれば次の相で応える
+        if self.stock.len() < REFILL_LOW {
+            let ask = u32::try_from(REFILL_TARGET - self.stock.len()).unwrap_or(u32::MAX);
+            self.hub.links[self.k].demand.ask(ask, &self.hub.front_bell);
+            super::count(&self.hub.counts.requests, 1);
+        }
         let gso = self.gso && !self.gso_refused;
         self.tx.lay_out(s0, gso);
         true

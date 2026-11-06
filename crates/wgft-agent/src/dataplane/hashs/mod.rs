@@ -59,6 +59,11 @@ pub(crate) const BATCH_PACKETS: usize = 128;
 pub(crate) const BATCH_STOCK: usize = 64;
 /// 区画が持つ在庫の上限。超えたら古いものから捨てて数える。
 pub(crate) const STOCK_CAP: usize = 256;
+/// 試作の変種 (在庫の先回りの補充):区画は送った後に在庫が [`REFILL_LOW`] を下回れば、[`REFILL_TARGET`] まで
+/// front に求めておき、次のバッチで在庫を待って眠らない。
+pub(crate) const REFILL_TARGET: usize = 128;
+/// [`REFILL_TARGET`] の補充を求め始める在庫の数。
+pub(crate) const REFILL_LOW: usize = 64;
 
 /// 起動の時の区画の数 P。Linux でバッチが有効な時だけ 2 以上になる (区画の送りは `sendmmsg` の道だけを持つ)。
 /// ラボの build (`lab-observe`) だけは `WGFT_LAB_HASHS_P` で上書きできる。
