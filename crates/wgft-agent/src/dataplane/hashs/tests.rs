@@ -21,7 +21,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use wgft_wgstack::{BoostPolicy, BoostPool, Budget, Config, Limits, NoHook, Partition, Stack, Time};
+use wgft_wgstack::{
+    BoostPolicy, BoostPool, Budget, Config, Limits, NoHook, Partition, Stack, Time,
+};
 use wgft_wireguard::DropReason;
 
 use super::super::batch::{TxBatch, tx_store};
@@ -139,8 +141,17 @@ fn the_no_tcp_on_zero_arm_keeps_tcp_off_partition_0() {
     // P = 2 では外さない (TCP の区画が 1 つになる)
     let two = Steer::new(2, AGENT).without_tcp_on_zero();
     let zero = (0..200u16).any(|p| {
-        two.inbound(0, &tcp(SocketAddrV4::new(REMOTE, 2000 + p), SocketAddrV4::new(AGENT, 80), 0, 0, SYN, &[]))
-            == Route::Part(0)
+        two.inbound(
+            0,
+            &tcp(
+                SocketAddrV4::new(REMOTE, 2000 + p),
+                SocketAddrV4::new(AGENT, 80),
+                0,
+                0,
+                SYN,
+                &[],
+            ),
+        ) == Route::Part(0)
     });
     assert!(zero);
 }
@@ -167,7 +178,11 @@ fn both_directions_of_every_flow_reach_the_same_partition() {
             );
         }
         let reply = tcp(local, remote, 7, i + 1, SYN | ACK, &[]);
-        assert_eq!(steer.outbound(0, &reply), k, "the reply belongs to the same partition");
+        assert_eq!(
+            steer.outbound(0, &reply),
+            k,
+            "the reply belongs to the same partition"
+        );
         // TCP を引用する ICMP の誤り (送った segment の引用) は同じ区画
         let err = icmp(raddr, AGENT, 3, 4, &reply);
         assert_eq!(steer.inbound(0, &err), Route::Part(k));
@@ -176,14 +191,29 @@ fn both_directions_of_every_flow_reach_the_same_partition() {
         // UDP は向きによらず区画 0、UDP の断片も区画 0
         assert_eq!(steer.inbound(0, &udp(remote, local, 0)), Route::Part(0));
         assert_eq!(steer.outbound(0, &udp(local, remote, 0)), 0);
-        assert_eq!(steer.inbound(0, &udp(remote, local, 0x2000)), Route::Part(0));
+        assert_eq!(
+            steer.inbound(0, &udp(remote, local, 0x2000)),
+            Route::Part(0)
+        );
         // ICMP の echo、UDP を引用する誤りは区画 0
-        assert_eq!(steer.inbound(0, &icmp(raddr, AGENT, 8, 0, &[0; 8])), Route::Part(0));
-        assert_eq!(steer.inbound(0, &icmp(raddr, AGENT, 0, 0, &[0; 8])), Route::Part(0));
+        assert_eq!(
+            steer.inbound(0, &icmp(raddr, AGENT, 8, 0, &[0; 8])),
+            Route::Part(0)
+        );
+        assert_eq!(
+            steer.inbound(0, &icmp(raddr, AGENT, 0, 0, &[0; 8])),
+            Route::Part(0)
+        );
         let quoted_udp = udp(local, remote, 0);
-        assert_eq!(steer.inbound(0, &icmp(raddr, AGENT, 3, 3, &quoted_udp)), Route::Part(0));
+        assert_eq!(
+            steer.inbound(0, &icmp(raddr, AGENT, 3, 3, &quoted_udp)),
+            Route::Part(0)
+        );
     }
-    assert!(used.iter().all(|&n| n > 800), "the hash spreads the flows: {used:?}");
+    assert!(
+        used.iter().all(|&n| n > 800),
+        "the hash spreads the flows: {used:?}"
+    );
     let remote = SocketAddrV4::new(REMOTE, 40000);
     let local = SocketAddrV4::new(AGENT, 80);
     // TCP の断片は捨てて数える (試作)。2 つ目以降の断片も
@@ -194,10 +224,20 @@ fn both_directions_of_every_flow_reach_the_same_partition() {
     frag[7] = 0x10;
     assert_eq!(steer.inbound(0, &frag), Route::TcpFragment);
     // 自分のアドレス宛てでない packet、壊れた packet、知らない protocol は区画 0
-    let other = tcp(remote, SocketAddrV4::new(Ipv4Addr::new(10, 200, 0, 9), 80), 1, 0, SYN, &[]);
+    let other = tcp(
+        remote,
+        SocketAddrV4::new(Ipv4Addr::new(10, 200, 0, 9), 80),
+        1,
+        0,
+        SYN,
+        &[],
+    );
     assert_eq!(steer.inbound(0, &other), Route::Part(0));
     assert_eq!(steer.inbound(0, &[0x45, 0, 0]), Route::Part(0));
-    assert_eq!(steer.inbound(0, &ipv4(REMOTE, AGENT, 47, 0, b"gre")), Route::Part(0));
+    assert_eq!(
+        steer.inbound(0, &ipv4(REMOTE, AGENT, 47, 0, b"gre")),
+        Route::Part(0)
+    );
     // IP の option を持つ TCP も、ポートで同じ区画
     let plain = tcp(remote, local, 1, 0, SYN, &[]);
     let mut opt = plain[..20].to_vec();
@@ -268,7 +308,11 @@ impl Cores {
         for (k, c) in self.cores.iter_mut().enumerate() {
             while let Some(n) = c.poll_transmit(self.now, &mut buf) {
                 let p = buf[..n].to_vec();
-                assert_eq!(self.steer.outbound(0, &p), k, "a partition answers only its flows");
+                assert_eq!(
+                    self.steer.outbound(0, &p),
+                    k,
+                    "a partition answers only its flows"
+                );
                 out.push((k, p));
             }
             c.check_invariants().unwrap();
@@ -340,7 +384,10 @@ fn a_flow_lives_and_ends_inside_its_partition() {
         n.advance(Duration::from_millis(250));
         let out = n.outputs();
         assert!(out.iter().all(|(j, _)| *j == k));
-        assert!(out.iter().any(|(_, p)| flags_of(p) & FIN != 0), "the agent's FIN");
+        assert!(
+            out.iter().any(|(_, p)| flags_of(p) & FIN != 0),
+            "the agent's FIN"
+        );
         n.deliver(&tcp(remote, local, 1006, iss + 2, ACK | FIN, &[]));
         let out = n.outputs();
         assert!(out.iter().all(|(j, _)| *j == k));
@@ -350,7 +397,11 @@ fn a_flow_lives_and_ends_inside_its_partition() {
         let out = n.outputs();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, k);
-        assert_eq!(flags_of(&out[0].1), SYN | ACK, "the TIME_WAIT 4-tuple is reused");
+        assert_eq!(
+            flags_of(&out[0].1),
+            SYN | ACK,
+            "the TIME_WAIT 4-tuple is reused"
+        );
         let syn_ack = out[0].1.clone();
         // その SYN-ACK を引用する ICMP の誤り (PMTU) も区画 k に着く
         let err = icmp(REMOTE, AGENT, 3, 4, &syn_ack);
@@ -362,11 +413,18 @@ fn a_flow_lives_and_ends_inside_its_partition() {
     }
     // UDP は区画 0 だけが受ける
     assert_eq!(
-        n.deliver(&udp(SocketAddrV4::new(REMOTE, 5000), SocketAddrV4::new(AGENT, 53), 0)),
+        n.deliver(&udp(
+            SocketAddrV4::new(REMOTE, 5000),
+            SocketAddrV4::new(AGENT, 53),
+            0
+        )),
         0
     );
     let out = n.outputs();
-    assert!(out.iter().all(|(j, _)| *j == 0), "the port-unreachable comes from partition 0");
+    assert!(
+        out.iter().all(|(j, _)| *j == 0),
+        "the port-unreachable comes from partition 0"
+    );
 }
 
 // ---- 番号の在庫と遅れの上限 ----
@@ -411,7 +469,11 @@ impl Lanes {
     }
 
     fn part(&self, k: usize) -> (PartSend, Local<Stub>) {
-        let tx = tx_store(Batching::default(), self.t.a.mtu(), self.t.a.max_transmit_len());
+        let tx = tx_store(
+            Batching::default(),
+            self.t.a.mtu(),
+            self.t.a.max_transmit_len(),
+        );
         let send = PartSend::new(k, Arc::clone(&self.hub), tx, false);
         let local = Local(Rc::new(Shared {
             inner: RefCell::new(Stub::new(None)),
@@ -461,8 +523,7 @@ impl Lanes {
 
 fn stub_out(local: &Local<Stub>, n: u32) {
     local.with(|s| {
-        s.out
-            .extend((0..n).map(|i| tcp_packet(1000 + i, 200)));
+        s.out.extend((0..n).map(|i| tcp_packet(1000 + i, 200)));
     });
 }
 
@@ -484,7 +545,13 @@ fn a_stalled_partition_drops_lagging_stock_and_the_peer_replays_nothing() {
     let (pulled, state) = local1.with(|s| p1.send_batch(s, &mut sink, now, 64));
     assert_eq!((pulled, state), (10, PartSent::Starved));
     assert!(sink.sent.is_empty());
-    assert_eq!(l.hub.counts.lag_drops.load(std::sync::atomic::Ordering::Relaxed), 64);
+    assert_eq!(
+        l.hub
+            .counts
+            .lag_drops
+            .load(std::sync::atomic::Ordering::Relaxed),
+        64
+    );
     l.front.serve(&mut l.t.a, clock::now());
     take_lane(&local1, &mut p1, clock::now());
     let now = clock::now();
@@ -564,7 +631,10 @@ fn would_block_drops_the_unsent_stock_and_reseals_after() {
     let (_, state) = local1.with(|s| p1.send_batch(s, &mut sink, now, 64));
     assert_eq!(state, PartSent::Blocked);
     assert_eq!(
-        l.hub.counts.eagain_drops.load(std::sync::atomic::Ordering::Relaxed),
+        l.hub
+            .counts
+            .eagain_drops
+            .load(std::sync::atomic::Ordering::Relaxed),
         8
     );
     assert!(p1.is_blocked());
@@ -593,7 +663,10 @@ fn old_stock_is_dropped_before_sealing() {
     let (_, state) = local1.with(|s| p1.send_batch(s, &mut sink, later, 64));
     assert_eq!(state, PartSent::Starved);
     assert_eq!(
-        l.hub.counts.age_drops.load(std::sync::atomic::Ordering::Relaxed),
+        l.hub
+            .counts
+            .age_drops
+            .load(std::sync::atomic::Ordering::Relaxed),
         4
     );
 }
@@ -611,10 +684,16 @@ fn the_check_before_sendmmsg_reseals_lagging_datagrams() {
     assert!(local1.with(|s| p1.pull_and_seal(s, now, 64)));
     l.front_sends(LAG_LIMIT as usize + 1);
     let mut sink = PartRecorder::default();
-    assert_eq!(p1.flush_for_test(&mut sink, clock::now()), Err(PartSent::Starved));
+    assert_eq!(
+        p1.flush_for_test(&mut sink, clock::now()),
+        Err(PartSent::Starved)
+    );
     assert!(sink.sent.is_empty(), "nothing lagging went out");
     assert_eq!(
-        l.hub.counts.lag_reseals.load(std::sync::atomic::Ordering::Relaxed),
+        l.hub
+            .counts
+            .lag_reseals
+            .load(std::sync::atomic::Ordering::Relaxed),
         4
     );
     // 補充の後に平文を新しい在庫で暗号化し直して送る
@@ -640,10 +719,9 @@ fn from_server(t: &mut Bench, now: Instant, payload: usize) -> Vec<u8> {
     let mut sealed = vec![0u8; t.b.max_transmit_len()];
     let out = t.b.handle_packet(now, &p, &mut sealed).unwrap();
     let mut plain = vec![0u8; 2048];
-    let n = t
-        .a
-        .handle_datagram(now, B_ADDR.parse().unwrap(), &sealed[..out.len], &mut plain)
-        .unwrap();
+    let n =
+        t.a.handle_datagram(now, B_ADDR.parse().unwrap(), &sealed[..out.len], &mut plain)
+            .unwrap();
     plain[..n].to_vec()
 }
 
@@ -698,7 +776,10 @@ fn piggybacked_stock_keeps_the_keepalive_and_handshake_timing_of_inline() {
         let t0 = clock::now();
         from_server(&mut t, t0, 100);
         let mut out = vec![0u8; t.a.max_transmit_len()];
-        assert!(t.a.handle_packet(t0, &tcp_packet(1, 40), &mut out).is_some());
+        assert!(
+            t.a.handle_packet(t0, &tcp_packet(1, 40), &mut out)
+                .is_some()
+        );
         first_emission(&mut t, t0)
     };
     let hashs = {
@@ -748,7 +829,10 @@ fn the_timing_test_detects_an_unused_reservation() {
 fn the_bound_counts_partitions() {
     let caps = crate::flowpool::Limits::default();
     let one = crate::memory::MemoryBound::for_partitions(caps, Batching::default(), 1);
-    assert_eq!(one, crate::memory::MemoryBound::for_limits(caps, Batching::default()));
+    assert_eq!(
+        one,
+        crate::memory::MemoryBound::for_limits(caps, Batching::default())
+    );
     let two = crate::memory::MemoryBound::for_partitions(caps, Batching::default(), 2);
     let eight = crate::memory::MemoryBound::for_partitions(caps, Batching::default(), 8);
     assert!(two.total > one.total && eight.total > two.total);

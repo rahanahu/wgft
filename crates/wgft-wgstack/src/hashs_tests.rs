@@ -137,7 +137,10 @@ fn a_new_flow_in_another_partition_gets_a_slot_from_idle_holders() {
     send_bulk(&mut b, &mut p, DEMAND_BYTES);
     read_n(&mut b, c, DEMAND_BYTES);
     b.drain();
-    assert!(boosted(&mut b, c), "B's flow got a slot within one demand window");
+    assert!(
+        boosted(&mut b, c),
+        "B's flow got a slot within one demand window"
+    );
     b.check();
 
     // 閉じた後、区画の Budget を集まりに返すと 1 つの Budget に戻る

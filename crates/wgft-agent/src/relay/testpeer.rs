@@ -121,8 +121,7 @@ impl Peer {
             limits: limits(),
         };
         // Hash S の試作:区画の数は製品と同じく使える CPU から決める (試験は WGFT_LAB_HASHS_P で上書きできる)
-        let parts =
-            crate::dataplane::hashs::part_count(settings.batching.running().is_on());
+        let parts = crate::dataplane::hashs::part_count(settings.batching.running().is_on());
         let agent = if parts > 1 {
             Dataplane::start_hashs(agent, settings, Carry::first(Duration::ZERO), stack, parts)
                 .await

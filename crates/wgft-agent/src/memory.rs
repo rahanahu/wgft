@@ -259,9 +259,7 @@ impl MemoryBound {
         let per_part = batching
             .bytes()
             .saturating_add(crate::dataplane::hashs::part_bytes(batching));
-        let batch = b
-            .batch
-            .saturating_add(per_part.saturating_mul(parts - 1));
+        let batch = b.batch.saturating_add(per_part.saturating_mul(parts - 1));
         let old = b.core + b.tables + b.driver + b.batch;
         b.core = core;
         b.core_fixed = fixed;

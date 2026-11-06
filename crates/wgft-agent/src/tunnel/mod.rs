@@ -272,7 +272,9 @@ impl Tunnel {
                 .map_err(|e| format!("start the tunnel data plane: {e}"))?;
         } else {
             generations
-                .start(dc, settings, move |init| dataplane::stack::make(stack, init))
+                .start(dc, settings, move |init| {
+                    dataplane::stack::make(stack, init)
+                })
                 .await
                 .map_err(|e| format!("start the tunnel data plane: {e}"))?;
         }

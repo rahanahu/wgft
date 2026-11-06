@@ -200,13 +200,12 @@ impl Agent {
         if counts != self.bound_listeners {
             self.bound_listeners = counts;
             let (tcp, udp) = counts;
-            let bound =
-                crate::memory::MemoryBound::for_partitions(
-                    self.opts.limits,
-                    self.opts.batching,
-                    crate::dataplane::hashs::part_count(self.opts.batching.running().is_on()),
-                )
-                .with_listeners(tcp, udp);
+            let bound = crate::memory::MemoryBound::for_partitions(
+                self.opts.limits,
+                self.opts.batching,
+                crate::dataplane::hashs::part_count(self.opts.batching.running().is_on()),
+            )
+            .with_listeners(tcp, udp);
             logf!("{}", bound.listeners_line(tcp, udp));
         }
         saved.map_err(|e| format!("save credentials file: {e}"))

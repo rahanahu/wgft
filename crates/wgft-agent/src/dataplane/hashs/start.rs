@@ -24,10 +24,10 @@ use super::super::{
     Carry, Command, Dataplane, Exit, Generations, Local, Settings, Shared, SocketBuffers,
     StartError, Wake, clock, duration_to_nanos, socket,
 };
+use super::Hub;
 use super::front::Front;
 use super::part::{PartSend, PartSocket};
 use super::steer::Steer;
-use super::Hub;
 
 type Stack<T> = Netstack<LanHook<T>>;
 
@@ -240,9 +240,10 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
             )),
         };
         if error.is_none() {
-            if let Ok(Err(e)) | Err(e) = ready.await.map_err(|_| {
-                io::Error::other("the data plane thread ended while starting")
-            }) {
+            if let Ok(Err(e)) | Err(e) = ready
+                .await
+                .map_err(|_| io::Error::other("the data plane thread ended while starting"))
+            {
                 error = Some(e);
             }
         }
@@ -301,7 +302,10 @@ impl<T: LanSocket + 'static> Dataplane<Stack<T>> {
 /// データプレーンの unsafe は `wgft-udp-batch` の `sys.rs` だけに置く規則なので、試作は非推奨の安全な口を使う。
 /// 包む値は fd を持ち続ける `std::net::UdpSocket` で、`as_raw_fd` は同じ fd を返し続ける (非推奨の理由に
 /// 当たらない)。
-#[expect(deprecated, reason = "the safe registration; the data plane keeps unsafe in sys.rs only")]
+#[expect(
+    deprecated,
+    reason = "the safe registration; the data plane keeps unsafe in sys.rs only"
+)]
 fn writable_only(sock: std::net::UdpSocket) -> io::Result<AsyncFd<std::net::UdpSocket>> {
     AsyncFd::with_interest(sock, Interest::WRITABLE)
 }
@@ -341,8 +345,14 @@ impl<T: LanSocket + 'static> Generations<Stack<T>> {
 type Ready = oneshot::Sender<io::Result<()>>;
 
 /// 区画 `k` のスレッド。核と中継を動かし、終わる時に区画の `Budget` を返す。
-#[expect(clippy::too_many_arguments, reason = "everything the thread takes over")]
-#[expect(clippy::needless_pass_by_value, reason = "the thread owns what it is given")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "everything the thread takes over"
+)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the thread owns what it is given"
+)]
 fn run_part<T: LanSocket + 'static>(
     k: usize,
     hub: Arc<Hub>,
@@ -369,7 +379,8 @@ fn run_part<T: LanSocket + 'static>(
     };
     let afd = {
         let _guard = runtime.enter();
-        sock.set_nonblocking(true).and_then(|()| writable_only(sock))
+        sock.set_nonblocking(true)
+            .and_then(|()| writable_only(sock))
     };
     let afd = match afd {
         Ok(a) => a,
@@ -441,8 +452,14 @@ fn run_part<T: LanSocket + 'static>(
 }
 
 /// front のスレッド。区画 0 の核と device と外側のソケットを持つ。
-#[expect(clippy::too_many_arguments, reason = "everything the thread takes over")]
-#[expect(clippy::needless_pass_by_value, reason = "the thread owns what it is given")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "everything the thread takes over"
+)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the thread owns what it is given"
+)]
 fn run_front<T: LanSocket + 'static>(
     device: Device,
     socket: std::net::UdpSocket,
@@ -546,7 +563,10 @@ fn run_front<T: LanSocket + 'static>(
     drop(runtime);
     crate::logf!("tunnel: {}", hub.counts.line());
     let unix_high_water = device.unix_high_water();
-    high_water.fetch_max(duration_to_nanos(unix_high_water), std::sync::atomic::Ordering::Relaxed);
+    high_water.fetch_max(
+        duration_to_nanos(unix_high_water),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let budget = match Rc::try_unwrap(shared) {
         Ok(s) if !s.poisoned.get() => {
             let upper = s.inner.into_inner();

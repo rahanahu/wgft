@@ -13,8 +13,8 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use sanstun::{
-    Committed, Error as SanstunError, Event as SanstunEvent, Interface, PendingEncapsulate, Received,
-    ReceivedMessage, StaticSecret, Tunnel, TunnelConfig, TunnelId,
+    Committed, Error as SanstunError, Event as SanstunEvent, Interface, PendingEncapsulate,
+    Received, ReceivedMessage, StaticSecret, Tunnel, TunnelConfig, TunnelId,
 };
 use zeroize::Zeroizing;
 

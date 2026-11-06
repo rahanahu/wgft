@@ -332,7 +332,10 @@ impl<H: Hook> Stack<H> {
                     cookie_sent: None,
                     ip_id: t.seeds.ip_id,
                     ip_ids: config.partition.as_ref().map_or((0, 0), Partition::ip_ids),
-                    ch_share: config.partition.as_ref().map_or(1, Partition::challenge_share),
+                    ch_share: config
+                        .partition
+                        .as_ref()
+                        .map_or(1, Partition::challenge_share),
                     rng: t.seeds.rng,
                     conn_free: t.conn_free,
                     qlinks: t.qlinks,

@@ -146,7 +146,11 @@ pub(crate) fn make_part<T: LanSocket + 'static>(
     let budget = pool
         .view()
         .map_err(|e| io::Error::other(format!("allocate the TCP/IP memory budget: {e}")))?;
-    let limits = part_limits(settings.limits, usize::from(part.index), usize::from(part.count));
+    let limits = part_limits(
+        settings.limits,
+        usize::from(part.index),
+        usize::from(part.count),
+    );
     let config = Config {
         limits,
         partition: Some(part),
@@ -157,8 +161,12 @@ pub(crate) fn make_part<T: LanSocket + 'static>(
         return Err(io::Error::other("no randomness for the TCP/IP seed"));
     }
     let hook = LanHook::shared(LanSockets::new(limits.conns()), Arc::clone(pool));
-    Netstack::new(config, budget, &seed, hook, now, clock::now)
-        .map_err(|e| io::Error::other(format!("make the TCP/IP core of partition {}: {e}", part.index)))
+    Netstack::new(config, budget, &seed, hook, now, clock::now).map_err(|e| {
+        io::Error::other(format!(
+            "make the TCP/IP core of partition {}: {e}",
+            part.index
+        ))
+    })
 }
 
 /// The tables of partition `k` of `parts` (Hash S prototype): the connection slots, the accept

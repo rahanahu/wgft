@@ -535,15 +535,7 @@ fn send_phase<U: Upper>(
         } else {
             1
         };
-        let (pulled, state) = send_batch(
-            device,
-            upper,
-            peer,
-            *now,
-            outbox,
-            io,
-            vlen,
-        );
+        let (pulled, state) = send_batch(device, upper, peer, *now, outbox, io, vlen);
         tx_done += pulled;
         if wake.timed {
             let after = clock::now();
@@ -597,9 +589,10 @@ pub(super) async fn drive<U: Upper>(
     buffers: SocketBuffers,
 ) -> io::Result<Rest> {
     let (peer, mtu, max_datagram) = {
-        let peer = device.peers().next().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "the device has no peer")
-        })?;
+        let peer = device
+            .peers()
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "the device has no peer"))?;
         (peer, device.mtu(), device.max_transmit_len())
     };
     let local_addr = socket
