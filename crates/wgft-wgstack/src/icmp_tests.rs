@@ -1438,7 +1438,6 @@ fn pmtu_after_with_mtu(mtu: usize, steps: &[(u16, u16)]) -> Vec<u32> {
 /// 最大の plateau を PMTU にし、552 で止めます。Total Length が今の PMTU 以上なら、5 節の 4.2BSD の注に従い
 /// 引用の header の長さの 4 倍を先に引きます (PMTU 1420 の接続で 1420 は 1400 になり 1006)。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn frag_needed_with_next_hop_mtu_zero_estimates_from_the_plateau_table() {
     assert_eq!(pmtu_after(&[(1420, 0)]), [1006]);
     assert_eq!(pmtu_after(&[(1300, 0)]), [1006]);
@@ -1540,7 +1539,6 @@ fn pmtu_report_that_keeps_the_mss_leaves_cwnd_alone() {
 /// RFC 1191 5 節の 4.2BSD の注と 7 節の表の境目です。Total Length が今の PMTU 以上のときだけ header の長さの
 /// 4 倍 (20 byte) を引き、Total Length 未満の最大の plateau を取ります (等しい plateau は取りません)。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn next_hop_mtu_zero_boundaries() {
     // PMTU 1420 を超える Total Length は引いてから表を引きます (1500 - 20 = 1480 なら 1492 は大きすぎます)。
     assert_eq!(pmtu_after(&[(1500, 0)]), [1006]);
@@ -1559,7 +1557,6 @@ fn next_hop_mtu_zero_boundaries() {
 /// MTU で、設定の上限は 9216 です。表の 65535、32000、17914 は公開の API では届かないので、この試験の対象外です
 /// (核に試験専用の口を足していません)。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn next_hop_mtu_zero_reaches_every_plateau() {
     const PLATEAUS: [u16; 7] = [8166, 4352, 2002, 1492, 1006, 508, 296];
     // 核の MTU は上限の 9216 とし、どの段にも今の PMTU 未満の Total Length で入ります。
