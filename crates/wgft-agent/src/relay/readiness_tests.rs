@@ -291,7 +291,7 @@ async fn a_reset_from_the_lan_after_a_short_read_ends_the_tunnel_side() {
     m.close().await;
 }
 
-/// 書いてすぐ RST で切る:データが届くかは決まらないが、接続は RST で終わり、枠が戻る。
+/// 書いてすぐ RST で切る:データが届くかは決まらないが、接続は FIN か RST で終わり、枠が戻る。
 #[tokio::test]
 async fn a_reset_right_after_a_short_write_from_the_lan_still_ends_the_relay() {
     let peer = Peer::start().await;
@@ -425,10 +425,10 @@ async fn a_stream_with_gaps_shorter_than_the_wait_keeps_its_bulk_buffer() {
     let peer = Peer::start().await;
     let (mut m, mut c, mut s) = setup(&peer).await;
     let base = lent();
+    let mut last = Instant::now();
     borrow_from_the_lan(&mut c, &mut s, base).await;
     let gap = BULK_WAIT * 2 / 5;
     // 合計は BULK_WAIT の数倍。途中で返れば、貸出数が減っている
-    let mut last = Instant::now();
     for i in 0..20u8 {
         tokio::time::sleep(gap).await;
         // 負荷で実際の間隔が延びたなら、正当に返却済みでありうるので、その回は確かめない
@@ -460,9 +460,9 @@ async fn a_tunnel_side_stream_with_gaps_shorter_than_the_wait_keeps_its_bulk_buf
     let peer = Peer::start().await;
     let (mut m, mut c, mut s) = setup(&peer).await;
     let base = lent();
+    let mut last = Instant::now();
     borrow_from_the_tunnel(&mut c, &mut s, base).await;
     let gap = BULK_WAIT * 2 / 5;
-    let mut last = Instant::now();
     for i in 0..20u8 {
         tokio::time::sleep(gap).await;
         // 負荷で実際の間隔が延びたなら、正当に返却済みでありうるので、その回は確かめない
