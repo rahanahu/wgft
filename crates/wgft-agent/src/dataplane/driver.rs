@@ -535,7 +535,9 @@ fn send_phase<U: Upper>(
             vlen,
         );
         tx_done += pulled;
-        if wake.timed {
+        // 何も引かなかったバッチは測るものが無く (Pace::record は 0 個を捨てる)、相もここで終わる
+        // (Full は 1 つ以上を引いたときだけ) ので、時計を読まない
+        if wake.timed && pulled > 0 {
             let after = clock::now();
             pace.record(after.saturating_duration_since(*now), pulled);
             *now = after;
@@ -637,7 +639,9 @@ pub(super) async fn drive<U: Upper>(
             )
             .await?;
             rx_done += n;
-            if timed {
+            // 空のバッチ (読むものが無い) は測るものが無く (Pace::record は 0 個を捨てる)、受信の相も
+            // ここで終わるので、時計を読まない。送信の相は前に読んだ時刻から始める
+            if timed && n > 0 {
                 let after = clock::now();
                 // 中継の task に譲っていた時間は、このバッチの仕事ではない
                 let took = after.saturating_duration_since(now).saturating_sub(yielded);
@@ -676,7 +680,8 @@ pub(super) async fn drive<U: Upper>(
         tokio::select! {
             ready = socket.readable() => ready?,
             ready = socket.writable(), if blocked => ready?,
-            () = clock::sleep_until_some(deadline) => {}
+            // この起床の最後に読んだ時刻を渡し、遠い期限では時計を読み直さない
+            () = clock::sleep_until_some(deadline, now) => {}
             () = local.0.wake.woken() => {}
             () = std::future::ready(()), if more => {}
             command = commands.recv() => match command {
