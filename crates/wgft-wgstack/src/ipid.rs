@@ -150,3 +150,202 @@ impl IdTable {
         id
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const UDP: u8 = 17;
+    const SEC: i64 = 1_000_000_000;
+
+    fn table() -> IdTable {
+        IdTable::new(SipKey {
+            k0: 0x0123_4567_89ab_cdef,
+            k1: 0xfedc_ba98_7654_3210,
+        })
+    }
+
+    fn rng(seed: u8) -> ChaCha8 {
+        ChaCha8::new([seed; 32])
+    }
+
+    fn tuple_key(dst: u32) -> u64 {
+        u64::from(dst) | (u64::from(UDP) << 32) | (1 << 48)
+    }
+
+    fn hash(t: &IdTable, dst: u32) -> u64 {
+        t.key.sum(tuple_key(dst), TUPLE_TAG)
+    }
+
+    fn cell(t: &IdTable, dst: u32) -> usize {
+        (hash(t, dst) >> 56) as usize & (CELLS - 1)
+    }
+
+    fn slot(t: &IdTable, dst: u32) -> Option<Slot> {
+        t.slots.iter().copied().find(|s| s.key == tuple_key(dst))
+    }
+
+    fn slot_mut(t: &mut IdTable, dst: u32) -> &mut Slot {
+        t.slots
+            .iter_mut()
+            .find(|s| s.key == tuple_key(dst))
+            .unwrap()
+    }
+
+    /// 同じ集合に入り、進みの位置がすべて異なる宛先を `WAYS + 1` 個返します。
+    fn colliding(t: &IdTable) -> [u32; WAYS + 1] {
+        let mut by_set = [[0u32; WAYS + 1]; SETS];
+        let mut len = [0usize; SETS];
+        for dst in 1..100_000u32 {
+            let set = (hash(t, dst) >> 48) as usize & (SETS - 1);
+            let found = &by_set[set][..len[set]];
+            if found.iter().all(|&d| cell(t, d) != cell(t, dst)) {
+                by_set[set][len[set]] = dst;
+                len[set] += 1;
+                if len[set] == WAYS + 1 {
+                    return by_set[set];
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    /// 集合を埋めます。`d[0]` が最も古く、`used0` 個の ID を使った状態です。
+    fn fill(t: &mut IdTable, d: &[u32; WAYS + 1], used0: u16, r: &mut ChaCha8) {
+        for &dst in &d[..WAYS] {
+            t.next(dst, UDP, 0, r);
+        }
+        slot_mut(t, d[0]).used = used0;
+    }
+
+    #[test]
+    fn an_idle_way_is_evicted_before_an_older_active_way_and_credits_nothing() {
+        let mut t = table();
+        let d = colliding(&t);
+        let mut r = rng(1);
+        fill(&mut t, &d, 5000, &mut r);
+        let now = 100 * SEC;
+        // d[0] は tick が最も古いが使われている。d[2] は新しいが寿命より長く使われていない。
+        for (i, &dst) in d[..WAYS].iter().enumerate() {
+            let s = slot_mut(&mut t, dst);
+            s.used = 5000;
+            s.last = now - SEC;
+            s.tick = 10 + i as u32;
+        }
+        slot_mut(&mut t, d[0]).tick = 1;
+        slot_mut(&mut t, d[2]).last = now - LIFETIME;
+        t.tick = 100;
+        let before = t.advance;
+        t.next(d[WAYS], UDP, now, &mut r);
+        assert!(slot(&t, d[2]).is_none(), "the idle way is evicted");
+        for &dst in &[d[0], d[1], d[3], d[WAYS]] {
+            assert!(slot(&t, dst).is_some());
+        }
+        assert_eq!(t.advance, before, "an idle way credits nothing");
+    }
+
+    struct Evicted {
+        delta: u16,
+        start0: u16,
+        table: IdTable,
+        d: [u32; WAYS + 1],
+    }
+
+    /// 使った数 `used`、進みの初期値 `adv` の最も古い組を追い出し、進みに足された値 (mod 65536) を返します。
+    fn evict_active(used: u16, adv: u16, seed: u8) -> Evicted {
+        let mut t = table();
+        let d = colliding(&t);
+        let mut r = rng(seed);
+        fill(&mut t, &d, used, &mut r);
+        let c = cell(&t, d[0]);
+        t.advance[c] = adv;
+        let before = t.advance;
+        let start0 = slot(&t, d[0]).unwrap().start;
+        t.next(d[WAYS], UDP, SEC, &mut r);
+        assert!(slot(&t, d[0]).is_none(), "the oldest active way is evicted");
+        for (i, (&a, &b)) in before.iter().zip(&t.advance).enumerate() {
+            if i != c {
+                assert_eq!(a, b, "only the evicted tuple's cell changes");
+            }
+        }
+        Evicted {
+            delta: t.advance[c].wrapping_sub(adv),
+            start0,
+            table: t,
+            d,
+        }
+    }
+
+    #[test]
+    fn evicting_an_active_way_credits_used_rounded_up_plus_less_than_a_step() {
+        for used in [
+            0u16, 1, 1000, 1024, 1025, 2047, 40_000, 64_511, 64_513, 65_535,
+        ] {
+            let ceil = u32::from(used).div_ceil(STEP) * STEP;
+            for seed in 0..64 {
+                let e = evict_active(used, 0, seed);
+                let jitter = e.delta.wrapping_sub(ceil as u16);
+                assert!(
+                    u32::from(jitter) < STEP,
+                    "used {used} seed {seed}: credit {}, rounded {ceil}",
+                    e.delta
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_evicted_tuple_resumes_after_its_previous_range_and_within_used_plus_2047() {
+        for used in [0u16, 1, 1000, 1024, 1025, 2047, 30_000, 40_000, 63_000] {
+            for seed in 0..32 {
+                let mut e = evict_active(used, 0, seed);
+                let mut r = rng(seed.wrapping_add(100));
+                let id = e.table.next(e.d[0], UDP, 2 * SEC, &mut r);
+                let s = slot(&e.table, e.d[0]).unwrap();
+                assert_eq!(
+                    id,
+                    permute(s.h, s.start),
+                    "the first ID comes from the new start"
+                );
+                // 前の範囲は start0 から used 個
+                let gap = u32::from(s.start.wrapping_sub(e.start0));
+                assert!(
+                    gap >= u32::from(used) && gap <= u32::from(used) + 2047,
+                    "used {used} seed {seed}: resumed {gap} after the start"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_advance_is_correct_when_used_or_the_cell_wraps() {
+        // 進みの値が 65536 を回る
+        for adv in [65_000u16, 65_535, 64_513] {
+            for used in [0u16, 1, 1024, 5000, 64_000] {
+                for seed in 0..32 {
+                    let ceil = u32::from(used).div_ceil(STEP) * STEP;
+                    let e = evict_active(used, adv, seed);
+                    let jitter = e.delta.wrapping_sub(ceil as u16);
+                    assert!(
+                        u32::from(jitter) < STEP,
+                        "adv {adv} used {used} seed {seed}"
+                    );
+                }
+            }
+        }
+        // 使った数の切り上げが 65536 になり、足す値が 0 から 1023 に戻る。再作成の始めも回って決まる
+        for used in [64_513u16, 65_000, 65_535] {
+            for seed in 0..32 {
+                let mut e = evict_active(used, 65_535, seed);
+                assert!(
+                    u32::from(e.delta) < STEP,
+                    "ceil wraps: used {used} seed {seed}"
+                );
+                let mut r = rng(seed);
+                e.table.next(e.d[0], UDP, 2 * SEC, &mut r);
+                let s = slot(&e.table, e.d[0]).unwrap();
+                assert_eq!(s.start, e.start0.wrapping_add(65_535).wrapping_add(e.delta));
+            }
+        }
+    }
+}
