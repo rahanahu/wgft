@@ -10,18 +10,29 @@
 //! 65536 個進む間は重なりません。置換の鍵と連番の始めの値は組の hash から導くので、ほかの組の送信量にも、
 //! ほかの組の列にも依りません。
 //!
-//! 組の状態は固定の表 (`SETS` × `WAYS` の枠) に置き、満杯なら同じ集合の最も古い枠を追い出します。追い出した枠が
-//! 使った ID の数は、組の hash の下位から選ぶ `CELLS` 個の「進み」に足します。新しい組(追い出された組を含む)の
-//! 連番の始めの値に、その進みを足すので、追い出された組が戻っても、追い出される前の範囲の後ろから始まり、
-//! 進みが 65536 を一周するまで最近の ID を使い直しません。進みは ID の置換の鍵に隠れて、ほかの組からは
-//! 見えません。表の大きさは固定で、Limits に依りません。
+//! 組の状態は固定の表 (`SETS` × `WAYS` の枠) に置きます。満杯なら同じ集合から、再組み立ての寿命
+//! (`frag::LIMITS.lifetime`) より長く使われていない枠を優先して追い出し、無ければ最も古い枠を追い出します。
+//! 寿命を過ぎた枠の ID は相手で使い終わっているので、進みには何も足しません。
+//! 寿命の内に使われた枠を追い出す時は、使った ID の数を 1024 の倍数に切り上げ、[0, 1024) の乱数を足した値を、
+//! 組の hash から選ぶ `CELLS` 個の「進み」に足します。
+//! 新しい組(追い出された組を含む)の連番の始めの値に、その進みを足すので、追い出された組が戻っても、
+//! 追い出される前の範囲の後ろから始まり、進みが 65536 を一周するまで最近の ID を使い直しません。
+//! 進みは ID の置換の鍵に隠れますが、完全には隠れません。同じ進みの位置 (256 分の 1) を共有する攻撃者が、
+//! 最近使われた組の追い出しを起こせると、追い出された組の使った数の和を、1024 に切り上げて乱数を足した値で
+//! 知ります。TCP の packet は ID が 0 なので影響を受けません。表の大きさは固定で、Limits に依りません。
 
 #![expect(
     clippy::cast_possible_truncation,
     reason = "the hash is cut to the 8, 16 and 56 bit pieces on purpose"
 )]
 
+use crate::rng::ChaCha8;
 use crate::siphash::SipKey;
+
+/// ID が相手で使い終わるとみなす時間 (ns) で、再組み立ての寿命です。
+const LIFETIME: i64 = crate::frag::LIMITS.lifetime.cast_signed();
+/// 追い出す時に進みへ足す数の丸めの単位です。
+const STEP: u32 = 1024;
 
 /// 集合の数 (2 の冪)。
 const SETS: usize = 64;
@@ -43,6 +54,8 @@ struct Slot {
     used: u16,
     /// 最後に使った順です (集合の中で最も古い枠を追い出す)。
     tick: u32,
+    /// 最後に使った時刻 (ns) です。再組み立ての寿命より長く使われていない枠を先に追い出します。
+    last: i64,
 }
 
 /// 組ごとの ID の表です。
@@ -81,7 +94,7 @@ impl IdTable {
     }
 
     /// 宛先 `dst` への protocol `proto` の組の、次の ID です。
-    pub(crate) fn next(&mut self, dst: u32, proto: u8) -> u16 {
+    pub(crate) fn next(&mut self, dst: u32, proto: u8, now: i64, rng: &mut ChaCha8) -> u16 {
         let key = u64::from(dst) | (u64::from(proto) << 32) | (1 << 48);
         let h = self.key.sum(key, TUPLE_TAG);
         let cell = (h >> 56) as usize & (CELLS - 1);
@@ -93,23 +106,30 @@ impl IdTable {
             i
         } else {
             {
-                // 空の枠か、最も古い枠を使います。
+                // 空の枠、寿命を過ぎた枠のうち最も古いもの、最も古い枠の順に使います。
                 let mut i = 0;
-                let mut age = 0;
+                let mut best = (false, false, 0u32);
                 for (k, w) in ways.iter().enumerate() {
-                    let a = if w.key == 0 {
-                        u32::MAX
+                    let rank = if w.key == 0 {
+                        (true, true, 0)
                     } else {
-                        tick.wrapping_sub(w.tick)
+                        (
+                            false,
+                            now.wrapping_sub(w.last) >= LIFETIME,
+                            tick.wrapping_sub(w.tick),
+                        )
                     };
-                    if a > age || k == 0 {
-                        (i, age) = (k, a);
+                    if k == 0 || rank > best {
+                        (i, best) = (k, rank);
                     }
                 }
                 let old = ways[i];
-                if old.key != 0 {
+                if old.key != 0 && !best.1 {
+                    // 寿命の内に使われた枠: 使った数を粗く切り上げ、乱数を足して進みに足す
                     let old_cell = (old.h >> 56) as usize & (CELLS - 1);
-                    self.advance[old_cell] = self.advance[old_cell].wrapping_add(old.used);
+                    let credit = u32::from(old.used).div_ceil(STEP) * STEP
+                        + rng.below(u64::from(STEP)) as u32;
+                    self.advance[old_cell] = self.advance[old_cell].wrapping_add(credit as u16);
                 }
                 ways[i] = Slot {
                     key,
@@ -117,12 +137,14 @@ impl IdTable {
                     start: ((h >> 32) as u16).wrapping_add(self.advance[cell]),
                     used: 0,
                     tick,
+                    last: now,
                 };
                 i
             }
         };
         let s = &mut ways[i];
         s.tick = tick;
+        s.last = now;
         let id = permute(s.h, s.start.wrapping_add(s.used));
         s.used = s.used.wrapping_add(1);
         id

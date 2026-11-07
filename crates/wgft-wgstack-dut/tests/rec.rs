@@ -28,6 +28,12 @@ fn mask_ipv4_id(frame: &[u8]) -> Vec<u8> {
     for _ in 0..count {
         let len = u32::from_le_bytes(f[at..at + 4].try_into().expect("length")) as usize;
         at += 4;
+        let ihl = usize::from(f[at] & 15) * 4;
+        let sum = f[at..at + ihl]
+            .chunks(2)
+            .fold(0u32, |a, c| a + u32::from(u16::from_be_bytes([c[0], c[1]])));
+        let sum = (sum & 0xffff) + (sum >> 16);
+        assert_eq!((sum & 0xffff) + (sum >> 16), 0xffff, "IPv4 header checksum");
         f[at + 4..at + 6].fill(0);
         f[at + 10..at + 12].fill(0);
         at += len;
@@ -35,7 +41,7 @@ fn mask_ipv4_id(frame: &[u8]) -> Vec<u8> {
     f
 }
 
-/// 記録の要求を別のプロセスの `wgstack-dut` に送り、応答が記録と同じ bytes (IPv4 の ID と header の checksum を除く)
+/// 記録の要求を別のプロセスの `wgstack-dut` に送り、応答が記録と同じ bytes (IPv4 の ID と header の checksum を除く。checksum は値が正しいことを確かめてから除く)
 /// であることを確かめます。
 fn replay_through_process(path: &Path) {
     let r = rec::read_file(path).expect("read");

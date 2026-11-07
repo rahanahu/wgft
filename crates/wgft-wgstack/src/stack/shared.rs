@@ -445,7 +445,7 @@ impl Shared {
         if crate::stack::go_compat_shared_id() {
             return self.next_id(); // 凍結した Go の記録との照合用: 1 つの数えを共有する
         }
-        self.ids.next(dst, proto)
+        self.ids.next(dst, proto, self.now, &mut self.rng)
     }
 
     /// `[0, n)` の乱数です (Go の `randomU64N`)。
