@@ -155,10 +155,12 @@ pub(crate) struct Seeds {
     pub(crate) table_key: SipKey,
     /// timestamp の offset の鍵。生成器の最初の 2 つの値です。
     pub(crate) ts_key: SipKey,
-    /// IP の ID の始めの値。生成器の 3 つ目の値の下位 32 bit です。
+    /// 凍結した Go と同じ、全体で 1 つの IP の ID の数えの始めの値です。生成器の 3 つ目の値の下位 32 bit で、照合の
+    /// build だけが使います。値は常に引くので、乱数の列は製品の build でも Go と同じです。
+    #[cfg(any(test, feature = "harness"))]
     pub(crate) ip_id: u32,
-    /// DF を下ろした datagram の IP の ID の始めの値。ISN の鍵から用途の印で導くので、生成器から引かず、Go と同じ乱数の列を保ちます。
-    pub(crate) ip_id_open: u16,
+    /// 組ごとの IP の ID の鍵。ISN の鍵から用途の印で導くので、生成器から引かず、Go と同じ乱数の列を保ちます。
+    pub(crate) id_key: SipKey,
     /// 残りの乱数 (challenge ACK の揺らぎ、区間の treap の優先度の種) を引く生成器です。
     pub(crate) rng: ChaCha8,
     /// SYN cookie の MAC の鍵。ISN の鍵から用途の印で導きます。生成器から引かないので、Go と同じ乱数の列を
@@ -170,7 +172,7 @@ pub(crate) struct Seeds {
 /// (ポートの組) の上位 32 bit は常に 0 なので、導いた鍵が ISN の hash の値と重なることはありません。
 const COOKIE_KEY_TAG: u64 = 0x6b6f_6f63 << 32; // "cook" の little endian
 
-/// 非 atomic の ID の始めの値を ISN の鍵から導く時の用途の印です。ISN の hash の 2 語目の上位 32 bit は常に 0 なので重なりません。
+/// IP の ID の値と鍵を ISN の鍵から導く時の用途の印です。ISN の hash の 2 語目の上位 32 bit は常に 0 なので重なりません。
 const ID_OPEN_TAG: u64 = 0x6970_6f70 << 32; // "popi"
 
 impl Seeds {
@@ -192,13 +194,19 @@ impl Seeds {
             k1: rng.next_u64(),
         };
         let ip_id = rng.next_u64() as u32;
+        #[cfg(not(any(test, feature = "harness")))]
+        let _ = ip_id;
         let isn_key = SipKey::from_le_bytes(isn);
         Self {
             isn_key,
             table_key: SipKey::from_le_bytes(table),
             ts_key,
+            #[cfg(any(test, feature = "harness"))]
             ip_id,
-            ip_id_open: isn_key.sum(2, ID_OPEN_TAG) as u16,
+            id_key: SipKey {
+                k0: isn_key.sum(2, ID_OPEN_TAG),
+                k1: isn_key.sum(3, ID_OPEN_TAG),
+            },
             rng,
             cookie_key: SipKey {
                 k0: isn_key.sum(0, COOKIE_KEY_TAG),

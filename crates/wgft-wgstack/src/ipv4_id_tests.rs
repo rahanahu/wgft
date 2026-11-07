@@ -26,7 +26,6 @@
 //! [`EVICT_WINDOW`] 個の ID と重なってはいけません。追い出しが datagram の寿命より前に起きても重ねない
 //! 仕組み (鍵つき hash の初期値に頼らず、追い出した状態の下限を覚えるなど) が要ります。
 //!
-//! 直す前の核で失敗する試験は `#[ignore]` を付けています。直す PR が外します。
 
 #![expect(
     clippy::disallowed_macros,
@@ -135,7 +134,6 @@ fn handshake_row_reset() -> Vec<Vec<u8>> {
 /// 核が出す、DF を立てた断片でない packet (TCP の SYN-ACK、データ、ACK、FIN、RST、challenge ACK、ICMP の誤り、
 /// ICMP の echo request) の ID は 0 です (RFC 6864 4.1 節)。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn df_set_non_fragments_carry_id_zero() {
     let (mut n, _l, v) = established(&[VICTIM]);
     let (c, mut p) = v[0];
@@ -278,7 +276,6 @@ fn echo_reply_ids_do_not_repeat_within_a_tuple() {
 /// を同じ列にし、片方だけ、間に別の宛先 (別の組) への UDP と、A への ICMP の echo reply (別の protocol の組) を
 /// 挟みます。A の UDP の ID の列は同じです。
 #[test]
-#[ignore = "fixed by the follow-up PR"]
 fn traffic_on_another_tuple_does_not_change_the_sequence() {
     let a = PEER;
     let b = Ipv4Addr::new(10, 9, 0, 3);

@@ -514,7 +514,13 @@ fn slot_u32(i: usize) -> u32 {
 /// 開いたことのある印 (`PortTable::opened`)、配列を返された boost の枠の印 (`Budget::dirty`) です。
 #[cfg(any(test, feature = "harness"))]
 pub(crate) const HARNESS_BYTES: usize =
-    3 * size_of::<crate::bitset::BitSet>() + size_of::<usize>() + size_of::<u64>();
+    3 * size_of::<crate::bitset::BitSet>() + size_of::<usize>() + size_of::<u64>() + GO_IDS_BYTES;
+
+/// 凍結した Go の IP の ID の数え (`GoIds`) の byte です。feature `harness` の build だけにあります。
+#[cfg(feature = "harness")]
+const GO_IDS_BYTES: usize = size_of::<shared::GoIds>();
+#[cfg(all(test, not(feature = "harness")))]
+const GO_IDS_BYTES: usize = 0;
 
 /// 上界の式が使う核の値の大きさです。製品の核の大きさで数え、試験と fuzz の build だけにある欄を入れません。
 pub(crate) const fn stack_size<H: Hook>() -> usize {
@@ -629,8 +635,11 @@ impl<H: Hook> Stack<H> {
                     ts_key: t.seeds.ts_key,
                     cookie_key: t.seeds.cookie_key,
                     cookie_sent: None,
-                    ip_id: t.seeds.ip_id,
-                    ip_id_open: t.seeds.ip_id_open,
+                    ids: crate::ipid::IdTable::new(t.seeds.id_key),
+                    #[cfg(feature = "harness")]
+                    go_ids: shared::GoIds {
+                        df: u64::from(t.seeds.ip_id),
+                    },
                     rng: t.seeds.rng,
                     conn_free: t.conn_free,
                     qlinks: t.qlinks,

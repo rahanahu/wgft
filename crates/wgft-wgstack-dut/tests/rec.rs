@@ -14,7 +14,35 @@ fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_wgstack-dut"))
 }
 
-/// 記録の要求を別のプロセスの `wgstack-dut` に送り、応答が記録と同じ bytes であることを確かめます。
+/// PACKETS の応答の frame で、IPv4 の ID と header の checksum を 0 にした写しを返します。製品の核は DF を立てた
+/// packet の ID を 0 にし (RFC 6864 4.1)、凍結した Go の記録は数えの値を持つので、ID だけが違います。
+/// 照合用の切り替えは `for_replay` の核だけが持つため、別のプロセスの製品の核では ID を比べません。
+fn mask_ipv4_id(frame: &[u8]) -> Vec<u8> {
+    let mut f = frame.to_vec();
+    // frame は長さ (4 byte)、種類 (1 byte)、本体で、PACKETS の本体は個数 (4 byte) と (長さ (4 byte)、packet) の列です。
+    if f.get(4) != Some(&(frame::Kind::Packets as u8)) {
+        return f;
+    }
+    let count = u32::from_le_bytes(f[5..9].try_into().expect("count")) as usize;
+    let mut at = 9;
+    for _ in 0..count {
+        let len = u32::from_le_bytes(f[at..at + 4].try_into().expect("length")) as usize;
+        at += 4;
+        let ihl = usize::from(f[at] & 15) * 4;
+        let sum = f[at..at + ihl]
+            .chunks(2)
+            .fold(0u32, |a, c| a + u32::from(u16::from_be_bytes([c[0], c[1]])));
+        let sum = (sum & 0xffff) + (sum >> 16);
+        assert_eq!((sum & 0xffff) + (sum >> 16), 0xffff, "IPv4 header checksum");
+        f[at + 4..at + 6].fill(0);
+        f[at + 10..at + 12].fill(0);
+        at += len;
+    }
+    f
+}
+
+/// 記録の要求を別のプロセスの `wgstack-dut` に送り、応答が記録と同じ bytes (IPv4 の ID と header の checksum を除く。checksum は値が正しいことを確かめてから除く)
+/// であることを確かめます。
 fn replay_through_process(path: &Path) {
     let r = rec::read_file(path).expect("read");
     let pairs = r.pairs().expect("frames");
@@ -26,7 +54,12 @@ fn replay_through_process(path: &Path) {
     for (i, (req, want)) in pairs.iter().enumerate().skip(1) {
         let m = Msg::decode(req.kind, req.body).expect("request");
         let got = d.exchange_frame(&m).expect("exchange");
-        assert_eq!(got.frame, want.bytes, "{}: request {i} {m}", path.display());
+        assert_eq!(
+            mask_ipv4_id(&got.frame),
+            mask_ipv4_id(want.bytes),
+            "{}: request {i} {m}",
+            path.display()
+        );
     }
     d.close().expect("close");
 }
