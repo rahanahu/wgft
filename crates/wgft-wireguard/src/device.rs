@@ -56,6 +56,39 @@ pub struct Outgoing {
     pub len: usize,
 }
 
+/// A data message whose counter [`Device::begin_packet`] reserved, to be encrypted later on any
+/// thread. It holds a copy of the session key; seal and send it promptly.
+#[derive(Debug)]
+pub struct SealJob {
+    to: SocketAddr,
+    /// The packet's IPv4 total length: the bytes [`SealJob::seal`] encrypts.
+    len: usize,
+    reserved: crate::protocol::Reserved,
+}
+
+impl SealJob {
+    /// Where to send the datagram.
+    #[must_use]
+    pub fn to(&self) -> SocketAddr {
+        self.to
+    }
+
+    /// Encrypts the first bytes of `packet` (the IPv4 total length that [`Device::begin_packet`]
+    /// read) into `out`, which must hold [`Device::max_transmit_len`] bytes, and returns the
+    /// datagram's length. A shorter `out` or `packet` drops the message; its counter is then
+    /// never sent, which the peer's replay window takes as a lost packet.
+    ///
+    /// # Errors
+    ///
+    /// [`DropReason::Internal`] when `out` or `packet` is too short.
+    pub fn seal(self, packet: &[u8], out: &mut [u8]) -> Result<usize, DropReason> {
+        let Some(packet) = packet.get(..self.len) else {
+            return Err(DropReason::Internal);
+        };
+        self.reserved.seal(packet, out)
+    }
+}
+
 impl ByteLen for Transmit {
     fn byte_len(&self) -> usize {
         self.payload.capacity()
@@ -494,6 +527,58 @@ impl Device {
         }
         // セッションが無いか、先に待っている packet がある。順を保って待たせ、ハンドシェイクを始める。
         // 写すのは待たせるときだけで、定常の経路ではない
+        let evicted = self.peers[peer].staged.push_evicting(packet.to_vec());
+        self.drops.add(DropReason::StagedOverflow, evicted as u64);
+        self.initiate(peer, now, true);
+        self.flush_staged(peer, now);
+        None
+    }
+
+    /// Handles an IP packet from the tunnel side like [`Device::handle_packet`], but only reserves
+    /// the data message's counter: the result is a [`SealJob`] that encrypts the packet later, on
+    /// any thread, with that counter.
+    ///
+    /// The checks, the counting and the timers are those of [`Device::handle_packet`]: the packet is
+    /// counted as sent here. Jobs must be sealed and sent in the order this returned them to keep
+    /// the counters in order; the peer's replay window accepts a bounded reordering only. The
+    /// result is `None` when the packet waits for the handshake this call starts, or was dropped
+    /// and counted.
+    pub fn begin_packet(&mut self, now: Instant, packet: &[u8]) -> Option<SealJob> {
+        let now = self.clock(now);
+        let Some(header) = parse_ipv4(packet) else {
+            self.drops.add(DropReason::InvalidInnerPacket, 1);
+            return None;
+        };
+        if header.total_len > self.mtu {
+            self.drops.add(DropReason::TooBig, 1);
+            return None;
+        }
+        let Some(peer) = self.routes.lookup(header.dst) else {
+            self.drops.add(DropReason::NoRoute, 1);
+            return None;
+        };
+        let Some(to) = self.peers[peer].endpoint else {
+            self.drops.add(DropReason::NoEndpoint, 1);
+            return None;
+        };
+        let packet = &packet[..header.total_len];
+        if self.peers[peer].staged.is_empty() {
+            match self.proto.reserve(peer, now) {
+                Ok(Some(reserved)) => {
+                    self.count_sent(peer, Protocol::sealed_len(packet.len()));
+                    return Some(SealJob {
+                        to,
+                        len: header.total_len,
+                        reserved,
+                    });
+                }
+                Ok(None) => {}
+                Err(reason) => {
+                    self.drops.add(reason, 1);
+                    return None;
+                }
+            }
+        }
         let evicted = self.peers[peer].staged.push_evicting(packet.to_vec());
         self.drops.add(DropReason::StagedOverflow, evicted as u64);
         self.initiate(peer, now, true);

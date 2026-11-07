@@ -1434,3 +1434,88 @@ fn a_handshake_flood_delays_the_first_session_but_does_not_stop_it() {
 
 #[path = "device_timer_tests.rs"]
 mod timers;
+
+/// 予約した counter を後で、別の順でも封じられる。受け手は予約の順の窓の内なら全部を受け、counter は
+/// 予約の順に並ぶ。数と宛先は handle_packet と同じに数える。
+#[test]
+fn reserved_seals_go_out_in_any_order_within_the_window() {
+    let mut n = Net::new();
+    n.connect();
+    let now = n.now();
+    let before = n.a.peer_status(&n.b_pub(), now).unwrap().tx_bytes;
+    let payloads: Vec<Vec<u8>> = (0..8u8).map(|i| vec![i; 100 + usize::from(i)]).collect();
+    let mut jobs: Vec<_> = payloads
+        .iter()
+        .map(|p| {
+            let packet = ipv4_packet(AGENT_IP, SERVER_IP, p);
+            let job = n.a.begin_packet(now, &packet).expect("a session");
+            assert_eq!(job.to(), n.b_addr);
+            (packet, job)
+        })
+        .collect();
+    // 逆の順に封じる。counter は予約の時に決まっている
+    jobs.reverse();
+    let mut datagrams = Vec::new();
+    let mut sealed_bytes = 0;
+    for (packet, job) in jobs {
+        let mut out = vec![0u8; n.a.max_transmit_len()];
+        // 封じる packet の後ろに余分な byte があっても、IPv4 の全長だけを封じる
+        let mut longer = packet.clone();
+        longer.extend([0xee; 7]);
+        let len = job.seal(&longer, &mut out).unwrap();
+        out.truncate(len);
+        sealed_bytes += len as u64;
+        datagrams.push(out);
+    }
+    let counters: Vec<u64> = datagrams
+        .iter()
+        .map(|d| u64::from_le_bytes(d[8..16].try_into().unwrap()))
+        .collect();
+    let mut sorted = counters.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(sorted.len(), counters.len(), "counters are unique");
+    assert!(
+        counters.windows(2).all(|w| w[0] > w[1]),
+        "reserved in order: {counters:?}"
+    );
+    let mut got = Vec::new();
+    for d in &datagrams {
+        got.extend(n.b.recv(now, n.a_addr, d));
+    }
+    got.reverse();
+    let want: Vec<Vec<u8>> = payloads
+        .iter()
+        .map(|p| ipv4_packet(AGENT_IP, SERVER_IP, p))
+        .collect();
+    assert_eq!(got, want);
+    assert_eq!(n.b.drops().total(), 0);
+    let after = n.a.peer_status(&n.b_pub(), now).unwrap().tx_bytes;
+    assert_eq!(after - before, sealed_bytes);
+}
+
+/// 予約は handle_packet と同じ検査を通る。セッションが無ければ待たせてハンドシェイクを始め、短い出力の
+/// buffer は封じずに誤りを返す。
+#[test]
+fn reserving_checks_like_handle_packet_and_a_short_buffer_drops() {
+    let mut n = Net::new();
+    let now = n.now();
+    // セッションの前:待たせて開始を送る
+    assert!(
+        n.a.begin_packet(now, &ipv4_packet(AGENT_IP, SERVER_IP, b"early"))
+            .is_none()
+    );
+    assert_eq!(n.a.held().staged_packets_max, 1);
+    n.pump();
+    assert_eq!(n.b_got, vec![ipv4_packet(AGENT_IP, SERVER_IP, b"early")]);
+    // 経路の無い宛先と壊れた packet
+    let other = ipv4_packet(AGENT_IP, Ipv4Addr::new(192, 0, 2, 9), b"x");
+    assert!(n.a.begin_packet(now, &other).is_none());
+    assert!(n.a.begin_packet(now, &[0x45, 0, 0]).is_none());
+    assert_eq!(n.a.drops().get(DropReason::NoRoute), 1);
+    assert_eq!(n.a.drops().get(DropReason::InvalidInnerPacket), 1);
+    let packet = ipv4_packet(AGENT_IP, SERVER_IP, b"short");
+    let job = n.a.begin_packet(now, &packet).unwrap();
+    let mut out = vec![0u8; 20];
+    assert_eq!(job.seal(&packet, &mut out), Err(DropReason::Internal));
+}

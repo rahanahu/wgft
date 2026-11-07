@@ -22,6 +22,26 @@ use crate::config::{ConfigError, ProtocolTimers, REJECT_AFTER_TIME};
 use crate::drops::DropReason;
 use crate::keys::{PrivateKey, PublicKey};
 
+/// 予約した counter と、その時のセッションの鍵の写しと受け手の index。sanstun の型をこの module の外に
+/// 出さないための包みである。暗号化は 1 回だけで、`self` を消費する。
+#[derive(Debug)]
+pub(crate) struct Reserved(sanstun::PendingEncapsulate);
+
+impl Reserved {
+    /// `packet` を `out` の先頭に暗号化し、書いた長さを返す。`out` は [`Protocol::sealed_len`] より
+    /// 短くてはならない。短ければ `Err` で、予約した counter は送られない。
+    pub(crate) fn seal(self, packet: &[u8], out: &mut [u8]) -> Result<usize, DropReason> {
+        let Some(out) = out.get_mut(..Protocol::sealed_len(packet.len())) else {
+            return Err(DropReason::Internal);
+        };
+        Ok(self
+            .0
+            .encrypt(packet, out)
+            .map_err(|e| map_error(&e))?
+            .len())
+    }
+}
+
 /// Device の中のピアの番号。設定の並びの位置。
 pub(crate) type PeerId = usize;
 
@@ -292,6 +312,24 @@ impl Protocol {
             .map_err(|e| map_error(&e))?
             .len();
         Ok(Some(len))
+    }
+
+    /// 送るデータの message の counter を 1 つ予約する。暗号化は [`Reserved::seal`] で、どのスレッドでも
+    /// 後で行える。セッションが無ければ `Ok(None)` で、counter を使わない。
+    pub(crate) fn reserve(
+        &mut self,
+        peer: PeerId,
+        now: Instant,
+    ) -> Result<Option<Reserved>, DropReason> {
+        let p = &mut self.peers[peer];
+        match p.tunnel.begin_encapsulate(now) {
+            Ok(pending) => {
+                p.passive.on_send();
+                Ok(Some(Reserved(pending)))
+            }
+            Err(SanstunError::NoCurrentSession | SanstunError::ConnectionExpired) => Ok(None),
+            Err(e) => Err(map_error(&e)),
+        }
     }
 
     /// `packet` を新しい buffer に暗号化する。ハンドシェイクを待っていた packet を送るときの、
