@@ -165,6 +165,51 @@ pub fn enable_gro(fd: RawFd) -> bool {
     rc == 0
 }
 
+/// The `SIOCGSTAMPNS` request of socket(7) in its original form, which writes the native
+/// `struct timespec`: on the 64-bit targets the agent builds for, a 64-bit `time_t`. The libc crate
+/// does not name it.
+#[cfg(target_pointer_width = "64")]
+const SIOCGSTAMPNS: libc::c_ulong = 0x8907;
+
+/// The kernel's receive time of the last datagram the socket `fd` passed to the user, in ns since
+/// the Unix epoch on the realtime clock (`SIOCGSTAMPNS`, socket(7)): after a `recvmmsg`, the
+/// newest datagram of that batch. One system call, whatever the batch held; the data plane calls
+/// it for one sample, not per datagram.
+///
+/// Behaviour observed on Linux (the tests in this module check it): before anything was read the
+/// call returns `None`, and the first call turns the receive times on, so that later datagrams
+/// carry the time they reached the socket; a datagram that arrived before that reads back about
+/// the time it was read, which reads as no wait. The socket must not have `SO_TIMESTAMP` or
+/// `SO_TIMESTAMPNS` on, which change what the call reports (socket(7)).
+///
+/// # Errors
+///
+/// The system call's error other than "nothing received yet", which is `Ok(None)`.
+#[cfg(target_pointer_width = "64")]
+pub fn receive_stamp(fd: RawFd) -> io::Result<Option<u64>> {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: 書き先は呼び出しの間生きている timespec で、この要求はその大きさだけを書く
+    let rc = unsafe { libc::ioctl(fd, SIOCGSTAMPNS as _, &raw mut ts) };
+    if rc != 0 {
+        let e = io::Error::last_os_error();
+        return if e.raw_os_error() == Some(libc::ENOENT) {
+            Ok(None)
+        } else {
+            Err(e)
+        };
+    }
+    let (Ok(sec), Ok(nsec)) = (u64::try_from(ts.tv_sec), u64::try_from(ts.tv_nsec)) else {
+        return Ok(None);
+    };
+    Ok(sec
+        .checked_mul(1_000_000_000)
+        .and_then(|s| s.checked_add(nsec))
+        .filter(|_| nsec < 1_000_000_000))
+}
+
 /// Whether the kernel has UDP GSO (`UDP_SEGMENT`, Linux 4.18 and later) for this socket.
 pub fn has_gso(fd: RawFd) -> bool {
     let mut v: libc::c_int = 0;
@@ -421,6 +466,58 @@ mod tests {
         assert_eq!(CTRL_LEN, space_int + space_byte);
         assert_eq!(cmsg_space(2), space_u16);
         assert_eq!(cmsg_len(2), len_u16);
+    }
+
+    /// 壁時計 (realtime) の Unix の起点からの ns。
+    fn wall_ns() -> u64 {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        u64::try_from(d.as_nanos()).unwrap()
+    }
+
+    /// 設計 (受信の取り出しの CoDel の待ちの合図):`SIOCGSTAMPNS` は、何も読む前は時刻を持たず、最初の呼び出しの
+    /// 後に届いた datagram には届いた時刻を付ける。`recvmmsg` の後は、そのバッチの最も新しい datagram の時刻を返す。
+    /// 1 つだけ読んだ後は、読んだ datagram (最も古い) の時刻を返す。時計は壁時計である。
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn the_receive_stamp_is_the_newest_datagram_of_the_last_read() {
+        use std::os::fd::AsRawFd;
+        use std::time::Duration;
+        let tx = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let rx_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        rx_socket.set_nonblocking(true).unwrap();
+        let fd = rx_socket.as_raw_fd();
+        let to = rx_socket.local_addr().unwrap();
+        // 何も読む前は時刻が無い。この呼び出しが時刻の付与を始める
+        assert_eq!(receive_stamp(fd).unwrap(), None);
+        let gap = Duration::from_millis(4);
+        let send_three = || {
+            let mut sent = Vec::new();
+            for i in 0..3u8 {
+                sent.push(wall_ns());
+                tx.send_to(&[i], to).unwrap();
+                std::thread::sleep(gap);
+            }
+            sent
+        };
+        let mut rx = RxBatch::new(8, true, 100);
+        // バッチ:最も新しい 3 つ目の時刻。その送る前の時刻より後で、2 つ目の送った時刻より gap の半分以上後
+        let sent = send_three();
+        assert_eq!(rx.recv(fd, 8).unwrap(), 3);
+        let read = wall_ns();
+        let s = receive_stamp(fd).unwrap().unwrap();
+        assert!(sent[2] <= s && s <= read, "{sent:?} {s} {read}");
+        assert!(s >= sent[1] + 2_000_000, "{sent:?} {s}");
+        // 1 つだけ読む:最も古い 1 つ目の時刻。2 つ目の送る前の時刻より前
+        let sent = send_three();
+        assert_eq!(rx.recv(fd, 1).unwrap(), 1);
+        let s = receive_stamp(fd).unwrap().unwrap();
+        assert!(sent[0] <= s && s < sent[1], "{sent:?} {s}");
+        // 残りを読むと、3 つ目の時刻
+        assert_eq!(rx.recv(fd, 8).unwrap(), 2);
+        let s = receive_stamp(fd).unwrap().unwrap();
+        assert!(sent[2] <= s, "{sent:?} {s}");
     }
 
     #[test]
