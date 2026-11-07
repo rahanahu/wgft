@@ -18,9 +18,11 @@
 #   tqagent.sh cpus <pid>                 the CPUs a process may run on (its Cpus_allowed_list)
 #   tqagent.sh pin-threads <pid> <dp cpus> <worker cpus>
 #                                         lab/lab paired --placement apart-mt: put the thread
-#                                         wgft-dataplane on <dp cpus> and the wgft-crypto workers one
-#                                         each on the CPUs of the comma list <worker cpus>, then check
-#                                         them as check-threads does; prints crypto_threads=<count>
+#                                         wgft-dataplane on <dp cpus> and the wgft-crypto workers and
+#                                         the wgft-send helper one each on the CPUs of the comma list
+#                                         <worker cpus> (round robin over both kinds), then check them
+#                                         as check-threads does; prints crypto_threads=<count>
+#                                         send_threads=<count>
 #   tqagent.sh check-threads <pid> <dp cpus> <worker cpus>
 #                                         print each thread as comm/tid=cpus and fail when the
 #                                         data-plane thread is missing or a thread named above is
@@ -94,17 +96,19 @@ case "${1:-}" in
     awk '$1 == "Cpus_allowed_list:" { print $2 }' "/proc/${2:?cpus <pid>}/status"
     ;;
   pin-threads | check-threads)
-    # <worker cpus> is a comma list; the k-th wgft-crypto thread, by thread id, goes on its k-th CPU
-    # (round robin), so that each worker has a CPU of its own
+    # <worker cpus> is a comma list; the k-th thread that is a wgft-crypto worker or the wgft-send
+    # helper, by thread id, goes on its k-th CPU (round robin), so that each has a CPU of its own
+    # while there are no more of them than CPUs; the two kinds are counted apart
     pid=${2:?$1 <pid> <dp cpus> <worker cpus>} dp=${3:?} wk=${4:?}
     IFS=, read -ra wcpus <<<"$wk"
-    rc=0 seen_dp=0 nwk=0 out=
+    rc=0 seen_dp=0 nwk=0 ncrypto=0 nsend=0 out=
     for tid in $(ls /proc/"$pid"/task 2>/dev/null | sort -n); do
       t=/proc/$pid/task/$tid
       comm=$(cat "$t/comm" 2>/dev/null) || continue
       case $comm in
         wgft-dataplane) want=$dp seen_dp=1 ;;
-        wgft-crypto) want=${wcpus[nwk % ${#wcpus[@]}]} nwk=$((nwk + 1)) ;;
+        wgft-crypto) want=${wcpus[nwk % ${#wcpus[@]}]} nwk=$((nwk + 1)) ncrypto=$((ncrypto + 1)) ;;
+        wgft-send) want=${wcpus[nwk % ${#wcpus[@]}]} nwk=$((nwk + 1)) nsend=$((nsend + 1)) ;;
         *) want= ;;
       esac
       if [ -n "$want" ] && [ "$1" = pin-threads ]; then taskset -pc "$want" "$tid" >/dev/null || rc=1; fi
@@ -116,7 +120,7 @@ case "${1:-}" in
       fi
     done
     [ "$seen_dp" = 1 ] || { echo "tqagent.sh: process $pid has no thread wgft-dataplane" >&2; rc=1; }
-    echo "crypto_threads=$nwk threads:${out:- none}"
+    echo "crypto_threads=$ncrypto send_threads=$nsend threads:${out:- none}"
     exit "$rc"
     ;;
   cpu)

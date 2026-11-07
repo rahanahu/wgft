@@ -297,6 +297,9 @@ iperf3 は送り手と受け手の byte あたりの CPU が `tcpquality.py` よ
 `base:<モード>` は、`--base` の commit の build で同じモードを動かします。
 `--base` は commit をホストの `~/.cache/wgft-lab/` の一時的な worktree に取り出し、`wgft` を `bin/base/` に作ります。
 腕に `rust` があれば、Rust の `wgft` も作ります。
+環境変数 `LAB_RUST_FEATURES` (例えば `lab-observe`) は cargo の feature として、head と `--base` の Rust の `wgft` の両方に付き、`header.txt` に書かれます。
+既定ではどちらにも付けません。
+性能の判定に使う組には付けません。
 `--base-rust-target` は base の Rust の `wgft` の target を変えます (既定は `x86_64-unknown-linux-musl`)。
 `--base HEAD --base-rust-target x86_64-unknown-linux-gnu.2.41` と腕 `rust base:rust` で、同じ commit の musl と glibc の build を比べます。
 `--rust-target` は作業ツリーの Rust の `wgft` の target を変えます (`WGFT_LAB_RUST_TARGET` と同じ)。
@@ -489,12 +492,13 @@ agent は転送先へ loopback で繋ぎ、転送先の CPU は agent の VM に
   暗号の worker のように data plane のスレッドを足した build には、次の `--placement apart-mt` を使います
 - `--placement apart-mt`:暗号の worker を持つ build 用です。
   NIC の割り込みと相手の VM の固定は `apart` と同じです。
-  Rust の agent のプロセスを CPU 1 から後に置き、agent が tunnel を張った後と各実行の始めに、data plane のスレッド (`wgft-dataplane`) を CPU 1、暗号の worker (`wgft-crypto`) を CPU 2 と 3 に 1 つずつ、agentd を通して置きます。
+  Rust の agent のプロセスを CPU 1 から後に置き、agent が tunnel を張った後と各実行の始めに、data plane のスレッド (`wgft-dataplane`) を CPU 1、暗号の worker (`wgft-crypto`) と送りの手伝い (`wgft-send`、実験の gated send の build) を CPU 2 と 3 に 1 つずつ、agentd を通して置きます。
   CPU 0 から 3 は lane の先頭の 1 つの L2 の塊にあるので、8 vCPU でも worker は data plane のスレッドと同じ塊に留まります。
   置けなければその腕か実行を失敗にし、各実行の終わりにも確かめます。
   実行の途中で作られた worker は data plane のスレッドの CPU を受け継ぐので、その実行は失敗になります。
-  結果の行には、実行の始めに見つけた worker の数 (`agent_crypto_threads`) が入り、0 なら警告を出します。
-  agent のすべてのスレッドの載った vCPU を、`dp`、`crypto`、`other` の組ごとに 0.1 秒ごとに記録します (`agentvm_thr_<組>_cpu<N>_frac` など)。
+  結果の行には、実行の始めに見つけた暗号の worker の数 (`agent_crypto_threads`) と送りの手伝いの数 (`agent_send_threads`) が入り、暗号の worker が 0 なら警告を出します。
+  worker と手伝いは合わせて CPU 2 と 3 に順に置くので、暗号の worker 2 つと手伝いを持つ build では 3 つのスレッドが 2 つの CPU を分け合います。
+  agent のすべてのスレッドの載った vCPU を、`dp`、`crypto`、`send`、`other` の組ごとに 0.1 秒ごとに記録します (`agentvm_thr_<組>_cpu<N>_frac` など)。
   この標本は、8 スレッドの試しのプロセスに対してホストで測って、1 つの CPU の約 0.65 % を使います。
   A+ の agent はプロセスの使える CPU が 2 つ以下だと worker を作らないので、`--vcpus 4` 以上を求めます。
   worker の無い build でも流せ、そのときは data plane のスレッドが CPU 1 に載ります。
@@ -543,6 +547,21 @@ namespace ごとのメモリの圧迫の数 (`tcp_prune`、`tcp_rcvpruned`、`tc
 上げた後に崩れが消えるかは未確認です。
 
 `tcpquality.sh` の `CPU=1` の結果の行には、interface ごとの packet の数と平均の大きさ、namespace ごとの TCP の segment と UDP の datagram の数、tunnel を戻る ACK の数 (`tun_ack_pkts_per_gb`)、受け手の GRO の後の segment の大きさ (`recv_seg_avg_b`) も入ります。
+
+### 観測の数 (`observe:` の行)
+
+`observe: k=v ...` の行を書く build の Rust の agent では、`--split` の実行ごとに、その行の数の差も記録します。
+今この行を書くのは、実験の送りの手伝い (gated send) の試作を `lab-observe` の feature で作った build だけです。
+main の agent は書かないので、記録は増えません。
+
+- 行:累計の整数を、data plane の起床の終わりに 0.2 秒に 1 回まで書きます。起床は足しません
+- 読み方:agent の log のファイルを読みます。ラボは agent の標準出力と標準エラーを 1 つのファイルに書かせるので、そのファイルの最後の `observe:` の行を、agentd が実行の前後の標本で読みます
+- 記録:差を `agentvm_obs_<k>` と `agentvm_obs_<k>_per_s` にします
+- 数:data plane の起床 (`dp_wakes`)、読むものも送るものも無かった起床 (`dp_idle_wakes`)、門の切り替え (`gs_transitions`)、渡した束 (`gs_jobs`) と packet (`gs_packets`)、持ち主が送った packet (`gs_owner_packets`)、手伝いと持ち主の起床 (`gs_helper_wakes`、`gs_owner_wakes`)、置き場の待ち (`gs_waits`) です
+- 割合:門が開いていた時間の割合 (`agentvm_obs_gs_open_share`) と、1,000 packet あたりの起床 (`agentvm_obs_gs_wakes_per_kpkt`) も出します
+- 誤差:行は 0.2 秒ごとなので、窓の端で最大 0.2 秒分の数がずれます
+
+ラボではまだ流していません。
 
 ### 受信経路の測定の選択肢
 
