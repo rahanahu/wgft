@@ -237,9 +237,9 @@ pub fn send_turn(env: &dyn super::Env) -> Result<u8, Refusal> {
     };
     match v.to_str() {
         Some("" | "0") => Ok(0),
-        Some(other) => match other.parse::<u8>() {
-            Ok(n) if SEND_TURN_VALUES.contains(&n) => Ok(n),
-            _ => Err(Refusal::config(
+        Some(other) => match SEND_TURN_VALUES.iter().find(|n| n.to_string() == other) {
+            Some(&n) => Ok(n),
+            None => Err(Refusal::config(
                 SEND_TURN_ENV,
                 format!("must be 2, 4, 8 or 0, not {}", quote(other)),
             )),

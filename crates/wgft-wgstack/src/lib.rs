@@ -144,9 +144,9 @@ mod scan_tests;
 #[cfg(test)]
 mod send_turn_rule_tests;
 #[cfg(test)]
-mod send_window_tests;
-#[cfg(test)]
 mod send_turn_tests;
+#[cfg(test)]
+mod send_window_tests;
 #[cfg(test)]
 mod tcp_tests;
 #[cfg(test)]

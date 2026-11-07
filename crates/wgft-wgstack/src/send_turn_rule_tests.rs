@@ -25,12 +25,28 @@ use crate::testnet_tests::{
     DUT, Out, PEER, PeerConn, TEST_MTU, TSeg, TestNet, parse_out, small_limits,
 };
 use crate::wire::{self, FLAG_ACK, FLAG_FIN, FLAG_RST, FLAG_SYN};
-use crate::{ListenerId, SEND_TURN_SEGMENTS, UdpId};
+use crate::{ListenerId, UdpId};
+
+thread_local! {
+    /// この試験の thread が確かめる番の長さ N (segment) です。どの試験も `for_each_n` が N を 2、4、8 に
+    /// して流します (N の候補を比べる実験のためです)。
+    static TURN_N: core::cell::Cell<u8> = const { core::cell::Cell::new(8) };
+}
 
 /// 番の長さ N (segment) です。
-const N: usize = SEND_TURN_SEGMENTS as usize;
+fn n() -> usize {
+    usize::from(TURN_N.get())
+}
+
+/// 番の途中で止める packet の数です。3 packet で、N が小さければ N - 1 packet です。
+fn mid() -> usize {
+    3.min(n() - 1)
+}
+
 /// 番の長さの byte (N × MTU) です。
-const TURN: usize = N * TEST_MTU;
+fn turn() -> usize {
+    n() * TEST_MTU
+}
 /// 待ち受けのポートです。
 const LISTEN: u16 = 80;
 /// 相手の接続の最初のポートです。
@@ -107,7 +123,7 @@ impl Bench {
     /// 相手の MSS を接続ごとに `mss` で選んで開きます。まだ何も書きません。
     fn opened(on: bool, mss: &[u16]) -> Self {
         let mut n = if on {
-            TestNet::with_send_turn(small_limits())
+            TestNet::with_send_turn_segments(small_limits(), TURN_N.get())
         } else {
             TestNet::new(small_limits())
         };
@@ -291,13 +307,12 @@ fn assert_turn_sane(b: &Bench) {
         "the turn points at a slot that is {:?}",
         b.n.s.conns.tcb(t).state
     );
-    assert!(bytes > 0 && (bytes as usize) < TURN, "turn bytes {bytes}");
+    assert!(bytes > 0 && (bytes as usize) < turn(), "turn bytes {bytes}");
 }
 
 // 無効の時
 
 /// 無効の時は、送るものがある接続を 1 segment ずつ list の順に回し、番を持ちません。
-#[test]
 fn off_rotates_one_segment_per_connection() {
     let mut b = Bench::new(false, 3);
     b.run(120);
@@ -314,7 +329,6 @@ fn off_rotates_one_segment_per_connection() {
 
 /// 有効の時、3 つの接続がどれも送るものを持てば、list の順にちょうど N segment ずつ続けて送ります。N を
 /// 超えて続かず、番の byte は N × MTU に届いた所で終わります。
-#[test]
 fn on_runs_each_connection_for_n_segments_in_list_order() {
     let mut b = Bench::new(true, 3);
     for _ in 0..240 {
@@ -326,14 +340,13 @@ fn on_runs_each_connection_for_n_segments_in_list_order() {
     let (last, done) = r.split_last().unwrap();
     for (i, &(port, segs, bytes)) in done.iter().enumerate() {
         assert_eq!(port, FIRST + (i % 3) as u16, "run {i} of {r:?}");
-        assert_eq!((segs, bytes), (N, TURN), "run {i} of {r:?}");
+        assert_eq!((segs, bytes), (n(), turn()), "run {i} of {r:?}");
     }
-    assert!(last.1 <= N, "{r:?}");
+    assert!(last.1 <= n(), "{r:?}");
 }
 
 /// 番の長さは segment の数ではなく、番を持つ接続が作った packet の byte で数えます。小さな segment の接続は
 /// N を超える segment を続けて送り、byte が N × MTU に届いた packet で番を終えます。
-#[test]
 fn a_turn_counts_bytes_of_the_packets_made() {
     let mut b = Bench::with_mss(true, &[536, 1380]);
     b.run(200);
@@ -344,27 +357,26 @@ fn a_turn_counts_bytes_of_the_packets_made() {
     assert!(done.len() >= 6, "{r:?}");
     for &(port, segs, bytes) in done {
         if port == FIRST {
-            assert!(segs > N, "{r:?}");
-            assert!(bytes >= TURN && bytes - small < TURN, "{r:?}");
+            assert!(segs > n(), "{r:?}");
+            assert!(bytes >= turn() && bytes - small < turn(), "{r:?}");
         } else {
-            assert_eq!((segs, bytes), (N, TURN), "{r:?}");
+            assert_eq!((segs, bytes), (n(), turn()), "{r:?}");
         }
     }
 }
 
 /// 番の途中で送るものが尽きた接続は、その時点で番を終え、次の接続がすぐに自分の番を始めます。残りは
 /// 持ち越さず、後で送るものができた接続は、list の末尾から新しい番を得て N segment を送ります。
-#[test]
 fn a_turn_ends_when_the_connection_runs_out() {
     let mut b = Bench::opened(true, &[1380; 3]);
     b.flows[0].feed = false;
     let a = b.flows[0].c;
-    let three = 3 * (TEST_MTU - 52);
-    assert_eq!(b.n.s.write(b.n.now, a, &DATA[..three]), Ok(three));
+    let few = mid() * (TEST_MTU - 52);
+    assert_eq!(b.n.s.write(b.n.now, a, &DATA[..few]), Ok(few));
     b.feed(1);
     b.feed(2);
-    b.run(3);
-    assert_eq!(conn_data(&b.sent), vec![(FIRST, TEST_MTU); 3]);
+    b.run(mid());
+    assert_eq!(conn_data(&b.sent), vec![(FIRST, TEST_MTU); mid()]);
     assert_eq!(b.turn(), (NIL, 0), "running out ends the turn");
     b.run(1);
     assert_eq!(
@@ -379,11 +391,11 @@ fn a_turn_ends_when_the_connection_runs_out() {
     assert_eq!(
         r[..5],
         [
-            (FIRST, 3, 3 * TEST_MTU),
-            (FIRST + 1, N, TURN),
-            (FIRST + 2, N, TURN),
-            (FIRST, N, TURN),
-            (FIRST + 1, N, TURN),
+            (FIRST, mid(), mid() * TEST_MTU),
+            (FIRST + 1, n(), turn()),
+            (FIRST + 2, n(), turn()),
+            (FIRST, n(), turn()),
+            (FIRST + 1, n(), turn()),
         ],
         "{r:?}"
     );
@@ -393,7 +405,6 @@ fn a_turn_ends_when_the_connection_runs_out() {
 
 /// 長い転送で、接続ごとの送った byte の差はどの時点でも 1 回の番と 1 packet の内にあり、どの接続も、次に
 /// 送るまでにほかの接続の (接続の数 - 1) × N segment より長く待ちません。
-#[test]
 fn fairness_over_a_long_transfer() {
     const K: usize = 4;
     let mut b = Bench::new(true, K);
@@ -406,14 +417,14 @@ fn fairness_over_a_long_transfer() {
         let j = usize::from(port - FIRST);
         let waited = i - last[j].map_or(0, |l| l + 1);
         assert!(
-            waited <= (K - 1) * N,
+            waited <= (K - 1) * n(),
             "connection {j} waited {waited} segments before segment {i}"
         );
         last[j] = Some(i);
         bytes[j] += len;
         let spread = bytes.iter().max().unwrap() - bytes.iter().min().unwrap();
         assert!(
-            spread <= TURN + TEST_MTU,
+            spread <= turn() + TEST_MTU,
             "after segment {i} the bytes per connection are {bytes:?}"
         );
     }
@@ -498,7 +509,6 @@ fn mixed(on: bool, at: &mut Vec<(usize, char)>) -> Vec<Sent> {
 /// 番の途中でも、UDP の datagram、制御の packet、行の packet は番の無い時と同じ位置で出ます。組の間の
 /// deficit round robin は TCP の packet 1 つごとに回ります。有効の核で番の途中に当たる時に作らせ、無効の核
 /// では同じ番号の時に作らせて比べます。
-#[test]
 fn udp_control_and_rows_keep_their_positions_mid_turn() {
     let mut at = Vec::new();
     let on = mixed(true, &mut at);
@@ -514,11 +524,10 @@ fn udp_control_and_rows_keep_their_positions_mid_turn() {
     // 試験が番を見ていることの確かめ:有効の時は N segment ずつ続き、無効の時は 1 つずつ入れ替わります。
     let longest = |s: &[Sent]| runs(&conn_data(s)).iter().map(|r| r.1).max();
     assert_eq!(longest(&off), Some(1));
-    assert_eq!(longest(&on), Some(N));
+    assert_eq!(longest(&on), Some(n()));
 }
 
 /// 番は接続の間の packet の順だけを変え、接続ごとの segment の作り方と順は変えません。
-#[test]
 fn each_connection_sends_the_same_segments_on_and_off() {
     let per_conn = |on: bool| {
         let mut b = Bench::new(on, 3);
@@ -543,12 +552,11 @@ fn each_connection_sends_the_same_segments_on_and_off() {
 
 /// 番の状態は核の中にあり、`poll_transmit` の呼び出しの境目を越えて続きます。呼び手のバッチの間に入る入力
 /// (時刻の進み、ほかの接続の書き込みと相手のデータ、UDP の受信、番を持つ接続への確認) も番を終えません。
-#[test]
 fn a_turn_carries_across_calls_and_batches() {
     let mut b = Bench::new(true, 2);
-    b.run(3);
+    b.run(mid());
     let held = b.turn();
-    assert_eq!(held, (b.slot(0), 3 * TEST_MTU as u32));
+    assert_eq!(held, (b.slot(0), (mid() * TEST_MTU) as u32));
     // バッチの境目に入る入力
     b.n.advance(Duration::from_millis(1));
     b.feed(1);
@@ -571,7 +579,7 @@ fn a_turn_carries_across_calls_and_batches() {
     for (i, &(port, segs, _)) in done.iter().enumerate() {
         assert_eq!(
             (port, segs),
-            (FIRST + (i % 2) as u16, N),
+            (FIRST + (i % 2) as u16, n()),
             "run {i} of {r:?}"
         );
     }
@@ -580,10 +588,9 @@ fn a_turn_carries_across_calls_and_batches() {
 // 外れる枠
 
 /// 番を持つ接続を破棄すると、その場で番が終わります。次の接続は持ち越しの無い新しい番で N segment を送ります。
-#[test]
 fn aborting_the_holder_ends_its_turn() {
     let mut b = Bench::new(true, 3);
-    b.run(3);
+    b.run(mid());
     assert_eq!(b.turn().0, b.slot(0));
     b.flows[0].live = false;
     b.flows[0].feed = false;
@@ -603,15 +610,14 @@ fn aborting_the_holder_ends_its_turn() {
     let r = runs(&conn_data(&b.sent));
     let (_, done) = r.split_last().unwrap();
     for (i, &(port, segs, _)) in done.iter().enumerate() {
-        assert_eq!((port, segs), (FIRST + 1 + (i % 2) as u16, N), "{r:?}");
+        assert_eq!((port, segs), (FIRST + 1 + (i % 2) as u16, n()), "{r:?}");
     }
 }
 
 /// 番を持つ接続が相手の RST で閉じると、その場で番が終わります。
-#[test]
 fn a_peer_reset_of_the_holder_ends_its_turn() {
     let mut b = Bench::new(true, 3);
-    b.run(5);
+    b.run(mid());
     assert_eq!(b.turn().0, b.slot(0));
     b.flows[0].live = false;
     b.flows[0].feed = false;
@@ -627,16 +633,15 @@ fn a_peer_reset_of_the_holder_ends_its_turn() {
         assert_turn_sane(&b);
     }
     let r = runs(&conn_data(&b.sent));
-    assert_eq!(r[0], (FIRST + 1, N, TURN), "{r:?}");
+    assert_eq!(r[0], (FIRST + 1, n(), turn()), "{r:?}");
     assert!(r.iter().all(|x| x.0 != FIRST), "{r:?}");
 }
 
 /// 番を持つ接続を破棄し、その枠を新しい接続が使い直しても、番は古い枠を指しません。新しい接続は list の
 /// 末尾から自分の番を得ます。
-#[test]
 fn a_reused_slot_does_not_inherit_the_turn() {
     let mut b = Bench::new(true, 3);
-    b.run(3);
+    b.run(mid());
     let old = b.flows[0].c;
     assert_eq!(b.turn().0, old.slot);
     b.flows[0].live = false;
@@ -664,16 +669,15 @@ fn a_reused_slot_does_not_inherit_the_turn() {
         .iter()
         .position(|x| x.0 == FIRST + 10)
         .expect("the new connection sends");
-    assert_eq!(done[first_new], (FIRST + 10, N, TURN), "{r:?}");
-    assert!(done.iter().all(|x| x.1 == N), "{r:?}");
+    assert_eq!(done[first_new], (FIRST + 10, n(), turn()), "{r:?}");
+    assert!(done.iter().all(|x| x.1 == n()), "{r:?}");
 }
 
 /// 番を持つ接続をアプリケーションが閉じると、送り残しを送る間は番を使い、送り終えて TIME_WAIT の行に移り
 /// 枠を返した後も、番は返した枠を指しません。
-#[test]
 fn closing_the_holder_leaves_no_stale_turn() {
     let mut b = Bench::new(true, 3);
-    b.run(3);
+    b.run(mid());
     let a = b.flows[0].c;
     assert_eq!(b.turn().0, a.slot);
     b.flows[0].feed = false;
@@ -703,15 +707,14 @@ fn closing_the_holder_leaves_no_stale_turn() {
             .is_some_and(|o| o.rport == FIRST && o.has(FLAG_FIN))
     }));
     let r = runs(&conn_data(&b.sent));
-    assert!(r.iter().all(|x| x.1 <= N), "{r:?}");
+    assert!(r.iter().all(|x| x.1 <= n()), "{r:?}");
 }
 
 /// 不変条件の検査は、古い番 (list の先頭に無い枠、list から外れた枠、長さに届いた byte、無効の核の番) を
 /// 見つけます。
-#[test]
 fn check_invariants_catches_a_stale_turn() {
     let mut b = Bench::new(true, 2);
-    b.run(3);
+    b.run(mid());
     let (t, bytes) = b.turn();
     assert_eq!(t, b.slot(0));
     let caught = |b: &mut Bench| {
@@ -742,3 +745,47 @@ fn check_invariants_catches_a_stale_turn() {
     off.n.s.s.out.turn_bytes = 1;
     caught(&mut off);
 }
+
+/// 試験 `t` を番の長さ `n` で流します。
+fn with_n(n: u8, t: fn()) {
+    TURN_N.set(n);
+    t();
+}
+
+/// 番の長さ `$n` で、同じ規則の試験を module `$m` として流します。
+macro_rules! rules_at {
+    ($m:ident, $n:expr; $($t:ident),* $(,)?) => {
+        mod $m {
+            $(
+                #[test]
+                fn $t() {
+                    super::with_n($n, super::$t);
+                }
+            )*
+        }
+    };
+}
+
+macro_rules! rules_at_each_n {
+    ($($t:ident),* $(,)?) => {
+        rules_at!(n2, 2; $($t),*);
+        rules_at!(n4, 4; $($t),*);
+        rules_at!(n8, 8; $($t),*);
+    };
+}
+
+rules_at_each_n!(
+    off_rotates_one_segment_per_connection,
+    on_runs_each_connection_for_n_segments_in_list_order,
+    a_turn_counts_bytes_of_the_packets_made,
+    a_turn_ends_when_the_connection_runs_out,
+    fairness_over_a_long_transfer,
+    udp_control_and_rows_keep_their_positions_mid_turn,
+    each_connection_sends_the_same_segments_on_and_off,
+    a_turn_carries_across_calls_and_batches,
+    aborting_the_holder_ends_its_turn,
+    a_peer_reset_of_the_holder_ends_its_turn,
+    a_reused_slot_does_not_inherit_the_turn,
+    closing_the_holder_leaves_no_stale_turn,
+    check_invariants_catches_a_stale_turn
+);

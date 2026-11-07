@@ -67,9 +67,9 @@ pub struct AdversaryCfg {
     pub peer_data: bool,
     pub boost_flip: bool,
     pub newreno: bool,
-    /// 送信の番を有効にするか。Go に無い選択で、種の Fibonacci hash の最上位の bit で決め、ほかの選択と
+    /// 送信の番の長さ N で、0 は無効です。Go に無い選択で、種の Fibonacci hash で決め、ほかの選択と
     /// 揃わないようにします (wgstack-rs.md の「送信の番」)。
-    pub send_turn: bool,
+    pub send_turn: u8,
 }
 
 impl AdversaryCfg {
@@ -91,7 +91,7 @@ impl AdversaryCfg {
             peer_data: seed % 3 == 2 || seed % 5 == 1,
             boost_flip: seed % 4 == 1,
             newreno: seed % 6 == 5,
-            send_turn: seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 63 == 1,
+            send_turn: super::net::send_turn_for_seed(seed),
         }
     }
 }
@@ -142,11 +142,7 @@ fn run(cfg: &AdversaryCfg) {
         udp_tx_datagrams: fuzz_limits().udp_tx_datagrams,
         ..small_limits()
     });
-    let base_cfg = if cfg.send_turn {
-        base_cfg.with_send_turn()
-    } else {
-        base_cfg
-    };
+    let base_cfg = base_cfg.with_send_turn_segments(cfg.send_turn);
     let config = Config {
         congestion: if cfg.newreno {
             Congestion::NewReno

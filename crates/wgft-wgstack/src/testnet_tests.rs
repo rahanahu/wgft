@@ -218,13 +218,18 @@ impl TestNet {
         Self::with_config(config, seed)
     }
 
-    /// 送信の番を [`crate::SEND_TURN_SEGMENTS`] の長さで有効にした核です。規則の試験の入口です。
+    /// 送信の番を [`crate::SEND_TURN_SEGMENTS`] の長さで有効にした核です。
     pub(crate) fn with_send_turn(limits: Limits) -> Self {
+        Self::with_send_turn_segments(limits, crate::SEND_TURN_SEGMENTS)
+    }
+
+    /// 送信の番を `segments` の長さで有効にした核です。規則の試験の入口です。
+    pub(crate) fn with_send_turn_segments(limits: Limits, segments: u8) -> Self {
         let config = Config {
             limits,
             ..Config::new(DUT, TEST_MTU)
         }
-        .with_send_turn();
+        .with_send_turn_segments(segments);
         Self::with_config(config, [7; 64])
     }
 

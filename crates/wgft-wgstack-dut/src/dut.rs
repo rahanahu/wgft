@@ -267,14 +267,14 @@ impl WgstackDut {
 
     /// fuzz の `replay` の target のために、`HELLO` の上限の組の代わりに表の大きさ `limits` で、渡した `budget`
     /// を持つ核を作ります。作れなければ誤りと `budget` を返します。`HELLO` の版と時計は確かめません。
-    /// `send_turn` が真なら送信の番を有効にします。記録の照合 ([`WgstackDut::for_replay`]) は番を使いません。
+    /// `send_turn` は送信の番の長さ N (0 は無効) です。記録の照合 ([`WgstackDut::for_replay`]) は番を使いません。
     ///
     /// `spare` は前の核の [`WgstackDut::close_stack_keeping`] が返した表で、新しく作る代わりに使います
     /// ([`Stack::new_reusing`])。
     pub fn for_fuzz(
         h: &Hello,
         limits: Limits,
-        send_turn: bool,
+        send_turn: u8,
         budget: Budget,
         spare: Spare,
     ) -> Result<Self, (HelloError, Budget)> {
@@ -331,7 +331,7 @@ impl WgstackDut {
                 frame::Boost::Never => BoostPolicy::Never,
             },
             // 記録の HELLO は送信の番を持たず、凍結した Go の wgstack にも番は無いので、照合は番の無い核で流す。
-            send_turn: false,
+            send_turn: 0,
         }
     }
 
