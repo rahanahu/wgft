@@ -216,8 +216,9 @@
 # once the tunnel is up and again at the start of every run, fail the mode or run when that does not
 # take, check the threads at the end of every run, failing the run when one left its CPUs (a worker
 # started later inherits the data-plane thread's CPUs), record the number of workers
-# (agent_crypto_threads) and warn when there is none, and sample every thread of the agent
-# (agentvm_thr_dp_*, _crypto_*, _other_*). AGENT_WORKER_CPUS is a comma list, one CPU per worker.
+# (agent_crypto_threads) and warn when there is none, the gated send helper the same way
+# (agent_send_threads, placed with the workers), and sample every thread of the agent
+# (agentvm_thr_dp_*, _crypto_*, _send_*, _other_*). AGENT_WORKER_CPUS is a comma list, one CPU per worker.
 # The peer VM's vCPUs are also sampled every 0.5 s over the run (tcpquality.py peerseries): the
 # result line gets the window's intervals (peervm_series_intervals), those in which some vCPU was
 # saturated, at least 0.95 busy with its own bound kernel workers at 0.9 or more
@@ -948,6 +949,7 @@ for mode in $MODES; do
         if [ -n "$AGENT_DP_CPUS" ] && [ "$mode" = rust ]; then
           if threads_now=$(agentsh pin-threads "$agent_pid" "$AGENT_DP_CPUS" "$AGENT_WORKER_CPUS" 2>&1); then
             crypto_field=" agent_crypto_threads=$(echo "$threads_now" | sed -n 's/^crypto_threads=\([0-9]*\).*/\1/p' | head -1)"
+            crypto_field="$crypto_field agent_send_threads=$(echo "$threads_now" | sed -n 's/^crypto_threads=[0-9]* send_threads=\([0-9]*\).*/\1/p' | head -1)"
           else
             echo "FAIL  agent $mode run $run: cannot place its threads: $threads_now"; fail=1 run_pass=0
           fi

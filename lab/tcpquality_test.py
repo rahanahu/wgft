@@ -640,6 +640,57 @@ class HostCounters(unittest.TestCase):
 
 
 
+class Observe(unittest.TestCase):
+    LOG = ("2026-11-07T00:00:00Z tunnel: up\n"
+           "2026-11-07T00:00:01Z observe: dp_wakes=10 dp_idle_wakes=2 gs_made=0\n"
+           "2026-11-07T00:00:02Z observe: dp_wakes=30 dp_idle_wakes=5 gs_made=1 gs_open=1 gs_open_ms=1500 "
+           "gs_transitions=1 gs_jobs=40 gs_packets=2560 gs_owner_packets=40 gs_helper_wakes=3 gs_owner_wakes=37 gs_waits=37\n"
+           "2026-11-07T00:00:02Z something else\n")
+
+    def test_the_last_observe_line_wins(self):
+        got = dict(tq.parse_observe(self.LOG))
+        self.assertEqual((got["obs_dp_wakes"], got["obs_gs_open_ms"], got["obs_gs_owner_wakes"]), (30, 1500, 37))
+        self.assertEqual(tq.parse_observe("no such line\n"), [])
+
+    def test_the_counters_come_from_the_process_s_output_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "agent.log")
+            with open(path, "w") as f:
+                f.write(self.LOG)
+            with open(path, "a") as out:
+                p = subprocess.Popen(["sleep", "5"], stdout=out)
+            try:
+                self.assertEqual(dict(tq.observe_counters(p.pid))["obs_gs_jobs"], 40)
+            finally:
+                p.kill()
+                p.wait()
+        self.assertEqual(tq.observe_counters(0), [])
+
+    def test_snapdiff_gives_counts_rates_open_share_and_wakes_per_1000_packets(self):
+        before = "agentvm_t=0 agentvm_busy_us=0 agentvm_user_us=0 agentvm_sys_us=0 agentvm_soft_us=0 agentvm_irq_us=0 " \
+                 "agentvm_steal_us=0 agentvm_proc_us=0 agentvm_proc_vcs=0 agentvm_proc_nvcs=0 " \
+                 "agentvm_obs_dp_wakes=100 agentvm_obs_gs_open_ms=0 agentvm_obs_gs_packets=0 agentvm_obs_gs_owner_packets=0 " \
+                 "agentvm_obs_gs_helper_wakes=0 agentvm_obs_gs_owner_wakes=0 agentvm_obs_gs_open=0"
+        after = "agentvm_t=10 agentvm_busy_us=1000000 agentvm_user_us=0 agentvm_sys_us=0 agentvm_soft_us=0 agentvm_irq_us=0 " \
+                "agentvm_steal_us=0 agentvm_proc_us=500000 agentvm_proc_vcs=10 agentvm_proc_nvcs=0 " \
+                "agentvm_obs_dp_wakes=1100 agentvm_obs_gs_open_ms=5000 agentvm_obs_gs_packets=9000 agentvm_obs_gs_owner_packets=1000 " \
+                "agentvm_obs_gs_helper_wakes=40 agentvm_obs_gs_owner_wakes=120 agentvm_obs_gs_open=1"
+        p = subprocess.run([sys.executable, TQ, "snapdiff", "2000000000", "10", "down", before, after],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        got = dict(kv.split("=") for kv in p.stdout.split())
+        self.assertEqual(got["agentvm_obs_dp_wakes"], "1000")
+        self.assertEqual(got["agentvm_obs_dp_wakes_per_s"], "100.0")
+        self.assertEqual(got["agentvm_obs_gs_open_share"], "0.500")
+        self.assertEqual(got["agentvm_obs_gs_wakes_per_kpkt"], "16.00")
+        self.assertNotIn("agentvm_obs_gs_open", got)
+        self.assertNotIn("agentvm_obs_dp_idle_wakes", got)
+
+    def test_the_send_helper_is_its_own_thread_group(self):
+        self.assertEqual([tq.thread_group(c) for c in ("wgft-dataplane", "wgft-crypto", "wgft-send", "tokio")],
+                         ["dp", "crypto", "send", "other"])
+
+
 class Placement(unittest.TestCase):
     def test_parse_irq_cpus_sums_one_device_per_cpu(self):
         text = INTERRUPTS + "  30:        900        800  PCI-MSIX-0000:06:00.0   1-edge      virtio12-input.0\n"

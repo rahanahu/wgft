@@ -778,6 +778,8 @@ paired_agent_logs() {
 # ref は ~/.cache の一時的な worktree に取り出し、build の後すぐに消す。Go の build は lab build と同じく
 # WGFT_LAB_BUILD_TAGS を付ける。Rust の target は ~/.cache/wgft-lab/paired-base-target に置き、作業ツリーの target に
 # base の binary を残さない。この置き場は消さずに次の --base の build で依存を使い回す
+# LAB_RUST_FEATURES (cargo の feature、例えば lab-observe) は head と同じく base の Rust の wgft にも付け、2 つの腕を
+# 同じ形の build にする。
 # PAIRED_BASE_RUST_TARGET (--base-rust-target) は base の Rust の wgft の target で、既定は x86_64-unknown-linux-musl。
 # x86_64-unknown-linux-gnu.2.41 のような glibc の target にすると、同じ commit の割り当て器と libc の違いを比べられる
 paired_build_base() {
@@ -797,7 +799,7 @@ paired_build_base() {
     # install までを置き場の flock で 1 つにし、同時の --base の build が互いの binary を入れないようにする
     (
       flock 9
-      rust_build "$PAIRED_BASE_WT" "$target" "$REPO/bin/base/rust/wgft" "$tdir"
+      rust_build "$PAIRED_BASE_WT" "$target" "$REPO/bin/base/rust/wgft" "$tdir" "${LAB_RUST_FEATURES:-}"
     ) 9>"$tdir.lock" || die "cannot build the Rust wgft of --base $ref for $target"
   fi
   git -C "$REPO" worktree remove --force "$PAIRED_BASE_WT" >/dev/null 2>&1 || true
@@ -1154,7 +1156,7 @@ paired_header() {
   local kern=$PAIRED_KERN dirty=$PAIRED_DIRTY
   {
     echo "lab paired: path $path, direction $direction, x=$spec_x y=$spec_y, $rounds rounds of $runs runs, tool ${tool:-tcpquality}, ${streams:-1} stream(s)${churnrate:+, $churnrate connections a second for ${churnsecs:-10} s}${bulkmbit:+, capped at $bulkmbit Mbit/s per stream}${agentgso:+, agent UDP GSO $agentgso}${rmemmax:+, kernel receiver tcp_rmem max $rmemmax}${udpping:+, UDP round trips}${iperfs:+, ${iperfs}-second transfers}${iperfint:+, iperf3 interval $iperfint s}${tcpbufmax:+, TCP buffers up to $tcpbufmax}${clientts:+, client TCP timestamps $clientts}${latestart:+, last stream ${latestart} s late}${pathchange:+, path change $pathchange}${crosstcp:+, TCP beside the tunnel ($crosstcp)}${udpblast:+, UDP blast $udpblast Mbit/s}${record:+, recorded}"
-    echo "lab paired: head $(git -C "$REPO" rev-parse HEAD)$dirty${base:+, base $(git -C "$REPO" rev-parse "$base^{commit}") ($base)}${WGFT_LAB_RUST_TARGET:+, head Rust target $WGFT_LAB_RUST_TARGET}${PAIRED_BASE_RUST_TARGET:+, base Rust target $PAIRED_BASE_RUST_TARGET}"
+    echo "lab paired: head $(git -C "$REPO" rev-parse HEAD)$dirty${base:+, base $(git -C "$REPO" rev-parse "$base^{commit}") ($base)}${WGFT_LAB_RUST_TARGET:+, head Rust target $WGFT_LAB_RUST_TARGET}${PAIRED_BASE_RUST_TARGET:+, base Rust target $PAIRED_BASE_RUST_TARGET}${LAB_RUST_FEATURES:+, Rust features $LAB_RUST_FEATURES in every Rust build, head and base}"
     if [[ -n $split ]]; then
       echo "lab paired: split: forwarding target ${target:-lan} (lan: a host on the LAN in the peer VM; local: on the agent's machine, over loopback)"
       echo "lab paired: split: agent VM ${names[0]} limits.cpu=${pins[0]} qemu $SPLIT_QEMU_AGENT, peer VM ${names[1]} limits.cpu=${pins[1]} qemu $SPLIT_QEMU_PEER, network $PAIRED_SPLIT_NET (taps$SPLIT_TAPS, queue ${PAIRED_TAP_QLEN:-4096}, NIC queues $SPLIT_PEER_Q), agentd $SPLIT_AGENT_AT, kernel $kern, template $SUITE_TEMPLATE"

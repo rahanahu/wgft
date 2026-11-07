@@ -1791,8 +1791,9 @@ class ThreadSampler:
 THREAD_SAMPLERS = {}
 
 # the agent's threads by name: the data-plane thread, the crypto workers of builds that have them,
+# the send helper of builds that have one (the experimental gated send),
 # and the rest (control, resolver and the runtime's own)
-THREAD_GROUPS = (("wgft-dataplane", "dp"), ("wgft-crypto", "crypto"))
+THREAD_GROUPS = (("wgft-dataplane", "dp"), ("wgft-crypto", "crypto"), ("wgft-send", "send"))
 
 
 def thread_group(comm):
@@ -2081,6 +2082,39 @@ SNMP_KEYS = {("TcpExt", "TCPOFOQueue"): "tcp_ofoq", ("TcpExt", "TCPOFODrop"): "t
              ("TcpExt", "ListenDrops"): "tcp_listendrops"}
 
 
+def parse_observe(text):
+    # the last "observe: k=v ..." line of an agent log: the cumulative counters that lab-observe
+    # builds of the Rust agent write (data-plane wake-ups, and the gated send helper's hand-offs,
+    # wake-ups and open time), as obs_<k>; integer values only
+    for line in reversed(text.splitlines()):
+        _, sep, rest = line.partition("observe: ")
+        if not sep:
+            continue
+        kv = []
+        for tok in rest.split():
+            k, eq, v = tok.partition("=")
+            if eq and v.isdigit():
+                kv.append(("obs_" + k, int(v)))
+        return kv
+    return []
+
+
+def observe_counters(pid, tail=65536):
+    # snap_line with a pid: the counters of the last observe line in the process's log, the file its
+    # standard output points to (the lab starts the agent with stdout and stderr in one log file, and
+    # the agent writes its log lines to stderr); none when that is not a file
+    try:
+        path = os.readlink("/proc/%s/fd/1" % pid)
+        if not path.startswith("/"):
+            return []
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - tail))
+            return parse_observe(f.read().decode("utf-8", "replace"))
+    except (OSError, ValueError):
+        return []
+
+
 def snap_line(prefix, pid="", cg="", *specs):
     # one line of cumulative counters, each key starting with <prefix>_:
     #   busy_us, user_us, sys_us, soft_us, irq_us, steal_us, cpu<N>_us (busy per CPU) and
@@ -2093,7 +2127,7 @@ def snap_line(prefix, pid="", cg="", *specs):
     # nicirq:<ns>:<ifname> adds nicirq_cpu<N> and nicirq_eff (nicirq_counters) and, with a pid,
     # thread:<label>:<comm> adds thr_<label>_* (ThreadSampler, which keeps sampling between calls in
     # a long-lived process such as agentd), threads:all the same per thread group of every thread
-    # (ThreadsSampler: dp, crypto, other); kthreads adds the per-CPU kernel workers' time
+    # (ThreadsSampler: dp, crypto, send, other); kthreads adds the per-CPU kernel workers' time
     # (kthread_counters).
     hz = os.sysconf("SC_CLK_TCK")
     us = lambda ticks: int(ticks) * 1000000 // hz
@@ -2139,6 +2173,7 @@ def snap_line(prefix, pid="", cg="", *specs):
             except OSError:
                 pass
         kv += [("proc_vcs", vcs), ("proc_nvcs", nvcs)]
+        kv += observe_counters(pid)
     kv += guest_counters()
     kv += tcpmem_counters()
     # nicirq:<ns>:<ifname> and thread:<label>:<comm> (with a pid): the placement counters above
@@ -2289,6 +2324,30 @@ def placement_parts(p, d, a, t):
     return out
 
 
+def observe_diff(p, d, t):
+    # the observe counters over the window: each as <p>_obs_<k> (the count) and <p>_obs_<k>_per_s; the
+    # gate's open time as a share of the window; and the helper's and the owner's wake-ups per 1000
+    # packets the data plane sent through or beside the helper. The state gs_open and gs_made are
+    # not counts and are left out
+    out = []
+    put = lambda k, v, fmt="%.3f": out.append(("%s=" + fmt) % (k, v))
+    pre = p + "_obs_"
+    for k in ("dp_wakes", "dp_idle_wakes", "gs_transitions", "gs_jobs", "gs_packets", "gs_owner_packets",
+              "gs_helper_wakes", "gs_owner_wakes", "gs_waits"):
+        v = d(pre + k)
+        if v is None:
+            continue
+        put(pre + k, v, "%.0f")
+        put(pre + k + "_per_s", v / t, "%.1f")
+    if d(pre + "gs_open_ms") is not None:
+        put(pre + "gs_open_share", d(pre + "gs_open_ms") / 1000.0 / t)
+    pk = [d(pre + k) for k in ("gs_packets", "gs_owner_packets")]
+    wk = [d(pre + k) for k in ("gs_helper_wakes", "gs_owner_wakes")]
+    if None not in pk and None not in wk and sum(pk) > 0:
+        put(pre + "gs_wakes_per_kpkt", sum(wk) * 1000.0 / sum(pk), "%.2f")
+    return out
+
+
 def snapdiff(nbytes, window_s, direction, before, after):
     # the run's values from two snap lines (several snap lines joined by spaces): per VM prefix
     # (agentvm, peervm, and vm in a single-VM lab) its CPU per GB, its busy share and the shares of
@@ -2325,6 +2384,7 @@ def snapdiff(nbytes, window_s, direction, before, after):
         if d(p + "_proc_us") is not None:
             put(p + "_proc_cs_per_s", (d(p + "_proc_vcs") + d(p + "_proc_nvcs")) / t, "%.0f")
             put(p + "_proc_nvcs_per_s", d(p + "_proc_nvcs") / t, "%.0f")
+        out += observe_diff(p, d, t)
         # interrupts and softirqs per second (the virtio vectors also per GB), and the idle states:
         # entries per second and the share of the window spent in each, summed over the VM's CPUs
         for k in sorted(a_ for a_ in a if a_.startswith(p + "_irq_") or a_.startswith(p + "_sirq_")):
