@@ -320,6 +320,16 @@ fn hs_rounds(
     rounds: usize,
     rtt: impl Fn(usize) -> Duration,
 ) -> Vec<u32> {
+    hs_rounds_keep(r, first, rounds, rtt).0
+}
+
+/// `hs_rounds` と同じで、最後の往復で核が出した送り出し (まだ確認していない) も返します。
+fn hs_rounds_keep(
+    r: &mut Rig,
+    first: Vec<Out>,
+    rounds: usize,
+    rtt: impl Fn(usize) -> Duration,
+) -> (Vec<u32>, Vec<Out>) {
     let mss = r.mss;
     let mut windows = Vec::new();
     let mut flight = first;
@@ -343,7 +353,7 @@ fn hs_rounds(
         }
         flight = r.take();
     }
-    windows
+    (windows, flight)
 }
 
 /// CSS を終えた直後は ssthresh が窓に揃っています。CUBIC は同じ ACK の続きで 1 SMSS に満たない分を足すことがあります。
@@ -557,5 +567,65 @@ fn the_initial_slow_start_enters_and_leaves_css() {
         assert_eq!(st.hystart_exits, 1, "{cc:?}: windows {w:?}");
         assert_eq!(w.len(), 1 + CSS_ROUNDS, "{cc:?}: windows {w:?}");
         assert_at_css_exit(&mut r, &w);
+    }
+}
+
+// 4. 黙った後の再開は HyStart++ の状態を最初から始める
+
+/// 最初の slow start の CSS の間に本物の損失があると、損失は HyStart++ の往復の状態に触れず、ssthresh だけが有限になります。
+/// その後に黙って再開すると、再開は CSS の続きでなく新しい HyStart++ として L = 2 で育ちます (RFC 9406 4.2 節)。
+/// 再開で往復の状態を戻さないと、CSS の 1 / CSS_GROWTH_DIVISOR で育ってしまう。
+/// 今の核は HyStart++ の外の L = 2 なので通ります (統制)。
+#[test]
+fn idle_restart_after_a_loss_in_css_starts_hystart_afresh() {
+    for cc in CCS {
+        let mut r = Rig::new(cc, true, 10, 10);
+        let mss = r.mss;
+        let mut first = std::mem::take(&mut r.outs);
+        r.write(400 * mss as usize);
+        first.extend(r.take());
+        // 最初の slow start で RTT が上がり、CSS に入る
+        let (w, flight) = hs_rounds_keep(&mut r, first, 3, rising_rtt);
+        let st = r.n.s.stats();
+        assert_eq!(st.hystart_css, 1, "{cc:?}: in CSS; windows {w:?}");
+        assert_eq!(st.hystart_exits, 0, "{cc:?}: not left; windows {w:?}");
+        assert_eq!(
+            r.ssthresh(),
+            u32::MAX,
+            "{cc:?}: still the initial slow start"
+        );
+        // CSS の間に先頭を失い、本物の高速の回復に入って終える
+        r.n.advance(rising_rtt(3));
+        r.q.deliver_with(&mut r.n, &flight, |i, _| i == 0);
+        let resent = r.take();
+        assert_eq!(r.n.s.stats().fast_recoveries, 1, "{cc:?}: entered");
+        assert!(!resent.is_empty() && resent[0].seq == flight[0].seq);
+        r.n.advance(Duration::from_millis(1));
+        r.q.deliver(&mut r.n, &resent[..1]);
+        r.settle();
+        assert!(!r.in_recovery(), "{cc:?}: recovery ended");
+        assert_ne!(r.ssthresh(), u32::MAX, "{cc:?}: the loss set ssthresh");
+        // 損失が決めた ssthresh は IW より小さいので、再開が slow start になるよう上げる (往復の状態には触れない)
+        r.set_ssthresh(100_000);
+        assert_eq!(r.n.s.stats().hystart_exits, 0, "{cc:?}: CSS never left");
+        // 黙って、窓を IW に戻して再開する。最初の ACK の増分は L = 2
+        r.n.s.conn(r.c.slot).t.cwnd = 40 * mss;
+        r.n.advance(Duration::from_secs(60));
+        assert_eq!(r.rtos(), 0, "{cc:?}: the idle raised no RTO");
+        r.write(400 * mss as usize);
+        let outs = r.take();
+        assert_eq!(
+            outs.len() as u32,
+            crate::tcp::INITIAL_WINDOW_SEGS,
+            "{cc:?}: the idle restart returns the window to IW"
+        );
+        assert!(r.cwnd() < r.ssthresh(), "{cc:?}: slow start");
+        r.n.advance(RTT);
+        let before = r.cwnd();
+        for o in &outs {
+            r.q.recv(o);
+        }
+        r.q.ack(&mut r.n);
+        assert_eq!(r.cwnd() - before, 2 * mss, "{cc:?}");
     }
 }
