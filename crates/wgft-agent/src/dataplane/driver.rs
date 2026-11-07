@@ -957,14 +957,19 @@ fn start_of_generation() -> Instant {
     clock::now()
 }
 
-/// 観測の build だけの数:駆動の task の起床と、仕事の無い起床 (読むものも送るものも無かった)、送りの手伝いの数。
-/// 累計を 1 秒に 1 回まで、起床の終わりに書く。起床を足さない。ラボは実行の前後の差を取る。
+/// 観測の build だけの数:駆動の task の起床と、仕事の無い起床 (読むものも送るものも無かった)、送りの手伝いの数と
+/// 門が開いていた時間。累計を `key=value` の 1 行にして、[`OBSERVE_EVERY`] に 1 回まで起床の終わりに書く。起床を
+/// 足さない。ラボは測る窓の前後の行の差を取る。
 #[cfg(feature = "lab-observe")]
 struct Observe {
     last: Instant,
     wakes: u64,
     idle: u64,
 }
+
+/// 観測の行の間隔。ラボの窓 (10 秒以上) の端の誤差を数 % に収める。
+#[cfg(feature = "lab-observe")]
+const OBSERVE_EVERY: Duration = Duration::from_millis(200);
 
 #[cfg(feature = "lab-observe")]
 impl Observe {
@@ -982,17 +987,18 @@ impl Observe {
         if now == start {
             self.idle += 1;
         }
-        if now.saturating_duration_since(self.last) < Duration::from_secs(1) {
+        if now.saturating_duration_since(self.last) < OBSERVE_EVERY {
             return;
         }
         self.last = now;
         let gated = helper.map_or_else(
-            || "not made".to_owned(),
+            || "gs_made=0".to_owned(),
             |h| {
                 let c = h.counters();
                 format!(
-                    "open {}, transitions {}, jobs {}, packets {}, owner packets {}, helper wakes {}, owner wakes {}, waits {}",
-                    h.gate.is_open(),
+                    "gs_made=1 gs_open={} gs_open_ms={} gs_transitions={} gs_jobs={} gs_packets={} gs_owner_packets={} gs_helper_wakes={} gs_owner_wakes={} gs_waits={}",
+                    u8::from(h.gate.is_open()),
+                    h.gate.open_time(now).as_millis(),
                     c.transitions,
                     c.jobs,
                     c.packets,
@@ -1004,7 +1010,7 @@ impl Observe {
             },
         );
         crate::logf!(
-            "observe: data plane wakes {}, without work {}; gated send: {gated}",
+            "observe: dp_wakes={} dp_idle_wakes={} {gated}",
             self.wakes,
             self.idle
         );

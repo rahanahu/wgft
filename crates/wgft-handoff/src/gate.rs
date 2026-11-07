@@ -37,6 +37,9 @@ pub struct Gate {
     streak: u32,
     /// 切り替わった数。
     transitions: u64,
+    /// 開いていた時間の和 (ns、今開いている分を除く) と、今開いているならその時刻。
+    open_ns: u64,
+    opened_at: Option<Instant>,
 }
 
 impl Gate {
@@ -49,6 +52,15 @@ impl Gate {
     #[must_use]
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// `now` までに開いていた時間の和。
+    #[must_use]
+    pub fn open_time(&self, now: Instant) -> Duration {
+        let current = self
+            .opened_at
+            .map_or(Duration::ZERO, |at| now.saturating_duration_since(at));
+        Duration::from_nanos(self.open_ns) + current
     }
 
     /// これまでに切り替わった数。
@@ -106,6 +118,13 @@ impl Gate {
         self.streak = 0;
         self.open = !self.open;
         self.transitions += 1;
+        if self.open {
+            self.opened_at = Some(end);
+        } else if let Some(at) = self.opened_at.take() {
+            self.open_ns = self
+                .open_ns
+                .saturating_add(nanos(end.saturating_duration_since(at)));
+        }
         if self.open {
             self.helper_mark = helper_busy();
         }
@@ -299,5 +318,10 @@ mod tests {
         }
         assert!(opened);
         assert_eq!(g.transitions(), 1);
+        assert!(g.open_time(t) < WINDOW, "{:?}", g.open_time(t));
+        assert_eq!(
+            g.open_time(t + WINDOW).checked_sub(g.open_time(t)),
+            Some(WINDOW)
+        );
     }
 }
