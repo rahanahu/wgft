@@ -2039,6 +2039,18 @@ addr_csv() { local out="" i; for i in $(seq "$1" "$2"); do out+="198.51.100.$i,"
 # listening_on <port>: the server listens on the port (its rule is applied), without taking a flow
 # slot the way tcp_probe_ok would.
 listening_on() { vps ss -ltn 2>/dev/null | grep -q ":$1 "; }
+# agent_opened <tag> <rule id> <port>...: the agent has opened its side of the rule on each port
+# (its log's "listener tcp/<port> -> <target> opened; rule <id>", the same line for the Go and the
+# Rust agent; the id makes it unique to this rule). The server listens as soon as it has applied the
+# rule, before the agent has: a flood started then meets connections the agent still refuses,
+# and the server releases their slots, so the held counts the check asserts on come out short.
+agent_opened() {
+  local tag=$1 id=$2 port; shift 2
+  for port in "$@"; do
+    must_wait "$tag: the agent opened its listener for rule $id on $port" 10 \
+      log_has "$W/wgft-lifecycle-$tag-agent.log" "listener tcp/$port -> .* opened; rule $id"
+  done
+}
 
 # check 5f: the reasons rule_cap, budget, floor and reserve on real connections (design 7a.10 節's
 # examples). Rule A alone holds 1020 flows. Rule B joins (m becomes 510): A is refused by rule_cap
@@ -2059,12 +2071,14 @@ check5f() {
   local idA idB
   idA=$(vps wgft rule add --agent home --tcp 39960 --to 192.168.50.3:25599 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   must_wait "$tag: rule A listens" 10 listening_on 39960
+  agent_opened "$tag" "$idA" 39960
   c5_flood "$tag" fillA 39960 "$(addr_csv 10 30)" 48 120; pids+=("$C5_PID")
   c5_flood "$tag" topA 39960 "$(addr_csv 31 31)" 12 12; local pidA2=$C5_PID; pids+=("$C5_PID")
   local heldA; heldA=$(held_on 39960)
   eqcheck "$tag: rule A alone holds the budget but the spare" 1020 "$heldA"
   idB=$(vps wgft rule add --agent home --tcp 39961 --to 192.168.50.3:25600 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   must_wait "$tag: rule B listens" 10 listening_on 39961
+  agent_opened "$tag" "$idB" 39961
   c5_flood "$tag" overA 39960 "$(addr_csv 32 32)" 5 1; pids+=("$C5_PID")
   okcheck "$tag: rule A is refused by rule_cap once rule B joins ($(refusal_count "$idA" rule_cap))" "$([ "$(refusal_count "$idA" rule_cap)" -gt 0 ] && echo 1 || echo 0)"
   c5_flood "$tag" fillB 39961 "$(addr_csv 33 33)" 10 120; pids+=("$C5_PID")
@@ -2085,12 +2099,15 @@ check5f() {
   idC=$(vps wgft rule add --agent home --tcp 39962 --to 192.168.50.3:25599 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   idD=$(vps wgft rule add --agent home --tcp 39963 --to 192.168.50.3:25600 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   must_wait "$tag: rules C and D listen" 10 bash -c "ip netns exec '$VPS_NS' ss -ltn | grep -q ':39962 ' && ip netns exec '$VPS_NS' ss -ltn | grep -q ':39963 '"
+  agent_opened "$tag" "$idC" 39962
+  agent_opened "$tag" "$idD" 39963
   c5_flood "$tag" C 39962 "$(addr_csv 10 20)" 60 120; pids+=("$C5_PID")
   c5_flood "$tag" D 39963 "$(addr_csv 21 31)" 60 120; pids+=("$C5_PID")
   eqcheck "$tag: rule C holds its minimum of 510" 510 "$(held_on 39962)"
   eqcheck "$tag: rule D holds its minimum of 510" 510 "$(held_on 39963)"
   idX=$(vps wgft rule add --agent home --tcp 39964 --to 192.168.50.3:25599 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   must_wait "$tag: rule X listens" 10 listening_on 39964
+  agent_opened "$tag" "$idX" 39964
   c5_flood "$tag" overC 39962 "$(addr_csv 32 32)" 5 1; pids+=("$C5_PID")
   okcheck "$tag: rule C is refused by reserve once rule X joins ($(refusal_count "$idC" reserve))" "$([ "$(refusal_count "$idC" reserve)" -gt 0 ] && echo 1 || echo 0)"
   c5_flood "$tag" X 39964 "$(addr_csv 33 33)" 10 120; pids+=("$C5_PID")
@@ -2121,6 +2138,8 @@ check5g() {
   idB=$(vps wgft rule add --agent home --tcp 39970-39971 --to 192.168.50.3:25599 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   idX=$(vps wgft rule add --agent home --tcp 39972 --to 192.168.50.3:25599 --admin "$ADMIN" | grep -oE 'r_[A-Za-z0-9]+')
   must_wait "$tag: rules B and X listen" 10 bash -c "ip netns exec '$VPS_NS' ss -ltn | grep -q ':39971 ' && ip netns exec '$VPS_NS' ss -ltn | grep -q ':39972 '"
+  agent_opened "$tag" "$idB" 39970 39971
+  agent_opened "$tag" "$idX" 39972
   c5_flood "$tag" keep 39970 "$(addr_csv 40 40)" 4 300; pids+=("$C5_PID")
   c5_flood "$tag" flood 39971 "$(addr_csv 10 30)" 40 300; pids+=("$C5_PID")
   eqcheck "$tag: the flood fills B up to its minimum" 506 "$(held_on 39971)"
