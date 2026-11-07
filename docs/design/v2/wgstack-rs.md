@@ -1301,7 +1301,7 @@ D は動き、Miri の試験も通りましたが、unsafe の `GlobalAlloc` を
 
 決定に従い、上界の表は `Bound` から生成します。
 
-`wgft-wgstack` の試験 `bound::tests::bound_table_is_up_to_date` が、既定の設定と代表の K の値で `Bound` を計算し、項ごとの表を [wgstack の Rust 版の上界の表](wgstack-bound.md) に書き出します。
+`wgft-wgstack` の試験 `bound::tests::bound_table_is_up_to_date` が、wgft の agent の表の大きさ (凍結した Go の本番の値、試験の口 `Limits::go_reference`) と代表の K の値で `Bound` を計算し、項ごとの表を [wgstack の Rust 版の上界の表](wgstack-bound.md) に書き出します。
 環境変数 `WGFT_UPDATE_GOLDEN=1` を付けたときだけファイルを書き直し、付けないときは差があれば失敗します。
 Go の `-update` の形に当たります。
 試験は文書の印の間だけを書き直し、行の説明は手で書いた部分が持ちます。
@@ -1314,6 +1314,53 @@ Go の `-update` の形に当たります。
 確保の失敗の注入は型の外に置きます。
 Linux、Windows、macOS の CI で同じ表になることを確かめました。
 核の値の大きさは hook の無い核で数え、`Stack::bound` は使う hook の核の大きさで数えます。
+
+### 既定の表の大きさ
+
+`Limits::default()` (と `Config::new`) は、wgft の外の利用者のための小さく保守的な値です (所有者の 2026-11-07 の決定)。
+wgft の agent は自分の値を `wgft_agent::memory::core_limits` に書いて渡すので、既定を変えても agent の挙動と上界は変わりません。
+試験の道具 (DUT、fuzz、ベンチ、確保の数えの試験) も、Go の記録と測定を比べられるよう同じ値を使います。
+DUT と fuzz と核の試験は試験だけの口 `Limits::go_reference` を、ベンチと確保の数えの試験は agent の `core_limits` を使い、`wgft-wgstack-dut` の試験 `agent_limits` が 2 つの一致を確かめます。
+
+| 項目 | 既定 | wgft の agent |
+| --- | ---: | ---: |
+| `max_flows` (K) | 16 | `WGFT_MAX_TCP_FLOWS` (2048) |
+| `accept_queue` (Q) | 16 | 512 |
+| `syn_rows` | 64 | 1024 |
+| `tw_rows` | 1024 | 65536 |
+| `ctl_slots` | 32 | 256 |
+| `frag_entries`、`frag_pieces`、`frag_bytes` | 8、64、256 KiB | 128、512、4 MiB |
+| `udp_rx_datagrams`、`udp_tx_datagrams` | 128、128 | 4096、1024 |
+| `udp_rx_bytes`、`udp_tx_bytes` | 256 KiB、256 KiB | 4 MiB、4 MiB |
+| `boost_slots` | 0 | 16 |
+| `pool_chunks` | 8 | 64 |
+
+値は推測でなく、`crates/wgft-alloc-count/tests/wgstack_default.rs` の測定で決めました。
+この試験は次を測り、既定の上界の上限 (24 MiB) と、確保が上界の内にあることを確かめます。
+`--nocapture` で測った値を出します。
+次の値は開発機 (x86_64 の Linux、release の build、MTU 1420) の値です。
+
+- 作った時:上界は 21.6 MiB (固定の項 4.2 MiB、接続の floor の項 16.7 MiB、UDP と再組み立てで 0.8 MiB、boost は 0)。
+  作った時の確保は 4.1 MiB で、プロセスの RSS は 4.3 MiB 増えました。
+  確保の大半はポートの数の行を持つ待ち受けと UDP の endpoint の表 (合わせて約 3.3 MiB) で、表の大きさに依らない固定の費用です。
+  wgft の agent の値の核は、上界 1487.6 MiB、作った時の確保 21.7 MiB でした
+- 基本の TCP の通信:1 本の接続で 4 MiB ずつ受けて送り、確保の最大値は作った時の分を含めて 4.2 MiB でした。
+  再送は 0 で、floor の 256 KiB の窓のまま通ります
+- 上限:接続の枠 K + Q = 32 本を使い切った後の握手は、最後の ACK を捨てて `accept_overflow` に数えます。
+  32 本すべての送受信の floor を満たしても、確保の最大値は 20.8 MiB で上界 21.6 MiB の内でした
+
+既定の boost の枠は 0 です。
+boost は接続ごとに 4 MiB の段のバッファを使う分、上界を枠 1 つで約 7.8 MiB 増やすので、速さの要る利用者が数を選びます。
+floor の窓 256 KiB で、往復 50 ms の経路の 1 本の接続は約 40 Mbit/s までです (計算の値で、測っていません)。
+K、Q、行の表の数は、少数の接続を受ける組み込みを想定した値です。
+TIME_WAIT の行は 1 行が約 116 byte と小さいので、追い出しを避けるため接続の数より多くしました。
+UDP の byte の予算は下限 (`MIN_UDP_BYTES`) で、再組み立ての表は最も大きい datagram (64 KiB、MTU 1420 で 47 断片) を 1 つ組み立てられる大きさです。
+
+上界の和と RSS は違う値です。
+上界は核が要求する確保の大きさの和で、割り当て器の丸めと管理の領域、確保したがまだ触れていない頁、解放した後もプロセスに残る頁、呼び手の buffer と hook と実行器のメモリを含みません。
+RSS はこれらを含み、触れていない頁を含みません。
+`Stack` の全体の動的なメモリの予算 (使う量に応じて枠と接続に配る予算) はまだありません。
+上界は表の大きさの和で、予算を超える確保を断る仕組みは各表の上限です。
 
 ### 需要で育つバッファとの関係
 

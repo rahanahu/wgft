@@ -5,13 +5,19 @@
 //! 「接続の枠の配置」にあります。
 
 use core::net::{Ipv4Addr, SocketAddrV4};
-use wgft_wgstack::{BoostPolicy, Bound, Budget, Config, ConnId, Held, Limits, NoHook, Stack, Time};
+use wgft_wgstack::{
+    BoostPolicy, Bound, Budget, Config, ConnId, Held, Limits, NoHook, Stack, Stats, Time,
+};
 
 const DUT: Ipv4Addr = Ipv4Addr::new(10, 9, 0, 1);
 const PEER: Ipv4Addr = Ipv4Addr::new(10, 9, 0, 2);
 const MTU: usize = 1420;
 /// 相手が送る segment の中身の大きさです (timestamp を使わない接続の MSS)。
 pub const MSS: usize = MTU - 40;
+
+/// wgft の agent の表の大きさで、K を `max_flows` にした値です (0 は 2048)。核の既定は外の利用者のための小さな
+/// 値なので、測定は agent と同じ大きさの核で行います。
+pub use wgft_agent::memory::core_limits as agent_limits;
 
 const SYN: u8 = 0x02;
 const ACK: u8 = 0x10;
@@ -112,7 +118,7 @@ impl Rig {
     /// `new` と同じで、`sack` が真なら相手が SACK-permitted を示し、SACK を交渉した接続の経路 (RACK の状態の更新と
     /// TLP の期限) を通ります。
     pub fn with_sack(conns: usize, sack: bool) -> Self {
-        Self::build(conns, sack, Limits::default(), BoostPolicy::OnDemand)
+        Self::build(conns, sack, agent_limits(0), BoostPolicy::OnDemand)
     }
 
     /// `with_sack` と同じで、表の大きさ `limits` と boost の与え方 `boost` を選びます。
@@ -381,6 +387,11 @@ impl Rig {
         self.stack.held()
     }
 
+    /// 核の数えです。
+    pub fn stats(&self) -> Stats {
+        self.stack.stats()
+    }
+
     /// 核の上界です。
     pub fn bound(&self) -> Bound {
         self.stack.bound()
@@ -402,9 +413,12 @@ impl Rig {
     }
 }
 
-/// 既定の表の大きさの核を作って閉じます。核の作成の手間を測るのに使います。
+/// agent の表の大きさの核を作って閉じます。核の作成の手間を測るのに使います。
 pub fn new_and_close() {
-    let config = Config::new(DUT, MTU);
+    let config = Config {
+        limits: agent_limits(0),
+        ..Config::new(DUT, MTU)
+    };
     let stack = Stack::new(
         config,
         Budget::new(config.limits.boost_slots).expect("budget"),

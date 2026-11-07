@@ -4,16 +4,16 @@
 
 use core::net::Ipv4Addr;
 use wgft_alloc_count::{CountingAlloc, ThreadWindow};
-use wgft_wgstack::{Budget, Config, Limits, NoHook, Stack, Time};
+use wgft_wgstack::{Budget, Config, NoHook, Stack, Time};
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
 
 #[test]
 fn stack_allocations_stay_within_the_bound() {
-    for k in [64, Limits::DEFAULT_MAX_FLOWS] {
+    for k in [64, 2048] {
         let config = Config {
-            limits: Limits::with_max_flows(k),
+            limits: wgft_wgstack_bench::agent_limits(k),
             ..Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420)
         };
         let w = ThreadWindow::open();

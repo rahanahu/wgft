@@ -36,7 +36,7 @@ fn small() -> Config {
             frag_pieces: 8,
             udp_rx_datagrams: 8,
             udp_tx_datagrams: 8,
-            ..Limits::with_max_flows(0)
+            ..Limits::go_reference(0)
         },
         ..Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420)
     }

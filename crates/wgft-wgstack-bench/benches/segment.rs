@@ -9,7 +9,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use wgft_wgstack::{BoostPolicy, Limits};
-use wgft_wgstack_bench::{MSS, Rig, new_and_close};
+use wgft_wgstack_bench::{MSS, Rig, agent_limits, new_and_close};
 
 const CONNS: [usize; 3] = [1, 64, 1024];
 
@@ -73,7 +73,7 @@ fn small_limits() -> Limits {
         syn_rows: 16,
         tw_rows: 32,
         ctl_slots: 16,
-        ..Limits::default()
+        ..agent_limits(0)
     }
 }
 
@@ -82,8 +82,8 @@ fn check(c: &mut Criterion) {
     for (name, limits, n) in [
         ("small", small_limits(), 1),
         ("small", small_limits(), 16),
-        ("default", Limits::default(), 1),
-        ("default", Limits::default(), 1024),
+        ("default", agent_limits(0), 1),
+        ("default", agent_limits(0), 1024),
     ] {
         let mut rig = Rig::build(n, true, limits, BoostPolicy::OnDemand);
         for i in 0..4 * n {

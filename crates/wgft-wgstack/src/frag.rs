@@ -42,7 +42,8 @@ pub(crate) struct Limits {
     pub(crate) lifetime: u64,
 }
 
-/// 本番の上限です。Go の wgstack と `internal/nettun` と同じ値で、設定の項目にしません。
+/// 凍結した Go の wgstack と `internal/nettun` の本番の上限です。項目と断片の数と保持の byte は [`crate::Limits`] が持ち、
+/// 寿命だけをここから使います。
 pub(crate) const LIMITS: Limits = Limits {
     entries: 128,
     fragments: 512,

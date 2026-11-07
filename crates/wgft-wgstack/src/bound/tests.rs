@@ -18,7 +18,7 @@ use core::fmt::Write;
 use core::net::Ipv4Addr;
 
 /// 生成する上界の表の K の値です。
-const TABLE_KS: [usize; 3] = [256, Limits::DEFAULT_MAX_FLOWS, 8192];
+const TABLE_KS: [usize; 3] = [256, 2048, 8192];
 /// 生成する上界の表の MTU です。
 const TABLE_MTU: usize = 1420;
 
@@ -32,7 +32,7 @@ const END: &str = "<!-- END GENERATED TABLE -->\n";
 
 /// 生成する表です。行の名前は `FixParts` と `Bound` の欄の名前で、説明は文書の手で書いた部分が持ちます。
 fn table() -> String {
-    let limits = TABLE_KS.map(Limits::with_max_flows);
+    let limits = TABLE_KS.map(Limits::go_reference);
     let parts = limits.map(|l| fix_parts(&l, TABLE_MTU, crate::stack::stack_size::<NoHook>()));
     let bounds = limits.map(|l| Bound::for_limits(&l, TABLE_MTU));
     let mut w = String::new();
@@ -104,6 +104,7 @@ fn bound_table_is_up_to_date() {
 #[test]
 fn fix_matches_the_allocated_tables() {
     for limits in [
+        Limits::go_reference(0),
         Limits::default(),
         Limits {
             max_flows: 8,
@@ -184,10 +185,13 @@ fn fix_matches_the_allocated_tables() {
 /// 上界は表の大きさだけで決まり、使い方で変わりません (Go の TestBoundDoesNotDependOnUse)。
 #[test]
 fn bound_does_not_depend_on_use() {
-    let config = Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420);
+    let config = Config {
+        limits: Limits::go_reference(0),
+        ..Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420)
+    };
     let mut s = Stack::new(
         config,
-        Budget::new(crate::buf::BOOST_SLOTS).unwrap(),
+        Budget::new(config.limits.boost_slots).unwrap(),
         &[1; 64],
         NoHook,
     )
@@ -222,7 +226,7 @@ fn a_full_stack_meets_each_term() {
         frag_pieces: 8,
         udp_rx_datagrams: 8,
         udp_tx_datagrams: 4,
-        ..Limits::with_max_flows(0)
+        ..Limits::go_reference(0)
     };
     let config = Config {
         addr: Ipv4Addr::new(10, 9, 0, 1),

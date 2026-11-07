@@ -72,7 +72,7 @@ impl<H: Hook + 'static> Access for Local<Netstack<H>> {
 pub(crate) struct StackSettings {
     /// The tunnel address, the only address the core accepts.
     pub addr: Ipv4Addr,
-    /// The table sizes; production uses [`Limits::with_max_flows`] with `WGFT_MAX_TCP_FLOWS`.
+    /// The table sizes; production uses [`crate::memory::core_limits`] with `WGFT_MAX_TCP_FLOWS`.
     pub limits: Limits,
 }
 

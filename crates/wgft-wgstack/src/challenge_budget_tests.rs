@@ -441,7 +441,7 @@ fn guard_limits() -> Limits {
         accept_queue: 16,
         syn_rows: 256,
         tw_rows: 2048,
-        ..Limits::default()
+        ..Limits::go_reference(0)
     }
 }
 

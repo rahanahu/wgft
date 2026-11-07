@@ -1137,7 +1137,7 @@ fn closed_port_syn(n: &mut TestNet, sport: u16) {
 /// 同じ drain の間に大きな echo request を多数送っても、echo の断片は 64 枠までで、出た応答はどれも断片が揃います。
 #[test]
 fn echo_replies_hold_at_most_64_ring_slots_and_none_is_partial() {
-    let mut n = TestNet::new(crate::config::Limits::default());
+    let mut n = TestNet::new(crate::config::Limits::go_reference(0));
     for i in 0..100u16 {
         send_big_echo(&mut n, 100 + i, 3000);
     }
@@ -1158,7 +1158,7 @@ fn echo_replies_hold_at_most_64_ring_slots_and_none_is_partial() {
 /// RST や ICMP の誤りが落ちないとは主張しません。この規模では落ちないことだけを確かめます。
 #[test]
 fn echo_flood_leaves_room_for_rst_and_icmp_errors() {
-    let mut n = TestNet::new(crate::config::Limits::default());
+    let mut n = TestNet::new(crate::config::Limits::go_reference(0));
     for i in 0..200u16 {
         send_big_echo(&mut n, 100 + i, 3000);
     }
@@ -1186,7 +1186,7 @@ fn echo_flood_leaves_room_for_rst_and_icmp_errors() {
 /// 捨てた応答ごとに ctl_dropped_echo が 1 増え、ctl_dropped は 3 種類の合計です。
 #[test]
 fn echo_drops_are_counted_per_whole_reply() {
-    let mut n = TestNet::new(crate::config::Limits::default());
+    let mut n = TestNet::new(crate::config::Limits::go_reference(0));
     let requests = 100u64;
     for i in 0..requests as u16 {
         send_big_echo(&mut n, 100 + i, 3000);
@@ -1204,7 +1204,7 @@ fn echo_drops_are_counted_per_whole_reply() {
 /// 輪が RST で満ちると、RST、ICMP の誤り、echo の捨てがそれぞれの欄に数えられ、合計は 3 つの和です。
 #[test]
 fn drops_are_counted_by_kind_and_sum_to_the_total() {
-    let mut n = TestNet::new(crate::config::Limits::default());
+    let mut n = TestNet::new(crate::config::Limits::go_reference(0));
     let (rsts, errors, echoes) = (300u64, 50u64, 5u64);
     for i in 0..rsts as u16 {
         closed_port_syn(&mut n, 40000 + i);
@@ -1239,7 +1239,7 @@ fn drops_are_counted_by_kind_and_sum_to_the_total() {
 #[test]
 fn a_reply_needing_more_fragments_than_the_cap_is_dropped_whole() {
     let config = Config {
-        limits: crate::config::Limits::default(),
+        limits: crate::config::Limits::go_reference(0),
         ..Config::new(DUT, 576)
     };
     let mut n = TestNet::with_config(config, [7; 64]);

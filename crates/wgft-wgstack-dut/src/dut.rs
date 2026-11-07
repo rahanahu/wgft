@@ -109,7 +109,7 @@ impl std::error::Error for HelloError {}
 /// `HELLO` の上限の組を核の表の大きさにします。空なら既定です。名前の無い欄と 0 の欄は本番の値で、表の大きさの
 /// 初めの 5 つは必ず要ります (4 節)。
 pub fn limits_from_hello(ls: &[frame::Limit]) -> Result<Limits, HelloError> {
-    let def = Limits::default();
+    let def = Limits::go_reference(0);
     if ls.is_empty() {
         return Ok(def);
     }
@@ -851,7 +851,7 @@ mod tests {
 
     #[test]
     fn limits_follow_go() {
-        assert_eq!(limits_from_hello(&[]), Ok(Limits::default()));
+        assert_eq!(limits_from_hello(&[]), Ok(Limits::go_reference(0)));
         let l = |name: &str, value| frame::Limit {
             name: name.to_owned(),
             value,
@@ -874,7 +874,7 @@ mod tests {
             ),
             (8, 4, 4, 8, 8)
         );
-        assert_eq!(got.frag_entries, Limits::default().frag_entries);
+        assert_eq!(got.frag_entries, Limits::go_reference(0).frag_entries);
         assert!(
             limits_from_hello(&five[..4]).is_err(),
             "ctlSlots is required"

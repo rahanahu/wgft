@@ -41,7 +41,7 @@ pub(crate) fn small_limits() -> Limits {
         syn_rows: 16,
         tw_rows: 32,
         ctl_slots: 16,
-        ..Limits::default()
+        ..Limits::go_reference(0)
     }
 }
 

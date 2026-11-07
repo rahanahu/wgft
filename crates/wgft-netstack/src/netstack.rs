@@ -258,7 +258,15 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn netstack() -> Netstack {
-        let config = Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420);
+        // ログの文面の試験は wgft の agent の UDP の予算で書きます (核の既定は外の利用者のための小さな値です)。
+        let config = Config {
+            limits: wgft_wgstack::Limits {
+                udp_rx_datagrams: 4096,
+                udp_rx_bytes: 4 << 20,
+                ..wgft_wgstack::Limits::default()
+            },
+            ..Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420)
+        };
         Netstack::new(
             config,
             Budget::new(config.limits.boost_slots).unwrap(),

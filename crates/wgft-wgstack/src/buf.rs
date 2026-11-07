@@ -13,7 +13,8 @@ pub(crate) const SEND_FLOOR: u64 = 256 << 10;
 pub(crate) const RECV_FLOOR: u64 = 256 << 10;
 /// boost の段の送信と受信のバッファの大きさ (floor + d_s、floor + d_r) です。
 pub(crate) const BOOST_SIZE: u64 = 4 << 20;
-/// boost の枠の数 (B) です。プロセスで 1 つの集まりです。
+/// boost の枠の数 (B) の、凍結した Go と wgft の agent の値です ([`crate::Limits::boost_slots`])。
+#[cfg(any(test, feature = "harness"))]
 pub(crate) const BOOST_SLOTS: usize = 16;
 /// 送り残しを分ける大きさの下限です。送信の記録の輪の容量は、送信のバッファの予約をこの値で割った数です。
 pub(crate) const MIN_SEG_PAYLOAD: u64 = 472;

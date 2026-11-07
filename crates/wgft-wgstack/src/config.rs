@@ -56,23 +56,40 @@ pub struct Limits {
     pub pool_chunks: usize,
 }
 
+/// 既定の表の大きさです。wgft の外の利用者のための小さく保守的な値で、上界は MTU 1420 で約 21.6 MiB です。値と測り方は
+/// docs/design/v2/wgstack-rs.md の「既定の表の大きさ」にあります。
+const DEFAULT_LIMITS: Limits = Limits {
+    max_flows: 16,
+    accept_queue: 16,
+    syn_rows: 64,
+    tw_rows: 1024,
+    ctl_slots: 32,
+    frag_entries: 8,
+    frag_pieces: 64,
+    udp_rx_datagrams: 128,
+    udp_tx_datagrams: 128,
+    udp_rx_bytes: crate::udp::MIN_BYTES,
+    udp_tx_bytes: crate::udp::MIN_BYTES,
+    frag_bytes: 256 << 10,
+    boost_slots: 0,
+    pool_chunks: 8,
+};
+
 impl Limits {
-    /// The value of K that [`Limits::with_max_flows`] uses for 0.
-    pub const DEFAULT_MAX_FLOWS: usize = 2048;
     /// [`Limits::boost_slots`] の上限です。空きの枠の印を 1 語に収めます。
     pub const MAX_BOOST_SLOTS: usize = 64;
     /// [`Limits::udp_rx_bytes`] と [`Limits::udp_tx_bytes`] の下限です。最も大きい datagram (4 chunk) が
     /// endpoint 1 つの上限 (予算の 4 分の 1) に収まる大きさです。
     pub const MIN_UDP_BYTES: usize = crate::udp::MIN_BYTES;
 
-    /// K を `max_flows` にした本番の表の大きさです。0 は既定値です。
-    pub const fn with_max_flows(max_flows: usize) -> Self {
+    /// 凍結した Go の wgstack の本番の表の大きさで、K を `max_flows` にした値です。0 は K = 2048 です。
+    /// Go の記録の再生と上界の表の試験が使います。wgft の agent は同じ値を自分で書いて渡します。試験の build と
+    /// feature `harness` の build だけにあり、公開の API ではありません。
+    #[cfg(any(test, feature = "harness"))]
+    #[doc(hidden)]
+    pub const fn go_reference(max_flows: usize) -> Self {
         Self {
-            max_flows: if max_flows == 0 {
-                Self::DEFAULT_MAX_FLOWS
-            } else {
-                max_flows
-            },
+            max_flows: if max_flows == 0 { 2048 } else { max_flows },
             accept_queue: 512,
             syn_rows: 1024,
             tw_rows: 65536,
@@ -107,7 +124,7 @@ impl Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self::with_max_flows(0)
+        DEFAULT_LIMITS
     }
 }
 
@@ -154,7 +171,7 @@ impl Config {
         Self {
             addr,
             mtu,
-            limits: Limits::with_max_flows(0),
+            limits: DEFAULT_LIMITS,
             congestion: Congestion::Cubic,
             boost: BoostPolicy::OnDemand,
         }
@@ -250,7 +267,17 @@ mod tests {
     fn validates_mtu_and_limits() {
         let c = Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420);
         assert_eq!(c.validate(), Ok(()));
-        assert_eq!(c.limits.conns(), 2560);
+        assert_eq!(c.limits, Limits::default());
+        assert_eq!(c.limits.conns(), 32);
+        assert_eq!(Limits::go_reference(0).conns(), 2560);
+        assert_eq!(
+            Config {
+                limits: Limits::go_reference(0),
+                ..c
+            }
+            .validate(),
+            Ok(())
+        );
         assert_eq!(
             (c.congestion, c.boost),
             (Congestion::Cubic, BoostPolicy::OnDemand)
@@ -266,10 +293,6 @@ mod tests {
             };
             assert_eq!(other.validate(), Ok(()));
         }
-        assert_eq!(
-            Limits::default(),
-            Limits::with_max_flows(Limits::DEFAULT_MAX_FLOWS)
-        );
         for mtu in [575, 9217] {
             assert_eq!(Config { mtu, ..c }.validate(), Err(ConfigError::Mtu(mtu)));
         }

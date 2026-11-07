@@ -11,6 +11,7 @@ pub(crate) const CHUNK_SHIFT: u32 = 14;
 /// バッファの中身を持つ chunk の大きさです。
 pub(crate) const CHUNK_SIZE: usize = 1 << CHUNK_SHIFT;
 /// 置き場に残す chunk の上限の、wgft の agent の値です ([`crate::Limits::pool_chunks`])。
+#[cfg(any(test, feature = "harness"))]
 pub(crate) const POOL_KEEP: usize = 64;
 /// 置き場に返す chunk を埋める byte です。目印の build だけが 0 でない値を使います。
 #[cfg(not(wgstack_sentinel))]
