@@ -54,6 +54,10 @@ pub struct Options {
     pub limits: Limits,
     /// トンネルのバッチ (`WGFT_AGENT_BATCH_MIB`)。起動の時に 1 回だけ決める。
     pub batching: Batching,
+    /// The target of the experimental receive queue control
+    /// (`WGFT_AGENT_EXPERIMENTAL_RX_CODEL`), `None` for off, the default. Outside the
+    /// compatibility guarantee.
+    pub rx_codel: Option<Duration>,
 }
 
 // 接続文字列は秘密なので Debug に出さない
@@ -74,6 +78,7 @@ impl std::fmt::Debug for Options {
             .field("allow_targets", &self.allow_targets)
             .field("limits", &self.limits)
             .field("batching", &self.batching)
+            .field("rx_codel", &self.rx_codel)
             .finish()
     }
 }
@@ -165,6 +170,7 @@ impl Agent {
                 &mut self.dataplane,
                 crate::memory::core_limits(self.opts.limits.tcp),
                 self.opts.batching,
+                self.opts.rx_codel,
                 Some(&clock),
                 Arc::clone(&self.tunnel_dead),
             )

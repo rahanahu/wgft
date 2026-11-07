@@ -216,6 +216,58 @@ pub fn batch_mib(v: &str) -> Result<Option<i64>, Refusal> {
     }
 }
 
+/// 受信の取り出しの CoDel の実験の環境変数。互換の保証の外の実験の設定で、予告なく変えるか消す。このため
+/// 設定項目の一覧 (`run_specs`) に入れず、フラグも dotenv の鍵も持たず、有効な設定の行にも出さない。
+/// プロセスの環境変数だけを読む (agent-throughput.md の「受信の取り出しの CoDel (実験)」)。
+pub const RX_CODEL_ENV: &str = "WGFT_AGENT_EXPERIMENTAL_RX_CODEL";
+
+/// The CoDel target of the experimental receive queue control, or `None` for off. Unset, empty and
+/// `0` are off; `1`, `2` and `5` turn it on with that target in ms. Any other value is a
+/// configuration error, so that a value meant to do something never turns into a silent no-op.
+///
+/// # Errors
+///
+/// Returns a configuration error for a value that is not empty, `0`, `1`, `2` or `5`.
+pub fn rx_codel(env: &dyn super::Env) -> Result<Option<std::time::Duration>, Refusal> {
+    let Some(v) = env.var(RX_CODEL_ENV) else {
+        return Ok(None);
+    };
+    match v.to_str() {
+        Some("" | "0") => Ok(None),
+        Some(other) => match crate::dataplane::rxcodel::TARGETS_MS
+            .iter()
+            .find(|n| n.to_string() == other)
+        {
+            Some(&ms) => Ok(Some(std::time::Duration::from_millis(u64::from(ms)))),
+            None => Err(Refusal::config(
+                RX_CODEL_ENV,
+                format!(
+                    "must be 1, 2 or 5, a target in ms, or 0, not {}",
+                    quote(other)
+                ),
+            )),
+        },
+        None => Err(Refusal::config(RX_CODEL_ENV, "is not valid UTF-8")),
+    }
+}
+
+/// The warning line for turning the experimental receive queue control on with `target` on the
+/// operating system `os` (`std::env::consts::OS`). Only Linux reads the kernel receive times it
+/// needs; elsewhere the line says it has no effect.
+#[must_use]
+pub fn rx_codel_warning(target: std::time::Duration, os: &str) -> LogLine {
+    let ms = target.as_millis();
+    LogLine::Stamped(if os == "linux" {
+        format!(
+            "warning: {RX_CODEL_ENV}={ms} turns on the experimental receive queue control, which drops TCP data segments that waited in the tunnel socket longer than its {ms} ms target allows; it is outside the compatibility guarantee and may change or go away without notice"
+        )
+    } else {
+        format!(
+            "warning: {RX_CODEL_ENV}={ms} has no effect on this system, which cannot report how long a datagram waited in the tunnel socket; the agent runs as with 0"
+        )
+    })
+}
+
 /// Linux がインタフェースの名前に課す規則に合わせ、名前をバイト列として調べる。
 /// 合わせて NUL と `%` も拒む。通すと、宣言した名前と実際に付く名前が食い違う。
 pub fn validate_interface_name(name: &str) -> Result<(), Refusal> {
@@ -342,6 +394,41 @@ mod tests {
 
     use super::*;
     use crate::config::dotenv::Map;
+
+    #[test]
+    fn the_experimental_rx_codel_takes_only_0_1_2_and_5() {
+        use std::time::Duration;
+        let env = |v: &str| HashMap::from([(RX_CODEL_ENV.to_owned(), OsString::from(v))]);
+        assert_eq!(rx_codel(&HashMap::<String, OsString>::new()).unwrap(), None);
+        for (v, want) in [
+            ("", None),
+            ("0", None),
+            ("1", Some(1)),
+            ("2", Some(2)),
+            ("5", Some(5)),
+        ] {
+            assert_eq!(
+                rx_codel(&env(v)).unwrap(),
+                want.map(Duration::from_millis),
+                "{v:?}"
+            );
+        }
+        for v in ["true", "3", "10", "5ms", "05", " 5", "on", "-1"] {
+            let e = rx_codel(&env(v)).unwrap_err().to_string();
+            assert!(
+                e.contains(RX_CODEL_ENV) && e.contains("must be 1, 2 or 5"),
+                "{e}"
+            );
+        }
+        for os in ["linux", "windows", "macos"] {
+            let LogLine::Stamped(w) = rx_codel_warning(Duration::from_millis(5), os) else {
+                panic!("the warning carries a time stamp");
+            };
+            assert!(w.starts_with("warning: ") && !w.contains('('), "{w}");
+            assert!(w.contains(&format!("{RX_CODEL_ENV}=5")), "{w}");
+            assert_eq!(w.contains("has no effect"), os != "linux", "{w}");
+        }
+    }
 
     fn settings(env: &[(&str, &str)], file: &[(&str, &str)]) -> (Config, Settings) {
         let d = Defaults {

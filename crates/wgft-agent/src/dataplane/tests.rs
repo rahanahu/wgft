@@ -1136,9 +1136,18 @@ async fn a_receive_batch_hands_udp_first_and_keeps_the_tcp_order() {
     // 密な部分を枠の全体にして、枠 i が data の i × RX_SLOT から始まるようにする
     let mut rx = RxBatch::new(8, false, RX_SLOT);
     let (mut errors, mut wakers) = (0, Vec::new());
-    let (n, _) = receive_batch(&local, &mut feed, &mut rx, now, 8, &mut errors, &mut wakers)
-        .await
-        .unwrap();
+    let (n, _) = receive_batch(
+        &local,
+        &mut feed,
+        &mut rx,
+        now,
+        8,
+        &mut errors,
+        &mut wakers,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!((n, errors), (5, 0));
     let got: Vec<u32> = local.with(|s| s.got.iter().map(|p| seq(p)).collect());
     assert_eq!(
@@ -1146,6 +1155,119 @@ async fn a_receive_batch_hands_udp_first_and_keeps_the_tcp_order() {
         vec![100, 101, 0, 1, 2],
         "UDP first, TCP in the order read"
     );
+}
+
+/// [`Feed`] に、読んだ datagram が `wait` だけ待ったと答える受信の時刻を足した受信の元。
+struct Waited {
+    feed: Feed,
+    wait: Duration,
+}
+
+impl Source for Waited {
+    fn recv(&mut self, rx: &mut RxBatch, vlen: usize) -> io::Result<usize> {
+        self.feed.recv(rx, vlen)
+    }
+
+    fn receive_stamp(&mut self) -> Option<u64> {
+        let wall = super::rxcodel::wall_ns();
+        Some(wall - u64::try_from(self.wait.as_nanos()).unwrap())
+    }
+}
+
+/// server から agent への IPv4 の TCP の segment。番号は送り元と宛先の port に入れる ([`seq`] が読む位置)。
+fn tcp_in(seq: u32, flags: u8, data: usize) -> Vec<u8> {
+    let total = 40 + data;
+    let mut p = packet(SERVER_IP, AGENT_IP, seq);
+    p.resize(total, 0);
+    p[2..4].copy_from_slice(&u16::try_from(total).unwrap().to_be_bytes());
+    p[9] = 6;
+    p[32] = 5 << 4;
+    p[33] = flags;
+    p
+}
+
+/// 設計 (受信の取り出しの CoDel):待ちが目標を interval の間ずっと超えると、復号した後の中身のある TCP の
+/// segment だけを核に渡さずに落とす。UDP、中身の無い ACK、SYN は落とさず、残りの TCP の順は変えない。無効
+/// (`None`) なら何も落とさない。
+#[tokio::test]
+async fn the_receive_queue_control_drops_only_tcp_data_and_nothing_when_off() {
+    for on in [false, true] {
+        let mut t = Bench::new(0);
+        t.connected();
+        let local = super::Local(std::rc::Rc::new(super::Shared {
+            inner: std::cell::RefCell::new(super::Inner {
+                device: t.a,
+                upper: Stub::new(None),
+            }),
+            poisoned: std::cell::Cell::new(false),
+            wake: super::Wake::default(),
+        }));
+        let mut codel = on.then(|| super::rxcodel::RxCodel::new(Duration::from_millis(5)));
+        let mut rx = RxBatch::new(8, false, RX_SLOT);
+        let (mut errors, mut wakers) = (0, Vec::new());
+        let mut sealed = vec![0u8; t.b.max_transmit_len()];
+        let t0 = clock::now();
+        let mut sent = Vec::new();
+        // 300 ms の間、1 ms ごとに 4 つの datagram のバッチを読む。どのバッチも枠を埋めるので、ソケットは空に
+        // ならない
+        for k in 0..300u32 {
+            let now = t0 + Duration::from_millis(u64::from(k));
+            let mut feed = Feed(VecDeque::new());
+            let kinds = [
+                tcp_in(4 * k, 0x18, 1000),
+                packet(SERVER_IP, AGENT_IP, 4 * k + 1),
+                tcp_in(4 * k + 2, 0x10, 0),
+                if k % 2 == 0 {
+                    tcp_in(4 * k + 3, 0x18, 500)
+                } else {
+                    tcp_in(4 * k + 3, 0x02, 0)
+                },
+            ];
+            for p in kinds {
+                sent.push((seq(&p), p.clone()));
+                let out = t.b.handle_packet(now, &p, &mut sealed).unwrap();
+                feed.0
+                    .push_back((B_ADDR.parse().unwrap(), sealed[..out.len].to_vec()));
+            }
+            let mut source = Waited {
+                feed,
+                wait: Duration::from_millis(20),
+            };
+            let (n, _) = receive_batch(
+                &local,
+                &mut source,
+                &mut rx,
+                now,
+                4,
+                &mut errors,
+                &mut wakers,
+                codel.as_mut(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(n, 4);
+        }
+        let got: Vec<u32> = local.with(|s| s.got.iter().map(|p| seq(p)).collect());
+        let dropped: Vec<&Vec<u8>> = sent
+            .iter()
+            .filter(|(n, _)| !got.contains(n))
+            .map(|(_, p)| p)
+            .collect();
+        if on {
+            let drops = codel.as_ref().unwrap().codel.drops();
+            assert!(drops >= 2, "{drops} drops");
+            assert_eq!(dropped.len() as u64, drops);
+            for p in dropped {
+                assert!(super::rxcodel::droppable(p), "dropped {:?}", &p[..40]);
+            }
+        } else {
+            assert_eq!(dropped.len(), 0);
+        }
+        // TCP の順は保つ
+        let tcp: Vec<u32> = got.iter().copied().filter(|n| n % 4 != 1).collect();
+        assert!(tcp.is_sorted(), "{tcp:?}");
+        assert_eq!(errors, 0);
+    }
 }
 
 #[test]

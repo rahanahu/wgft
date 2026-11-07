@@ -31,6 +31,7 @@ use wgft_wireguard::{Device, DropReason, Event, PublicKey, Transmit};
 use super::batch::{
     BATCH_TIME, Pace, RxBatch, TxBatch, WAKE_BUDGET, each_packet, rx_store, tx_store,
 };
+use super::rxcodel::RxCodel;
 use super::{Command, Local, Settings, SocketBuffers, Status, Upper, clock, duration_to_nanos};
 use crate::batching::Batching;
 
@@ -69,6 +70,12 @@ fn send_each<S: Sink + ?Sized>(sink: &mut S, tx: &TxBatch) -> io::Result<usize> 
 pub(super) trait Source {
     /// 最大 `vlen` の枠に datagram を読み、埋めた枠の数を返す。読むものが無ければ `WouldBlock`。
     fn recv(&mut self, rx: &mut RxBatch, vlen: usize) -> io::Result<usize>;
+
+    /// 最後の [`Source::recv`] が読んだ最も新しい datagram のカーネルの受信の時刻 (Unix の起点からの ns)。
+    /// 受信の取り出しの CoDel の待ちの標本で、読めなければ `None`。
+    fn receive_stamp(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 /// WireGuard の UDP のソケットと、そこで使える送受信の形。
@@ -169,6 +176,18 @@ impl Source for Io<'_> {
             };
             Ok(1)
         }
+    }
+
+    fn receive_stamp(&mut self) -> Option<u64> {
+        #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+        {
+            use std::os::fd::AsRawFd;
+            wgft_udp_batch::sys::receive_stamp(self.socket.as_raw_fd())
+                .ok()
+                .flatten()
+        }
+        #[cfg(not(all(target_os = "linux", target_pointer_width = "64")))]
+        None
     }
 }
 
@@ -381,6 +400,13 @@ pub(super) fn pump<U: Upper>(
 /// 読んだ datagram をすべて復号してから、UDP の packet を先に上の層に渡す。残りの packet もあれば、
 /// 起こす waker を起こして順を譲り、中継の task が UDP の datagram を先に運べるようにしてから、残りを
 /// 読んだ順に渡す。核に渡す TCP の segment の順は変えない。
+///
+/// `codel` (実験の受信の取り出しの CoDel) があれば、読みごとに待ちの標本と状態を進め、落とすと決めている
+/// 間だけ、UDP でない packet の列から最初の落とせる TCP の segment を 1 つ核に渡さずに捨てる。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the receive phase's state, passed apart so that the borrows stay separate"
+)]
 pub(super) async fn receive_batch<U: Upper>(
     local: &Local<U>,
     source: &mut impl Source,
@@ -389,22 +415,26 @@ pub(super) async fn receive_batch<U: Upper>(
     vlen: usize,
     receive_errors: &mut u64,
     wakers: &mut Vec<Waker>,
+    mut codel: Option<&mut RxCodel>,
 ) -> io::Result<(usize, Duration)> {
     let n = match source.recv(rx, vlen) {
         Ok(n) => n,
-        Err(e)
-            if matches!(
-                e.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-            ) =>
-        {
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+            // 読むものが無い:ソケットは空
+            if let Some(c) = codel {
+                c.after_read(now, 0, vlen, || None);
+            }
             return Ok((0, Duration::ZERO));
         }
+        Err(e) if e.kind() == io::ErrorKind::Interrupted => return Ok((0, Duration::ZERO)),
         Err(_) => {
             *receive_errors += 1;
             return Ok((0, Duration::ZERO));
         }
     };
+    if let Some(c) = codel.as_deref_mut() {
+        c.after_read(now, n, vlen, || source.receive_stamp());
+    }
     let (end, udp, others) = {
         let mut guard = local.0.borrow();
         let inner = &mut *guard;
@@ -433,7 +463,19 @@ pub(super) async fn receive_batch<U: Upper>(
     }
     let mut guard = local.0.borrow();
     let upper = &mut guard.upper;
-    each_packet(&rx.plain[..end], false, |p| upper.handle_packet(now, p));
+    match codel {
+        // 落とすと決めている時だけ packet を見分ける。決めていなければ今までと同じ道を通る
+        Some(c) if c.codel.pending() => {
+            each_packet(&rx.plain[..end], false, |p| {
+                if !c.codel.take(p) {
+                    upper.handle_packet(now, p);
+                }
+            });
+        }
+        _ => {
+            each_packet(&rx.plain[..end], false, |p| upper.handle_packet(now, p));
+        }
+    }
     Ok((n, yielded))
 }
 
@@ -475,6 +517,14 @@ fn ce_on_not_ect_line(dropped: u64) -> String {
     format!(
         "warning: the WireGuard tunnel dropped {dropped} packets so far that arrived with an outer CE mark but are not ECN-capable inside, as RFC 6040 requires; a device on the path from the server marks traffic that is not ECN-capable"
     )
+}
+
+/// 実験の受信の取り出しの CoDel を、`target` があり、カーネルの受信の時刻を読める Linux の 64 bit の build
+/// でだけ作る。作る時に受信の時刻を 1 回読み、カーネルに時刻の付与を始めさせる (何も読む前なので値は無い)。
+fn start_rx_codel(io: &mut Io<'_>, target: Option<Duration>) -> Option<RxCodel> {
+    let target = target.filter(|_| cfg!(all(target_os = "linux", target_pointer_width = "64")))?;
+    let _ = io.receive_stamp();
+    Some(RxCodel::new(target))
 }
 
 /// 1 つずつ送受信する道の 1 回の起床の上限。受信の相と送信の相のそれぞれで、バッチの前の値のままにする。
@@ -657,6 +707,7 @@ pub(super) async fn drive<U: Upper>(
     let mut receive_errors = 0u64;
     let mut ce_seen = 0u64;
     let mut wakers = Vec::new();
+    let mut rx_codel = start_rx_codel(&mut io, settings.rx_codel);
     loop {
         if local.is_poisoned() {
             return Err(io::Error::other(
@@ -684,6 +735,7 @@ pub(super) async fn drive<U: Upper>(
                 vlen,
                 &mut receive_errors,
                 &mut wakers,
+                rx_codel.as_mut(),
             )
             .await?;
             rx_done += n;
@@ -714,6 +766,9 @@ pub(super) async fn drive<U: Upper>(
             &mut now,
         );
         let more = rx_more || tx_more;
+        if let Some(line) = rx_codel.as_mut().and_then(|c| c.log_line(now, false)) {
+            crate::logf!("{line}");
+        }
         let deadline = finish_wake(&local, &events, high_water, &mut wakers, &mut ce_seen, now);
         for waker in wakers.drain(..) {
             waker.wake();
@@ -755,6 +810,12 @@ pub(super) async fn drive<U: Upper>(
                 Some(Command::Run(job)) => job(&local),
             },
         }
+    }
+    if let Some(line) = rx_codel
+        .as_mut()
+        .and_then(|c| c.log_line(clock::now(), true))
+    {
+        crate::logf!("{line}");
     }
     let gso = io.gso;
     Ok(Rest {

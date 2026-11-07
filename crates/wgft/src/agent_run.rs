@@ -97,6 +97,10 @@ pub fn prepare_door(
     }
     let settings = agent::check_door(&cfg, os)?;
     early.extend(agent::join_warning(&settings));
+    let rx_codel = agent::rx_codel(env)?;
+    if let Some(target) = rx_codel {
+        early.push(agent::rx_codel_warning(target, os));
+    }
     let options = Options {
         data_dir: settings.data_dir.clone().into(),
         join: settings.join.clone(),
@@ -105,6 +109,7 @@ pub fn prepare_door(
         allow_targets: settings.allow_targets.clone(),
         limits: settings.flow_caps(),
         batching: settings.batching(),
+        rx_codel,
     };
     Ok(Prepared {
         options,
@@ -191,5 +196,36 @@ mod tests {
         assert_eq!(early_lines("WGFT_JOIN=\nWGFT_NAME=x\n", 0o644, &[]), vec![]);
         // 秘密でない項目だけなら警告しない
         assert_eq!(early_lines("WGFT_NAME=x\n", 0o644, &[]), vec![]);
+    }
+
+    /// 実験の受信の取り出しの CoDel は環境変数だけで有効になり、警告の行を 1 つ書く。dotenv の鍵は読まない。
+    #[test]
+    fn the_experimental_rx_codel_comes_only_from_the_environment() {
+        let env = agent::RX_CODEL_ENV;
+        let e = early_lines("", 0o600, &[(env, "5")]);
+        assert_eq!(
+            e,
+            vec![agent::rx_codel_warning(
+                std::time::Duration::from_millis(5),
+                "linux"
+            )]
+        );
+        assert_eq!(early_lines("", 0o600, &[(env, "0")]), vec![]);
+        assert_eq!(early_lines(&format!("{env}=5\n"), 0o600, &[]), vec![]);
+    }
+
+    /// 実験の受信の取り出しの CoDel の誤った値は設定の誤りで、終了コード 3 で止まる。
+    #[test]
+    fn a_bad_experimental_rx_codel_value_exits_with_code_3() {
+        let argv = ["wgft", "agent", "run", "--data-dir", "/d"].map(OsString::from);
+        let Ok(Parsed::AgentRun { global, run }) = cli::parse(argv) else {
+            panic!("parse");
+        };
+        let env: HashMap<String, OsString> =
+            HashMap::from([(agent::RX_CODEL_ENV.to_owned(), OsString::from("yes"))]);
+        let mut early = Vec::new();
+        let e = prepare_door(&global, &run, &env, "linux", &mut early).unwrap_err();
+        assert_eq!(e.exit_code(), 3, "{e}");
+        assert!(e.to_string().contains(agent::RX_CODEL_ENV), "{e}");
     }
 }

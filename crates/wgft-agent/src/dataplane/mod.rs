@@ -17,6 +17,7 @@
 pub(crate) mod batch;
 pub(crate) mod clock;
 mod driver;
+pub(crate) mod rxcodel;
 mod socket;
 pub(crate) mod stack;
 #[cfg(test)]
@@ -125,6 +126,10 @@ pub struct Settings {
     /// How the tunnel batches its socket's receive and send. One wake-up's work ends at the
     /// latency budget, an internal constant (`docs/design/v2/agent-throughput.md`).
     pub batching: Batching,
+    /// The target of the experimental receive queue control (`WGFT_AGENT_EXPERIMENTAL_RX_CODEL`),
+    /// or `None` for off, the default. Only Linux on a 64-bit target runs it; elsewhere the data
+    /// plane runs as with `None`.
+    pub rx_codel: Option<Duration>,
 }
 
 impl Default for Settings {
@@ -133,6 +138,7 @@ impl Default for Settings {
         Self {
             listen: SocketAddr::from(([0, 0, 0, 0], 0)),
             batching: Batching::derived(crate::flowpool::Limits::default()),
+            rx_codel: None,
         }
     }
 }

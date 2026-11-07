@@ -218,12 +218,17 @@ impl Tunnel {
     /// # Errors
     ///
     /// 鍵が読めないか、データプレーン (UDP のソケット、スレッド、核) を作れなければ誤りを返す。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the tunnel's settings from the agent's options, each fixed at start"
+    )]
     pub async fn start(
         private_key: &str,
         cfg: Config,
         generations: &mut Generations,
         limits: Limits,
         batching: Batching,
+        rx_codel: Option<Duration>,
         clock: Option<&Path>,
         dead: Arc<tokio::sync::Notify>,
     ) -> Result<Tunnel, String> {
@@ -264,6 +269,7 @@ impl Tunnel {
                 dc,
                 Settings {
                     batching,
+                    rx_codel,
                     ..Settings::default()
                 },
                 move |init| dataplane::stack::make(stack, init),
