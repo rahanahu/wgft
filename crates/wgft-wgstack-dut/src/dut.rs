@@ -153,7 +153,7 @@ pub fn limits_from_hello(ls: &[frame::Limit]) -> Result<Limits, HelloError> {
     reason = "one flag per switch, set and restored together"
 )]
 struct Compat {
-    rto_l2: bool,
+    slow_start_l2: bool,
     dsack_snd_una: bool,
     row_rst: bool,
     synack_rto: bool,
@@ -171,7 +171,7 @@ impl Compat {
     /// 今の thread の値です。
     fn get() -> Self {
         Self {
-            rto_l2: wgft_wgstack::go_compat_rto_l2(),
+            slow_start_l2: wgft_wgstack::go_compat_slow_start_l2(),
             dsack_snd_una: wgft_wgstack::go_compat_dsack_snd_una(),
             row_rst: wgft_wgstack::go_compat_row_rst(),
             synack_rto: wgft_wgstack::go_compat_synack_rto(),
@@ -189,7 +189,7 @@ impl Compat {
     /// 切り替えをすべて `on` にした値です。
     fn all(on: bool) -> Self {
         Self {
-            rto_l2: on,
+            slow_start_l2: on,
             dsack_snd_una: on,
             row_rst: on,
             synack_rto: on,
@@ -206,7 +206,7 @@ impl Compat {
 
     /// thread の値をこの値にします。
     fn set(self) {
-        wgft_wgstack::set_go_compat_rto_l2(self.rto_l2);
+        wgft_wgstack::set_go_compat_slow_start_l2(self.slow_start_l2);
         wgft_wgstack::set_go_compat_dsack_snd_una(self.dsack_snd_una);
         wgft_wgstack::set_go_compat_row_rst(self.row_rst);
         wgft_wgstack::set_go_compat_synack_rto(self.synack_rto);
@@ -239,7 +239,7 @@ pub struct WgstackDut {
     addr: Ipv4Addr,
     objs: Vec<Obj>,
     buf: Vec<u8>,
-    /// 照合用の切り替え ([`set_go_compat_rto_l2`]) をこの核に使うか。核を駆動する前に thread の値をこれに合わせる
+    /// 照合用の切り替え ([`set_go_compat_slow_start_l2`]) をこの核に使うか。核を駆動する前に thread の値をこれに合わせる
     go_compat: bool,
 }
 

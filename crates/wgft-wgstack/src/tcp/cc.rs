@@ -3,7 +3,7 @@
 //! slow start、回復の間の窓 (NewReno の窓の膨らませ方と PRR)、RTO の後の 1 segment は共通の処理が持ち、輻輳の
 //! 回避の窓の増やし方と、輻輳の事象での ssthresh の決め方だけが輻輳の制御ごとに違います。輻輳の制御は核の設定で
 //! 1 つに決まり (`Config::congestion`)、状態は接続の枠の中に値として埋め込みます。HyStart++ は輻輳の制御の種類に
-//! よらず最初の slow start で働きます。
+//! よらず最初の slow start と、黙った後の再開の slow start で働きます。
 
 use super::ctx::Conn;
 use super::{CWND_MAX, MS, SEC};
@@ -245,7 +245,7 @@ impl Conn<'_> {
     /// 下げます。TLP は SACK を交渉した接続だけで使うので、SACK の無い接続では `tlp_cut` は立ちません。
     pub(crate) fn enter_fast_recovery(&mut self) {
         self.init_undo();
-        self.t.rto_slow_start = false; // 高速の回復の後の slow start は RTO の後ではありません
+        self.t.idle_hs = false; // 黙った後の再開の HyStart++ は回復に入ると終わります
         if self.t.tlp_cut && seq::lt(self.t.snd_una, self.t.tlp_cut_seq) {
             self.t.recover = self.t.tlp_cut_seq;
         } else {
@@ -308,18 +308,39 @@ impl Conn<'_> {
         }
     }
 
-    /// 最初の slow start の間だけ真を返します (RFC 9406 4.3)。
+    /// HyStart++ を動かす間だけ真を返します。最初の slow start と、黙った後の再開で覚えた ssthresh まで窓を育て
+    /// 直す slow start です (RFC 9406 4.3。後者は MAY で、RFC 5681 4.1 の再開の窓に使えます)。
     pub(crate) fn hystart_on(&self) -> bool {
-        self.t.ssthresh == u32::MAX && !self.t.in_recovery
+        (self.t.ssthresh == u32::MAX || self.t.idle_hs) && !self.t.in_recovery
+    }
+
+    /// 凍結した Go との照合用の切り替え (feature `harness` だけ) が真か。製品の build では常に偽です。
+    #[inline]
+    fn slow_start_l2() -> bool {
+        #[cfg(feature = "harness")]
+        return crate::stack::go_compat_slow_start_l2();
+        #[cfg(not(feature = "harness"))]
+        false
+    }
+
+    /// 黙った後に窓を IW に戻した slow start を HyStart++ の中で動かし始めます。往復の状態は最初から測り直します。
+    pub(crate) fn restart_hystart(&mut self) {
+        #[cfg(feature = "harness")]
+        if crate::stack::go_compat_slow_start_l2() {
+            return; // 凍結した Go の記録との照合用の切り替え: 黙った後の再開に HyStart++ を使わない
+        }
+        self.t.idle_hs = true;
+        self.t.hs = Hystart::default();
     }
 
     /// slow start の ACK で窓を増やします。`acked` は新しく確認された byte、`sample` はこの ACK で測った RTT
-    /// (ns、無ければ -1) です。増やす量は RFC 3465 の L で、RTO の後の slow start は L = 1 (同 2.3)、それ以外は
-    /// L = 2 です。CSS の間は 4 分の 1 にします。
+    /// (ns、無ければ -1) です。増やす量は RFC 3465 の L です。HyStart++ の中は L = 2 (RFC 9406 4.2)、外は L = 1
+    /// (RFC 5681 3.1、RFC 3465 2.3) です。CSS の間は 4 分の 1 にします。
     pub(crate) fn slow_start_ack(&mut self, ack: u32, acked: u32, sample: i64) {
-        let limit = if self.t.rto_slow_start { 1 } else { 2 };
+        let hs = self.hystart_on();
+        let limit = if hs || Self::slow_start_l2() { 2 } else { 1 };
         let mut inc = acked.min(limit * self.seg_mss());
-        if !self.hystart_on() {
+        if !hs {
             self.t.cwnd = self.t.cwnd.wrapping_add(inc);
             return;
         }

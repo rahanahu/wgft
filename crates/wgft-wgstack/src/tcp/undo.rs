@@ -20,7 +20,6 @@ impl Conn<'_> {
         let k = &mut *self.k;
         (k.undo_marker, k.undo_seq) = (true, self.t.snd_una);
         (k.undo_cwnd, k.undo_ssthresh) = (self.t.cwnd, self.t.ssthresh);
-        k.undo_rto_slow_start = self.t.rto_slow_start;
         (k.undo_retrans, k.retrans_ts_ok) = (-1, false);
     }
 
@@ -120,7 +119,6 @@ impl Conn<'_> {
         t.reorder_seen = true;
         self.k.undo_marker = false;
         (t.frto, t.rto_episode) = (0, false);
-        t.rto_slow_start = self.k.undo_rto_slow_start; // 取り消した事象の前の slow start に戻ります
         self.s.stats.spurious_undos += 1;
     }
 

@@ -479,7 +479,10 @@ fn burst_after_ack(d: &mut WgstackDut, mut p: Peer) -> usize {
 
 /// 照合用の切り替えがどれも偽 (製品と同じ) であることを確かめます。切り替えを足したらここに足します。
 fn assert_switches_off(when: &str) {
-    assert!(!wgft_wgstack::go_compat_rto_l2(), "rto_l2 {when}");
+    assert!(
+        !wgft_wgstack::go_compat_slow_start_l2(),
+        "slow_start_l2 {when}"
+    );
     assert!(
         !wgft_wgstack::go_compat_dsack_snd_una(),
         "dsack_snd_una {when}"

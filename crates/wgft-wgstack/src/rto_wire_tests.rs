@@ -294,7 +294,7 @@ fn past_recover(w: &mut Wire) -> u32 {
 }
 
 #[test]
-fn fast_recovery_after_rto_ends_the_limit() {
+fn fast_recovery_after_rto_keeps_the_limit() {
     for cc in CCS {
         let mut w = after_rto(cc);
         past_recover(&mut w);
@@ -310,8 +310,8 @@ fn fast_recovery_after_rto_ends_the_limit() {
         let got = w.ack_by(2, 1);
         assert_eq!(
             got,
-            [4],
-            "{cc:?}: slow start after a fast recovery is not RTO limited"
+            [3],
+            "{cc:?}: slow start after a fast recovery is outside HyStart++, so L = 1"
         );
     }
 }
@@ -404,11 +404,10 @@ fn second_rto_limits_again() {
 
 // 3b. 窓が ssthresh にちょうど届いた時に限りが終わっていること
 
-/// 窓が ssthresh にちょうど届いた後の ACK は、残りのデータが窓の 20 segment に満たないので、輻輳回避でも窓を
-/// 増やしません (増やすには窓の分の byte の確認が要ります。送り手が窓に止められていなければ、そもそも増やしません)。
-/// 窓が ssthresh より上へ出ないので、限りの印が下りるのは「窓が ssthresh 以上」の時だけです (`>` の比べでは
-/// 下りません)。遊びの後の再開で窓が ssthresh より低い slow start に戻った時、印が下りていれば 2 SMSS ずつ、
-/// 残っていれば 1 SMSS ずつ増えます。
+/// 窓が ssthresh にちょうど届くと RTO の後の slow start は終わり、その後の ACK は輻輳回避で窓を増やしません
+/// (残りのデータが窓の 20 segment に満たないので、増やすには窓の分の byte の確認が要ります)。
+/// 終わるのは「窓が ssthresh 以上」の時で、`>` の比べでは終わりません (RFC 5681 3.1 は「超えた時、または任意で届いた時」)。
+/// 遊びの後の再開で窓が ssthresh より低い slow start に戻ると、それは HyStart++ の中の再開なので、2 SMSS ずつ増えます。
 #[test]
 fn limit_ends_when_the_window_equals_ssthresh() {
     let mut w = Wire::with_ahead(Congestion::NewReno, false, false, 40);
