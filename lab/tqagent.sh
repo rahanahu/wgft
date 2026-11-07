@@ -27,6 +27,11 @@
 #                                         not on its CPUs; workers started after pin-threads inherit
 #                                         the data-plane thread's CPUs, which this catches
 #   tqagent.sh killlan                    stop tcpquality.py's processes in home
+#   tqagent.sh stat <adata> <log>         the agent's memory and refusals and home's TCP sockets and
+#                                         conntrack entries (tcpquality.py agentstat)
+#   tqagent.sh ctmax <entries>            raise this VM's conntrack table to at least <entries>, with a
+#                                         hash of a quarter as many buckets; never lowers either.
+#                                         Prints the table's size
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/sandbox.sh"
@@ -121,6 +126,20 @@ case "${1:-}" in
     elif [ -n "$pid" ]; then
       sed 's/.*) //' "/proc/$pid/stat" | awk -v hz="$(getconf CLK_TCK)" '{ printf "%d\n", ($12 + $13) * 1000000 / hz }'
     fi
+    ;;
+  stat)
+    adata=${2:?stat <adata> <log>} log=${3:?}
+    # run inside home, so that agentstat needs no setns of its own (a setns from here failed with EPERM in the
+    # single-VM lab); the label names the keys
+    exec ip netns exec "$HOME_NS" $Q agentstat "$(agent_pid "$adata")" "$log" "" "$HOME_NS"
+    ;;
+  ctmax)
+    n=${2:?ctmax <entries>}
+    [ -e /proc/sys/net/netfilter/nf_conntrack_max ] || modprobe nf_conntrack || exit 1
+    [ "$(cat /proc/sys/net/netfilter/nf_conntrack_max)" -ge "$n" ] || sysctl -qw net.netfilter.nf_conntrack_max="$n" || exit 1
+    hs=/sys/module/nf_conntrack/parameters/hashsize
+    if [ -w "$hs" ] && [ "$(cat "$hs")" -lt $((n / 4)) ]; then echo $((n / 4)) > "$hs" || exit 1; fi
+    cat /proc/sys/net/netfilter/nf_conntrack_max
     ;;
   killlan)
     for p in $(ip netns pids "$HOME_NS" 2>/dev/null); do

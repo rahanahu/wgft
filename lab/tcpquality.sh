@@ -183,6 +183,44 @@
 # namespace, where `lab/lab paired --split --target local` has put 192.168.50.3 on lo, so the
 # agent reaches the forwarding target over loopback and the target's CPU is the agent VM's.
 #
+# Many connections (lab/manyconn.sh): iperf3 takes at most 128 streams. With STREAMS above 128 the run
+# starts ceil(STREAMS/128) iperf3 servers on the LAN host's ports from 25800 up, a TCP rule over as
+# many listen ports from 41800 up (one rule, so that the agent's per-rule cap stays out of it), and as
+# many clients at once, 0.1 s apart, the streams shared out as evenly as they go; the clients' bytes
+# and rates add up, the fairness values are over all the streams, and one failed client fails the run.
+# The result line then has iperf_groups. This needs the LAN host in the lan namespace (no
+# TARGET_LOCAL). Each iperf3 client also holds one control connection, which counts against the
+# agent's flow budget like a stream.
+#
+# TOOL=churn opens short connections at a fixed rate instead of a transfer: `churn run` (tools/churn)
+# in the client opens CHURN_RATE connections a second for CHURN_S seconds (10 by default) through
+# the rule, each sending CHURN_SIZE bytes (200 by default) and reading as many back from `churn
+# serve` on the LAN host, without waiting for one to finish before the next starts. CHURN_CLOSE says
+# which end closes first: server (the default) makes the LAN host close first, so that the agent's
+# netstack sends the first FIN into the tunnel and keeps the TIME_WAIT rows; client makes the
+# client close first. The result line has churn_*: the planned, completed and failed connections by
+# reason (refused, reset, dial_timeout, xfer_timeout, short, other, skipped past 20000 open), the
+# completed ones per second, the setup time (connect) and the whole exchange (rr) at p50, p99 and the
+# maximum, and the connections whose setup took a second or more (a SYN sent again). received= is
+# the bytes the completed connections moved both ways, so that the CPU per GB times
+# 2 x CHURN_SIZE / 1e9 is the CPU per connection. UDPPING=1 works with it as with iperf3. churn
+# raises the conntrack table of both VMs to CT_MAX entries (1048576 by default) and never lowers
+# it: at the default 120 s of conntrack's TIME_WAIT a few thousand connections a second would fill the
+# default table, and the drops would measure the lab, not the agent.
+#
+# With STREAMS + iperf3's control connections at 120 or more, and with TOOL=churn, the server runs
+# with WGFT_MAX_TCP_FLOWS_PER_SOURCE=0: the client namespace has one address, and the kernel-mode
+# server's per-source cap of 128 TCP connections would otherwise refuse the load before it reaches
+# the agent. The result line then has per_source_cap=off.
+#
+# After every run, outside the CPU window, the result line gets the agent's memory and refusals from
+# `tcpquality.py agentstat` in the agent's machine: agent_rss_mib, agent_hwm_mib (the process's VmRSS
+# and VmHWM), agent_bound_mib (the Rust agent's start line), the latest count of each wgstack refusal
+# line (wg_*), the relay's refusal lines, and home's established and TIME_WAIT TCP sockets and
+# conntrack entries as home_tcp_estab_after, home_tcp_timewait_after and home_ct_count_after. Those
+# three are counts after the load has exited, not peaks, and nothing counts the agent's sockets
+# while the load runs; vps_ct_count is the vps namespace's conntrack entries.
+#
 # Requires `lab/lab build` and the netns topology (`lab/lab net up`).
 set -u
 MODES=${*:-kernel userspace}
@@ -217,6 +255,11 @@ AGENT_CPUS=${AGENT_CPUS:-}
 AGENT_DP_CPUS=${AGENT_DP_CPUS:-}
 AGENT_WORKER_CPUS=${AGENT_WORKER_CPUS:-}
 TARGET_LOCAL=${TARGET_LOCAL:-}
+CHURN_RATE=${CHURN_RATE:-}
+CHURN_S=${CHURN_S:-10}
+CHURN_SIZE=${CHURN_SIZE:-200}
+CHURN_CLOSE=${CHURN_CLOSE:-server}
+CT_MAX=${CT_MAX:-1048576}
 if [ -n "${WGFT_BIN_DIR:-}" ]; then
   PATH=$WGFT_BIN_DIR:$PATH
   export PATH
@@ -241,6 +284,7 @@ router() { ip netns exec "$ROUTER_NS" "$@"; }
 agentx() { $Q agentx "$AGENT_AT" "$AGENT_TOKEN" "$@"; }
 agentsh() { agentx "${AGENT_ENV[@]}" -- bash "$TQAGENT" "$@"; }
 TQAGENT=/wgft/lab/tqagent.sh
+TQAGENT_HERE="$(cd "$(dirname "$0")" && pwd)/tqagent.sh"
 # lan <command...>: run it where the LAN host is: the lan namespace here, or with TARGET_LOCAL the
 # agent's home namespace in the agent VM. lan_bg <log> <command...> starts it in the background
 lan() { if [ -n "$TARGET_LOCAL" ]; then agentx -- ip netns exec "$HOME_NS" "$@"; else ip netns exec "$LAN_NS" "$@"; fi; }
@@ -255,6 +299,8 @@ lan_bg() {
   fi
 }
 lan_listening() { lan ss -Htln 'sport = :25800' | grep -q .; }
+# every one of the IPERF_GROUPS iperf3 servers, on 25800 and up, listens
+lan_listening_all() { [ "$(lan ss -Htln "( sport >= :25800 and sport < :$((25800 + IPERF_GROUPS)) )" | wc -l)" -ge "$IPERF_GROUPS" ]; }
 lan_free() { ! lan_listening; }
 lan_us() { # the LAN host process's CPU time so far, in microseconds
   if [ -n "$TARGET_LOCAL" ]; then agentsh cpu "$lan_pid" "$lan_cg"; else cpu_us "$lan_pid" "$lan_cg"; fi
@@ -366,9 +412,9 @@ tq_pids() { # the tcpquality.py processes in the lab's namespaces; a bare pgrep 
   done
   return 0
 }
-none_running() { ! sandbox_any_named wgft iperf3 && [ -z "$(tq_pids)" ]; }
+none_running() { ! sandbox_any_named wgft iperf3 churn && [ -z "$(tq_pids)" ]; }
 cleanup() {
-  sandbox_kill_named wgft iperf3
+  sandbox_kill_named wgft iperf3 churn
   sandbox_kill_cmdline '/tcpquality.py '
   # the teardown below and the next mode's start want the killed processes gone, which takes well
   # under a second; 10 s bounds a process that does not stop
@@ -404,7 +450,16 @@ done
 case "$TOOL" in
   tcpquality) [ "$STREAMS" = 1 ] || bad_config "STREAMS above 1 needs TOOL=iperf3" ;;
   iperf3) [ "$OUTAGE_S" = 0 ] || bad_config "TOOL=iperf3 needs OUTAGE_S=0" ;;
-  *) bad_config "TOOL is tcpquality or iperf3" ;;
+  churn)
+    [ "$OUTAGE_S" = 0 ] || bad_config "TOOL=churn needs OUTAGE_S=0"
+    [ "$STREAMS" = 1 ] || bad_config "STREAMS above 1 needs TOOL=iperf3"
+    need_positive CHURN_RATE "${CHURN_RATE:-}" "a whole number of connections a second, 1 or more, for TOOL=churn"
+    need_positive CHURN_S "$CHURN_S" "a whole number of seconds of 1 or more"
+    need_positive CHURN_SIZE "$CHURN_SIZE" "a whole number of bytes of 1 or more"
+    need_positive CT_MAX "$CT_MAX" "a whole number of conntrack entries"
+    case "$CHURN_CLOSE" in server|client) ;; *) bad_config "CHURN_CLOSE is server or client" ;; esac
+    command -v churn >/dev/null || bad_config "TOOL=churn needs tools/churn; run lab/lab build" ;;
+  *) bad_config "TOOL is tcpquality, iperf3 or churn" ;;
 esac
 case "$AGENT_GSO" in
   off) ;;
@@ -413,7 +468,7 @@ case "$AGENT_GSO" in
   *) bad_config "AGENT_GSO is off or on" ;;
 esac
 case "$UDPPING" in
-  1) [ "$TOOL" = iperf3 ] || bad_config "UDPPING=1 needs TOOL=iperf3" ;;
+  1) [ "$TOOL" = iperf3 ] || [ "$TOOL" = churn ] || bad_config "UDPPING=1 needs TOOL=iperf3 or churn" ;;
   ''|0) UDPPING= ;;
   *) bad_config "UDPPING is 1 or 0" ;;
 esac
@@ -422,6 +477,20 @@ if [ -n "$IPERF_MBIT" ]; then
   [ "$TOOL" = iperf3 ] || bad_config "IPERF_MBIT needs TOOL=iperf3"
 fi
 need_positive STREAMS "$STREAMS" "a whole number of 1 or more"
+# iperf3 takes at most 128 streams: past that, one server, client and listen port per 128
+IPERF_GROUPS=$(( (STREAMS + 127) / 128 ))
+[ "$IPERF_GROUPS" = 1 ] || [ -z "$TARGET_LOCAL" ] || bad_config "STREAMS above 128 needs the LAN host in the lan namespace, without TARGET_LOCAL"
+# the seconds the load runs, which the UDP pinger follows
+if [ "$TOOL" = churn ]; then LOAD_S=$CHURN_S; else LOAD_S=$IPERF_S; fi
+# the kernel-mode server's cap on one source address's TCP connections (128 by default) would
+# refuse a load from the client's one address before the agent sees it
+SERVER_ENV=()
+if [ "$TOOL" = churn ] || [ $((STREAMS + IPERF_GROUPS)) -ge 120 ]; then SERVER_ENV=(WGFT_MAX_TCP_FLOWS_PER_SOURCE=0); fi
+RULE_TCP=41800
+if [ "$IPERF_GROUPS" -gt 1 ]; then
+  RULE_TCP=41800-$((41800 + IPERF_GROUPS - 1))
+  ALLOW=192.168.50.3:25800-$((25800 + IPERF_GROUPS - 1)),$UDP_TARGET
+fi
 if [ -n "$TARGET_LOCAL" ]; then
   [ -n "$AGENT_AT" ] && [ "$TOOL" = iperf3 ] || bad_config "TARGET_LOCAL needs AGENT_AT and TOOL=iperf3"
   [ -z "$KERNEL_RMEM_MAX" ] || bad_config "TARGET_LOCAL does not take KERNEL_RMEM_MAX"
@@ -540,6 +609,14 @@ if [ -n "$TCP_BUF_MAX" ]; then
   raise_tcpmem here || { echo "FAIL  cannot raise tcp_mem for TCP_BUF_MAX"; exit 1; }
   if [ -n "$TARGET_LOCAL" ]; then raise_tcpmem agent || { echo "FAIL  cannot raise tcp_mem in the agent VM for TCP_BUF_MAX"; exit 1; }; fi
 fi
+if [ "$TOOL" = churn ]; then
+  ct_here=$(bash "$TQAGENT_HERE" ctmax "$CT_MAX") || { echo "FAIL  cannot raise the conntrack table to $CT_MAX entries"; exit 1; }
+  ct_agent=$ct_here
+  if [ -n "$AGENT_AT" ]; then
+    ct_agent=$(agentsh ctmax "$CT_MAX") || { echo "FAIL  cannot raise the conntrack table of the agent VM to $CT_MAX entries"; exit 1; }
+  fi
+  echo "   conntrack table: $ct_here entries here, $ct_agent in the agent's VM"
+fi
 gso_now=$(agent_gso "$AGENT_GSO") ||
   { echo "FAIL  cannot turn $AGENT_GSO UDP segmentation offload on the agent's eth0: $gso_now"; exit 1; }
 echo "   agent eth0: $gso_now"
@@ -572,10 +649,15 @@ for mode in $MODES; do
   if [ "$OUTAGE_S" = 0 ]; then outage="no outage"; else outage="${OUTAGE_S}s outage after ${OUTAGE_AFTER} bytes"; fi
   path="delay ${DELAY_MS}ms and loss ${LOSS_PCT}%${RATE_MBIT:+ at ${RATE_MBIT} Mbit/s with a ${QUEUE_PKTS}-packet queue}"
   if [ "$TOOL" = iperf3 ]; then size="${IPERF_S}-second"; else size="${BYTES}-byte"; fi
-  echo "== agent $mode: $path each way, $size $transfer by $TOOL with $STREAMS stream(s), $outage, $RUNS runs"
+  if [ "$TOOL" = churn ]; then
+    echo "== agent $mode: $path each way, $CHURN_RATE connections a second for ${CHURN_S} s, $CHURN_SIZE bytes each way, the $CHURN_CLOSE closing first, $RUNS runs"
+  else
+    echo "== agent $mode: $path each way, $size $transfer by $TOOL with $STREAMS stream(s)$([ "$IPERF_GROUPS" -gt 1 ] && echo " in $IPERF_GROUPS iperf3 clients"), $outage, $RUNS runs"
+  fi
+  [ ${#SERVER_ENV[@]} = 0 ] || echo "   server: ${SERVER_ENV[*]}"
   cleanup
   mkdir -p "$DATA"
-  vps setsid nohup wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
+  vps setsid nohup env "${SERVER_ENV[@]}" wgft server run --mode kernel --data-dir "$DATA" --wg-endpoint 203.0.113.1:51820 --admin "$ADMIN" \
     > "$W/wgft-tq-server-$mode.log" 2>&1 < /dev/null &
   disown
   wait_until 30 vps wgft agent ls --admin "$ADMIN" || { echo "FAIL  the server did not come up"; fail=1; continue; }
@@ -599,15 +681,22 @@ for mode in $MODES; do
   wait_until 30 handshaken || { echo "FAIL  the agent did not register"; fail=1; continue; }
   : > "$W/wgft-tq-serve-$mode.log"
   lan_bg "$W/wgft-tq-serve-$mode.log" $Q serve 192.168.50.3 25800 "$BYTES" 7
-  vps wgft rule add --agent home --tcp 41800 --to "$TARGET" --admin "$ADMIN" >/dev/null
+  vps wgft rule add --agent home --tcp "$RULE_TCP" --to "$TARGET" --admin "$ADMIN" >/dev/null
   wait_until 30 rule_ok || { echo "FAIL  the rule does not forward"; fail=1; continue; }
   if [ "$TOOL" = iperf3 ]; then
     # the probe above needs tcpquality.py's server; iperf3's takes the target port from here on
     sandbox_kill_cmdline '/tcpquality.py '
     [ -z "$TARGET_LOCAL" ] || agentsh killlan
     wait_until 10 lan_free
-    lan_bg "$W/wgft-tq-serve-$mode.log" iperf3 -s -B 192.168.50.3 -p 25800
-    wait_until 10 lan_listening || { echo "FAIL  iperf3 did not listen"; fail=1; continue; }
+    for g in $(seq 0 $((IPERF_GROUPS - 1))); do
+      lan_bg "$W/wgft-tq-serve-$mode${g/#0/}.log" iperf3 -s -B 192.168.50.3 -p $((25800 + g))
+    done
+    wait_until 10 lan_listening_all || { echo "FAIL  iperf3 did not listen"; fail=1; continue; }
+  elif [ "$TOOL" = churn ]; then
+    sandbox_kill_cmdline '/tcpquality.py '
+    wait_until 10 lan_free
+    lan_bg "$W/wgft-tq-serve-$mode.log" churn serve -bind 192.168.50.3 -port 25800 -size "$CHURN_SIZE" -close "$CHURN_CLOSE"
+    wait_until 10 lan_listening || { echo "FAIL  churn serve did not listen"; fail=1; continue; }
   fi
   if [ -n "$UDPPING" ]; then
     lan_bg "$W/wgft-tq-uecho-$mode.log" $Q uecho 192.168.50.3 25801
@@ -621,7 +710,9 @@ for mode in $MODES; do
     if [ -n "$TARGET_LOCAL" ]; then
       own=$(agentsh own-lan "iperf3 -s" "$CG_ROOT")
       lan_pid=$(field pid "$own") lan_cg=$(field cg "$own")
-    elif [ "$TOOL" = iperf3 ]; then lan_pid=$(ns_pid "$LAN_NS" "iperf3 -s"); else lan_pid=$(ns_pid "$LAN_NS" "tcpquality.py serve"); fi
+    elif [ "$TOOL" = iperf3 ]; then lan_pid=$(ns_pid "$LAN_NS" "iperf3 -s")
+    elif [ "$TOOL" = churn ]; then lan_pid=$(ns_pid "$LAN_NS" "churn serve")
+    else lan_pid=$(ns_pid "$LAN_NS" "tcpquality.py serve"); fi
     DP_SAMPLE=
     if [ -n "$AGENT_AT" ]; then
       own=$(agentsh own "$ADATA" "$CG_ROOT")
@@ -650,6 +741,12 @@ for mode in $MODES; do
     fi
     server_cg=$(cg_own server "$server_pid")
     [ -n "$TARGET_LOCAL" ] || lan_cg=$(cg_own lan "$lan_pid")
+    # the other iperf3 servers of a run past 128 streams share the LAN host's cgroup
+    if [ "$IPERF_GROUPS" -gt 1 ] && [ -n "$lan_cg" ]; then
+      for p in $(ip netns pids "$LAN_NS" 2>/dev/null); do
+        tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q -- "iperf3 -s" && echo "$p" > "$lan_cg/cgroup.procs" 2>/dev/null
+      done
+    fi
     if [ -z "$agent_pid" ]; then
       echo "FAIL  agent $mode: no agent process found, so its CPU time is not measured"; fail=1
     elif [ -n "$agent_cg" ]; then
@@ -714,28 +811,43 @@ for mode in $MODES; do
         t0=$(date +%s.%N) a0=$(cpu_us "$agent_pid" "$agent_cg") s0=$(cpu_us "$server_pid" "$server_cg") l0=$(cpu_us "$lan_pid" "$lan_cg") v0=$(vm_cpu_us)
       fi
     fi
-    if [ "$TOOL" = iperf3 ]; then
+    fetchers=()
+    if [ "$TOOL" = iperf3 ] || [ "$TOOL" = churn ]; then
       # the client runs in a cgroup of its own from its first instruction, so its CPU time is read like the others'
       client_cg=$CG_ROOT-client-$run
       mkdir -p "$client_cg" 2>/dev/null || client_cg=
       rev=; [ "$DIRECTION" = down ] && rev=-R
-      bash -c 'if [ -n "$1" ]; then echo $$ > "$1/cgroup.procs"; fi; shift; exec "$@"' _ "$client_cg" \
-        ip netns exec "$CLIENT_NS" iperf3 -c 198.51.100.1 -p 41800 -t "$IPERF_S" -P "$STREAMS" $rev -J \
-        ${IPERF_MBIT:+-b "${IPERF_MBIT}M"} > "$W/wgft-tq-iperf-$mode.json" 2> "$W/wgft-tq-fetch-$mode.log" &
-      fetcher=$!
+      iperf_json=()
+      if [ "$TOOL" = churn ]; then
+        bash -c 'if [ -n "$1" ]; then echo $$ > "$1/cgroup.procs"; fi; shift; exec "$@"' _ "$client_cg" \
+          ip netns exec "$CLIENT_NS" churn run -addr 198.51.100.1:41800 -rate "$CHURN_RATE" -seconds "$CHURN_S" \
+          -size "$CHURN_SIZE" -close "$CHURN_CLOSE" > "$W/wgft-tq-churn-$mode.log" 2> "$W/wgft-tq-fetch-$mode.log" &
+        fetchers+=($!)
+      else
+        # one client per 128 streams, 0.1 s apart, the streams shared out as evenly as they go
+        for g in $(seq 0 $((IPERF_GROUPS - 1))); do
+          n=$((STREAMS / IPERF_GROUPS + (g < STREAMS % IPERF_GROUPS ? 1 : 0)))
+          [ "$g" = 0 ] || sleep 0.1
+          iperf_json+=("$W/wgft-tq-iperf-$mode${g/#0/}.json")
+          bash -c 'if [ -n "$1" ]; then echo $$ > "$1/cgroup.procs"; fi; shift; exec "$@"' _ "$client_cg" \
+            ip netns exec "$CLIENT_NS" iperf3 -c 198.51.100.1 -p $((41800 + g)) -t "$IPERF_S" -P "$n" $rev -J \
+            ${IPERF_MBIT:+-b "${IPERF_MBIT}M"} > "${iperf_json[g]}" 2> "$W/wgft-tq-fetch-$mode${g/#0/}.log" &
+          fetchers+=($!)
+        done
+      fi
       if [ -n "$UDPPING" ]; then
-        (sleep 0.5; exec ip netns exec "$CLIENT_NS" $Q uping 198.51.100.1 41801 "$((IPERF_S - 1))" "$UDPPING_MS" udp_load) \
+        (sleep 0.5; exec ip netns exec "$CLIENT_NS" $Q uping 198.51.100.1 41801 "$((LOAD_S - 1))" "$UDPPING_MS" udp_load) \
           > "$W/wgft-tq-uping-$mode.log" 2>&1 &
         pinger=$!
       fi
     elif [ "$DIRECTION" = up ]; then
       ip netns exec "$CLIENT_NS" $Q push 198.51.100.1 41800 "$BYTES" 7 "$W/wgft-tq-samples-$mode" "$OUTAGE_AFTER" "$mark" \
         > "$W/wgft-tq-fetch-$mode.log" 2>&1 &
-      fetcher=$!
+      fetchers+=($!)
     else
       ip netns exec "$CLIENT_NS" $Q fetch 198.51.100.1 41800 "$W/wgft-tq-samples-$mode" "$OUTAGE_AFTER" "$mark" \
         > "$W/wgft-tq-fetch-$mode.log" 2>&1 &
-      fetcher=$!
+      fetchers+=($!)
     fi
     if [ "$OUTAGE_S" = 0 ]; then
       out_start=- out_end=-
@@ -748,8 +860,12 @@ for mode in $MODES; do
     else
       out_start=0 out_end=0
     fi
-    wait "$fetcher"
-    tool_rc=$?
+    tool_rc=0
+    for f in "${fetchers[@]}"; do
+      wait "$f"
+      rc_f=$?
+      [ "$tool_rc" != 0 ] || tool_rc=$rc_f
+    done
     # the CPU window closes when the transfer ends; the pinger's last second of waiting for late
     # echoes is not part of it
     if [ -n "$CPU" ]; then
@@ -770,15 +886,23 @@ for mode in $MODES; do
     fi
     if [ -n "$UDPPING" ]; then
       wait "$pinger"
-      udp_load=$(udp_or_lost udp_load "$((IPERF_S - 1))" "$(tail -1 "$W/wgft-tq-uping-$mode.log")")
+      udp_load=$(udp_or_lost udp_load "$((LOAD_S - 1))" "$(tail -1 "$W/wgft-tq-uping-$mode.log")")
     fi
     netem delay 0ms
 
     if [ "$TOOL" = iperf3 ]; then
       # one line with received=, sent=, the receiver's duration and rate, and the sender's retransmits
-      got=$($Q iperf "$W/wgft-tq-iperf-$mode.json")
+      got=$($Q iperf "${iperf_json[@]}")
       sent=$got
-      stats="undetermined=0 streams=$STREAMS duration_s=$(field duration_s "$got") overall_mbit=$(field mbit "$got") retransmits=$(field retransmits "$got")$(echo "$got" | grep -oE ' stream_(jain|min_over_max)=[^ ]*' | tr -d '\n')"
+      stats="undetermined=0 streams=$STREAMS duration_s=$(field duration_s "$got") overall_mbit=$(field mbit "$got") retransmits=$(field retransmits "$got")$(echo "$got" | grep -oE ' stream_[a-z_]+=[^ ]*' | tr -d '\n')"
+      [ "$IPERF_GROUPS" = 1 ] || stats="$stats iperf_groups=$IPERF_GROUPS"
+      c_us=; [ -n "$client_cg" ] && c_us=$(awk '$1 == "usage_usec" { print $2 }' "$client_cg/cpu.stat" 2>/dev/null)
+      rmdir "$client_cg" 2>/dev/null
+    elif [ "$TOOL" = churn ]; then
+      got=$(tail -1 "$W/wgft-tq-churn-$mode.log")
+      sent=$got
+      # overall_mbit is the payload of the completed connections over CHURN_S, which the paired analysis reads
+      stats="undetermined=0 streams=1 duration_s=$CHURN_S overall_mbit=$(awk -v b="$(field received "$got")" -v s="$CHURN_S" 'BEGIN { printf "%.3f", b * 8 / s / 1e6 }') churn_close=$CHURN_CLOSE$(echo " $got" | grep -oE ' churn_[a-z0-9_]+=[^ ]*' | tr -d '\n')"
       c_us=; [ -n "$client_cg" ] && c_us=$(awk '$1 == "usage_usec" { print $2 }' "$client_cg/cpu.stat" 2>/dev/null)
       rmdir "$client_cg" 2>/dev/null
     else
@@ -800,6 +924,8 @@ for mode in $MODES; do
           if (splitvm == "") printf " vm_cpu_s_per_gb=%.3f vm_cpu_share=%.3f", (n > 0 ? v / 1e6 / (n / 1e9) : -1), v / 1e6 / t
           # tcpquality.py reports the client CPU only for an upload, where the client sends; the analysis
           # reads client_cpu_share as the sender, so with iperf3 the client is named by its role only
+          # with churn, connections and not bytes are the load: the client is the load generator, named so
+          if (tool == "churn") { if (c != "") printf " churn_client_cpu_share=%.3f", c / 1e6 / t; exit }
           if (c != "" && (tool != "iperf3" || dir == "up")) printf " client_cpu_share=%.3f", c / 1e6 / t
           if (dir == "up") { snd = c; rcv = l * 1 } else { snd = l; rcv = c }
           if (snd != "") printf " sender_cpu_share=%.3f", snd / 1e6 / t
@@ -814,9 +940,24 @@ for mode in $MODES; do
         echo "FAIL  agent $mode run $run: netem dropped $((nd1 - nd0)) packets on a path without loss; raise NETEM_LIMIT"; fail=1 run_pass=0
       fi
     fi
+    # the agent's memory and refusals, read after the window
+    if [ -n "$AGENT_AT" ]; then
+      ast=$(agentsh stat "$ADATA" "$W/wgft-tq-agent-$mode.log" 2>/dev/null)
+    else
+      ast=$(bash "$TQAGENT_HERE" stat "$ADATA" "$W/wgft-tq-agent-$mode.log" 2>/dev/null)
+    fi
+    stats="$stats${ast:+ $ast} vps_ct_count=$(vps cat /proc/sys/net/netfilter/nf_conntrack_count 2>/dev/null || echo -)"
+    [ ${#SERVER_ENV[@]} = 0 ] || stats="$stats per_source_cap=off"
     echo "   run $run sent:     $sent"
     echo "   run $run received: $got"
-    if [ "$TOOL" = iperf3 ]; then
+    if [ "$TOOL" = churn ]; then
+      if [ "$tool_rc" = 0 ] && [ "$(field churn_ok "$got")" -gt 0 ] 2>/dev/null; then
+        echo "PASS  agent $mode run $run: churn completed $(field churn_ok "$got") of $(field churn_planned "$got") connections"
+      else
+        echo "FAIL  agent $mode run $run: churn exited $tool_rc and completed $(field churn_ok "$got") connections"; fail=1 run_pass=0
+        tail -5 "$W/wgft-tq-fetch-$mode.log"
+      fi
+    elif [ "$TOOL" = iperf3 ]; then
       if [ "$tool_rc" = 0 ] && [ "$(field received "$got")" -gt 0 ] 2>/dev/null; then
         echo "PASS  agent $mode run $run: iperf3 exited 0 and $reader read $(field received "$got") bytes"
       else

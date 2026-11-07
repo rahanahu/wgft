@@ -70,10 +70,27 @@
 #       unavailable" and keep the tick value. The
 #       kernel arm (by its name), whose agent process does no work, has no RATIO line but a line
 #       saying so, and is compared by the VM ratios only.
-#   iperf <jsonfile>
+#   iperf <jsonfile>...
 #       reads the output of `iperf3 -J` and prints received=<bytes the receiver read>,
 #       sent=<bytes the sender wrote>, the receiver's duration and rate in Mbit/s and the sender's TCP
-#       retransmits, or received=0 and the error when iperf3 failed.
+#       retransmits, or received=0 and the error when iperf3 failed. With more than one stream, the
+#       fairness between them: Jain's index, the smallest over the largest, the smallest and largest
+#       stream's rate and the streams that read nothing. Several files are the clients of one run
+#       that tcpquality.sh starts together, past iperf3's 128 streams: their bytes and rates add up,
+#       the duration is the longest, and the fairness is over all their streams; one failed client
+#       fails the run.
+#   agentstat <pid> <log> <netns> [label]
+#       the agent's memory and refusals at one moment, for runs with many connections: its VmRSS and
+#       VmHWM in MiB, the "memory bound: N MiB" of its start line, the latest count of each wgstack
+#       refusal and drop line ("...; N since the tunnel was built"), the number of the relays'
+#       "refusing new connections" and "dropping new flows" lines, and in <netns> the TCP sockets
+#       established and in TIME_WAIT and the conntrack entries. The counts of the log lines lag the
+#       agent's own counters by as long as it waits between two lines of one kind.
+#   manyconn <paired.log>...
+#       the many-connection table of lab/manyconn.sh: per paired.log (one case) and arm the median
+#       over its runs of the rate, the agent VM's CPU per GB from the host's guest time, the
+#       fairness, the UDP round trips, the agent's RSS and its refusals, or for TOOL=churn the
+#       connections per second, the setup times and the agent VM's CPU per connection.
 #   uecho <ip> <port>
 #       UDP echo server: sends every datagram back to where it came from.
 #   uping <ip> <port> <seconds> <interval_ms> <prefix>
@@ -306,28 +323,218 @@ def sender_share(r):
     return float(v) / int(r.get("streams", "1"))
 
 
-def iperf(jsonfile):
+def iperf(*jsonfiles):
     import json
-    try:
-        j = json.load(open(jsonfile))
-    except (OSError, ValueError) as e:
-        print("received=0 sent=0 error=%s" % str(e).replace(" ", "_"))
-        return 0
-    end = j.get("end", {})
-    rcv, snd = end.get("sum_received", {}), end.get("sum_sent", {})
-    if "error" in j or not rcv:
-        print("received=0 sent=0 error=%s" % str(j.get("error", "no_result")).replace(" ", "_"))
-        return 0
+    received = sent = 0
+    seconds = bps = 0.0
+    retrans = []
+    per, secs = [], []
+    for jsonfile in jsonfiles:
+        try:
+            j = json.load(open(jsonfile))
+        except (OSError, ValueError) as e:
+            print("received=0 sent=0 error=%s" % str(e).replace(" ", "_"))
+            return 0
+        end = j.get("end", {})
+        rcv, snd = end.get("sum_received", {}), end.get("sum_sent", {})
+        if "error" in j or not rcv:
+            print("received=0 sent=0 error=%s" % str(j.get("error", "no_result")).replace(" ", "_"))
+            return 0
+        received += rcv["bytes"]
+        sent += snd.get("bytes", 0)
+        seconds = max(seconds, rcv["seconds"])
+        bps += rcv["bits_per_second"]
+        if "retransmits" in snd:
+            retrans.append(snd["retransmits"])
+        for st in end.get("streams", []):
+            r = st.get("receiver", {})
+            per.append(r.get("bytes", 0))
+            secs.append(r.get("seconds", 0) or rcv["seconds"])
     # fairness between the streams of one run: Jain's index of the bytes each stream's receiver read
-    # (1 is equal shares) and the smallest stream over the largest; one stream gives no values
-    per = [s.get("receiver", {}).get("bytes", 0) for s in end.get("streams", [])]
+    # (1 is equal shares) and the smallest stream over the largest; one stream gives no values. The
+    # smallest and largest stream's rate and the streams that read nothing come with them
     fair = ""
     if len(per) > 1 and sum(per) > 0:
         fair = " stream_jain=%.4f stream_min_over_max=%.3f" % (
             sum(per) ** 2 / (len(per) * sum(b * b for b in per)), min(per) / max(per) if max(per) else 0)
+        rates = [b * 8 / t / 1e6 for b, t in zip(per, secs) if t > 0]
+        if rates:
+            fair += " stream_min_mbit=%.3f stream_max_mbit=%.3f" % (min(rates), max(rates))
+        fair += " stream_zero=%d" % sum(1 for b in per if b == 0)
     print("received=%d sent=%d duration_s=%.3f mbit=%.2f retransmits=%s%s"
-          % (rcv["bytes"], snd.get("bytes", 0), rcv["seconds"], rcv["bits_per_second"] / 1e6,
-             snd.get("retransmits", "-"), fair))
+          % (received, sent, seconds, bps / 1e6, sum(retrans) if retrans else "-", fair))
+    return 0
+
+
+# the agent's log lines that report a refusal or a drop, with the key agentstat gives each: wgstack's
+# lines end in "; N since the tunnel was built" (Netstack::log_text in crates/wgft-netstack); the
+# relays' lines are counted
+AGENT_LOG_KINDS = (
+    ("dropped TCP handshakes that advertise an MSS", "wg_mss_floor"),
+    ("dropped SYNs because the half-open table was full", "wg_syn_full"),
+    ("answered SYNs with SYN cookies", "wg_syn_cookies"),
+    ("dropped SYNs because the accept queue or the connection table was full", "wg_syn_accept_full"),
+    ("dropped final handshake ACKs", "wg_accept_overflow"),
+    ("evicted the oldest TIME_WAIT rows", "wg_tw_evicted"),
+    ("dropped control packets", "wg_ctl_dropped"),
+    ("dropped out-of-order segments", "wg_ooo_dropped"),
+    ("closed a connection after an internal accounting error", "wg_accounting_fault"),
+)
+
+
+def agent_log_counts(text):
+    # the latest count of each kind of refusal line in the agent's log, and the memory bound
+    out = {}
+    for line in text.splitlines():
+        m = re.search(r"memory bound: (\d+) MiB", line)
+        if m and "agent_bound_mib" not in out:
+            out["agent_bound_mib"] = int(m.group(1))
+        if "; refusing new connections" in line:
+            out["relay_tcp_refusing_lines"] = out.get("relay_tcp_refusing_lines", 0) + 1
+        if "; dropping new flows" in line:
+            out["relay_udp_dropping_lines"] = out.get("relay_udp_dropping_lines", 0) + 1
+        if "wgstack: " not in line:
+            continue
+        m = re.search(r"(\d+) over the per-socket limit .* (\d+) over the tunnel budget", line)
+        if m:
+            out["wg_udp_endpoint_full"], out["wg_udp_tunnel_full"] = int(m.group(1)), int(m.group(2))
+            continue
+        m = re.search(r"(\d+) dropped to make room for newer ones and (\d+) dropped for waiting", line)
+        if m:
+            out["wg_udp_send_evicted"], out["wg_udp_send_expired"] = int(m.group(1)), int(m.group(2))
+            continue
+        m = re.search(r"(\d+) (?:dropped )?since the tunnel was built", line)
+        if not m:
+            continue
+        key = next((k for phrase, k in AGENT_LOG_KINDS if phrase in line), None)
+        if key:
+            out[key] = int(m.group(1))
+        else:
+            out["wg_other_lines"] = out.get("wg_other_lines", 0) + 1
+    return out
+
+
+# /proc/net/tcp's states that agentstat counts
+TCP_STATES = {"01": "estab", "06": "timewait"}
+
+
+def agentstat(pid, log, ns="", label=""):
+    # the socket and conntrack counts are read once, after the load has exited, so their keys end in
+    # _after: they are not peaks, and no count is taken while the load runs
+    out = {}
+    try:
+        with open("/proc/%s/status" % pid) as f:
+            for line in f:
+                k, _, v = line.partition(":")
+                if k in ("VmRSS", "VmHWM"):
+                    out["agent_%s_mib" % ("rss" if k == "VmRSS" else "hwm")] = "%.1f" % (int(v.split()[0]) / 1024)
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        with open(log, errors="replace") as f:
+            out.update(agent_log_counts(f.read()))
+    except OSError:
+        pass
+
+    def sockets():
+        n = {}
+        for path in ("/proc/thread-self/net/tcp", "/proc/thread-self/net/tcp6"):
+            try:
+                with open(path) as f:
+                    for line in f.readlines()[1:]:
+                        st = TCP_STATES.get(line.split()[3])
+                        if st:
+                            n["tcp_" + st] = n.get("tcp_" + st, 0) + 1
+            except (OSError, IndexError):
+                pass
+        for st in TCP_STATES.values():
+            n.setdefault("tcp_" + st, 0)
+        try:
+            with open("/proc/sys/net/netfilter/nf_conntrack_count") as f:
+                n["ct_count"] = int(f.read())
+        except (OSError, ValueError):
+            pass
+        return n
+    for k, v in in_netns(ns, sockets).items():
+        out["%s_%s_after" % (label or ns or "ns", k)] = v
+    print(" ".join("%s=%s" % kv for kv in out.items()))
+    return 0
+
+
+# the values manyconn prints per arm: (key, how runs combine); med is the median, max the largest,
+# sum the total over the runs
+MANY_IPERF = (("streams", "max"), ("overall_mbit", "med"), ("agentvm_guest_s_per_gb", "med"),
+              ("agentvm_cpu_s_per_gb", "med"), ("agentvm_guest_share", "med"), ("stream_jain", "med"),
+              ("stream_min_over_max", "med"), ("stream_min_mbit", "med"), ("stream_max_mbit", "med"),
+              ("stream_zero", "max"), ("retransmits", "med"), ("udp_idle_p50_ms", "med"), ("udp_idle_p99_ms", "med"),
+              ("udp_load_p50_ms", "med"), ("udp_load_p99_ms", "med"), ("udp_load_max_ms", "max"),
+              ("udp_load_lost", "sum"), ("udp_load_sent", "sum"))
+MANY_CHURN = (("churn_rate", "max"), ("churn_ok_per_s", "med"), ("churn_planned", "sum"), ("churn_ok", "sum"),
+              ("churn_refused", "sum"), ("churn_reset", "sum"), ("churn_dial_timeout", "sum"),
+              ("churn_xfer_timeout", "sum"), ("churn_short", "sum"), ("churn_other", "sum"), ("churn_skipped", "sum"),
+              ("churn_connect_p50_ms", "med"), ("churn_connect_p99_ms", "med"), ("churn_connect_max_ms", "max"),
+              ("churn_rr_p50_ms", "med"), ("churn_rr_p99_ms", "med"), ("churn_connect_over_1s", "sum"),
+              ("churn_inflight_max", "max"), ("agentvm_guest_share", "med"), ("client_tcp_synretrans", "sum"),
+              ("udp_idle_p99_ms", "med"), ("udp_load_p50_ms", "med"), ("udp_load_p99_ms", "med"),
+              ("udp_load_lost", "sum"))
+# what both kinds of case print after their own values: the agent's memory, refusals and sockets at
+# the ends of the runs (agentstat), the largest over the runs
+MANY_AGENT = ("agent_rss_mib", "agent_hwm_mib", "agent_bound_mib", "wg_syn_full", "wg_syn_cookies",
+              "wg_syn_accept_full", "wg_accept_overflow", "wg_tw_evicted", "wg_ctl_dropped", "wg_ooo_dropped",
+              "wg_accounting_fault", "wg_udp_endpoint_full", "wg_udp_tunnel_full", "wg_udp_send_evicted",
+              "wg_udp_send_expired", "wg_other_lines", "relay_tcp_refusing_lines", "relay_udp_dropping_lines",
+              "home_tcp_estab_after", "home_tcp_timewait_after", "home_ct_count_after")
+# the drop and error counters snapdiff prints only when they moved, summed over the runs
+MANY_DROPS = re.compile(r"(udp_rcvbuferr|udp_sndbuferr|tcp_synretrans|tcp_attemptfails|tcp_estabresets|tcp_twoverflow|"
+                        r"tcp_listenoverflows|tcp_listendrops|_rxdrop|_txdrop|softnet_drop)$")
+
+
+def manyconn(*logs):
+    for log in logs:
+        _, names, runs = load_paired(log)
+        case = os.path.basename(os.path.dirname(os.path.abspath(log)))
+        for arm in ("x", "y"):
+            rs = [r for k, r in sorted(runs.items()) if k[2] == arm and r.get("pass") == "1" and r.get("sync") != "timeout"]
+            failed = sum(1 for k, r in runs.items() if k[2] == arm) - len(rs)
+            churn = any("churn_rate" in r for r in rs)
+            vals = []
+            for key, how in (MANY_CHURN if churn else MANY_IPERF) + tuple((k, "max") for k in MANY_AGENT):
+                v = []
+                for r in rs:
+                    try:
+                        v.append(float(r[key]))
+                    except (KeyError, ValueError):
+                        pass
+                if not v:
+                    continue
+                x = statistics.median(v) if how == "med" else max(v) if how == "max" else sum(v)
+                vals.append("%s=%s" % (key, ("%d" % x) if x == int(x) and abs(x) < 1e15 else ("%.4g" % x)))
+            drops = {}
+            for r in rs:
+                for k, v in r.items():
+                    if MANY_DROPS.search(k) and not (churn and k == "client_tcp_synretrans"):
+                        try:
+                            drops[k] = drops.get(k, 0) + int(float(v))
+                        except ValueError:
+                            pass
+            vals += ["%s=%d" % kv for kv in sorted(drops.items())]
+            if churn:
+                # the agent VM's guest time per completed connection, in microseconds
+                per = [float(r["host_agent_vcpu_guest_s"]) / int(r["churn_ok"]) * 1e6 for r in rs
+                       if "host_agent_vcpu_guest_s" in r and int(r.get("churn_ok", "0")) > 0]
+                if per:
+                    vals.append("agentvm_guest_us_per_conn=%.1f" % statistics.median(per))
+            else:
+                # the bytes over the whole CPU window: with hundreds of streams iperf3 can spend seconds
+                # connecting and closing outside its own 10 s, so this is a lower bound of the rate, and
+                # the window's length shows how far the run stretched
+                win = [(int(r["bytes"]) * 8 / float(r["window_s"]) / 1e6, float(r["window_s"])) for r in rs
+                       if r.get("bytes", "").isdigit() and float(r.get("window_s", "0") or 0) > 0]
+                if win:
+                    vals.append("window_mbit=%.0f window_s=%.1f" % (statistics.median(w[0] for w in win),
+                                                                    statistics.median(w[1] for w in win)))
+            print("MANY case=%s arm=%s name=%s runs=%d failed=%d %s"
+                  % (case, arm, names.get(arm, arm), len(rs), failed, " ".join(vals)))
     return 0
 
 
@@ -935,6 +1142,15 @@ def latpaired(logfile):
 CLONE_NEWNET = 0x40000000
 
 
+def setns(fd, nstype):
+    # os.setns needs Python 3.12; the VMs of an older image have 3.11, so call libc's setns then
+    if hasattr(os, "setns"):
+        os.setns(fd, nstype)
+    elif ctypes.CDLL(None, use_errno=True).setns(fd, nstype) != 0:
+        err = ctypes.get_errno()
+        raise OSError(err, os.strerror(err))
+
+
 def read_netns(ns, paths):
     # the contents of /proc/thread-self/net/<path> in the network namespace ns ("" is the caller's),
     # read by this thread alone after setns, so that a threaded agentd is not disturbed
@@ -945,7 +1161,7 @@ def read_netns(ns, paths):
             own = os.open("/proc/thread-self/ns/net", os.O_RDONLY)
             fd = os.open("/run/netns/" + ns, os.O_RDONLY)
             try:
-                os.setns(fd, CLONE_NEWNET)
+                setns(fd, CLONE_NEWNET)
             finally:
                 os.close(fd)
         for p in paths:
@@ -956,7 +1172,7 @@ def read_netns(ns, paths):
                 out[p] = ""
     finally:
         if own is not None:
-            os.setns(own, CLONE_NEWNET)
+            setns(own, CLONE_NEWNET)
             os.close(own)
     return out
 
@@ -969,13 +1185,13 @@ def in_netns(ns, fn):
             own = os.open("/proc/thread-self/ns/net", os.O_RDONLY)
             fd = os.open("/run/netns/" + ns, os.O_RDONLY)
             try:
-                os.setns(fd, CLONE_NEWNET)
+                setns(fd, CLONE_NEWNET)
             finally:
                 os.close(fd)
         return fn()
     finally:
         if own is not None:
-            os.setns(own, CLONE_NEWNET)
+            setns(own, CLONE_NEWNET)
             os.close(own)
 
 
@@ -1569,7 +1785,10 @@ SNMP_KEYS = {("TcpExt", "TCPOFOQueue"): "tcp_ofoq", ("TcpExt", "TCPOFODrop"): "t
              ("Tcp", "InSegs"): "tcp_insegs", ("Tcp", "OutSegs"): "tcp_outsegs",
              ("Tcp", "RetransSegs"): "tcp_retrans", ("Udp", "InDatagrams"): "udp_in",
              ("Udp", "OutDatagrams"): "udp_out", ("Udp", "RcvbufErrors"): "udp_rcvbuferr",
-             ("Udp", "SndbufErrors"): "udp_sndbuferr"}
+             ("Udp", "SndbufErrors"): "udp_sndbuferr", ("TcpExt", "TCPSynRetrans"): "tcp_synretrans",
+             ("Tcp", "AttemptFails"): "tcp_attemptfails", ("Tcp", "EstabResets"): "tcp_estabresets",
+             ("TcpExt", "TCPTimeWaitOverflow"): "tcp_twoverflow", ("TcpExt", "ListenOverflows"): "tcp_listenoverflows",
+             ("TcpExt", "ListenDrops"): "tcp_listendrops"}
 
 
 def snap_line(prefix, pid="", cg="", *specs):
@@ -2580,4 +2799,5 @@ if __name__ == "__main__":
               "uecho": uecho, "uping": uping, "latpaired": latpaired, "snap": snap, "snapdiff": snapdiff,
               "agentd": agentd, "agentx": agentx, "channels": channels, "hostsample": hostsample, "hostwin": hostwin,
               "kvmsample": kvmsample, "pollctl": pollctl, "guestinfo": guestinfo, "nicirq": nicirq,
-              "peerseries": peerseries, "peerseries_sum": peerseries_line}[cmd](*args))
+              "peerseries": peerseries, "peerseries_sum": peerseries_line, "agentstat": agentstat,
+              "manyconn": manyconn}[cmd](*args))
