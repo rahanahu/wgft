@@ -29,20 +29,23 @@ pub(super) struct Plan {
 pub(super) struct Measured {
     pub(super) cpu: Cpu,
     pub(super) calls: Syscalls,
+    /// The second thread's CPU time over its bursts in `recv` and `answer` mode, where loopback
+    /// also queues each datagram on the measured socket inside the second thread's send; zero in
+    /// `send` mode.
+    pub(super) peer_cpu: Cpu,
 }
 
 /// Waits for the second thread, then returns the measured thread's result before the second
 /// thread's, so that the first failure is the one reported.
-fn finish(
-    peer: thread::JoinHandle<Result<(), Error>>,
+fn finish<T>(
+    peer: thread::JoinHandle<Result<T, Error>>,
     result: Result<Measured, Error>,
-) -> Result<Measured, Error> {
+) -> Result<(Measured, T), Error> {
     let joined = peer
         .join()
         .map_err(|_| Error::failed("the second thread panicked"))?;
     let measured = result?;
-    joined?;
-    Ok(measured)
+    Ok((measured, joined?))
 }
 
 /// Fails the run when the device layer dropped anything.
@@ -125,11 +128,15 @@ pub(super) fn measure_send(mut agent: Link, server: Link, plan: &Plan) -> Result
             }
         }
         no_drops(&agent)?;
-        Ok(Measured { cpu, calls })
+        Ok(Measured {
+            cpu,
+            calls,
+            peer_cpu: Cpu::ZERO,
+        })
     })();
     stop.store(true, Ordering::Relaxed);
     drop(delivered_rx);
-    finish(peer, result)
+    finish(peer, result).map(|(m, ())| m)
 }
 
 enum Command {
@@ -205,20 +212,25 @@ pub(super) fn measure_recv(
             }
         }
         no_drops(&server)?;
-        Ok(Measured { cpu, calls })
+        Ok(Measured {
+            cpu,
+            calls,
+            peer_cpu: Cpu::ZERO,
+        })
     })();
     drop(command_tx);
-    finish(peer, result)
+    finish(peer, result).map(|(m, peer_cpu)| Measured { peer_cpu, ..m })
 }
 
-/// The second thread of `recv` mode: the agent that encrypts a burst when told to.
+/// The second thread of `recv` mode: the agent that encrypts a burst when told to. Returns its CPU
+/// time over the bursts.
 fn sender_thread(
     mut agent: Link,
     packet: &[u8],
     cpu: Option<usize>,
     commands: &Receiver<Command>,
     sent: &Sender<()>,
-) -> Result<(), Error> {
+) -> Result<Cpu, Error> {
     pin(cpu).map_err(|e| Error::context("cannot pin the second thread", &e))?;
     let mut calls = Syscalls::default();
     agent.encrypt(Instant::now(), packet);
@@ -239,10 +251,12 @@ fn sender_thread(
     }
     agent.send_pending(&mut calls)?;
     sent.send(()).map_err(|e| Error::failed(e.to_string()))?;
+    let mut spent = Cpu::ZERO;
     while let Ok(Command::Burst(n)) = commands.recv() {
         let now = Instant::now();
         // `answer` mode の返事を読み捨てる。読むのは測る区間の外で、無ければ何もしない
         agent.receive_all(now, &mut calls)?;
+        let start = Cpu::now();
         for _ in 0..n {
             agent.encrypt(now, packet);
             if agent.send_each() {
@@ -250,9 +264,10 @@ fn sender_thread(
             }
         }
         agent.send_pending(&mut calls)?;
+        spent = spent.plus(Cpu::now().since(start));
         if sent.send(()).is_err() {
             break;
         }
     }
-    Ok(())
+    Ok(spent)
 }

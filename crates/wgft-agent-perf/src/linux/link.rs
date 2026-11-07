@@ -17,6 +17,8 @@ pub(super) struct Syscalls {
     pub(super) data: u64,
     /// The readiness check once per burst, standing in for the data plane's `epoll_wait`.
     pub(super) wake: u64,
+    /// `SIOCGSTAMPNS` calls of `--rx-stamp batch`.
+    pub(super) stamp: u64,
 }
 
 /// Sends one datagram, waiting while the socket is full.
@@ -56,6 +58,23 @@ pub(super) struct Link {
     /// slots and sent with `sendmmsg`, UDP GSO joining runs of one length, and datagrams are read
     /// with `recvmmsg` and UDP GRO.
     batch: Option<Batch>,
+    /// What the receive side does about the kernel's receive times (`--rx-stamp`).
+    stamp: RxStamp,
+}
+
+/// The kernel receive time work of the receive side, for the cost of the signal of the receive
+/// queue control (`--rx-stamp`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+pub(super) enum RxStamp {
+    /// Nothing, as the data plane without the control.
+    #[default]
+    Off,
+    /// One `SIOCGSTAMPNS` at the start, which turns the kernel's receive times on, and none
+    /// after: the cost of the times alone.
+    On,
+    /// One `SIOCGSTAMPNS` after every `recvmmsg` or `recvfrom`: the most the control could ask
+    /// for; the data plane samples at most once a millisecond.
+    Batch,
 }
 
 struct Batch {
@@ -65,7 +84,11 @@ struct Batch {
 }
 
 impl Link {
-    pub(super) fn new(socket: UdpSocket, device: Device, batching: bool) -> Self {
+    pub(super) fn new(socket: UdpSocket, device: Device, batching: bool, stamp: RxStamp) -> Self {
+        if stamp != RxStamp::Off {
+            // 最初の呼び出しが受信の時刻の付与を始める。何も読む前なので時刻は無い
+            let _ = sys::receive_stamp(socket.as_raw_fd());
+        }
         let buf = vec![0; device.max_transmit_len() + 64];
         let sealed = vec![0; device.max_transmit_len()];
         let batch = batching.then(|| {
@@ -88,6 +111,7 @@ impl Link {
             sealed,
             direct: None,
             batch,
+            stamp,
         }
     }
 
@@ -172,6 +196,7 @@ impl Link {
             calls.data += 1;
             match self.socket.recv_from(&mut self.buf) {
                 Ok((n, from)) => {
+                    self.sample(calls)?;
                     self.decrypt(now, from, n);
                     read += 1;
                 }
@@ -196,6 +221,10 @@ impl Link {
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(read),
                 Err(e) => return Err(e),
             };
+            if self.stamp == RxStamp::Batch {
+                calls.stamp += 1;
+                std::hint::black_box(sys::receive_stamp(fd)?);
+            }
             let device = &mut self.device;
             let mut delivered = 0;
             b.rx.decrypt_each(n, |from, ecn, datagram, out| {
@@ -210,6 +239,15 @@ impl Link {
             });
             self.delivered += delivered;
         }
+    }
+
+    /// With `--rx-stamp batch`, reads the receive time of the datagram just read.
+    fn sample(&self, calls: &mut Syscalls) -> std::io::Result<()> {
+        if self.stamp == RxStamp::Batch {
+            calls.stamp += 1;
+            std::hint::black_box(sys::receive_stamp(self.socket.as_raw_fd())?);
+        }
+        Ok(())
     }
 
     /// Runs the device's timer if it is due. A measured wake-up does this once, as the data plane

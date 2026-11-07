@@ -18,7 +18,7 @@ mod measure;
 
 use cpu::pin;
 use error::Error;
-use link::Link;
+use link::{Link, RxStamp};
 use measure::{Plan, measure_recv, measure_send};
 
 /// The agent's tunnel address and the server's, as in the device layer's own tests.
@@ -67,6 +67,11 @@ struct Args {
     /// plane's batch store with `sendmmsg`, `recvmmsg`, UDP GSO and GRO.
     #[arg(long)]
     one_by_one: bool,
+    /// What the measured receive side does about the kernel's receive times, for the cost of the
+    /// receive queue control's signal: off, on (turned on once, never read), or batch (read once
+    /// after every receive call). recv and answer modes only.
+    #[arg(long, value_enum, default_value_t = RxStamp::Off)]
+    rx_stamp: RxStamp,
 }
 
 pub(crate) fn main() -> ExitCode {
@@ -119,8 +124,12 @@ fn run(args: &Args) -> Result<String, Error> {
             agent.mtu()
         )));
     }
-    let agent = Link::new(agent_socket, agent, !args.one_by_one);
-    let server = Link::new(server_socket, server, !args.one_by_one);
+    let rx_stamp = match args.mode {
+        Mode::Send => RxStamp::Off,
+        Mode::Recv | Mode::Answer => args.rx_stamp,
+    };
+    let agent = Link::new(agent_socket, agent, !args.one_by_one, RxStamp::Off);
+    let server = Link::new(server_socket, server, !args.one_by_one, rx_stamp);
     let packet = inner_packet(args.size, AGENT_IP, SERVER_IP);
     let bursts = args.packets.div_ceil(args.burst as u64);
     let plan = Plan {
@@ -137,7 +146,7 @@ fn run(args: &Args) -> Result<String, Error> {
     };
     let packets = bursts * args.burst as u64;
     Ok(format!(
-        "RESULT mode={} size={} batch={} packets={packets} bytes={} cpu_ns={} user_ns={} sys_ns={} data_syscalls={} wake_syscalls={}",
+        "RESULT mode={} size={} batch={} rx_stamp={} packets={packets} bytes={} cpu_ns={} user_ns={} sys_ns={} data_syscalls={} wake_syscalls={} stamp_syscalls={} peer_cpu_ns={}",
         match args.mode {
             Mode::Send => "send",
             Mode::Recv => "recv",
@@ -145,12 +154,19 @@ fn run(args: &Args) -> Result<String, Error> {
         },
         args.size,
         if args.one_by_one { "off" } else { "on" },
+        match rx_stamp {
+            RxStamp::Off => "off",
+            RxStamp::On => "on",
+            RxStamp::Batch => "batch",
+        },
         packets * args.size as u64,
         measured.cpu.total.as_nanos(),
         measured.cpu.user.as_nanos(),
         measured.cpu.sys.as_nanos(),
         measured.calls.data,
         measured.calls.wake,
+        measured.calls.stamp,
+        measured.peer_cpu.total.as_nanos(),
     ))
 }
 

@@ -40,6 +40,14 @@
 //! - Loopback delivers inline in the sender's `sendto`, so the send mode's CPU time includes the
 //!   receiving socket's queueing, as the lab's veth path includes the softirq after a send.
 //!
+//! The receive queue control's signal. `--rx-stamp on` turns the kernel's receive times on for the
+//! measured socket (one `SIOCGSTAMPNS` before the first read) and `--rx-stamp batch` also reads the
+//! receive time once after every receive call, the most the control of
+//! `docs/design/v2/agent-throughput.md` could ask for; the result line counts those calls in
+//! `stamp_syscalls`. In `recv` and `answer` mode the line also has `peer_cpu_ns`, the second
+//! thread's CPU time over its bursts, which includes the loopback's queueing of each datagram on
+//! the measured socket.
+//!
 //! The code is in `linux.rs` and the modules under `linux/`: `cpu` (thread CPU time, pinning, the
 //! readiness check), `link` (one end: a socket and the device layer, and the batched path), `measure`
 //! (the two loops) and `error`. The batching of the data plane is in
