@@ -511,6 +511,58 @@ async fn a_panic_inside_the_core_ends_the_generation_and_the_next_gets_a_new_bud
     g.stop().await;
 }
 
+/// 核の中の桁あふれの panic が世代を終わらせ、その世代の task が持っていた資源が返ることの試験。
+/// 資源は、プロセスで 1 つの応答のバッファの枠 (`REPLIES` と同じ型。ほかの試験と数を混ぜないよう
+/// 試験用の置き場を使う) と、世代のスレッドが持つ UDP のソケットである。
+#[tokio::test]
+async fn an_overflow_panic_in_the_core_releases_what_the_generation_held() {
+    use crate::relay::replies::Replies;
+    use std::sync::LazyLock;
+    static POOL: LazyLock<Replies> = LazyLock::new(|| Replies::new(4));
+    let (a_key, b_key) = keys();
+    let config = || agent_config(&a_key, b_key.public_key(), "127.0.0.1:9".parse().unwrap());
+    let mut g = Generations::<Stub>::new(Duration::ZERO);
+    g.start(config(), loopback(), Stub::from_init)
+        .await
+        .unwrap();
+    let d = g.current().unwrap();
+    let addr = d.local_addr();
+    let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+    // 枠を 2 つ持ったまま待つ中継の task の代わり
+    d.call(move |_| {
+        tokio::task::spawn_local(async move {
+            let _r1 = POOL.acquire().await;
+            let _r2 = POOL.acquire().await;
+            let _ = held_tx.send(());
+            std::future::pending::<()>().await;
+        });
+    })
+    .await
+    .unwrap();
+    held_rx.await.unwrap();
+    assert_eq!(POOL.available(), 2);
+    // 核を借りている間に本物の桁あふれの panic を起こす
+    d.call(|l| {
+        let l = l.clone();
+        tokio::task::spawn_local(async move {
+            l.with(|_| {
+                let max = std::hint::black_box(u32::MAX);
+                std::hint::black_box(max + 1)
+            });
+        });
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), g.exited())
+        .await
+        .expect("the thread ended");
+    g.stop().await;
+    assert_eq!(POOL.available(), 4, "the slots came back with the tasks");
+    // 世代のソケットは閉じている
+    std::net::UdpSocket::bind(addr).expect("the data plane socket was closed");
+    assert!(!g.has_budget());
+}
+
 /// 落ちるときに核の操作をする handle の代わり。
 struct AbortOnDrop(super::Local<Stub>);
 

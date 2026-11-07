@@ -23,7 +23,7 @@ mod lansock;
 mod pipe;
 #[cfg(test)]
 mod readiness_tests;
-mod replies;
+pub(crate) mod replies;
 #[cfg(test)]
 pub(crate) mod testpeer;
 #[cfg(test)]

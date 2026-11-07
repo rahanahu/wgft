@@ -98,16 +98,15 @@ allow_attributes_without_reason = "deny"
 [profile.dev.package.wgft-wgstack]
 opt-level = 2
 
-# Release builds keep overflow checks in the crates that parse what the network sends: the TCP/IP
-# core, the WireGuard device and the WireGuard protocol crate under it. An arithmetic overflow there
-# is a bug an attacker may reach, and a panic is the bounded outcome: the data plane thread unwinds and
-# the agent rebuilds the tunnel, which needs panic = "unwind" (the default). This is a profile setting
-# for a dependency, not a patch to it. The cost is in docs/design/v2/wgstack-rs.md.
-[profile.release.package.wgft-wgstack]
-overflow-checks = true
-
-[profile.release.package.wgft-wireguard]
-overflow-checks = true
-
-[profile.release.package.sanstun]
+# Release builds keep overflow checks everywhere. The TCP/IP core, the WireGuard device and the WireGuard
+# protocol crate parse what the network sends, so an arithmetic overflow there is a bug an attacker may reach,
+# and a panic is the bounded outcome: the data plane thread unwinds and the agent rebuilds the tunnel, which
+# needs panic = "unwind" (the default). The check follows the crate that is being compiled, not the crate that
+# wrote the source: generic code (`Stack<H: Hook>` in wgft-wgstack, used as `Stack<LanHook<T>>` through
+# wgft-netstack and wgft-agent) and small functions inlined across crates are compiled with the instantiating
+# crate's setting. A per-package override for the core therefore leaves its generic part unchecked in the agent.
+# The profile-wide setting covers every instantiation and any crate added later. This is a profile setting, not
+# a patch to a dependency. Code that relies on wrap-around writes wrapping_* explicitly. The cost is in
+# docs/design/v2/wgstack-rs.md.
+[profile.release]
 overflow-checks = true
