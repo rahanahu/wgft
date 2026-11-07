@@ -48,7 +48,8 @@ pub enum Event {
     Acceptable(ListenerId),
     /// UDP の socket に読める datagram があるかもしれません。
     UdpReadable(UdpId),
-    /// UDP の送信の予算に空きができたかもしれません。`send_to` が `WouldBlock` を返した socket にだけ出します。
+    /// The UDP send budget may have room again. Emitted only for an endpoint whose
+    /// [`Stack::send_to`](crate::Stack::send_to) returned [`Error::WouldBlock`].
     UdpWritable(UdpId),
     /// ping の endpoint に応答が届きました。
     PingReply(PingId),
