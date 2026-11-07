@@ -10,7 +10,8 @@
 use crate::buf::records::Record;
 use crate::buf::recv::Interval;
 use crate::buf::ring::{BOOST_RING_SLOTS, ChunkTable, try_chunk_table};
-use crate::buf::{BOOST_INTERVALS, BOOST_RECORDS, BOOST_SLOTS};
+use crate::buf::{BOOST_INTERVALS, BOOST_RECORDS};
+use crate::config::Limits;
 use crate::fixed_vec::{AllocError, FixedVec};
 use crate::tcp::conn::ConnId;
 
@@ -88,7 +89,7 @@ pub struct Budget {
 }
 
 // 空きの枠の印は 1 語に収めます。
-const _: () = assert!(BOOST_SLOTS <= 64);
+const _: () = assert!(Limits::MAX_BOOST_SLOTS <= 64);
 
 impl core::fmt::Debug for Budget {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -99,13 +100,26 @@ impl core::fmt::Debug for Budget {
     }
 }
 
-/// `Budget` を作れなかった理由です。確保に失敗しました。
+/// `Budget` を作れなかった理由です。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BudgetError;
+#[non_exhaustive]
+pub enum BudgetError {
+    /// 枠の数が [`Limits::MAX_BOOST_SLOTS`] を超えます。
+    TooManySlots(usize),
+    /// 確保に失敗しました。
+    Alloc,
+}
 
 impl core::fmt::Display for BudgetError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("cannot allocate the boost arrays")
+        match self {
+            Self::TooManySlots(n) => write!(
+                f,
+                "{n} boost slots are more than the limit of {}",
+                Limits::MAX_BOOST_SLOTS
+            ),
+            Self::Alloc => f.write_str("cannot allocate the boost arrays"),
+        }
     }
 }
 
@@ -113,7 +127,7 @@ impl core::error::Error for BudgetError {}
 
 impl From<AllocError> for BudgetError {
     fn from(_: AllocError) -> Self {
-        Self
+        Self::Alloc
     }
 }
 
@@ -124,16 +138,20 @@ impl Budget {
         size_of_val(&self.dirty)
     }
 
-    /// 枠と boost の配列をすべて確保します。
-    pub fn new() -> Result<Self, BudgetError> {
-        let mut slots = FixedVec::try_with_capacity(BOOST_SLOTS)?;
-        for _ in 0..BOOST_SLOTS {
+    /// `slots` 個の枠と boost の配列をすべて確保します。核の [`Limits::boost_slots`] と同じ数にします。
+    pub fn new(slots: usize) -> Result<Self, BudgetError> {
+        if slots > Limits::MAX_BOOST_SLOTS {
+            return Err(BudgetError::TooManySlots(slots));
+        }
+        let n = slots;
+        let mut slots = FixedVec::try_with_capacity(n)?;
+        for _ in 0..n {
             let slot = Slot {
                 holder: None,
                 arrays: BoostArrays::try_new()?,
             };
             if slots.try_push(slot).is_err() {
-                return Err(BudgetError);
+                return Err(BudgetError::Alloc);
             }
         }
         Ok(Self {
@@ -143,9 +161,9 @@ impl Budget {
         })
     }
 
-    /// 枠の管理の配列の byte 数 (boost の配列を除く) です。上界が数えます。
-    pub(crate) fn slot_bytes() -> usize {
-        BOOST_SLOTS * size_of::<Slot>()
+    /// 枠 `slots` 個の管理の配列の byte 数 (boost の配列を除く) です。上界が数えます。
+    pub(crate) fn slot_bytes(slots: usize) -> usize {
+        slots * size_of::<Slot>()
     }
 
     /// 枠の数 (B) です。
@@ -273,8 +291,8 @@ mod tests {
 
     #[test]
     fn lends_the_lowest_free_slot_and_takes_the_arrays_back() {
-        let mut b = Budget::new().unwrap();
-        assert_eq!(b.slots(), BOOST_SLOTS);
+        let mut b = Budget::new(crate::buf::BOOST_SLOTS).unwrap();
+        assert_eq!(b.slots(), crate::buf::BOOST_SLOTS);
         let full = b.heap_bytes();
         let (i, a) = b.acquire(conn(7)).unwrap();
         assert_eq!(
@@ -345,7 +363,7 @@ mod tests {
     /// 配列を返した枠だけに印が付き、印の無い枠の chunk の表は確かめを省いても同じ答えです。
     #[test]
     fn release_marks_the_slot_whose_tables_changed() {
-        let mut b = Budget::new().unwrap();
+        let mut b = Budget::new(crate::buf::BOOST_SLOTS).unwrap();
         b.take_dirty();
         let (k, mut a) = b.acquire(conn(1)).unwrap();
         assert_eq!(b.take_dirty(), 0, "lending a slot does not mark it");

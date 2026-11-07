@@ -147,7 +147,7 @@ fn build(h: &Hello) -> Result<Netstack<NoHook>, String> {
     }
     let limits = limits_from_hello(&h.limits).map_err(|e| e.0)?;
     let config = WgstackDut::config(h, limits);
-    let budget = Budget::new().map_err(|e| format!("wgstack: {e}"))?;
+    let budget = Budget::new(config.limits.boost_slots).map_err(|e| format!("wgstack: {e}"))?;
     let now = Instant::now();
     Netstack::new(config, budget, &h.seed, NoHook, now, Instant::now)
         .map_err(|e| format!("wgstack: {e}"))

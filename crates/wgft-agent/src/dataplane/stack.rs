@@ -89,7 +89,7 @@ pub(crate) fn make<T: LanSocket + 'static>(
 ) -> Result<Netstack<LanHook<T>>, UpperError<Budget>> {
     let budget = match init.budget {
         Some(b) => b,
-        None => Budget::new().map_err(|e| UpperError {
+        None => Budget::new(settings.limits.boost_slots).map_err(|e| UpperError {
             error: io::Error::other(format!("allocate the TCP/IP memory budget: {e}")),
             budget: None,
         })?,

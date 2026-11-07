@@ -17,7 +17,7 @@ fn stack_allocations_stay_within_the_bound() {
             ..Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420)
         };
         let w = ThreadWindow::open();
-        let budget = Budget::new().expect("budget");
+        let budget = Budget::new(config.limits.boost_slots).expect("budget");
         let budget_bytes = w.grown();
         let stack = Stack::new(config, budget, &[7; 64], NoHook).expect("stack");
         let bound = stack.bound();

@@ -36,6 +36,7 @@ fn small() -> Config {
             frag_pieces: 8,
             udp_rx_datagrams: 8,
             udp_tx_datagrams: 8,
+            ..Limits::with_max_flows(0)
         },
         ..Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420)
     }
@@ -57,7 +58,7 @@ fn rejects_a_bad_config_and_returns_the_budget() {
             mtu: 100,
             ..small()
         },
-        Budget::new().unwrap(),
+        Budget::new(crate::buf::BOOST_SLOTS).unwrap(),
         &[0; 64],
         NoHook,
     )
@@ -66,10 +67,45 @@ fn rejects_a_bad_config_and_returns_the_budget() {
     assert_eq!(e.into_budget().slots(), crate::buf::BOOST_SLOTS);
 }
 
+/// `Budget` の枠の数は `Limits::boost_slots` と同じでなければならず、違えば設定の誤りで `Budget` を返します。
+/// 上界の boost の項は `Limits` から数えるためです。
+#[test]
+fn rejects_a_budget_of_another_size() {
+    let e = Stack::new(small(), Budget::new(2).unwrap(), &[0; 64], NoHook).unwrap_err();
+    assert_eq!(
+        e.kind(),
+        NewErrorKind::Config(ConfigError::BudgetSlots {
+            budget: 2,
+            limits: crate::buf::BOOST_SLOTS
+        })
+    );
+    assert_eq!(e.into_budget().slots(), 2);
+    let config = Config {
+        limits: Limits {
+            boost_slots: 2,
+            ..small().limits
+        },
+        ..small()
+    };
+    let s = Stack::new(config, Budget::new(2).unwrap(), &[0; 64], NoHook).unwrap();
+    assert_eq!(s.bound(), crate::Bound::for_limits(&config.limits, 1420));
+    assert_eq!(
+        Budget::new(65).unwrap_err(),
+        crate::BudgetError::TooManySlots(65)
+    );
+    assert_eq!(Budget::new(0).unwrap().slots(), 0);
+}
+
 /// 表を使った状態から閉じると、保持がすべて 0 に戻り、Budget の配列が戻ります。
 #[test]
 fn close_returns_everything() {
-    let mut s = Stack::new(small(), Budget::new().unwrap(), &[7; 64], NoHook).unwrap();
+    let mut s = Stack::new(
+        small(),
+        Budget::new(crate::buf::BOOST_SLOTS).unwrap(),
+        &[7; 64],
+        NoHook,
+    )
+    .unwrap();
     let g = s.s.listeners.open(80).unwrap();
     // 接続 2 本を確立したとして、表と待ち行列と boost に入れます。
     for rport in [1000, 1001] {
@@ -161,7 +197,13 @@ fn close_returns_everything() {
 
 #[test]
 fn invariants_catch_a_broken_count() {
-    let mut s = Stack::new(small(), Budget::new().unwrap(), &[7; 64], NoHook).unwrap();
+    let mut s = Stack::new(
+        small(),
+        Budget::new(crate::buf::BOOST_SLOTS).unwrap(),
+        &[7; 64],
+        NoHook,
+    )
+    .unwrap();
     s.check_invariants().unwrap();
     s.s.queued = 1;
     assert_eq!(
@@ -221,7 +263,13 @@ fn demote_holds_within_the_connection_s_reservation() {
     use crate::buf::chunk::{held_peak, reset_held_peak};
     use crate::buf::{RECV_FLOOR, SEND_FLOOR};
     use crate::tcp::boost::IDLE_RECLAIM;
-    let mut s = Stack::new(small(), Budget::new().unwrap(), &[7; 64], NoHook).unwrap();
+    let mut s = Stack::new(
+        small(),
+        Budget::new(crate::buf::BOOST_SLOTS).unwrap(),
+        &[7; 64],
+        NoHook,
+    )
+    .unwrap();
     let i = s.conns.alloc(&mut s.s.conn_free).unwrap().unwrap();
     let id = s.conns.id(i);
     let (b, a) = s.s.budget.acquire(id).unwrap();
@@ -300,7 +348,13 @@ fn demote_holds_within_the_connection_s_reservation() {
 /// 試験だけの欄を足すときは、その欄の `harness_bytes` もこの和に足します (足し忘れた新しい欄は検出できません)。
 #[test]
 fn harness_bytes_match_the_harness_only_fields() {
-    let s = Stack::new(small(), Budget::new().unwrap(), &[7; 64], NoHook).unwrap();
+    let s = Stack::new(
+        small(),
+        Budget::new(crate::buf::BOOST_SLOTS).unwrap(),
+        &[7; 64],
+        NoHook,
+    )
+    .unwrap();
     let sum = s.conns.harness_bytes()
         + s.s.events.harness_bytes()
         + s.s.budget.harness_bytes()

@@ -220,7 +220,7 @@ impl TestNet {
 
     /// 設定 `config` の核です (Go の試験の `TestCongestion` と `TestBoost` を選ぶ時に使います)。
     pub(crate) fn with_config(config: Config, seed: [u8; 64]) -> Self {
-        Self::with_budget(config, seed, Budget::new().unwrap())
+        Self::with_budget(config, seed, Budget::new(crate::buf::BOOST_SLOTS).unwrap())
     }
 
     /// 渡した `Budget` を使う核です。

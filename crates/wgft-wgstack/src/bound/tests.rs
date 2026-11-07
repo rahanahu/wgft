@@ -115,6 +115,11 @@ fn fix_matches_the_allocated_tables() {
             frag_pieces: 8,
             udp_rx_datagrams: 8,
             udp_tx_datagrams: 4,
+            udp_rx_bytes: Limits::MIN_UDP_BYTES,
+            udp_tx_bytes: 2 * Limits::MIN_UDP_BYTES,
+            frag_bytes: 256 << 10,
+            boost_slots: 2,
+            pool_chunks: 4,
         },
     ] {
         let config = Config {
@@ -123,7 +128,8 @@ fn fix_matches_the_allocated_tables() {
             limits,
             ..Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420)
         };
-        let s = Stack::new(config, Budget::new().unwrap(), &[7; 64], NoHook).unwrap();
+        let budget = Budget::new(limits.boost_slots).unwrap();
+        let s = Stack::new(config, budget, &[7; 64], NoHook).unwrap();
         let p = fix_parts(&limits, config.mtu, crate::stack::stack_size::<NoHook>());
         let sh = &s.s;
         assert_eq!(
@@ -143,7 +149,7 @@ fn fix_matches_the_allocated_tables() {
         assert_eq!(p.events, b(sh.events.heap_bytes()));
         assert_eq!(
             p.chunk_pool,
-            b(sh.chunks.heap_bytes() + POOL_KEEP * CHUNK_SIZE)
+            b(sh.chunks.heap_bytes() + limits.pool_chunks * CHUNK_SIZE)
         );
         assert_eq!(p.stack, b(crate::stack::stack_size::<NoHook>()));
         let bound = s.bound();
@@ -153,7 +159,7 @@ fn fix_matches_the_allocated_tables() {
         // UDP の項は予算と管理の配列を、ping の項は応答の置き場を覆います。
         assert_eq!(
             bound.udp_rx + bound.udp_tx,
-            b(crate::udp::RX_BYTES + crate::udp::TX_BYTES)
+            b(limits.udp_rx_bytes + limits.udp_tx_bytes)
                 + b(sh.udp.heap_bytes(crate::udp::RX)
                     + sh.udp.heap_bytes(crate::udp::TX)
                     + sh.udp.chunk_heap_bytes())
@@ -179,7 +185,13 @@ fn fix_matches_the_allocated_tables() {
 #[test]
 fn bound_does_not_depend_on_use() {
     let config = Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420);
-    let mut s = Stack::new(config, Budget::new().unwrap(), &[1; 64], NoHook).unwrap();
+    let mut s = Stack::new(
+        config,
+        Budget::new(crate::buf::BOOST_SLOTS).unwrap(),
+        &[1; 64],
+        NoHook,
+    )
+    .unwrap();
     let before = s.bound();
     let slot = s.conns.alloc(&mut s.s.conn_free).unwrap().unwrap();
     s.conns
@@ -210,6 +222,7 @@ fn a_full_stack_meets_each_term() {
         frag_pieces: 8,
         udp_rx_datagrams: 8,
         udp_tx_datagrams: 4,
+        ..Limits::with_max_flows(0)
     };
     let config = Config {
         addr: Ipv4Addr::new(10, 9, 0, 1),
@@ -217,7 +230,8 @@ fn a_full_stack_meets_each_term() {
         limits,
         ..Config::new(Ipv4Addr::new(10, 9, 0, 1), 1420)
     };
-    let mut s = Stack::new(config, Budget::new().unwrap(), &[3; 64], NoHook).unwrap();
+    let budget = Budget::new(limits.boost_slots).unwrap();
+    let mut s = Stack::new(config, budget, &[3; 64], NoHook).unwrap();
     let data = vec![7u8; BOOST_SIZE as usize];
     for _ in 0..limits.conns() {
         let i = s.conns.alloc(&mut s.s.conn_free).unwrap().unwrap();
@@ -248,7 +262,7 @@ fn a_full_stack_meets_each_term() {
     s.check_invariants().unwrap();
     let h = s.held();
     let bound = s.bound();
-    let (n, slots) = (b(limits.conns()), b(BOOST_SLOTS));
+    let (n, slots) = (b(limits.conns()), b(limits.boost_slots));
     assert_eq!(h.boosted as u64, slots);
     assert_eq!(h.slot_arrays, limits.conns());
     assert_eq!(s.slots_used(), h.slot_arrays);
@@ -270,7 +284,7 @@ fn a_full_stack_meets_each_term() {
     let table_terms = slots * b(2 * BOOST_RING_SLOTS * size_of::<Option<Chunk>>());
     assert_eq!(
         chunk_terms + record_terms + interval_terms + table_terms,
-        bound.floor_conn + bound.boost - b(Budget::slot_bytes()),
+        bound.floor_conn + bound.boost - b(Budget::slot_bytes(limits.boost_slots)),
         "the filled stack reaches exactly the floor and boost terms"
     );
     assert!(

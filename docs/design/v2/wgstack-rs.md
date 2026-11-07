@@ -575,6 +575,16 @@ Go の `internal/dataplane/deps_test.go` の `TestWgstackImports` に当たる�
   試験の担当が `FuzzCore` の小さな上限を外の crate から渡すためです。
   握手の途中の表と accept の待ち行列は 0 を受け付けます。
   待ち受け 1 つの accept の待ち行列と握手の途中の行は全体の半分までで、16 bit で数えるので、全体はその 2 倍を超えられません
+- 予算の大きさ:boost の枠の数 (`boost_slots`、0 から 64)、UDP の受信と送信の byte の予算 (`udp_rx_bytes`、`udp_tx_bytes`)、再組み立ての表の保持の byte (`frag_bytes`)、chunk の置き場に残す数 (`pool_chunks`) も `Limits` に持ち、上界はその値から数えます。
+  `Stack` ごとに上界を小さくできるようにするためで、wgft の agent の値では上界も挙動も変わりません。
+  UDP の byte の予算の下限 (`Limits::MIN_UDP_BYTES`、256 KiB) は、最も大きい datagram の 4 chunk が endpoint 1 つの上限 (予算の 4 分の 1) に収まる大きさです。
+  下限より小さいと、空の endpoint でも大きな datagram の予約が通らず、待つ `send_to` が知らせを受けないまま待ち続けるためです。
+  同じ理由で、UDP の datagram の数 (`udp_rx_datagrams`、`udp_tx_datagrams`) は endpoint の分が 0 にならない 4 以上にします。
+  `accept_queue` の 1 は待ち受けの分 (半分) が 0 で、どの接続も accept できないので設定の誤りにします。
+  0 は待ち受けを持たない核のための値として受け付けます。
+  `Budget::new(slots)` は `boost_slots` と同じ数の枠で作ります。
+  数が違う `Budget` を渡した `Stack::new` は設定の誤り (`ConfigError::BudgetSlots`) を返します。
+  floor と boost の段のバッファの大きさ、ping の endpoint の数、再組み立ての項目の寿命、ポートの表は定数のままです
 - 終わり:`close(self, now) -> Closed` が、待ち受けと接続とソケットをすべて閉じ、`Budget` と最後の会計 (`Held`) を返します。
   最後の会計がすべて 0 であることを、試験と debug の build で確かめます
 
@@ -1168,6 +1178,7 @@ Go の測った値 (c_conn、記録 1 件、区間 1 つ) は Rust の型の大�
 Go では boost の枠の集まりがプロセスで 1 つで、トンネルを作り直しても増えません。
 
 Rust では枠の集まり (B 本の枠と、前節の boost の配列) を `Budget` という値にし、核がそれを所有します。
+B は `Limits::boost_slots` で、wgft の agent は 16 です。
 トンネルを作り直すときの受け渡しは[世代と予算の受け渡し](#世代と予算の受け渡し)の順に従います。
 古い核の接続はその前にすべて閉じているので、受け渡す `Budget` の借りは 0 です。
 このため枠の集まりはプロセスで 1 つのままで、別の Device の接続を回収する処理も要りません。
@@ -2219,7 +2230,7 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   hook は変化だけを伝えるので ([回復と輻輳の制御と boost で決めたこと](#回復と輻輳の制御と-boost-で決めたこと))、この方針では最初の知らせが LAN 側に届きません。
   この方針は試験と測定だけが選ぶので、知らせを溜めて登録の時に渡す仕組みは作りません。
   製品の既定の需要による boost は読み書きの後に来るので、登録が先です
-- handle の層が使う核の口:`PingId::index`、`Stack::hook`、定数の `MAX_PINGS`、`MIN_MSS`、`UDP_RX_BYTES`、`UDP_ENDPOINT_SHARE` です。
+- handle の層が使う核の口:`PingId::index`、`Stack::hook`、定数の `MAX_PINGS`、`MIN_MSS`、`UDP_ENDPOINT_SHARE`、`Limits` の `udp_rx_bytes` です。
   waker の表とログの文面が核の値を写さずに使うためです
 - dial の側の余地:`TcpStream` は `ConnId` から作り、waker の表は接続の枠の番号で引くので、受動と能動の接続で同じ形です。
   dial の側は、`connect` の future と、`Connected` と `ConnectFailed` の知らせで書きの waker を起こす行を足します

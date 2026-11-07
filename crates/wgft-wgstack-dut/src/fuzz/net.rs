@@ -125,10 +125,12 @@ pub fn put_spare(s: Spare) {
     SPARE.with_borrow_mut(|slot| *slot = Some(s));
 }
 
-pub(crate) fn take_budget() -> Budget {
+/// このスレッドに残した `slots` 個の枠の `Budget` を取り出します。無いか枠の数が違えば作ります。
+pub(crate) fn take_budget(slots: usize) -> Budget {
     BUDGET
         .with_borrow_mut(Option::take)
-        .unwrap_or_else(|| Budget::new().expect("allocate the boost budget"))
+        .filter(|b| b.slots() == slots)
+        .unwrap_or_else(|| Budget::new(slots).expect("allocate the boost budget"))
 }
 
 pub(crate) fn put_budget(b: Budget) {
@@ -306,7 +308,7 @@ impl<H: Hook> Net<H> {
     /// 前の入力の核の表を使い回します。
     pub fn new(config: Config, hook: H) -> Self {
         let options = OPTIONS.get();
-        let budget = take_budget();
+        let budget = take_budget(config.limits.boost_slots);
         let slots = budget.slots();
         let limits = config.limits;
         let spare = if options.reuse {

@@ -38,8 +38,8 @@ pub(crate) const TX_DATAGRAMS: usize = 1024;
 pub(crate) const ENDPOINT_SHARE: usize = 4;
 /// 1 つの datagram の中身の上限です。
 pub(crate) const MAX_PAYLOAD: usize = 65535 - IP_HEADER_LEN - UDP_HEADER_LEN;
-/// 2 つの向きの予算を合わせた chunk の数です。chunk の管理の配列はこの数で持ちます。
-pub(crate) const CHUNKS: usize = (RX_BYTES + TX_BYTES) / CHUNK_SIZE;
+/// byte の予算の下限です。最も大きい datagram の chunk の数が endpoint 1 つの上限に収まる大きさです。
+pub(crate) const MIN_BYTES: usize = ENDPOINT_SHARE * MAX_DGRAM_CHUNKS * CHUNK_SIZE;
 /// 枠の大きさの区分です。最後の区分を超える datagram は chunk の列に置きます。
 const CLASSES: [usize; 3] = [256, 2048, CHUNK_SIZE];
 /// chunk の列を表す区分の番号です。
@@ -266,6 +266,8 @@ impl Udp {
     /// 値に戻した表です。
     pub(crate) fn with_eps(l: &Limits, eps: PortTable<UdpEp>) -> Result<Self, AllocError> {
         let sizes = [l.udp_rx_datagrams, l.udp_tx_datagrams];
+        let bytes = [l.udp_rx_bytes, l.udp_tx_bytes];
+        let chunks = Self::chunks_for(l);
         let free = |n: usize| FixedVec::try_filled(n, |i| u16_of(n - 1 - i));
         let dev = |bytes: usize, count: usize| DevBudget {
             bytes: 0,
@@ -284,10 +286,10 @@ impl Udp {
                 FixedVec::try_filled(sizes[TX], |_| Dgram::default())?,
             ],
             dg_free: [free(sizes[RX])?, free(sizes[TX])?],
-            ck: FixedVec::try_filled(CHUNKS, |_| ChunkRec::default())?,
-            ck_free: free(CHUNKS)?,
-            dev: [dev(RX_BYTES, sizes[RX]), dev(TX_BYTES, sizes[TX])],
-            ep_max: [ep(RX_BYTES, sizes[RX]), ep(TX_BYTES, sizes[TX])],
+            ck: FixedVec::try_filled(chunks, |_| ChunkRec::default())?,
+            ck_free: free(chunks)?,
+            dev: [dev(bytes[RX], sizes[RX]), dev(bytes[TX], sizes[TX])],
+            ep_max: [ep(bytes[RX], sizes[RX]), ep(bytes[TX], sizes[TX])],
             tx_head: NIL16,
             tx_tail: NIL16,
             wait_head: None,
@@ -311,6 +313,11 @@ impl Udp {
     /// 管理の情報の 1 件の大きさです。上界が使います。
     pub(crate) fn dgram_size() -> usize {
         size_of::<Dgram>() + size_of::<u16>()
+    }
+
+    /// chunk の管理の配列の件数です。向きごとの byte の予算の chunk の数の和です。
+    pub(crate) fn chunks_for(l: &Limits) -> usize {
+        l.udp_rx_bytes / CHUNK_SIZE + l.udp_tx_bytes / CHUNK_SIZE
     }
 
     /// chunk の管理の 1 件の大きさです。上界が使います。
