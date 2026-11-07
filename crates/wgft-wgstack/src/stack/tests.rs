@@ -360,5 +360,7 @@ fn harness_bytes_match_the_harness_only_fields() {
         + s.s.budget.harness_bytes()
         + s.s.listeners.harness_bytes()
         + s.s.udp.eps.harness_bytes();
+    #[cfg(feature = "harness")]
+    let sum = sum + size_of::<shared::GoIds>();
     assert_eq!(sum, HARNESS_BYTES);
 }

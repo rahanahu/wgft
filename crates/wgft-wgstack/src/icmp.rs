@@ -232,7 +232,7 @@ impl Shared {
         } else {
             payload.len().div_ceil(space)
         };
-        let id = self.next_open_id();
+        let id = self.next_open_id(ip.src, PROTO_ICMP);
         // 断片は全部積めるときだけ積みます。一部だけ積むと、受け手が完成させない断片が残ります。echo の応答の
         // 断片が持てる枠には上限があり、超える応答は丸ごと捨てて、RST と ICMP の誤りの枠を残します。
         if !self.out.ctl.echo_room(frags) {

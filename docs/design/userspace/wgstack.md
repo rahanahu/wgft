@@ -857,7 +857,7 @@ ECN は交渉しません。
   小さく始める受信の窓の案は[性能の段階の未確認の点](wgstack-performance.md#未確認の点と未決の点)に残します。
   [需要で育つバッファ](wgstack-buffers.md#予約と予算)の設計(未実装)は、予算に余りがある間は今と同じ 256 KiB から始めます
 - IP の ID(理由を付けて受け入れる):Device 全体の 1 つの数え上げを乱数の値から始めます。
-  Rust の実装は、DF を下ろした packet (UDP と echo の応答) の数えを分け、TCP と ICMP の誤りでは進めません([RFC 6864](https://www.rfc-editor.org/rfc/rfc6864) 4.3)。
+  Rust の実装は、DF を立てた断片でない packet (TCP、ICMP の誤り、echo request) の ID を 0 にし、断片にされうる packet (UDP と echo の応答) の ID を (宛先、protocol) の組ごとに重ならないよう管理します([RFC 6864](https://www.rfc-editor.org/rfc/rfc6864) 4.1 と 4.3、[IPv4 の ID](../v2/wgstack-rs.md#ipv4-の-id))。
   Linux で確かめた結果、Linux は SYN-ACK に 0 を使い、その後の segment はソケットごとの数を使います(`early-ack` の `synack.ip-id` と `first-data.ack-ip-id`)。
   wgstack の TCP は DF を立てるので、ID は断片の組み立てに使われず、RFC 6864 はこの場合の値を問いません
 - 順序外のデータだけを持った `Close`(閉じた):RST を送らずに FIN を送ります。

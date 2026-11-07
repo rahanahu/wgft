@@ -311,6 +311,14 @@ impl Gates {
     }
 }
 
+/// 凍結した Go の IP の ID の数えです。照合の build (feature `harness`) だけにあり、製品の build にはありません。
+#[cfg(feature = "harness")]
+#[derive(Debug)]
+pub(crate) struct GoIds {
+    /// 数えの値です。下位 32 bit だけを使います (欄を 8 byte にして、`HARNESS_BYTES` の引き算が詰め物に吸われないようにします)。
+    pub(crate) df: u64,
+}
+
 /// 接続の枠の外の核の状態です。
 #[derive(Debug)]
 pub(crate) struct Shared {
@@ -325,9 +333,11 @@ pub(crate) struct Shared {
     pub(crate) cookie_key: SipKey,
     /// 最後に cookie の SYN-ACK を積んだ時刻 (ns) です。
     pub(crate) cookie_sent: Option<i64>,
-    pub(crate) ip_id: u32,
-    /// DF を下ろした datagram (UDP と echo の応答) の ID の数えです。DF を立てた packet は進めません (RFC 6864 4.3)。
-    pub(crate) ip_id_open: u16,
+    /// 断片にされうる packet (UDP の datagram と echo の応答) の ID を、(宛先、protocol) の組ごとに割り当てる表です。
+    pub(crate) ids: crate::ipid::IdTable,
+    /// 凍結した Go の数えです。照合の build だけにあります。
+    #[cfg(feature = "harness")]
+    pub(crate) go_ids: GoIds,
     pub(crate) rng: ChaCha8,
     /// 空きの接続の枠です。
     pub(crate) conn_free: FixedVec<u32>,
@@ -402,28 +412,40 @@ impl Shared {
         self.refused(LogKind::MssFloor, now);
     }
 
-    /// DF を立てた packet (TCP と ICMP の誤り) の次の IP の ID です。
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "Go keeps the low 16 bits of the counter"
+    /// DF を立てた断片でない packet (TCP、ICMP の誤り、echo request) の IP の ID です。atomic な datagram の ID は
+    /// 意味を持たない (RFC 6864 4.1) ので 0 を入れ、核の全体の送信量を ID から読めないようにします。
+    #[cfg_attr(
+        not(feature = "harness"),
+        expect(
+            clippy::unused_self,
+            reason = "the harness build counts like the frozen Go"
+        )
+    )]
+    #[cfg_attr(
+        feature = "harness",
+        expect(
+            clippy::cast_possible_truncation,
+            reason = "Go keeps the low 16 bits of the counter"
+        )
     )]
     pub(crate) fn next_id(&mut self) -> u16 {
-        self.ip_id = self.ip_id.wrapping_add(1);
-        self.ip_id as u16
+        #[cfg(feature = "harness")]
+        if crate::stack::go_compat_shared_id() {
+            // 凍結した Go の記録との照合用: 全体で 1 つの数えを進める
+            self.go_ids.df = u64::from((self.go_ids.df as u32).wrapping_add(1));
+            return self.go_ids.df as u16;
+        }
+        0
     }
 
-    /// DF を下ろした datagram の次の IP の ID です。0 は飛ばします。DF を立てた packet とは別の数えから取ります
-    /// (RFC 6864 4.3 は、非 atomic の datagram の ID が重ならない間隔を保つことを求めます)。
-    pub(crate) fn next_open_id(&mut self) -> u16 {
+    /// 断片にされうる packet (DF を下ろした UDP の datagram と echo の応答) の、宛先 `dst` への protocol `proto` の
+    /// 組の次の IP の ID です。組ごとに重ならないよう管理します (RFC 791、RFC 6864 4.2 と 4.3、`ipid.rs`)。
+    pub(crate) fn next_open_id(&mut self, dst: u32, proto: u8) -> u16 {
         #[cfg(feature = "harness")]
         if crate::stack::go_compat_shared_id() {
             return self.next_id(); // 凍結した Go の記録との照合用: 1 つの数えを共有する
         }
-        self.ip_id_open = self.ip_id_open.wrapping_add(1);
-        if self.ip_id_open == 0 {
-            self.ip_id_open = 1;
-        }
-        self.ip_id_open
+        self.ids.next(dst, proto)
     }
 
     /// `[0, n)` の乱数です (Go の `randomU64N`)。

@@ -15,6 +15,7 @@ mod fixed_vec;
 mod frag;
 mod icmp;
 mod index;
+mod ipid;
 mod output;
 mod rng;
 mod seq;
