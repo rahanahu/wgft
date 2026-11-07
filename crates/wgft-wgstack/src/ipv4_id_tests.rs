@@ -38,10 +38,11 @@
 
 use crate::dnat_peer_tests::{VICTIM, established};
 use crate::icmp::ECHO;
+use crate::listen_tests::{cookie_then_full_queue, flooded};
 use crate::testnet_tests::{
     DUT, PEER, TSeg, TestNet, build_icmp, build_udp, parse_out, small_limits,
 };
-use crate::wire::{FLAG_SYN, PROTO_ICMP, PROTO_TCP, PROTO_UDP};
+use crate::wire::{FLAG_RST, FLAG_SYN, PROTO_ICMP, PROTO_TCP, PROTO_UDP};
 use core::net::{Ipv4Addr, SocketAddrV4};
 use std::collections::HashSet;
 
@@ -100,6 +101,36 @@ fn drain_hdrs(n: &mut TestNet) -> Vec<Hdr> {
 }
 
 // 1. DF を立てた、断片でない packet の ID は 0
+
+/// cookie の ACK が満杯の待ち行列に当たって握手の途中の行になり、待ち行列が空かないまま SYN-ACK の再送を使い切って
+/// RST|ACK で切られるまでの、核の packet をすべて返します。最後の packet が行の RST|ACK です。
+fn handshake_row_reset() -> Vec<Vec<u8>> {
+    let (mut n, _l) = flooded();
+    let mut p = cookie_then_full_queue(&mut n, 42000);
+    n.peer_ack(&mut p, &[]);
+    let mut out = Vec::new();
+    let mut reset = false;
+    for _ in 0..200 {
+        n.advance(std::time::Duration::from_secs(1));
+        for pkt in n.drain_raw() {
+            let o = parse_out(&pkt);
+            if o.rport != 42000 {
+                continue;
+            }
+            if o.has(FLAG_RST) {
+                reset = true;
+            } else {
+                n.peer_ack(&mut p, &[]);
+            }
+            out.push(pkt);
+        }
+    }
+    assert!(
+        reset,
+        "the row ran out of retransmissions and reset the peer"
+    );
+    out
+}
 
 /// 核が出す、DF を立てた断片でない packet (TCP の SYN-ACK、データ、ACK、FIN、RST、challenge ACK、ICMP の誤り、
 /// ICMP の echo request) の ID は 0 です (RFC 6864 4.1 節)。
@@ -161,7 +192,15 @@ fn df_set_non_fragments_carry_id_zero() {
         .unwrap();
     all.extend(n.drain_raw());
 
+    // 握手の途中の行が、SYN-ACK の再送を使い切って送る RST|ACK
+    all.extend(handshake_row_reset());
+
     let hdrs: Vec<Hdr> = all.iter().map(|q| Hdr::of(q)).collect();
+    let rows = hdrs
+        .iter()
+        .filter(|h| h.proto == PROTO_TCP && h.df() && h.dst == PEER.to_bits())
+        .count();
+    assert!(rows >= 1);
     let atomic: Vec<&Hdr> = hdrs.iter().filter(|h| h.df() && !h.fragment()).collect();
     let tcp = atomic.iter().filter(|h| h.proto == PROTO_TCP).count();
     let icmp = atomic.iter().filter(|h| h.proto == PROTO_ICMP).count();
@@ -268,9 +307,56 @@ fn traffic_on_another_tuple_does_not_change_the_sequence() {
     );
 }
 
+/// 追い出した組が、追い出される前の範囲の後ろから戻ります (追い出した状態の下限を覚える仕組みを、公開の面だけで
+/// 確かめる試験)。組 X が前の `PRE` 個の ID を使った後、多数の別の宛先を送って X の状態を追い出し、X が次の `POST` 個を
+/// 使います。ID の列が組ごとの連番の置換なら、X の後の範囲は前の範囲の終わり以降から始まり、置換は全単射なので、
+/// 前の ID と重ならない。窓は次の考えで選びます。
+///
+/// - 下限:`PRE` 個の範囲が 2^16 の輪の中で後の範囲と重ならないことで、追い出しの前進を 1 だけにする実装と、追い出した
+///   状態の使った数を別の組の前進に足す実装(後の範囲が前の範囲の始めの近くから戻る)を落とします。
+/// - 無作為な始めの後に連番を続ける実装:2 つの範囲 (どちらも 20000 個) が 2^16 の輪の上で重ならない確率は
+///   25536 / 65536 で約 39%、8 つの種で全部通る確率は 5e-4 ほどです。
+/// - 上限:`PRE + POST + 前進の余り` が 2^16 を超えると後の範囲が前の範囲の始めに回り込んで重なるので、前進が使った数から
+///   大きく離れる実装 (使った数の 2 倍以上など) も落とします。余りは、flood が別の組の使った数を同じ前進の枠に足す分で、
+///   flood の数を抑えて小さく保ちます。
+const PRE: usize = 20_000;
+const POST: usize = 20_000;
+const ADVANCE_FLOOD: u32 = 600;
+
+#[test]
+fn evicted_tuple_resumes_after_its_previous_range() {
+    for seed in 0..8u8 {
+        let mut n = TestNet::with_seed(small_limits(), [seed; 64]);
+        let pc = n.s.bind_udp(n.now, SocketAddrV4::new(DUT, 53)).unwrap();
+        let pre: HashSet<u16> = (0..PRE).map(|_| send_udp(&mut n, pc, PEER, 40)).collect();
+        assert_eq!(pre.len(), PRE, "seed {seed}: repeats before the eviction");
+        for i in 0..ADVANCE_FLOOD {
+            let dst = Ipv4Addr::from_bits(0x0a0b_0000 + i);
+            n.s.send_to(n.now, pc, b"x", SocketAddrV4::new(dst, 9))
+                .unwrap();
+            drain_hdrs(&mut n);
+        }
+        let mut post = HashSet::new();
+        for i in 0..POST {
+            let id = send_udp(&mut n, pc, PEER, 40);
+            assert!(
+                !pre.contains(&id),
+                "seed {seed}: ID {id} of the earlier range comes back at datagram {i}"
+            );
+            assert!(
+                post.insert(id),
+                "seed {seed}: ID {id} repeats at datagram {i}"
+            );
+        }
+    }
+}
+
 /// 追い出し:別の宛先を多数に送って組の状態を追い出しても、追い出された組の次の [`EVICT_WINDOW`] 個の ID は、追い出す
-/// 前の [`EVICT_WINDOW`] 個の ID と重なりません。種を変えて繰り返すのは、追い出した後の初期値を無作為に選ぶ実装が
-/// 重なる確率を、試験の結果として確実に出すためです。核の保持は上界の中に収まり、不変条件が保たれます。
+/// 前の [`EVICT_WINDOW`] 個の ID と重なりません。核の保持は上界の中に収まり、不変条件が保たれます。
+///
+/// この試験の検出力は限られます。追い出した後の始めを、独立に引いた ID で選ぶ実装なら重なりを見つけますが、無作為な始めの
+/// 後に連番を続ける実装は、2 つの 300 個の範囲が重なるときだけ (1 つの種で 600 / 65536 で約 0.9%、8 つの種で約 7%)
+/// 見つかります。追い出しの前進の仕組みは、下の `evicted_tuple_resumes_after_its_previous_range` が確かめます。
 #[test]
 fn eviction_of_tuple_state_does_not_reuse_recent_ids() {
     for seed in 0..8u8 {
