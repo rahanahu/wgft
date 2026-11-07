@@ -490,6 +490,18 @@ jobs:
       # The wgstack core's README example is a doctest; the full example runs a TCP exchange.
       - name: wgstack example
         run: cargo run -p wgft-wgstack --example echo --locked
+      # The wgstack core is released on its own (docs/design/v2/wgstack-rs.md, the standalone build).
+      # Its package must build and test without the workspace, and in a release build whose
+      # overflow checks are off; the library must build on its declared rust-version.
+      - name: wgstack standalone package
+        run: scripts/wgstack-package-test.sh
+      - name: wgstack MSRV
+        env:
+          CARGO_TARGET_DIR: target/msrv
+        run: |
+          msrv=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' crates/wgft-wgstack/Cargo.toml)
+          rustup toolchain install "$msrv" --profile minimal
+          cargo +"$msrv" check -p wgft-wgstack --all-targets --features harness --locked
 
   rust-deny:
     # B15. cargo-deny: licence allowlist, RustSec advisories, duplicate versions, and

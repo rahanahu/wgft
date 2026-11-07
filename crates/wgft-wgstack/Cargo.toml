@@ -1,10 +1,17 @@
 [package]
+# 名前は crates.io に初めて出す前に決めます (2026-11-07 の所有者の決定)。Experimental は Git で配ります。
 name = "wgft-wgstack"
+description = "A sans-IO user-space IPv4 TCP/UDP stack with explicit, accounted memory bounds"
 version.workspace = true
 edition.workspace = true
+# MSRV です。CI が lib と試験をこの版で build します。
+rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
+keywords = ["tcp", "tcpip", "network-stack", "sans-io", "userspace"]
+categories = ["network-programming"]
+# crates.io には出しません。Experimental の配布は Git だけです。
 publish.workspace = true
 
 [dependencies]

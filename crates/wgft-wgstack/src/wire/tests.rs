@@ -502,9 +502,16 @@ fn sack_writer_fits_what_room_allows() {
 
 /// `parse` の fuzz の target の corpus (Go の `FuzzParse` の種) と、見つけた落ちる入力を流します。
 /// nightly の無い CI でも回帰を確かめるためです。
+///
+/// fuzz の directory は別の package なので `cargo package` の中身に入りません。crate を単独で試す時は無いので、
+/// その時は確かめません。
 #[test]
 fn fuzz_parse_corpus_and_regressions() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz");
+    if !root.join("Cargo.toml").exists() {
+        eprintln!("fuzz_parse_corpus_and_regressions: no fuzz directory in this package; skipped");
+        return;
+    }
     let mut n = 0;
     for dir in ["corpus/parse", "regressions/parse"] {
         let Ok(entries) = std::fs::read_dir(root.join(dir)) else {

@@ -992,7 +992,7 @@ fn per_ack_cost_under_sack_flood() {
         let (mut n, c, mut q) = flood_conn();
         let mut rng = Rng(1 ^ 2 << 32);
         let nrec = n.s.conn(c.slot).b.recs.len();
-        let log_n = u64::from(nrec.bit_width());
+        let log_n = u64::from(usize::BITS - nrec.leading_zeros());
         let per_block = 3 * (log_n + 3);
         let mut worst_excess = 0u64;
         let start = steps();
@@ -1071,7 +1071,7 @@ fn per_ack_cost_under_renege_flapping() {
     let (mut n, c, mut q) = flood_conn();
     let i = c.slot;
     let nrec = n.s.conn(i).b.recs.len();
-    let log_n = u64::from(nrec.bit_width());
+    let log_n = u64::from(usize::BITS - nrec.leading_zeros());
     let mut worst = 0u64;
     let mut first = rec_range(&mut n, c, 1).0;
     let mut ack_to = n.s.conn(i).t.snd_una;

@@ -92,7 +92,7 @@ fn shrunk_zero_window_with_data_in_flight_is_not_aborted_while_the_peer_answers(
     n.drain();
     let mut el = Duration::ZERO;
     let mut answers = 0;
-    while el < Duration::from_mins(25) {
+    while el < Duration::from_secs(25 * 60) {
         n.advance(Duration::from_millis(100));
         el += Duration::from_millis(100);
         let outs = n.drain();
