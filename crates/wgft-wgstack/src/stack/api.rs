@@ -19,7 +19,8 @@ use crate::udp::UdpId;
 use core::fmt;
 use core::net::{Ipv4Addr, SocketAddrV4};
 
-/// 待ち受けの handle です。ポートと 32 bit の世代の組で、閉じた後の handle は誤りになります。
+/// A handle to a listener. It pairs a port with a 32-bit generation, so a handle used after the listener is closed is
+/// an error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ListenerId {
     pub(crate) port: u16,
@@ -27,69 +28,71 @@ pub struct ListenerId {
 }
 
 impl ListenerId {
-    /// 待ち受けのポートです。
+    /// The listener's port.
     pub fn port(&self) -> u16 {
         self.port
     }
 }
 
-/// 接続と待ち受けの準備の変化の知らせです。知らせはきっかけで、状態の正本ではありません。呼び手は知らせを受けたら
-/// 操作を試し、`WouldBlock` なら次の知らせを待ちます。種類は増えることがあるので、知らない種類は無視します。
+/// A notification that a connection or listener may have become ready. An event is a trigger, not the source of truth
+/// about state: when the caller receives one it tries the operation, and on `WouldBlock` waits for the next event. More
+/// kinds may be added, so the caller ignores kinds it does not know.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Event {
-    /// 読めるデータか EOF か誤りがあるかもしれません。
+    /// There may be data to read, an EOF or an error.
     Readable(ConnId),
-    /// 送信のバッファに空きができたか、書けない状態になったかもしれません。
+    /// Space may have opened in the send buffer, or the connection may have become unwritable.
     Writable(ConnId),
-    /// プロトコルが終わりました。枠を返した後の知らせは、枠を最後に使った接続の handle で出します。
+    /// The protocol has finished. An event delivered after the slot has been released carries the handle of the
+    /// connection that last used the slot.
     Closed(ConnId),
-    /// accept の待ち行列に接続があります。
+    /// There is a connection in the accept queue.
     Acceptable(ListenerId),
-    /// UDP の socket に読める datagram があるかもしれません。
+    /// The UDP socket may have a datagram to read.
     UdpReadable(UdpId),
     /// The UDP send budget may have room again. Emitted only for an endpoint whose
     /// [`Stack::send_to`](crate::Stack::send_to) returned [`Error::WouldBlock`].
     UdpWritable(UdpId),
-    /// ping の endpoint に応答が届きました。
+    /// A reply has arrived at the ping endpoint.
     PingReply(PingId),
 }
 
-/// 操作の誤りです。
+/// The error of an operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-    /// 今はできません。できるようになったら知らせます。
+    /// Not possible now. An event is delivered when it becomes possible.
     WouldBlock,
-    /// handle が閉じているか、古い handle です。
+    /// The handle is closed or stale.
     Closed,
-    /// 相手の RST で接続が終わりました。
+    /// The connection ended because of the peer's RST.
     Reset,
-    /// 送信の向きを閉じた後か、送れない状態の接続に書きました。
+    /// A write was made after the send direction was closed, or to a connection that cannot send.
     BrokenPipe,
-    /// 再送か窓の probe の回数を使い切りました。
+    /// The retransmission or window probe attempts are used up.
     TimedOut,
-    /// 会計の不整合で接続を閉じました。
+    /// The connection was closed because of an accounting inconsistency.
     Accounting,
-    /// バッファの chunk を確保できませんでした。状態は変えていません。
+    /// A buffer chunk could not be allocated. The state is unchanged.
     NoMemory,
     /// The address is not the stack's address ([`Config::addr`](crate::Config::addr)).
     AddrNotLocal,
-    /// ポート 0 で待ち受けることはできません。
+    /// Port 0 cannot be listened on.
     PortZero,
-    /// ポートは既に使われています。
+    /// The port is already in use.
     AddrInUse,
-    /// 宛先のアドレスかポートが使えません。
+    /// The destination address or port cannot be used.
     InvalidAddress,
-    /// datagram が大きすぎます。
+    /// The datagram is too large.
     MessageTooLong,
-    /// UDP の会計の不整合で、この核の UDP は止まっています。
+    /// UDP in this stack is stopped because of a UDP accounting inconsistency.
     UdpStopped,
-    /// 表が満杯です。
+    /// The table is full.
     TableFull,
-    /// ICMP の echo request でないか、MTU に収まりません。
+    /// The message is not an ICMP echo request, or does not fit in the MTU.
     InvalidMessage,
-    /// 制御の出力の輪が満杯です。
+    /// The control output ring is full.
     NoBufferSpace,
 }
 
@@ -151,7 +154,7 @@ impl<H: Hook> Stack<H> {
         Ok(ListenerId { port, generation })
     }
 
-    /// 待ち受けの accept の待ち行列の先頭の接続と相手のアドレスを返します。
+    /// Returns the connection at the head of the listener's accept queue and the peer's address.
     pub fn accept(&mut self, now: Time, l: ListenerId) -> Result<(ConnId, SocketAddrV4), Error> {
         self.clock(now);
         let s = &mut self.s;
@@ -181,8 +184,8 @@ impl<H: Hook> Stack<H> {
         Ok((id, peer))
     }
 
-    /// 待ち受けを閉じます。accept の待ち行列の接続と握手の途中の行に RST を送って返し、ポートをその場で空けます。
-    /// 古い handle では何もしません。
+    /// Closes the listener. Connections in the accept queue and half-open rows are reset with RST and released, and the
+    /// port is freed immediately. Does nothing for a stale handle.
     pub fn close_listener(&mut self, now: Time, l: ListenerId) {
         self.clock(now);
         if self.s.listeners.get(l.port, l.generation).is_none() {
@@ -218,8 +221,9 @@ impl<H: Hook> Stack<H> {
         self.s.events.clear_bits(target, EV_ACCEPT);
     }
 
-    /// 接続 `id` の未読のデータを `dst` に写し、写した byte 数を返します。相手の FIN の後に読み終えたら 0 を返し
-    /// (EOF)、RST と会計の不整合の後は誤りを返します。`dst` が空なら 0 を返します。
+    /// Copies unread data of connection `id` into `dst` and returns the number of bytes copied. Returns 0 (EOF) once
+    /// everything has been read after the peer's FIN, and an error after an RST or an accounting inconsistency. Returns
+    /// 0 if `dst` is empty.
     pub fn read(&mut self, now: Time, id: ConnId, dst: &mut [u8]) -> Result<usize, Error> {
         let now = self.clock(now);
         let Some(i) = self.conns.resolve(id) else {
@@ -260,7 +264,8 @@ impl<H: Hook> Stack<H> {
         Err(Error::WouldBlock)
     }
 
-    /// 接続 `id` の送信のバッファに `data` を書き、受け取った byte 数を返します。空きが無ければ `WouldBlock` です。
+    /// Writes `data` to the send buffer of connection `id` and returns the number of bytes accepted. Returns
+    /// `WouldBlock` if there is no space.
     pub fn write(&mut self, now: Time, id: ConnId, data: &[u8]) -> Result<usize, Error> {
         let now = self.clock(now);
         let Some(i) = self.conns.resolve(id) else {
@@ -297,7 +302,7 @@ impl<H: Hook> Stack<H> {
         Ok(n)
     }
 
-    /// 送信の向きを閉じ、送信のバッファの後ろに FIN を置きます。読み取りは続けられます。
+    /// Closes the send direction and queues a FIN after the send buffer. Reading can continue.
     pub fn close_write(&mut self, now: Time, id: ConnId) -> Result<(), Error> {
         let now = self.clock(now);
         let Some(i) = self.conns.resolve(id) else {
@@ -312,9 +317,10 @@ impl<H: Hook> Stack<H> {
         Ok(())
     }
 
-    /// 接続を閉じます。未読の順序どおりのデータを持てば RST で終えて枠を返し (Linux と同じ)、持たなければ送信の
-    /// バッファの後ろに FIN を置きます。送り残しを持つ接続は、届け終えるか再送の回数を使い切るまで枠に残り、行に
-    /// 移る条件を満たした後に TIME_WAIT の表に移ります。古い handle では何もしません。
+    /// Closes the connection. If it holds unread in-order data it ends with an RST and releases its slot; otherwise it
+    /// queues a FIN after the send buffer. A connection with data left to send stays in its slot until the data is
+    /// delivered or the retransmission attempts are used up, and moves to the TIME_WAIT table after the condition for
+    /// becoming a row is met. Does nothing for a stale handle.
     pub fn close_conn(&mut self, now: Time, id: ConnId) {
         let now = self.clock(now);
         let Some(i) = self.conns.resolve(id) else {
@@ -339,8 +345,8 @@ impl<H: Hook> Stack<H> {
         }
     }
 
-    /// RST を送り、接続の枠をその場で返します。古い handle では、元の接続の行が TIME_WAIT の表に残っていれば行を
-    /// 外して RST を送ります。
+    /// Sends an RST and releases the connection slot immediately. For a stale handle, if the original connection's row
+    /// is still in the TIME_WAIT table, the row is removed and an RST is sent.
     pub fn abort(&mut self, now: Time, id: ConnId) {
         self.clock(now);
         let Some(i) = self.conns.resolve(id) else {
@@ -357,8 +363,9 @@ impl<H: Hook> Stack<H> {
         c.release();
     }
 
-    /// 最後の `close_conn` か `abort` の後、この接続が送ったデータと FIN を届け終えたかを返します。CLOSED、TIME_WAIT、
-    /// 受信のバッファが空の FIN_WAIT_2 を届け終えたとします。古い handle では真を返します。
+    /// Returns whether, after the last `close_conn` or `abort`, the connection has finished delivering the data and FIN
+    /// it sent. CLOSED, TIME_WAIT and FIN_WAIT_2 with an empty receive buffer count as delivered. Returns true for a
+    /// stale handle.
     pub fn delivered(&self, id: ConnId) -> bool {
         let Some(i) = self.conns.resolve(id) else {
             return true;
@@ -374,7 +381,7 @@ impl<H: Hook> Stack<H> {
         }
     }
 
-    /// 接続の自分の側のアドレスです。古い handle では `None` です。
+    /// The local address of the connection, or `None` for a stale handle.
     pub fn local_addr(&self, id: ConnId) -> Option<SocketAddrV4> {
         let t = self.conns.tcb(self.conns.resolve(id)?);
         Some(SocketAddrV4::new(
@@ -383,7 +390,7 @@ impl<H: Hook> Stack<H> {
         ))
     }
 
-    /// 接続の相手のアドレスです。古い handle では `None` です。
+    /// The peer's address of the connection, or `None` for a stale handle.
     pub fn peer_addr(&self, id: ConnId) -> Option<SocketAddrV4> {
         let t = self.conns.tcb(self.conns.resolve(id)?);
         Some(SocketAddrV4::new(

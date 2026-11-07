@@ -96,111 +96,112 @@ impl Output {
     }
 }
 
-/// 種類ごとの拒否と事象の数です (Go の `Stats` の数の欄)。保持の量は [`crate::Held`] が持ちます。
+/// Counts of rejections and events by kind. The amount of held memory is in [`crate::Held`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Stats {
     pub mss_floor_drops: u64,
-    /// 14 を超える窓の scale を示した SYN の数です。握手は止めず、14 で扱います (RFC 7323 2.3)。
+    /// SYNs that announced a window scale above 14. The handshake goes on with 14 (RFC 7323 2.3).
     pub wscale_clamped: u64,
-    /// 握手の途中の表が満杯で捨てた SYN です。cookie で応えた SYN は数えません。
+    /// SYNs dropped because the half-open table was full. SYNs answered with a cookie are not counted.
     pub syn_table_full: u64,
-    /// SYN cookie を使う間に、accept の待ち行列か接続の枠が満杯で捨てた SYN です。
+    /// SYNs dropped because the accept queue or the connection slots were full while SYN cookies were in use.
     pub syn_accept_full: u64,
-    /// 握手の途中の表が満杯で、行を作らずに cookie で応えた SYN です。
+    /// SYNs answered with a cookie, without creating a row, because the half-open table was full.
     pub syn_cookies_sent: u64,
-    /// cookie が通り、接続を作った ACK です。
+    /// ACKs that passed the cookie check and created a connection.
     pub syn_cookies_accepted: u64,
-    /// cookie を送ってから 2 周期の内に届き、cookie が通らなかった ACK です。握手の途中の行に当たる ACK と、
-    /// 中身も FIN も持たない ACK には RST を返し、ほかは捨てます。
+    /// ACKs that arrived within two periods after a cookie was sent and failed the cookie check. An ACK that hits a
+    /// half-open row, and an ACK carrying neither payload nor FIN, is answered with an RST; the others are dropped.
     pub syn_cookies_rejected: u64,
-    /// cookie が通ったが accept の待ち行列か接続の枠が満杯で、cookie の値で握手の途中の行にした ACK です。
+    /// ACKs that passed the cookie check but found the accept queue or the connection slots full, and were turned into
+    /// half-open rows built from the cookie value.
     pub syn_cookies_deferred: u64,
-    /// cookie が通ったが接続も行も作れず、RST で切った ACK と、cookie の値の行が SYN-ACK の再送を使い切って
-    /// RST で切った数です。
+    /// ACKs that passed the cookie check but could neither create a connection nor a row and were reset with RST, plus
+    /// rows built from a cookie value that used up their SYN-ACK retransmissions and were reset with RST.
     pub syn_cookies_reset: u64,
     pub accept_overflow: u64,
     pub tw_evicted: u64,
-    /// 制御の輪に積めずに捨てた packet の合計です。下の 3 つの和です。
+    /// The total of packets dropped because the control output ring was full. It is the sum of the next three.
     pub ctl_dropped: u64,
-    /// 制御の輪に積めずに捨てた TCP の制御の segment (RST と cookie の SYN-ACK) です。
+    /// TCP control segments dropped because the control output ring was full. These are RSTs and cookie SYN-ACKs.
     pub ctl_dropped_tcp: u64,
-    /// 制御の輪に積めずに捨てた ICMP の誤りです。
+    /// ICMP errors dropped because the control output ring was full.
     pub ctl_dropped_icmp_error: u64,
-    /// 制御の輪に積めずに、echo の応答を 1 つ丸ごと捨てた数です。
+    /// Echo replies dropped whole because the control output ring was full.
     pub ctl_dropped_echo: u64,
     pub ooo_dropped: u64,
     pub recv_trimmed: u64,
     pub recv_no_memory: u64,
-    /// 接続か行ごとの速さの制限で送らなかった ACK です。challenge ACK (RFC 5961) と、受け入れられない segment への
-    /// ACK を数えます。受け入れられない segment は、接続では中身の無い segment だけで、行では中身のある segment も
-    /// 含みます。
+    /// ACKs not sent because of the per-connection or per-row rate limit: challenge ACKs (RFC 5961) and ACKs to
+    /// unacceptable segments. On connections only segments without payload count as unacceptable here; on rows,
+    /// segments with payload count too.
     pub challenge_limited: u64,
-    /// 再組み立ての表が保持したか捨てた断片です。datagram を完成させた断片は数えません (Go の
-    /// `FragmentsDropped` と同じ数え方です)。
+    /// Fragments that the reassembly table held or dropped. Fragments that completed a datagram are not counted.
     pub fragments_dropped: u64,
-    /// 再組み立ての表が満杯で、ほかの datagram のために外した未完成の datagram の数です (Go の `ipv4frag` の
-    /// `Evicted`)。外した datagram の断片は `fragments_dropped` に数え済みです。
+    /// Incomplete datagrams removed to make room for other datagrams because the reassembly table was full. Their
+    /// fragments are already counted in `fragments_dropped`.
     pub fragments_evicted: u64,
-    /// 捨てた UDP の datagram です。予算で断ったものと、壊れたものと、会計の不整合の後に届いたものを含みます。
+    /// UDP datagrams dropped. This includes datagrams refused by a budget, malformed datagrams and datagrams that
+    /// arrived after an accounting inconsistency.
     pub udp_dropped: u64,
-    /// endpoint 1 つの上限で断った受信の datagram です。
+    /// Received datagrams refused by the per-endpoint limit.
     pub udp_endpoint_full: u64,
-    /// 核の全体の予算で断った受信の datagram です。
+    /// Received datagrams refused by the stack-wide budget.
     pub udp_stack_full: u64,
-    /// 送信の予算が尽きた時に、新しい datagram の場所を空けるために捨てた古い送信の datagram です。
+    /// Older send datagrams dropped to make room for a new datagram when the send budget was exhausted.
     pub udp_send_evicted: u64,
-    /// 待てる最長の時間を超えて、送り始める前に捨てた送信の datagram です。
+    /// Send datagrams dropped before sending started because they exceeded the longest time they may wait.
     pub udp_send_expired: u64,
     pub icmp_dropped: u64,
-    /// 速さの制限で送らなかった ICMP の誤りです。
+    /// ICMP errors not sent because of rate limiting.
     pub icmp_limited: u64,
     pub malformed: u64,
     pub bad_checksum: u64,
     pub not_local: u64,
-    /// 送信元が 0/8、127/8、224/4、240/4 にある datagram を捨てた数です (RFC 1122 3.2.1.3)。
+    /// Datagrams dropped because the source address is in 0/8, 127/8, 224/4 or 240/4 (RFC 1122 3.2.1.3).
     pub bad_source: u64,
     pub retransmit_aborts: u64,
     pub probe_aborts: u64,
-    /// 再送のタイマーの期限で送り直した回数です。窓の probe は数えません。
+    /// Times data was retransmitted because the retransmission timer expired. Window probes are not counted.
     pub rtos: u64,
-    /// 累積の確認が進む前に続いた RTO です。
+    /// RTOs that followed another RTO before the cumulative acknowledgment advanced.
     pub rtos_backed_off: u64,
-    /// 回復の外で、重複した ACK を 1 つか 2 つ受けた後の RTO です。
+    /// RTOs outside recovery after one or two duplicate ACKs had been received.
     pub rtos_short_of_dup_thresh: u64,
     pub fast_recoveries: u64,
     pub partial_acks: u64,
-    /// 原因ごとの再送の segment です。添字は高速の再送、部分の確認、RTO、PMTU、TLP です。
+    /// Retransmitted segments by cause. The indices are fast retransmit, partial acknowledgment, RTO, PMTU and TLP.
     pub retrans: [u64; 5],
     pub dup_acks_in: u64,
     pub acks_delayed: u64,
     pub acks_immediate: u64,
     pub accounting_faults: u64,
-    /// HyStart++ が Conservative Slow Start に入った回数です。
+    /// Times HyStart++ entered Conservative Slow Start.
     pub hystart_css: u64,
-    /// HyStart++ が CSS の後に slow start を終えた回数です。
+    /// Times HyStart++ ended slow start after CSS.
     pub hystart_exits: u64,
-    /// 再送が不要だったと分かり輻輳の窓を戻した回数です。
+    /// Times the congestion window was restored after a retransmission turned out to be unnecessary.
     pub spurious_undos: u64,
-    /// RTO の後の回復で、RTO が不要だったと分かった回数です。
+    /// Times recovery after an RTO found that the RTO had been unnecessary.
     pub spurious_rtos: u64,
-    /// 相手が SACK 済みのデータを捨てたとみなし、SACK の印を消した回数です。
+    /// Times the peer was taken to have discarded data it had SACKed, and the SACK marks were cleared.
     pub sack_reneging: u64,
-    /// RACK が失われたとみなした記録の数です。
+    /// Records that RACK marked as lost.
     pub rack_lost: u64,
-    /// RACK の並べ替えの期限が来た回数です。
+    /// Times the RACK reordering timer expired.
     pub reorder_timeouts: u64,
-    /// 送った TLP の probe の数です。
+    /// TLP probes sent.
     pub tlp_probes: u64,
-    /// TLP の probe が損失を直したとみなして輻輳の窓を下げた回数です。
+    /// Times a TLP probe was taken to have repaired a loss and the congestion window was reduced.
     pub tlp_recoveries: u64,
-    /// 並べ替えの窓の倍率を上げた D-SACK の数です。
+    /// D-SACKs that raised the multiplier of the reordering window.
     pub dsacks_in: u64,
-    /// boost を得た回数です。
+    /// Times a boost was obtained.
     pub boost_granted: u64,
-    /// 需要の無い保有者を floor に戻した回数です。
+    /// Times a holder without demand was returned to its floor.
     pub boost_reclaimed: u64,
-    /// floor に戻す時に取り消した順序外の byte の数です。
+    /// Out-of-order bytes cancelled when returning to the floor.
     pub boost_reneged_bytes: u64,
 }
 
@@ -212,37 +213,38 @@ pub(crate) enum CtlKind {
     Echo,
 }
 
-/// 1 分に 1 回までの門を通るログの種類です。
+/// The kinds of log entry, each passed through a gate that allows at most one per minute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LogKind {
-    /// MSS の下限より小さな MSS を示す SYN を捨てました。
+    /// A SYN announcing an MSS below the lower limit was dropped.
     MssFloor,
-    /// 14 を超える窓の scale を示す SYN を、14 で扱いました。握手は続けます。
+    /// A SYN announced a window scale above 14; the stack used 14 and went on with the handshake.
     WscaleClamped,
-    /// 握手の途中の表が満杯で SYN を捨てました。
+    /// A SYN was dropped because the half-open table was full.
     SynFull,
-    /// 握手の途中の表が満杯で、SYN に cookie で応えました。`count` は応えた数です。
+    /// SYNs were answered with a cookie because the half-open table was full. `count` is the number answered.
     SynCookies,
-    /// SYN cookie を使う間に、accept の待ち行列か接続の枠が満杯で SYN を捨てました。
+    /// A SYN was dropped because the accept queue or the connection slots were full while SYN cookies were in use.
     SynAcceptFull,
-    /// accept の待ち行列か接続の表が満杯で、握手の最後の ACK を捨てました。
+    /// The final ACK of a handshake was dropped because the accept queue or the connection table was full.
     AcceptOverflow,
-    /// TIME_WAIT の表が満杯で最も古い行を外しました。
+    /// The oldest row was removed because the TIME_WAIT table was full.
     TwEvicted,
-    /// 制御の輪が満杯で制御の packet を捨てました。
+    /// A control packet was dropped because the control output ring was full.
     CtlDropped,
-    /// 順序外の区間の数の上限で segment を捨てました。
+    /// A segment was dropped because of the limit on out-of-order intervals.
     OooDropped,
-    /// 会計の不整合で接続を閉じました。
+    /// A connection was closed because of an accounting inconsistency.
     AccountingFault,
-    /// 受信の socket が読まれず、UDP の予算で datagram を捨てました。`count` は予算で断った数です。
+    /// Datagrams were dropped by the UDP budget because the receiving socket was not read. `count` is the number
+    /// refused by the budget.
     UdpDropped,
-    /// 送る UDP の datagram を、送信の予算が尽きたか待てる時間を超えたために捨てました。`count` は
-    /// 捨てた数の和です。
+    /// Outgoing UDP datagrams were dropped because the send budget was exhausted or they waited too long. `count` is
+    /// the sum of the dropped datagrams.
     UdpSendDropped,
-    /// UDP の会計が不変条件の違反を見つけ、核の UDP をすべて止めました。1 回だけ出します。違反の中身は
-    /// [`crate::Stack::udp_receive_fault`] が返します。
+    /// UDP accounting found an invariant violation and stopped all UDP in the stack. Emitted only once. The violation
+    /// itself is returned by [`crate::Stack::udp_receive_fault`].
     UdpFault,
 }
 
@@ -262,7 +264,8 @@ const LOG_KINDS: [LogKind; 12] = [
     LogKind::UdpSendDropped,
 ];
 
-/// 門を通った 1 行の材料です。`count` は核を作ってからの数です。英語の文面は駆動の層 (`wgft-netstack`) が書きます。
+/// The material for one log entry that passed the gate. `count` is the number since the stack was created. The caller
+/// writes the message text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LogLine {
     pub kind: LogKind,

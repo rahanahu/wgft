@@ -26,31 +26,42 @@ use crate::tcp::timewait::TwRow;
 use crate::time::Time;
 use crate::udp::{Udp, UdpEp};
 
-/// 上界の式の値です。単位は byte です。
+/// The memory bound of a stack, in bytes, by term.
+///
+/// The bound is computed from the [`Limits`], the MTU and type sizes only, so it is known before the stack
+/// handles any packet and does not change with use ([`Bound::for_limits`], [`Stack::bound`](crate::Stack::bound)).
+/// Each term is an upper limit on the heap bytes that the stack requests for that purpose; [`Held`] reports
+/// what it holds now. The bound counts requested sizes: it does not include allocator rounding or
+/// bookkeeping, the caller's buffers, the [`Hook`](crate::Hook)'s own memory, or the call stack.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Bound {
-    /// M_fix:核の構造、接続の枠、hash の表、行の表、待ち受けの表、UDP の endpoint の表、タイマーの輪、出力の
-    /// list と制御の輪、知らせの list、chunk の置き場です。
+    /// Fixed tables, allocated at creation: the stack value, connection slots, the hash indexes, the half-open
+    /// and TIME_WAIT rows, the per-port listener and UDP endpoint tables, the timer wheel, the output lists and
+    /// the control output ring, the event list, and the kept pool chunks.
     pub fix: u64,
-    /// N_c × (f_s + f_r + r_f + h_f) です。
+    /// The floor buffers of every connection slot: N_c × (send floor + receive floor + floor send records +
+    /// floor out-of-order intervals), with N_c = [`Limits::conns`].
     pub floor_conn: u64,
-    /// `floor_conn` のうち、floor の送信の記録の輪と区間の表の N_c × (r_f + h_f) です。枠を初めて使う時に確保し、
-    /// 枠と共に持つので、データを運ばない接続も持ちます。`floor_conn` の内訳で、`total` に重ねて足しません。
+    /// The part of `floor_conn` taken by the floor send-record ring and interval table. A slot allocates them
+    /// on its first use and keeps them until the stack closes, so a slot that carries no data holds them too.
+    /// Included in `floor_conn`; not added to `total` again.
     pub floor_arrays: u64,
-    /// B × (d_s + d_r + d_rec + d_h + 2 × d_tbl) と枠の管理です。d_rec と d_h は boost の輪と表の全体、d_tbl は
-    /// boost の段の輪の chunk の表で、`Budget` が作成の時に確保します。floor の輪と表は枠に残るので `floor_conn`
-    /// が数えます。
+    /// The boost slots: per slot the boost-stage send and receive buffers above the floors, the boost record
+    /// ring and interval table and the boost-stage chunk tables, plus slot bookkeeping. The arrays are
+    /// allocated by [`Budget::new`](crate::Budget::new); the buffer chunks when a boosted connection uses them.
     pub boost: u64,
-    /// M_frag:再組み立ての表の保持 byte の上限です。
+    /// The reassembly table's byte limit ([`Limits::frag_bytes`]).
     pub frag: u64,
-    /// M_udp_rx:UDP の受信の byte の予算と、受信の datagram の管理の配列と、chunk の管理の配列の半分です。
+    /// The UDP receive byte budget ([`Limits::udp_rx_bytes`]) plus the receive datagram table and half of the
+    /// chunk records.
     pub udp_rx: u64,
-    /// M_udp_tx:UDP の送信の byte の予算と、送信の datagram の管理の配列と、chunk の管理の配列の残りの半分です。
+    /// The UDP send byte budget ([`Limits::udp_tx_bytes`]) plus the send datagram table and the other half of
+    /// the chunk records.
     pub udp_tx: u64,
-    /// N_ping × c_ping:ping の endpoint の行と応答の置き場です。
+    /// The ping endpoint rows and their reply buffers.
     pub ping: u64,
-    /// 項の和です。段を変える間の一時の保持は、段を変える接続が持つ boost の枠の予約の内にあるので、別の項を
-    /// 持ちません (`STAGE_CHANGE_FITS`)。
+    /// The sum of the terms. A connection that changes buffer stage holds both stages for a moment; that
+    /// stays inside its boost slot's reservation, so it has no term of its own.
     pub total: u64,
 }
 
@@ -176,7 +187,8 @@ pub(crate) fn fix_parts(l: &Limits, mtu: usize, stack_size: usize) -> FixParts {
 }
 
 impl Bound {
-    /// 表の大きさ `limits` と MTU `mtu` の核の上界です。核の値の大きさは hook の無い核で数えます。
+    /// The bound of a stack with the table sizes `limits` and the MTU `mtu`, counting the stack value of a
+    /// stack without a hook ([`NoHook`](crate::NoHook)).
     pub fn for_limits(limits: &Limits, mtu: usize) -> Self {
         Self::with_stack_size(limits, mtu, crate::stack::stack_size::<NoHook>())
     }
@@ -208,60 +220,62 @@ impl Bound {
     }
 }
 
-/// 核が今持つ可変の保持の量です。表の固定の配列は含みません。核を閉じた後はすべて 0 です。
+/// What a stack holds now beyond its fixed tables; all zero after [`Stack::close`](crate::Stack::close).
 ///
-/// 核を作った直後から増えた heap の byte は、`chunk_bytes + record_bytes + interval_bytes + frag_bytes +
-/// udp_rx_bytes + udp_tx_bytes + pool_bytes - lent_array_bytes` とちょうど一致します。boost の配列は `Budget` が
-/// 作った時に確保し、接続が借りている間は `record_bytes` と `interval_bytes` にも数えるので、その分
-/// (`lent_array_bytes`) を引きます。試験はこの式で確保の数えと会計を照らします。
+/// The heap bytes the stack has gained since creation equal exactly `chunk_bytes + record_bytes +
+/// interval_bytes + frag_bytes + udp_rx_bytes + udp_tx_bytes + pool_bytes - lent_array_bytes`. Boost arrays are
+/// allocated by the [`Budget`](crate::Budget) and counted in `record_bytes` and `interval_bytes` while a
+/// connection borrows them, hence the subtraction. The crate's allocation-counting tests check this
+/// equation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Held {
-    /// 使っている接続の枠です。
+    /// Connection slots in use.
     pub conns: usize,
-    /// floor の送信の記録の輪と区間の表を持つ接続の枠です。枠は初めて使う時に配列を確保して持ち続けるので、核を
-    /// 作ってから使ったことのある枠の数です。
+    /// Connection slots that hold their floor record ring and interval table. A slot allocates them on first
+    /// use and keeps them, so this counts the slots used since the stack was created.
     pub slot_arrays: usize,
-    /// 握手の途中の行です。
+    /// Half-open (handshake) rows in use.
     pub syn_rows: usize,
-    /// TIME_WAIT と FIN_WAIT_2 の行です。
+    /// TIME_WAIT and FIN_WAIT_2 rows in use.
     pub tw_rows: usize,
-    /// accept の待ち行列の接続 (移している途中の行を含む) です。
+    /// Connections in accept queues, including ones being moved there.
     pub accept_queued: usize,
-    /// 制御の輪に積んだ packet です。
+    /// Packets queued in the control output ring.
     pub ctl_queued: usize,
-    /// 送信と受信の輪が持つ chunk の byte です。
+    /// Bytes of buffer chunks held by connection send and receive rings.
     pub chunk_bytes: usize,
-    /// 置き場に残した chunk の数です。上限の分は上界の M_fix に入ります。
+    /// Chunks kept in the pool for reuse; the bound counts up to [`Limits::pool_chunks`] of them in `fix`.
     pub pool_chunks: usize,
-    /// 置き場に残した chunk の中身の byte です (`pool_chunks` × chunk の大きさ)。
+    /// Bytes of the kept pool chunks (`pool_chunks` × the chunk size).
     pub pool_bytes: usize,
-    /// `record_bytes` と `interval_bytes` のうち、boost の枠を持つ接続が `Budget` から借りている記録の輪と区間の
-    /// 表の byte です。
+    /// The part of `record_bytes` and `interval_bytes` that boosted connections borrow from the `Budget`.
     pub lent_array_bytes: usize,
-    /// 送信の記録の輪が持つ byte (floor の輪と、借りている boost の輪) です。
+    /// Bytes of send-record rings: the floor rings and the borrowed boost rings.
     pub record_bytes: usize,
-    /// 順序外の区間の表が持つ byte (floor の表と、借りている boost の表) です。
+    /// Bytes of out-of-order interval tables: the floor tables and the borrowed boost tables.
     pub interval_bytes: usize,
-    /// boost の枠を持つ接続です。
+    /// Connections that hold a boost slot.
     pub boosted: usize,
-    /// 使っている接続の枠の送信と受信の容量の和です。
+    /// The send and receive capacity reserved by the connection slots in use.
     pub reserved: u64,
-    /// 再組み立ての表が保持する断片の写しの byte です。固定の管理領域は含みません。
+    /// Bytes of fragment copies held by the reassembly table, without its fixed bookkeeping.
     pub frag_bytes: usize,
-    /// UDP の受信が持つ chunk の byte と datagram の数です。
+    /// Chunk bytes held by received UDP datagrams.
     pub udp_rx_bytes: usize,
+    /// Received UDP datagrams held.
     pub udp_rx_datagrams: usize,
-    /// UDP の送信が持つ chunk の byte と datagram の数です。
+    /// Chunk bytes held by queued UDP datagrams to send.
     pub udp_tx_bytes: usize,
+    /// Queued UDP datagrams to send.
     pub udp_tx_datagrams: usize,
-    /// 使っている ping の endpoint です。
+    /// Ping endpoints in use.
     pub ping_endpoints: usize,
-    /// 知らせることのある対象の数です。
+    /// Targets with a pending event.
     pub events: usize,
 }
 
 impl Held {
-    /// すべての項が 0 かを返します。
+    /// Returns whether every term is zero.
     pub fn is_zero(&self) -> bool {
         *self == Self::default()
     }

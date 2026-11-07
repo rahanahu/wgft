@@ -72,7 +72,8 @@ fn u16_of(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(NIL16)
 }
 
-/// UDP の socket の handle です。ポートと 32 bit の世代の組で、閉じた後の handle は誤りになります。
+/// A handle to a UDP socket. It pairs a port with a 32-bit generation, so a handle used after the socket is closed is
+/// an error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct UdpId {
     pub(crate) port: u16,
@@ -80,7 +81,7 @@ pub struct UdpId {
 }
 
 impl UdpId {
-    /// socket のポートです。
+    /// The socket's port.
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -91,11 +92,12 @@ impl UdpId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UdpFault {
-    /// datagram の枠を 2 回返しました。
+    /// A datagram slot was released twice.
     SlotReleasedTwice,
-    /// 予算の数が負になりました。値は違反を見つけた時の核の予算の byte と件数です。
+    /// A budget count became negative. The values are the stack's budget in bytes and in datagrams when the violation
+    /// was found.
     BudgetNegative { bytes: i64, datagrams: i64 },
-    /// 送信の datagram が、持ち主の endpoint の列の先頭にも 2 番目にもありませんでした。
+    /// A send datagram was neither first nor second in its owner endpoint's list.
     SendListBroken,
 }
 
@@ -1127,8 +1129,9 @@ impl<H: Hook> Stack<H> {
         Ok(UdpId { port, generation })
     }
 
-    /// 届いた順に datagram を 1 つ `dst` に写し、写した長さと送信元を返します。`dst` より長い datagram は
-    /// `dst` の長さで切り、残りを捨てます。写した時点で予約を返します。読む物が無ければ `WouldBlock` です。
+    /// Copies one datagram, in order of arrival, into `dst` and returns the copied length and the sender. A datagram
+    /// longer than `dst` is cut to the length of `dst` and the rest is discarded. The reservation is released at the
+    /// time of the copy. Returns `WouldBlock` if there is nothing to read.
     pub fn recv_from(
         &mut self,
         now: Time,
@@ -1177,14 +1180,15 @@ impl<H: Hook> Stack<H> {
         self.send_impl(now, id, data, to, None)
     }
 
-    /// [`Stack::send_to`] と同じく `data` を 1 つの datagram として送りますが、待ちません。送信の予算が尽きて
-    /// いたら、断った予算に応じて最も古い送信の datagram を捨て、空きを作って予約します。endpoint の上限
-    /// で断ったら、その endpoint の最も古い datagram を、核の全体の予算で断ったら、送信の FIFO の先頭を捨てます。
-    /// 捨てた数は [`crate::Stats::udp_send_evicted`] に数えます。
+    /// Sends `data` as one datagram like [`Stack::send_to`], but never waits. If the send budget is exhausted, it drops
+    /// the oldest queued send datagram to make room, chosen by which budget refused, and then reserves. If the
+    /// per-endpoint limit refused, the oldest datagram of that endpoint is dropped; if the stack-wide budget refused,
+    /// the head of the send FIFO is dropped. The number dropped is counted in [`crate::Stats::udp_send_evicted`].
     ///
-    /// `max_age_ms` が 0 でなければ、その時間を超えても送り始めていない datagram は、取り出す時に捨てます
-    /// ([`crate::Stats::udp_send_expired`])。ここで決める時間は上限で、送信の FIFO に入れた時から数えます。
-    /// `WouldBlock` は返さず、`UdpWritable` の待ちの list にも入れません。
+    /// If `max_age_ms` is not 0, a datagram that has not started to be sent after that time is dropped when it would be
+    /// taken out ([`crate::Stats::udp_send_expired`]). The time given here is an upper bound, counted from when the
+    /// datagram entered the send FIFO. It never returns `WouldBlock` and never adds the endpoint to the wait list for
+    /// writability.
     pub fn send_to_latest(
         &mut self,
         now: Time,
@@ -1259,8 +1263,8 @@ impl<H: Hook> Stack<H> {
         Ok(data.len())
     }
 
-    /// endpoint を閉じます。受けて読まれていない datagram の予約を返します。送り残しの datagram は送り終えた
-    /// 時に返します。古い handle では何もしません。
+    /// Closes the endpoint. The reservations of received datagrams that have not been read are released. Datagrams
+    /// still queued to send are released when they have been sent. Does nothing for a stale handle.
     pub fn close_udp(&mut self, now: Time, id: UdpId) {
         self.clock(now);
         let s = &mut self.s;

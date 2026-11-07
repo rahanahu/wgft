@@ -41,15 +41,15 @@ pub(crate) use shared::{Output, Shared};
 /// back pressure, for example to keep a connection's boost while the application still has data for it.
 /// New methods come with default implementations.
 pub trait Hook {
-    /// 接続が boost を得た時に呼びます。
+    /// Called when a connection obtains a boost.
     fn boost_granted(&mut self, _conn: ConnId) {}
 
-    /// 需要の無い保有者を floor に戻す前に呼びます。偽を返すと戻りを取り消します。
+    /// Called before a holder without demand is returned to its floor. Returning false cancels the return.
     fn may_return(&mut self, _conn: ConnId) -> bool {
         true
     }
 
-    /// 接続を floor に戻した後に呼びます。
+    /// Called after a connection has been returned to its floor.
     fn boost_returned(&mut self, _conn: ConnId) {}
 }
 
@@ -367,25 +367,25 @@ pub(crate) fn go_compat_evict_silent() -> bool {
     GO_COMPAT_EVICT_SILENT.with(std::cell::Cell::get)
 }
 
-/// 何もしない hook です。boost の戻りを常に許します。
+/// A hook that does nothing. It always allows a boost to be returned.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoHook;
 
 impl Hook for NoHook {}
 
-/// 核を作れなかった理由と、渡した `Budget` です。
+/// Why the stack could not be created, together with the `Budget` that was passed in.
 #[derive(Debug)]
 pub struct NewError {
     kind: NewErrorKind,
     budget: Budget,
 }
 
-/// 核を作れなかった理由です。
+/// Why the stack could not be created.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NewErrorKind {
-    /// 設定の誤りです。
+    /// The configuration is invalid.
     Config(ConfigError),
-    /// 表の確保に失敗しました。
+    /// Allocating the tables failed.
     Alloc,
 }
 
@@ -394,7 +394,7 @@ impl NewError {
         self.kind
     }
 
-    /// 渡した `Budget` を取り戻します。
+    /// Takes back the `Budget` that was passed in.
     pub fn into_budget(self) -> Budget {
         self.budget
     }
@@ -411,14 +411,14 @@ impl fmt::Display for NewError {
 
 impl core::error::Error for NewError {}
 
-/// 不変条件の違反です。[`Stack::check_invariants`] が返します。
+/// An invariant violation. [`Stack::check_invariants`] returns it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InvariantError {
     what: &'static str,
 }
 
 impl InvariantError {
-    /// 違反の英語の説明です。
+    /// A description of the violation in English.
     pub fn what(&self) -> &'static str {
         self.what
     }
@@ -438,7 +438,7 @@ impl From<&'static str> for InvariantError {
     }
 }
 
-/// [`Stack::close`] が返す、取り戻した `Budget` と最後の会計です。
+/// The reclaimed `Budget` and the final accounting, returned by [`Stack::close`].
 #[derive(Debug)]
 pub struct Closed {
     pub budget: Budget,
@@ -524,7 +524,7 @@ pub(crate) const fn stack_size<H: Hook>() -> usize {
     size
 }
 
-/// wgstack の核です。1 つの所有者が `&mut` で呼ぶ値で、錠を持ちません。
+/// The user-space stack. A single owner calls it through `&mut`; it holds no locks.
 pub struct Stack<H: Hook = NoHook> {
     pub(crate) conns: ConnSlots,
     pub(crate) s: Shared,
@@ -555,8 +555,9 @@ pub(crate) fn time(ns: i64) -> Time {
 }
 
 impl<H: Hook> Stack<H> {
-    /// 核を作り、表をすべて確保します。`seed` は 64 byte の乱数の種で、製品は OS の乱数から作り、試験は固定の
-    /// 種を渡します。失敗したら渡した `Budget` を誤りに入れて返します。
+    /// Creates the stack and allocates all tables. `seed` is 64 bytes of random seed; production code should derive it
+    /// from the operating system's random source, and tests may pass a fixed seed. On failure the `Budget` that was
+    /// passed in is returned inside the error.
     pub fn new(config: Config, budget: Budget, seed: &[u8; 64], hook: H) -> Result<Self, NewError> {
         Self::create(config, budget, hook, |c| Tables::new(c, seed))
     }
@@ -669,7 +670,7 @@ impl<H: Hook> Stack<H> {
         }
     }
 
-    /// 作成の時の設定です。
+    /// The configuration given at creation.
     pub fn config(&self) -> &Config {
         &self.s.config
     }
@@ -679,7 +680,8 @@ impl<H: Hook> Stack<H> {
         &self.hook
     }
 
-    /// この核の上界の式の値です。作成の時の設定と型の大きさだけから決まります。
+    /// The value of the bound formula for this stack. It depends only on the configuration given at creation and on the
+    /// sizes of types.
     pub fn bound(&self) -> Bound {
         Bound::with_stack_size(&self.s.config.limits, self.s.config.mtu, stack_size::<H>())
     }
@@ -705,12 +707,12 @@ impl<H: Hook> Stack<H> {
         self.s.now
     }
 
-    /// 事象の数です。
+    /// The event counters.
     pub fn stats(&self) -> Stats {
         self.s.stats
     }
 
-    /// 核が今持つ可変の保持の量です。
+    /// The variable amount of memory the stack holds now.
     pub fn held(&self) -> Held {
         let mut h = Held::default();
         for (_, t, b) in self.conns.iter_bufs() {
@@ -742,17 +744,18 @@ impl<H: Hook> Stack<H> {
         h
     }
 
-    /// 核を作ってから使ったことのある接続の枠の数です。枠は初めて使う時に floor の送信の記録の輪と区間の表を確保し、
-    /// 持ち続けるので、この数の枠がその配列を持ちます。数えは枠を初めて使う時だけ増えるので、読むのは定数の手間です。
+    /// The number of connection slots that have been used since the stack was created. A slot allocates its floor send
+    /// record ring and its interval table the first time it is used and keeps them, so this many slots hold those
+    /// arrays. The count grows only on a slot's first use, so reading it takes constant time.
     pub fn slots_used(&self) -> usize {
         self.conns.with_arrays()
     }
 
-    /// 不変条件を確かめます。予約の和が上界以下であること、表の数と予約が一致すること、chunk と配列の持ち主が
-    /// 1 つであることを確かめます。呼んだ時だけ手間がかかり、製品は呼びません。試験と fuzz が各段の後に呼びます。
+    /// Checks the invariants: the sum of reservations is within the bound, table counts agree with the reservations,
+    /// and each chunk and array has exactly one owner. It costs time only when called; production code does not call
+    /// it. Tests and fuzzers call it after each step.
     ///
-    /// すべての接続の枠を確かめ、表の数と和をすべて数え直します。各段の後に書き換えた枠だけを確かめる形は
-    /// [`Stack::check_invariants_touched`] で、同じ状態に同じ答えを返します。
+    /// It checks every connection slot and recounts all table counts and sums.
     pub fn check_invariants(&self) -> Result<(), InvariantError> {
         let s = &self.s;
         self.conns.check_free(&s.conn_free, &s.qlinks)?;
@@ -933,7 +936,8 @@ impl<H: Hook> Stack<H> {
         Ok(())
     }
 
-    /// 待ち受けと接続とソケットをすべて閉じ、`Budget` と最後の会計を返します。最後の会計はすべて 0 です。
+    /// Closes all listeners, connections and sockets, and returns the `Budget` and the final accounting. The final
+    /// accounting is all zeros.
     pub fn close(mut self, now: Time) -> Closed {
         let held = self.close_tables(now);
         Closed {
@@ -1194,7 +1198,7 @@ impl<H: Hook> Stack<H> {
         true
     }
 
-    /// 期限の来たタイマーと行の期限を、新しい `now` の時刻で 1 回ずつ処理します (Go の `advance`)。
+    /// Processes expired timers and row deadlines once each, at the new time `now`.
     pub fn handle_timeout(&mut self, now: Time) {
         let now = self.clock(now);
         let mut fired = core::mem::take(&mut self.s.fired);
@@ -1218,7 +1222,7 @@ impl<H: Hook> Stack<H> {
         self.s.sweep_frag(now);
     }
 
-    /// 次に [`Stack::handle_timeout`] を呼ぶ時刻です。
+    /// The time at which [`Stack::handle_timeout`] should be called next.
     pub fn poll_timeout(&self) -> Option<Time> {
         let mut next: Option<i64> = None;
         let tick = self.s.wheel.next_tick();
@@ -1244,9 +1248,18 @@ impl<H: Hook> Stack<H> {
         next.map(time)
     }
 
-    /// 次に送る IPv4 の packet を 1 つ `buf` に作り、長さを返します。`buf` は MTU 以上の長さを持ちます。組は
-    /// deficit round robin で選びます (Go の `stack.poll`)。
+    /// Builds the next IPv4 packet to send into `buf` and returns its length, or `None` when nothing is ready.
+    /// The class of output to serve is chosen by deficit round robin.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `buf` is shorter than the MTU ([`Config::mtu`]), before taking anything from the output queues.
     pub fn poll_transmit(&mut self, now: Time, buf: &mut [u8]) -> Option<usize> {
+        // 短い buffer では、制御の packet は切れ、TCP の segment は書く途中で止まるので、何も取り出す前に止めます。
+        assert!(
+            buf.len() >= self.s.config.mtu,
+            "poll_transmit needs a buffer of at least the MTU"
+        );
         let now = self.clock(now);
         let quantum = i64::try_from(self.s.config.mtu).unwrap_or(i64::MAX);
         // 取り出した項目が何も作らなければ次を見ます。何も作らない項目は入れ直さないので、この繰り返しは有限です。
@@ -1278,7 +1291,7 @@ impl<H: Hook> Stack<H> {
         None
     }
 
-    /// 次の知らせを取り出します。同じ対象の同じ種類の知らせは、取り出すまで 1 つにまとまります。
+    /// Takes the next event. Events of the same kind for the same target are merged into one until it is taken.
     pub fn poll_event(&mut self) -> Option<Event> {
         let (target, bit) = self.s.events.pop()?;
         let n = self.conns.len();
@@ -1328,7 +1341,8 @@ impl<H: Hook> Stack<H> {
         })
     }
 
-    /// 1 分に 1 回までの門を通った拒否の数を 1 つ取り出します。駆動の層が英語の 1 行にしてログに出します。
+    /// Takes one count of rejections that passed the gate that allows at most one per minute. The caller turns it into
+    /// a log line.
     pub fn poll_log(&mut self) -> Option<LogLine> {
         if self.s.udp.take_fault_log() {
             return Some(LogLine {

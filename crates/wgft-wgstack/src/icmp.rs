@@ -30,7 +30,8 @@ pub(crate) const PING_ENDPOINTS: usize = 16;
 /// IPv4 の最小の再組み立ての大きさです。誤りの引用はこれに収めます。
 const MIN_REASSEMBLY: usize = 576;
 
-/// ping の endpoint の handle です。表の番号と 64 bit の世代の組で、閉じた後の handle は誤りになります。
+/// A handle to a ping endpoint. It pairs a table index with a 64-bit generation, so a handle used after the endpoint is
+/// closed is an error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PingId {
     pub(crate) slot: u8,
@@ -38,8 +39,8 @@ pub struct PingId {
 }
 
 impl PingId {
-    /// ping の endpoint の表の番号です。[`MAX_PINGS`](crate::MAX_PINGS) より小さく、呼び手が endpoint ごとの表を
-    /// 核の外に持つ時の位置に使えます。
+    /// The index of the ping endpoint in the stack's table. It is below [`MAX_PINGS`](crate::MAX_PINGS), so the caller
+    /// can use it as a position in its own per-endpoint table.
     pub fn index(&self) -> usize {
         usize::from(self.slot)
     }
@@ -433,8 +434,8 @@ impl<H: Hook> Stack<H> {
         Ok(id)
     }
 
-    /// ICMP の echo request の message `msg` を送ります。識別子はこの endpoint の値に書き換えます。制御の輪が
-    /// 満杯なら [`Error::NoBufferSpace`] を返します。
+    /// Sends the ICMP echo request message `msg`. The identifier is overwritten with this endpoint's value. Returns
+    /// [`Error::NoBufferSpace`] if the control output ring is full.
     pub fn send_ping(&mut self, now: Time, id: PingId, msg: &[u8]) -> Result<usize, Error> {
         self.clock(now);
         let s = &mut self.s;
@@ -460,8 +461,8 @@ impl<H: Hook> Stack<H> {
         Ok(msg.len())
     }
 
-    /// 応答の message を 1 つ `dst` に写し、写した長さを返します。`dst` より長い応答は切ります。応答が無ければ
-    /// `WouldBlock` です。
+    /// Copies one reply message into `dst` and returns the copied length. A reply longer than `dst` is truncated.
+    /// Returns `WouldBlock` if there is no reply.
     pub fn recv_ping(&mut self, now: Time, id: PingId, dst: &mut [u8]) -> Result<usize, Error> {
         self.clock(now);
         let p = &mut self.s.pings;
@@ -483,7 +484,7 @@ impl<H: Hook> Stack<H> {
         Ok(n)
     }
 
-    /// endpoint を閉じ、識別子を空けます。古い handle では何もしません。
+    /// Closes the endpoint and frees its identifier. Does nothing for a stale handle.
     pub fn close_ping(&mut self, now: Time, id: PingId) {
         self.clock(now);
         if let Some(e) = self.s.pings.get(id) {

@@ -79,7 +79,9 @@ struct Slot {
     arrays: BoostArrays,
 }
 
-/// boost の枠の集まりです。プロセスで 1 つ作り、核から核へ渡します。
+/// The boost slots of one stack: each live stack owns its own `Budget`. When a stack is replaced, the
+/// `Budget` from [`Stack::close`](crate::Stack::close) (or [`NewError::into_budget`](crate::NewError::into_budget))
+/// is passed to its successor, so replacing a stack allocates no new boost arrays.
 pub struct Budget {
     slots: FixedVec<Slot>,
     /// 前に [`Budget::take_dirty`] を呼んでから、空きの枠に配列を返した枠の印です (枠 `i` が bit `i`)。試験と fuzz の
@@ -100,13 +102,13 @@ impl core::fmt::Debug for Budget {
     }
 }
 
-/// `Budget` を作れなかった理由です。
+/// Why a `Budget` could not be created.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BudgetError {
-    /// 枠の数が [`Limits::MAX_BOOST_SLOTS`] を超えます。
+    /// The slot count exceeds [`Limits::MAX_BOOST_SLOTS`].
     TooManySlots(usize),
-    /// 確保に失敗しました。
+    /// Allocation failed.
     Alloc,
 }
 
@@ -138,7 +140,7 @@ impl Budget {
         size_of_val(&self.dirty)
     }
 
-    /// `slots` 個の枠と boost の配列をすべて確保します。核の [`Limits::boost_slots`] と同じ数にします。
+    /// Allocates all `slots` slots and the boost arrays. Use the same count as the stack's [`Limits::boost_slots`].
     pub fn new(slots: usize) -> Result<Self, BudgetError> {
         if slots > Limits::MAX_BOOST_SLOTS {
             return Err(BudgetError::TooManySlots(slots));
@@ -166,12 +168,12 @@ impl Budget {
         slots * size_of::<Slot>()
     }
 
-    /// 枠の数 (B) です。
+    /// The number of slots.
     pub fn slots(&self) -> usize {
         self.slots.len()
     }
 
-    /// 貸している枠の数です。
+    /// The number of slots currently lent out.
     pub fn lent(&self) -> usize {
         self.slots.iter().filter(|s| s.holder.is_some()).count()
     }

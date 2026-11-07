@@ -28,8 +28,9 @@ use crate::fixed_vec::{AllocError, FixedVec};
 use crate::output::NIL;
 use crate::wire::{SackBlock, Tuple};
 
-/// 接続の handle です。接続の枠の番号と 64 bit の世代の組で、核への参照を持たない `Copy` の値です。
-/// 枠が別の接続に使われた後の handle は、核の操作で古い handle として扱われます。
+/// A handle to a connection. It pairs a connection slot index with a 64-bit generation and is a `Copy` value that holds
+/// no reference to the stack. A handle whose slot has been reused by another connection is treated as a stale handle by
+/// the stack's operations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConnId {
     pub(crate) slot: u32,
@@ -37,7 +38,7 @@ pub struct ConnId {
 }
 
 impl ConnId {
-    /// 接続の枠の番号です。呼び手が接続ごとの表を核の外に持つ時の位置に使えます。
+    /// The connection slot index. The caller can use it as a position in its own per-connection table.
     pub fn index(&self) -> usize {
         self.slot as usize
     }
