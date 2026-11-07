@@ -35,10 +35,11 @@ use core::fmt;
 pub use shared::{LogKind, LogLine, Stats};
 pub(crate) use shared::{Output, Shared};
 
-/// 核が呼び手に伝える boost の変化と問い合わせです (wgstack-rs.md の「boost の hook」)。
+/// Boost changes and queries that the stack passes to the caller.
 ///
-/// hook は核への参照を受け取らないので、核を呼び返せません。製品の hook は中継の層が渡し、試験は決まった
-/// 答えを返す hook を渡します。種類を足すときは、既定の実装を持つメソッドで足します。
+/// The hook gets no reference to the stack, so it cannot call back into it. An application uses it as
+/// back pressure, for example to keep a connection's boost while the application still has data for it.
+/// New methods come with default implementations.
 pub trait Hook {
     /// 接続が boost を得た時に呼びます。
     fn boost_granted(&mut self, _conn: ConnId) {}
@@ -64,12 +65,14 @@ thread_local! {
 /// (凍結した Go と同じ)。核を駆動する前に呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使い、
 /// 核ごとの値は `WgstackDut` が持って駆動の前に合わせます。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn set_go_compat_rto_l2(on: bool) {
     GO_COMPAT_RTO_L2.with(|c| c.set(on));
 }
 
 /// 今の thread の値です。`WgstackDut` の駆動の外で偽に戻っていることを試験が確かめます。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn go_compat_rto_l2() -> bool {
     GO_COMPAT_RTO_L2.with(std::cell::Cell::get)
 }
@@ -84,12 +87,14 @@ thread_local! {
 /// 真にすると、この thread で駆動する核は D-SACK の判定を SND.UNA と比べます (凍結した Go と同じ)。核を駆動する前に
 /// 呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn set_go_compat_dsack_snd_una(on: bool) {
     GO_COMPAT_DSACK_SND_UNA.with(|c| c.set(on));
 }
 
 /// 今の thread の値です。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn go_compat_dsack_snd_una() -> bool {
     GO_COMPAT_DSACK_SND_UNA.with(std::cell::Cell::get)
 }
@@ -106,12 +111,14 @@ thread_local! {
 /// 真にすると、この thread で駆動する核は行と TIME_WAIT の枠の RST と受け入れの判定を凍結した Go と同じにします。核を駆動する前に
 /// 呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn set_go_compat_row_rst(on: bool) {
     GO_COMPAT_ROW_RST.with(|c| c.set(on));
 }
 
 /// 今の thread の値です。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn go_compat_row_rst() -> bool {
     GO_COMPAT_ROW_RST.with(std::cell::Cell::get)
 }
@@ -128,12 +135,14 @@ thread_local! {
 /// 真にすると、この thread で駆動する核は challenge ACK と行の ACK に接続と行ごとの速さの制限を掛けません (凍結した
 /// Go と同じ)。核を駆動する前に呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn set_go_compat_core_challenge(on: bool) {
     GO_COMPAT_CORE_CHALLENGE.with(|c| c.set(on));
 }
 
 /// 今の thread の値です。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn go_compat_core_challenge() -> bool {
     GO_COMPAT_CORE_CHALLENGE.with(std::cell::Cell::get)
 }
@@ -148,12 +157,14 @@ thread_local! {
 /// 真にすると、この thread で駆動する核は SYN-ACK を再送した接続の最初の RTO を 3 秒にしません (凍結した Go と同じ)。
 /// 核を駆動する前に呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn set_go_compat_synack_rto(on: bool) {
     GO_COMPAT_SYNACK_RTO.with(|c| c.set(on));
 }
 
 /// 今の thread の値です。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn go_compat_synack_rto() -> bool {
     GO_COMPAT_SYNACK_RTO.with(std::cell::Cell::get)
 }
@@ -168,12 +179,14 @@ thread_local! {
 /// 真にすると、この thread で駆動する核は TIME_WAIT の枠と行で PAWS をしません (凍結した Go と同じ)。核を駆動する前に
 /// 呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn set_go_compat_tw_no_paws(on: bool) {
     GO_COMPAT_TW_NO_PAWS.with(|c| c.set(on));
 }
 
 /// 今の thread の値です。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn go_compat_tw_no_paws() -> bool {
     GO_COMPAT_TW_NO_PAWS.with(std::cell::Cell::get)
 }
@@ -188,6 +201,7 @@ thread_local! {
 /// 真にすると、この thread で駆動する核は TIME_WAIT の枠で FIN の写しの TSval から TS.Recent を更新しません (凍結した
 /// Go と同じ)。核を駆動する前に呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn set_go_compat_tw_no_ts_recent(on: bool) {
     GO_COMPAT_TW_NO_TS_RECENT.with(|c| c.set(on));
 }
@@ -203,18 +217,21 @@ thread_local! {
 /// 真にすると、この thread で駆動する核は TIME_WAIT を使い直す SYN を、TSval が厳密に大きい時と、番号が RCV.NXT より
 /// 大きい時だけ受けます (凍結した Go と同じ)。核を駆動する前に呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn set_go_compat_tw_reuse_strict(on: bool) {
     GO_COMPAT_TW_REUSE_STRICT.with(|c| c.set(on));
 }
 
 /// 今の thread の値です。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn go_compat_tw_no_ts_recent() -> bool {
     GO_COMPAT_TW_NO_TS_RECENT.with(std::cell::Cell::get)
 }
 
 /// 今の thread の値です。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn go_compat_tw_reuse_strict() -> bool {
     GO_COMPAT_TW_REUSE_STRICT.with(std::cell::Cell::get)
 }
@@ -229,12 +246,14 @@ thread_local! {
 /// 真にすると、この thread で駆動する核は時刻 0 の SYN-ACK から RTT の標本を取りません (凍結した Go と同じ)。
 /// 核を駆動する前に呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn set_go_compat_sent_at_zero(on: bool) {
     GO_COMPAT_SENT_AT_ZERO.with(|c| c.set(on));
 }
 
 /// 今の thread の値です。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn go_compat_sent_at_zero() -> bool {
     GO_COMPAT_SENT_AT_ZERO.with(std::cell::Cell::get)
 }
@@ -249,12 +268,14 @@ thread_local! {
 /// 真にすると、この thread で駆動する核は PMTU の引き下げで輻輳の窓を縮めません (凍結した Go と同じ)。核を駆動する前に
 /// 呼びます。照合の道具 (`wgft-wgstack-dut`) だけが使います。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn set_go_compat_pmtu_keep_cwnd(on: bool) {
     GO_COMPAT_PMTU_KEEP_CWND.with(|c| c.set(on));
 }
 
 /// 今の thread の値です。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn go_compat_pmtu_keep_cwnd() -> bool {
     GO_COMPAT_PMTU_KEEP_CWND.with(std::cell::Cell::get)
 }
@@ -270,12 +291,14 @@ thread_local! {
 /// 真にすると、この thread で駆動する核は非 atomic の datagram の ID を DF を立てた packet と同じ数えから取ります
 /// (凍結した Go と同じ)。核を駆動する前に呼びます。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn set_go_compat_shared_id(on: bool) {
     GO_COMPAT_SHARED_ID.with(|c| c.set(on));
 }
 
 /// 今の thread の値です。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn go_compat_shared_id() -> bool {
     GO_COMPAT_SHARED_ID.with(std::cell::Cell::get)
 }
@@ -291,12 +314,14 @@ thread_local! {
 /// 真にすると、この thread で駆動する核は MTU を超える echo の応答を捨てます (凍結した Go と同じ)。
 /// 核を駆動する前に呼びます。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn set_go_compat_echo_drop(on: bool) {
     GO_COMPAT_ECHO_DROP.with(|c| c.set(on));
 }
 
 /// 今の thread の値です。
 #[cfg(feature = "harness")]
+#[doc(hidden)]
 pub fn go_compat_echo_drop() -> bool {
     GO_COMPAT_ECHO_DROP.with(std::cell::Cell::get)
 }
@@ -540,6 +565,7 @@ impl<H: Hook> Stack<H> {
     /// 使います。大きさが合わない表と `spare` に無い表は新しく作ります。ほかの表は [`Stack::new`] と同じ口で
     /// 作るので、作った核は [`Stack::new`] が作る核と同じ状態です。試験と fuzz の build だけにあります。
     #[cfg(any(test, feature = "harness"))]
+    #[doc(hidden)]
     pub fn new_reusing(
         config: Config,
         budget: Budget,
@@ -638,7 +664,7 @@ impl<H: Hook> Stack<H> {
         &self.s.config
     }
 
-    /// 作成の時に渡した hook です。中継の層が hook と分け合う表を引くのに使います。
+    /// The hook passed at creation, for state the caller shares with it.
     pub fn hook(&self) -> &H {
         &self.hook
     }
@@ -741,6 +767,7 @@ impl<H: Hook> Stack<H> {
     /// 同じ状態に [`Stack::check_invariants`] と同じ答えを返します。枠と共有の表の間の確かめと共有の表の確かめは、
     /// 毎回すべてを確かめます。知らせの印は数え直さず、印を書く口が増減で保つ数で確かめます。誤りの文も同じです。
     #[cfg(any(test, feature = "harness"))]
+    #[doc(hidden)]
     pub fn check_invariants_touched(&mut self, c: &mut TouchedCheck) -> Result<(), InvariantError> {
         let slots = self.conns.len();
         let ready = c.primed && c.tally.len() == slots;
@@ -912,6 +939,7 @@ impl<H: Hook> Stack<H> {
     /// 行に印を持つので (試験と fuzz の build だけ)、その行を戻せば表は作成の時と同じになります。印の残る知らせの
     /// list は返さず、次の核はそれを新しく作ります。試験と fuzz の build だけにあります。
     #[cfg(any(test, feature = "harness"))]
+    #[doc(hidden)]
     pub fn close_keeping(mut self, now: Time) -> (Closed, Spare) {
         let held = self.close_tables(now);
         let Self { s, .. } = self;
@@ -969,8 +997,8 @@ impl<H: Hook> Stack<H> {
         held
     }
 
-    /// トンネルから届いた IPv4 の packet を 1 つ処理します。packet は呼び出しの間だけ読み、保持するものは自分の
-    /// 予約に写します。捨てた packet は理由ごとに数えます。
+    /// Processes one received IPv4 packet. The stack reads `pkt` only during the call and copies what it
+    /// keeps into its own reservations. Dropped packets are counted by reason in [`Stack::stats`].
     pub fn handle_packet(&mut self, now: Time, pkt: &[u8]) {
         let now = self.clock(now);
         self.input(pkt, now);

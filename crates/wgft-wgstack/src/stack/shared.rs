@@ -147,7 +147,7 @@ pub struct Stats {
     /// endpoint 1 つの上限で断った受信の datagram です。
     pub udp_endpoint_full: u64,
     /// 核の全体の予算で断った受信の datagram です。
-    pub udp_tunnel_full: u64,
+    pub udp_stack_full: u64,
     /// 送信の予算が尽きた時に、新しい datagram の場所を空けるために捨てた古い送信の datagram です。
     pub udp_send_evicted: u64,
     /// 待てる最長の時間を超えて、送り始める前に捨てた送信の datagram です。
@@ -238,7 +238,7 @@ pub enum LogKind {
     AccountingFault,
     /// 受信の socket が読まれず、UDP の予算で datagram を捨てました。`count` は予算で断った数です。
     UdpDropped,
-    /// トンネルへ送る UDP の datagram を、送信の予算が尽きたか待てる時間を超えたために捨てました。`count` は
+    /// 送る UDP の datagram を、送信の予算が尽きたか待てる時間を超えたために捨てました。`count` は
     /// 捨てた数の和です。
     UdpSendDropped,
     /// UDP の会計が不変条件の違反を見つけ、核の UDP をすべて止めました。1 回だけ出します。違反の中身は

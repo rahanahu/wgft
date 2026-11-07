@@ -866,7 +866,7 @@ fn udp_flood() {
     let held = h.held();
     let st = h.n.stack().stats();
     assert!(
-        held.udp_rx_bytes <= 4 * bytes && st.udp_tunnel_full > 0,
+        held.udp_rx_bytes <= 4 * bytes && st.udp_stack_full > 0,
         "the tunnel stops at its budget of four shares ({}): {held:?} {st:?}",
         4 * bytes
     );

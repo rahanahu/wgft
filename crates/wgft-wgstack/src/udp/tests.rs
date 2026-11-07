@@ -214,7 +214,7 @@ fn bound_udp_receive() {
         );
         let st = n.s.stats();
         assert!(st.udp_dropped > 0, "size {size}: no drops counted");
-        assert_eq!(st.udp_dropped, st.udp_endpoint_full + st.udp_tunnel_full);
+        assert_eq!(st.udp_dropped, st.udp_endpoint_full + st.udp_stack_full);
         let log = n.s.poll_log().expect("a gated log line");
         assert_eq!(log.kind, LogKind::UdpDropped);
         assert!(n.s.poll_log().is_none(), "one line a minute");
@@ -243,12 +243,12 @@ fn a_full_receive_budget_meets_its_term() {
     assert_eq!(n.s.stats().udp_dropped, 0);
     n.s.handle_packet(n.now, &build_udp(PEER_UDP, 104, &[1; 100]));
     let st = n.s.stats();
-    assert_eq!((st.udp_endpoint_full, st.udp_tunnel_full), (0, 1));
+    assert_eq!((st.udp_endpoint_full, st.udp_stack_full), (0, 1));
     let log = n.s.poll_log().unwrap();
     assert_eq!((log.kind, log.count), (LogKind::UdpDropped, 1));
     // 上限に届いた endpoint は、核の予算を先に調べるので核の予算で断られます (Go と同じ順です)。
     n.s.handle_packet(n.now, &build_udp(PEER_UDP, 100, &[1; 100]));
-    assert_eq!(n.s.stats().udp_tunnel_full, 2);
+    assert_eq!(n.s.stats().udp_stack_full, 2);
     n.s.check_invariants().unwrap();
     let b = n.s.bound();
     assert!(b.udp_rx >= RX_BYTES as u64);
@@ -292,7 +292,7 @@ fn tunnel_datagram_count_boundary() {
     assert_eq!(n.s.held().udp_rx_datagrams, 8);
     n.write(&build_udp(PEER_UDP, 104, b"x"));
     let st = n.s.stats();
-    assert_eq!((st.udp_endpoint_full, st.udp_tunnel_full), (0, 1));
+    assert_eq!((st.udp_endpoint_full, st.udp_stack_full), (0, 1));
     assert_eq!(
         n.s.recv_from(n.now, pcs[4], &mut [0; 4]),
         Err(Error::WouldBlock)
@@ -329,7 +329,7 @@ fn send_chunk_failure_returns_no_memory() {
     n.s.handle_packet(n.now, &build_udp(PEER_UDP, 53, &[0; 3000]));
     fail_chunks_after(None);
     n.s.check_invariants().unwrap();
-    assert_eq!(n.s.stats().udp_tunnel_full, 1);
+    assert_eq!(n.s.stats().udp_stack_full, 1);
     assert_eq!(n.s.held().udp_rx_datagrams, 0);
 }
 

@@ -3,12 +3,12 @@
 use core::fmt;
 use core::net::Ipv4Addr;
 
-/// 受け付ける MTU の下限です。
+/// The smallest MTU the stack accepts, the IPv4 minimum datagram size every host must accept.
 pub const MIN_MTU: usize = 576;
-/// 受け付ける MTU の上限です。server が送る範囲に合わせた値です。
+/// The largest MTU the stack accepts, which covers jumbo frames.
 pub const MAX_MTU: usize = 9216;
 
-/// 表の大きさです。本番は [`Limits::with_max_flows`] の値で、試験だけが小さな値を渡します。
+/// The table sizes of a stack, fixed at creation.
 ///
 /// 一部の値だけを変えるときは、既定の値から作ります。
 ///
@@ -20,7 +20,7 @@ pub const MAX_MTU: usize = 9216;
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
-    /// 同時に確立できる接続の数 K です (`WGFT_MAX_TCP_FLOWS`)。
+    /// The number K of connections that can be established at once.
     pub max_flows: usize,
     /// accept の待ち行列の全体の数 Q です。接続の枠の数は K + Q です。
     pub accept_queue: usize,
@@ -41,7 +41,7 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// K の既定値です (`WGFT_MAX_TCP_FLOWS` の既定値と同じ)。
+    /// The value of K that [`Limits::with_max_flows`] uses for 0.
     pub const DEFAULT_MAX_FLOWS: usize = 2048;
 
     /// K を `max_flows` にした本番の表の大きさです。0 は既定値です。
@@ -75,8 +75,7 @@ impl Default for Limits {
     }
 }
 
-/// 輻輳の制御です。本番は既定の CUBIC のままにし、試験と性能の測定だけが選びます (Go の
-/// `Config.TestCongestion`)。
+/// The congestion control algorithm for every TCP connection of the stack.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Congestion {
     /// RFC 9438 の CUBIC です。既定です。
@@ -86,7 +85,7 @@ pub enum Congestion {
     NewReno,
 }
 
-/// boost の与え方です。本番は既定のままにし、試験だけが選びます (Go の `Config.TestBoost`)。
+/// When a connection asks for a boost, the larger per-connection buffers taken from the [`Budget`](crate::Budget).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BoostPolicy {
     /// 需要の区間が閾値に届いた時に求めます。既定です。
@@ -101,9 +100,9 @@ pub enum BoostPolicy {
 /// 作成の時の設定です。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
-    /// 受け付ける宛先です。agent ではトンネルのアドレスの /32 の 1 つだけです。
+    /// The stack's single IPv4 address. The stack accepts packets to this address only.
     pub addr: Ipv4Addr,
-    /// トンネルの MTU です。[`MIN_MTU`] から [`MAX_MTU`] を受け付けます。
+    /// The MTU of the link that carries the stack's packets, from [`MIN_MTU`] to [`MAX_MTU`].
     pub mtu: usize,
     /// 表の大きさです。
     pub limits: Limits,

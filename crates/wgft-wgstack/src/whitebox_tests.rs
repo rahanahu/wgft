@@ -80,12 +80,12 @@ fn udp_send_waits_when_the_tunnel_budget_is_spent() {
         (
             after.udp_dropped,
             after.udp_endpoint_full,
-            after.udp_tunnel_full
+            after.udp_stack_full
         ),
         (
             before.udp_dropped,
             before.udp_endpoint_full,
-            before.udp_tunnel_full
+            before.udp_stack_full
         ),
         "a refused send is a wait, not a drop"
     );

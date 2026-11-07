@@ -517,7 +517,7 @@ impl App {
                 let c = conns.swap_remove(i);
                 match r.below(4) {
                     0 => n.stack().abort(now, c),
-                    1 => n.stack().close_for_delivery(now, c),
+                    // 1 は Go の close_for_delivery の目で、close_conn と同じ動作です。
                     _ => n.stack().close_conn(now, c),
                 }
             }

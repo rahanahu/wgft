@@ -72,7 +72,7 @@ pub enum Error {
     Accounting,
     /// バッファの chunk を確保できませんでした。状態は変えていません。
     NoMemory,
-    /// アドレスがこのトンネルのアドレスではありません。
+    /// The address is not the stack's address ([`Config::addr`](crate::Config::addr)).
     AddrNotLocal,
     /// ポート 0 で待ち受けることはできません。
     PortZero,
@@ -102,13 +102,13 @@ impl fmt::Display for Error {
             Self::TimedOut => "connection timed out",
             Self::Accounting => "closed the connection after an internal accounting error",
             Self::NoMemory => "cannot allocate a buffer chunk",
-            Self::AddrNotLocal => "address is not a local address of this tunnel",
+            Self::AddrNotLocal => "address is not the stack's address",
             Self::PortZero => "port 0 is not supported",
             Self::AddrInUse => "address already in use",
             Self::InvalidAddress => "invalid UDP address",
             Self::MessageTooLong => "message too long",
             Self::UdpStopped => {
-                "UDP on this tunnel stopped after an internal accounting error; restart the agent to recover"
+                "UDP in this stack stopped after an internal accounting error; recreate the stack to recover"
             }
             Self::TableFull => "all ping endpoints are in use",
             Self::InvalidMessage => "not an ICMP echo request that fits the MTU",
@@ -130,7 +130,7 @@ impl From<ConnError> for Error {
 }
 
 impl<H: Hook> Stack<H> {
-    /// `addr` で TCP を待ち受けます。アドレスはトンネルのアドレスです。
+    /// Listens for TCP on `addr`, whose address must be the stack's address.
     pub fn listen_tcp(&mut self, now: Time, addr: SocketAddrV4) -> Result<ListenerId, Error> {
         self.clock(now);
         if addr.ip().to_bits() != self.s.addr {
@@ -336,12 +336,6 @@ impl<H: Hook> Stack<H> {
             c.shutdown_write();
             c.after_input(now);
         }
-    }
-
-    /// Go と同じく [`Stack::close_conn`] と同じ動作です。送り残しを持つ接続は接続の枠に残るので、TIME_WAIT の表の
-    /// 追い出しで末尾を失いません。
-    pub fn close_for_delivery(&mut self, now: Time, id: ConnId) {
-        self.close_conn(now, id);
     }
 
     /// RST を送り、接続の枠をその場で返します。古い handle では、元の接続の行が TIME_WAIT の表に残っていれば行を

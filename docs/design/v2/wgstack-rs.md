@@ -619,7 +619,7 @@ IPv4 でない packet は device の層が捨てます。
   待ち受けを閉じると、Go と同じく accept の待ち行列の接続と握手の途中の行に RST を送ります
 - TCP の接続:`read(now, ConnId, &mut [u8])`、`write(now, ConnId, &[u8])`、`close_write`、`close_conn`、`abort`、`delivered`、`local_addr`、`peer_addr`。
   読み取りは、相手の FIN の後に `Eof` を、RST と会計の不整合の後に誤りを返します。
-  `close_for_delivery` は Go と同じく `close_conn` と同じ動作です。
+  Go の `CloseForDelivery` は `Close` と同じ動作なので、核は別名を持たず、試験の道具が `close_conn` を呼びます。
   接続を閉じる操作の名前が `close` でなく `close_conn` なのは、核を消費する `close(self, now)` と同じ名前を持てないためです。
   `read` は、`dst` が空でないときの 0 を EOF とします (std の `Read` と同じ約束です)。
   古い handle の `local_addr` と `peer_addr` は `None` を返します
@@ -740,6 +740,7 @@ hook は核への参照を受け取らないので、核を呼び返せません
 feature `harness` は試験の道具の crate (`wgft-wgstack-dut`) だけが付け、製品の binary の build (`-p wgft`) は付けません。
 ワークスペースの `default-members` は製品の crate だけなので、引数の無い `cargo build` も試験の道具の crate を同じ build に入れず、この feature を付けません。
 CI の `product features` の段が、`-p wgft` と引数の無い形の両方で、依存の木にこの feature が無いことを確かめます。
+feature `harness` が開ける公開の項目 (Go の記録と照らす切り替えを含みます) には `#[doc(hidden)]` を付け、公開の API と互換の保証の外とします。
 hook はこれらの口を持たず、製品の hook と同じです。
 中継の層は、`ConnId` から LAN 側のソケットを引く固定の大きさの表を核の外に持ち、`may_return` の中でそのソケットの受信のデータの量を読みます。
 試験は、決まった答えを返す hook を渡します。
@@ -2028,10 +2029,10 @@ Rust の agent が製品の経路で wgstack を使い始めた後は、[置き�
   Rust の datagram は持ち主のポートと開いた時の世代を持ち、送り終えた時に世代が違えば核の予算だけを返します
 - chunk の確保の失敗:Go の chunk の置き場は確保に失敗しませんが、Rust の chunk の確保は失敗しえます。
   予約は要る chunk を先に揃え、揃わなければ取った chunk と datagram の番号を戻し、何も変えずに断ります。
-  受信では核の予算で断ったことにして `udp_tunnel_full` に数えます。
+  受信では核の予算で断ったことにして `udp_stack_full` に数えます。
   送信の `send_to` は、TCP の `write` と同じく待たずに `Error::NoMemory` を返し、endpoint を待ちの list に入れません。
   `UdpWritable` は送信の予約が返った時にだけ出すので、送信の FIFO が空のまま `WouldBlock` を返すと、知らせが来ずに待ち続けるためです
-- 捨てた数とログ:受信の予算で断った datagram は、Go と同じく `udp_dropped` に数え、加えて endpoint の上限で断った数 (`udp_endpoint_full`) と核の予算で断った数 (`udp_tunnel_full`) に分けて数えます。
+- 捨てた数とログ:受信の予算で断った datagram は、Go と同じく `udp_dropped` に数え、加えて endpoint の上限で断った数 (`udp_endpoint_full`) と核の予算で断った数 (`udp_stack_full`) に分けて数えます。
   1 分に 1 回までの門は 1 つで、`LogKind::UdpDropped` の数は予算で断った数の和です。
   Go のログの行は 2 つの数を書きますが、`LogLine` は 1 つの数だけを運ぶので、内訳は `stats` で読みます。
   ログの文面は記録の照合の対象ではありません。
