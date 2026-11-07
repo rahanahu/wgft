@@ -22,6 +22,7 @@ use crate::batching::Batching;
 
 #[cfg(target_os = "linux")]
 mod ecn;
+mod helper;
 
 const AGENT_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 2);
 const SERVER_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 1);

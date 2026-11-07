@@ -95,8 +95,9 @@ pub fn prepare_door(
     if cfg.has_secret_from_file() && config::readable_by_other(&path) {
         early.push(LogLine::Plain(config::insecure_file_warning(&path)));
     }
-    let settings = agent::check_door(&cfg, os)?;
+    let mut settings = agent::check_door(&cfg, os)?;
     early.extend(agent::join_warning(&settings));
+    settings.gated_send = agent::gated_send(env)?;
     let options = Options {
         data_dir: settings.data_dir.clone().into(),
         join: settings.join.clone(),
@@ -157,6 +158,28 @@ mod tests {
         let mut early = Vec::new();
         prepare_door(&global, &run, &env, "linux", &mut early).unwrap();
         early
+    }
+
+    /// 実験の送りの手伝いは環境変数だけで求められ、誤った値は設定の誤りで終了コード 3 で止まる。
+    #[test]
+    fn a_bad_experimental_gated_send_value_exits_with_code_3() {
+        let argv = ["wgft", "agent", "run", "--data-dir", "/d"].map(OsString::from);
+        let Ok(Parsed::AgentRun { global, run }) = cli::parse(argv) else {
+            panic!("parse");
+        };
+        let env: HashMap<String, OsString> =
+            HashMap::from([(agent::GATED_SEND_ENV.to_owned(), OsString::from("yes"))]);
+        let mut early = Vec::new();
+        let e = prepare_door(&global, &run, &env, "linux", &mut early).unwrap_err();
+        assert_eq!(e.exit_code(), 3, "{e}");
+        assert!(e.to_string().contains(agent::GATED_SEND_ENV), "{e}");
+        let env: HashMap<String, OsString> =
+            HashMap::from([(agent::GATED_SEND_ENV.to_owned(), OsString::from("1"))]);
+        let p = prepare_door(&global, &run, &env, "linux", &mut early).unwrap();
+        assert!(p.settings.gated_send);
+        // dotenv の鍵は読まない
+        let e = early_lines(&format!("{}=1\n", agent::GATED_SEND_ENV), 0o600, &[]);
+        assert_eq!(e, vec![]);
     }
 
     const JOIN: &str = "WGFT_JOIN=wgft://h:1/t#sha256:0000000000000000000000000000000000000000000000000000000000000000\n";

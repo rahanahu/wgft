@@ -69,6 +69,9 @@ pub struct Settings {
     pub max_udp_flows: u32,
     /// 同時 TCP フローの上限。
     pub max_tcp_flows: u32,
+    /// 実験の送りの手伝い (`WGFT_AGENT_EXPERIMENTAL_GATED_SEND`) を求めた。設定項目の一覧の外で、入口の
+    /// 検査の後にプロセスの環境変数から [`gated_send`] で読む。
+    pub gated_send: bool,
 }
 
 impl Settings {
@@ -84,7 +87,12 @@ impl Settings {
     /// The tunnel batching from `WGFT_AGENT_BATCH_MIB` and the flow caps.
     #[must_use]
     pub fn batching(&self) -> crate::batching::Batching {
-        crate::batching::Batching::new(self.batch_mib, self.flow_caps())
+        let b = crate::batching::Batching::new(self.batch_mib, self.flow_caps());
+        if self.gated_send {
+            b.with_send_helper(true, available_cpus())
+        } else {
+            b
+        }
     }
 }
 
@@ -109,6 +117,7 @@ impl std::fmt::Debug for Settings {
             .field("allow_targets", &self.allow_targets)
             .field("max_udp_flows", &self.max_udp_flows)
             .field("max_tcp_flows", &self.max_tcp_flows)
+            .field("gated_send", &self.gated_send)
             .finish()
     }
 }
@@ -172,7 +181,56 @@ pub fn check_door(c: &Config, os: &str) -> Result<Settings, Refusal> {
         allow_targets,
         max_udp_flows,
         max_tcp_flows,
+        gated_send: false,
     })
+}
+
+/// 利用可能な CPU の数 (cgroup の割り当てと affinity を含む)。読めなければ 1。
+fn available_cpus() -> usize {
+    std::thread::available_parallelism().map_or(1, usize::from)
+}
+
+/// 実験の送りの手伝いの環境変数。互換の保証の外の実験の設定で、予告なく変えるか消す。このため設定項目の一覧
+/// (`run_specs`) に入れず、フラグも dotenv の鍵も持たず、有効な設定の行にも出さない。プロセスの環境変数だけを
+/// 読む (#819 の実験の設定の規則と同じ形)。
+pub const GATED_SEND_ENV: &str = "WGFT_AGENT_EXPERIMENTAL_GATED_SEND";
+
+/// 実験の送りの手伝いを求めるか。無いか空か `0` は無効、`1` は有効で、ほかの値は設定の誤りにする。
+///
+/// # Errors
+///
+/// 値が `0`、`1`、空のどれでもなければ設定の誤りを返す。
+pub fn gated_send(env: &dyn super::Env) -> Result<bool, Refusal> {
+    let Some(v) = env.var(GATED_SEND_ENV) else {
+        return Ok(false);
+    };
+    match v.to_str() {
+        Some("" | "0") => Ok(false),
+        Some("1") => Ok(true),
+        Some(other) => Err(Refusal::config(
+            GATED_SEND_ENV,
+            format!("must be 1 or 0, not {}", quote(other)),
+        )),
+        None => Err(Refusal::config(GATED_SEND_ENV, "is not valid UTF-8")),
+    }
+}
+
+/// 実験の送りの手伝いを求めた時の行。手伝いを作るかどうかと、作らない理由を書く。
+#[must_use]
+pub fn gated_send_line(s: &Settings) -> LogLine {
+    let made = s.batching().send_helper();
+    let what = if made {
+        "the gated send helper is on: a second thread seals and sends the tunnel's TCP batches while the data plane thread is saturated".to_owned()
+    } else {
+        format!(
+            "the gated send helper is not made: it needs Linux, tunnel batching with {} slots and at least {} available CPUs",
+            crate::batching::MAX_SLOTS,
+            crate::batching::HELPER_MIN_CPUS
+        )
+    };
+    LogLine::Stamped(format!(
+        "warning: {GATED_SEND_ENV}=1 turns on an experimental feature outside the compatibility guarantee that may change or go away without notice; {what}"
+    ))
 }
 
 /// 環境変数と dotenv の整数は `strconv.Atoi` で読む。フラグの値は 10 進に書き直してあるので同じ道を通る。
@@ -281,6 +339,9 @@ pub fn startup_lines(c: &Config, s: &Settings) -> Vec<LogLine> {
     out.push(LogLine::Stamped(bound.terms_line()));
     // バッチの予算が何をするかを、Go の `send batch budget:` の行の代わりに書く
     out.push(LogLine::Stamped(s.batching().line()));
+    if s.gated_send {
+        out.push(gated_send_line(s));
+    }
     // netstack は Rust の wgstack の 1 つだけである。wgstack 以外の値は使わない旨を書く
     if c.source("WGFT_AGENT_NETSTACK") != Source::Default && s.netstack != "wgstack" {
         out.push(LogLine::Stamped(format!(
@@ -342,6 +403,43 @@ mod tests {
 
     use super::*;
     use crate::config::dotenv::Map;
+
+    #[test]
+    fn the_experimental_gated_send_takes_only_0_and_1() {
+        let env = |v: &str| HashMap::from([(GATED_SEND_ENV.to_owned(), OsString::from(v))]);
+        assert!(!gated_send(&HashMap::<String, OsString>::new()).unwrap());
+        for (v, on) in [("", false), ("0", false), ("1", true)] {
+            assert_eq!(gated_send(&env(v)).unwrap(), on, "{v:?}");
+        }
+        for v in ["true", "2", " 1", "on"] {
+            let e = gated_send(&env(v)).unwrap_err().to_string();
+            assert!(
+                e.contains(GATED_SEND_ENV) && e.contains("must be 1 or 0"),
+                "{e}"
+            );
+        }
+    }
+
+    /// 求めた時だけ警告の行を書き、手伝いを作るかと作らない理由を言う。作るかは CPU の数で決まる。
+    #[test]
+    fn the_gated_send_line_says_whether_the_helper_is_made() {
+        let (c, mut s) = settings(&[], &[]);
+        assert!(
+            !stamped(&startup_lines(&c, &s))
+                .iter()
+                .any(|l| l.contains(GATED_SEND_ENV))
+        );
+        s.gated_send = true;
+        let lines = startup_lines(&c, &s);
+        let st = stamped(&lines);
+        let w = st.iter().find(|l| l.contains(GATED_SEND_ENV)).unwrap();
+        assert!(w.starts_with("warning: ") && !w.contains('('), "{w}");
+        let cpus = available_cpus();
+        let made = cfg!(target_os = "linux") && cpus >= crate::batching::HELPER_MIN_CPUS;
+        assert_eq!(s.batching().send_helper(), made);
+        assert_eq!(w.contains("helper is on"), made, "{w}");
+        assert_eq!(w.contains("is not made"), !made, "{w}");
+    }
 
     fn settings(env: &[(&str, &str)], file: &[(&str, &str)]) -> (Config, Settings) {
         let d = Defaults {

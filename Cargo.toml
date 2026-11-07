@@ -33,6 +33,7 @@ wgft-tcpharness = { path = "crates/wgft-tcpharness" }
 wgft-netstack = { path = "crates/wgft-netstack" }
 wgft-alloc-count = { path = "crates/wgft-alloc-count" }
 wgft-udp-batch = { path = "crates/wgft-udp-batch" }
+wgft-handoff = { path = "crates/wgft-handoff" }
 base64 = "0.23.1"
 criterion = "0.8.2"
 flate2 = "1.1.10"
@@ -72,7 +73,7 @@ unused_extern_crates = "warn"
 # どちらも RUSTFLAGS の --cfg で選ぶ (docs/design/v2/wgstack-rs.md の「故障の注入と目印の build」)。
 # 故障の名前は故障の点を足す PR が values に足す。
 # crate の [lints] は workspace = true とほかの項目を併せて書けないので、ここで宣言する。
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(wgstack_sentinel)", "cfg(wgstack_fault, values(none()))"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(fuzzing)", "cfg(wgstack_sentinel)", "cfg(wgstack_fault, values(none()))"] }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

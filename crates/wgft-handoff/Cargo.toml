@@ -1,0 +1,19 @@
+[package]
+name = "wgft-handoff"
+description = "The gated send helper's hand-over between the data plane thread and the helper thread, and its saturation gate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# 起床の数の計数。ラボの観測の build (`wgft-agent` の `lab-observe`) と試験だけが付ける。製品の build には無い
+counters = []
+
+[lints]
+workspace = true
+
+# loom は試験だけの依存で、`--cfg loom` の試験の build にだけ入る。製品の build には入らない
+[target."cfg(loom)".dev-dependencies]
+loom = "0.7.2"

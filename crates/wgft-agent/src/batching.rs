@@ -14,6 +14,10 @@ use crate::flowpool;
 /// also the most segments one UDP GSO send carries on every kernel that has GSO.
 pub const MAX_SLOTS: usize = wgft_udp_batch::MAX_SLOTS;
 
+/// The fewest available CPUs on which the gated send helper is made: the data plane thread, the
+/// helper and one CPU for the kernel's network work. On 1 and 2 CPUs the helper is not made.
+pub const HELPER_MIN_CPUS: usize = 3;
+
 /// The share of the flow caps' memory figure that the derived budget takes: β = 3/20, the v1
 /// agent's value, kept as an integer ratio so the result does not depend on the platform.
 const SHARE_NUM: u64 = 3;
@@ -30,6 +34,10 @@ pub enum Batching {
         slots: usize,
         /// Where the budget came from.
         source: Source,
+        /// The gated send helper of the experimental `WGFT_AGENT_EXPERIMENTAL_GATED_SEND`: a second
+        /// thread that seals and sends the tunnel's TCP batches while the data plane thread is
+        /// saturated. Set only where [`Batching::with_send_helper`] makes one.
+        helper: bool,
     },
 }
 
@@ -88,7 +96,35 @@ impl Batching {
         while slots > 1 && store_of(slots) > bytes {
             slots -= 1;
         }
-        Self::On { slots, source }
+        Self::On {
+            slots,
+            source,
+            helper: false,
+        }
+    }
+
+    /// The batching with the gated send helper when `requested` and the host can use it: Linux,
+    /// batching on with the most slots, and at least [`HELPER_MIN_CPUS`] CPUs available (`cpus`,
+    /// read once at start). Elsewhere the helper is not made and nothing is reserved for it.
+    #[must_use]
+    pub fn with_send_helper(self, requested: bool, cpus: usize) -> Self {
+        match self {
+            Self::On { slots, source, .. } => Self::On {
+                slots,
+                source,
+                helper: requested
+                    && cfg!(target_os = "linux")
+                    && slots == MAX_SLOTS
+                    && cpus >= HELPER_MIN_CPUS,
+            },
+            Self::Off => Self::Off,
+        }
+    }
+
+    /// Whether the gated send helper is made.
+    #[must_use]
+    pub fn send_helper(self) -> bool {
+        matches!(self, Self::On { helper: true, .. })
     }
 
     /// What this build runs: the batching itself on Linux, [`Batching::OFF`] elsewhere.
@@ -129,7 +165,13 @@ impl Batching {
     /// bound's `batch` term.
     #[must_use]
     pub fn bytes(self) -> usize {
-        crate::dataplane::batch::store_bytes(self.running(), wgft_wgstack::MAX_MTU)
+        let b = self.running();
+        let helper = if b.send_helper() {
+            crate::dataplane::helper_bytes(b.slots(), wgft_wgstack::MAX_MTU)
+        } else {
+            0
+        };
+        crate::dataplane::batch::store_bytes(b, wgft_wgstack::MAX_MTU) + helper
     }
 
     /// The start line that says what the setting does, after the memory bound lines.
@@ -138,7 +180,7 @@ impl Batching {
         if !cfg!(target_os = "linux") {
             return "tunnel batching: unused on this OS, where the tunnel reads and sends one datagram per system call; WGFT_AGENT_BATCH_MIB is kept so the same agent.env works on Linux".to_owned();
         }
-        let Self::On { slots, source } = self else {
+        let Self::On { slots, source, .. } = self else {
             return "tunnel batching: off, WGFT_AGENT_BATCH_MIB=0; the tunnel reads and sends one datagram per system call".to_owned();
         };
         let source = match source {
@@ -146,8 +188,13 @@ impl Batching {
             Source::Set => "from WGFT_AGENT_BATCH_MIB",
             Source::Lowered => "from WGFT_AGENT_BATCH_MIB, lowered to the most this build uses",
         };
+        let helper = if self.send_helper() {
+            "; with the experimental gated send helper, a second thread that seals and sends TCP batches while the data plane thread is saturated"
+        } else {
+            ""
+        };
         format!(
-            "tunnel batching: up to {} messages per receive and per send system call, {:.1} MiB of buffers; {source}",
+            "tunnel batching: up to {} messages per receive and per send system call, {:.1} MiB of buffers; {source}{helper}",
             slots,
             mib_tenths(self.bytes())
         )
@@ -185,6 +232,7 @@ fn store_of(slots: usize) -> u64 {
     let b = Batching::On {
         slots,
         source: Source::Set,
+        helper: false,
     };
     let bytes = crate::dataplane::batch::store_bytes(b, wgft_wgstack::MAX_MTU);
     u64::try_from(bytes).unwrap_or(u64::MAX)
@@ -220,9 +268,57 @@ mod tests {
         let next = Batching::On {
             slots: b.slots() + 1,
             source: Source::Set,
+            helper: false,
         };
         crate::dataplane::batch::store_bytes(b, wgft_wgstack::MAX_MTU) <= budget
             && crate::dataplane::batch::store_bytes(next, wgft_wgstack::MAX_MTU) > budget
+    }
+
+    #[test]
+    fn the_send_helper_needs_linux_full_slots_and_three_cpus() {
+        let caps = flowpool::Limits::default();
+        let full = Batching::new(None, caps);
+        assert_eq!(full.slots(), MAX_SLOTS);
+        let linux = cfg!(target_os = "linux");
+        assert_eq!(full.with_send_helper(true, 3).send_helper(), linux);
+        assert!(!full.with_send_helper(true, 2).send_helper());
+        assert!(!full.with_send_helper(true, 1).send_helper());
+        assert!(!full.with_send_helper(false, 8).send_helper());
+        assert!(
+            !Batching::new(Some(1), caps)
+                .with_send_helper(true, 8)
+                .send_helper()
+        );
+        assert!(!Batching::OFF.with_send_helper(true, 8).send_helper());
+        // 作らない時は何も足さない。作る時は置き場 2 つと予約の列とスタック
+        assert_eq!(full.with_send_helper(true, 2).bytes(), full.bytes());
+        if linux {
+            let helped = full.with_send_helper(true, 4);
+            let extra = helped.bytes() - full.bytes();
+            let mtu = wgft_wgstack::MAX_MTU;
+            let tx = wgft_udp_batch::tx_store_bytes(
+                MAX_SLOTS,
+                true,
+                mtu,
+                mtu + wgft_wireguard::DATA_OVERHEAD,
+            );
+            assert_eq!(extra, crate::dataplane::helper_bytes(MAX_SLOTS, mtu));
+            assert!(
+                extra > 2 * tx && extra < 2 * tx + (256 << 10),
+                "{extra} {tx}"
+            );
+            assert!(
+                helped.line().contains("gated send helper"),
+                "{}",
+                helped.line()
+            );
+            // 起動の行のメモリの上界は、その分だけ大きい
+            let with = crate::memory::MemoryBound::for_limits(caps, helped);
+            let without = crate::memory::MemoryBound::for_limits(caps, full);
+            assert_eq!(with.total - without.total, extra);
+            assert_eq!(with.batch - without.batch, extra);
+            assert!(!full.line().contains("helper"));
+        }
     }
 
     #[test]

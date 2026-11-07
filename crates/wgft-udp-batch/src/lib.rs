@@ -97,10 +97,16 @@ const EMPTY_MSG: Msg = Msg {
 pub const fn store_bytes(slots: usize, on: bool, mtu: usize, max_datagram: usize) -> usize {
     let headers = if on { header_bytes() } else { 0 };
     let rx = 2 * RX_SLOT + size_of::<RxMeta>() + headers;
-    let tx =
-        mtu + max_datagram + size_of::<u16>() + size_of::<Sealed>() + size_of::<Msg>() + headers;
     let scratch = if slots > 1 { RX_SLOT } else { 0 };
-    slots * (rx + tx) + scratch
+    slots * rx + tx_store_bytes(slots, on, mtu, max_datagram) + scratch
+}
+
+/// The bytes of the send side alone, what one [`TxBatch::new`] allocates.
+#[must_use]
+pub const fn tx_store_bytes(slots: usize, on: bool, mtu: usize, max_datagram: usize) -> usize {
+    let headers = if on { header_bytes() } else { 0 };
+    slots
+        * (mtu + max_datagram + size_of::<u16>() + size_of::<Sealed>() + size_of::<Msg>() + headers)
 }
 
 #[cfg(target_os = "linux")]
@@ -377,6 +383,12 @@ impl TxBatch {
         self.lens[i] = u16::try_from(len).unwrap_or(0);
     }
 
+    /// The packet in slot `i`, as long as the layer above wrote it.
+    pub fn packet(&self, i: usize) -> &[u8] {
+        let len = usize::from(self.lens[i]).min(self.mtu);
+        &self.packets[i * self.mtu..i * self.mtu + len]
+    }
+
     /// Whether the packet in slot `i` carries UDP.
     pub fn is_udp_slot(&self, i: usize) -> bool {
         is_udp(&self.packets[i * self.mtu..(i + 1) * self.mtu])
@@ -497,6 +509,7 @@ mod tests {
                 store_bytes(slots, on, mtu, mtu + 32),
                 "{slots} {on}"
             );
+            assert_eq!(tx.allocated(), tx_store_bytes(slots, on, mtu, mtu + 32));
         }
     }
 

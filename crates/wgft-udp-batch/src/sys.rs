@@ -182,6 +182,32 @@ pub fn has_gso(fd: RawFd) -> bool {
     rc == 0
 }
 
+/// Waits up to `timeout_ms` for the socket `fd` to take a write, with `poll`, and returns whether it
+/// can. The gated send helper calls it only after `EAGAIN`, so that no thread keeps the socket
+/// registered for write readiness while sends go through.
+///
+/// # Errors
+///
+/// The system call's error other than `EINTR`, which reads as not yet writable.
+pub fn wait_writable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
+    let mut p = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: 1 つの pollfd は呼び出しの間生きている
+    let rc = unsafe { libc::poll(&raw mut p, 1, timeout_ms) };
+    if rc < 0 {
+        let e = io::Error::last_os_error();
+        return if e.kind() == io::ErrorKind::Interrupted {
+            Ok(false)
+        } else {
+            Err(e)
+        };
+    }
+    Ok(rc > 0 && p.revents & (libc::POLLOUT | libc::POLLERR) != 0)
+}
+
 /// The layout of the receive slots in `RxBatch::data`.
 #[derive(Clone, Copy)]
 struct Parts {

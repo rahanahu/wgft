@@ -31,6 +31,7 @@ use wgft_wireguard::{Device, DropReason, Event, PublicKey, Transmit};
 use super::batch::{
     BATCH_TIME, Pace, RxBatch, TxBatch, WAKE_BUDGET, each_packet, rx_store, tx_store,
 };
+use super::helper::{HANDOFF_MIN, Helper};
 use super::{Command, Local, Settings, SocketBuffers, Status, Upper, clock, duration_to_nanos};
 use crate::batching::Batching;
 
@@ -264,7 +265,7 @@ impl Outbox {
 
 /// カーネルが UDP の GSO の message を拒んだ誤りか。`EIO` は checksum の offload の無い装置、`EINVAL` は
 /// 経路の MTU を超える segment で返る。
-fn gso_refusal(e: &io::Error) -> bool {
+pub(super) fn gso_refusal(e: &io::Error) -> bool {
     #[cfg(unix)]
     {
         matches!(e.raw_os_error(), Some(libc::EIO | libc::EINVAL))
@@ -285,6 +286,8 @@ pub(super) enum Sent {
     Idle,
     /// ソケットが書けない。書けるようになるまで何も引かない。
     Blocked,
+    /// 送りの置き場がどれも手伝いにある。手伝いが返すまで何も引かない。
+    Waiting,
 }
 
 /// 送信のバッチを 1 つ行い、引いた packet の数と終わり方を返す。
@@ -348,6 +351,135 @@ pub(super) fn send_batch<U: Upper>(
         Sent::Idle
     };
     (pulled, state)
+}
+
+/// 送りの手伝いが加わる送信のバッチ。門が開いているか、手伝いに束がある時だけ呼ぶ (`Helper::engaged`)。
+///
+/// - 先に device の層の datagram と送り切っていない Inline のバッチを送る。セッションが無ければ
+///   [`send_batch`] と同じく引かずにハンドシェイクを始める
+/// - 空いた置き場が無ければ何も引かず [`Sent::Waiting`] を返す
+/// - 置き場の枠の数まで引く。UDP の packet は持ち主が封じて、すぐ送る (UDP を TCP の束の後ろに並べない)
+/// - 手伝いに束があるか、`open` で引いた TCP が [`HANDOFF_MIN`] 以上なら、TCP の counter を引いた順に
+///   予約して束を手伝いに渡す。手伝いにある束より先に持ち主が TCP を送らないためである
+/// - それ以外は持ち主が TCP も封じ、置き場を送り出しの置き場と取り替えて Inline と同じく送る
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the send batch's state, as send_batch takes it, and the helper"
+)]
+pub(super) fn send_batch_helped<U: Upper>(
+    device: &mut Device,
+    upper: &mut U,
+    peer: &PublicKey,
+    now: Instant,
+    outbox: &mut Outbox,
+    sink: &mut impl Sink,
+    helper: &mut Helper,
+    open: bool,
+) -> (usize, Sent) {
+    if !outbox.drain(device, sink) {
+        return (0, Sent::Blocked);
+    }
+    if !device.has_session(peer, now) {
+        if device.start_handshake(now, peer) {
+            outbox.drain(device, sink);
+        }
+        return (0, Sent::Idle);
+    }
+    let Some(mut job) = helper.take() else {
+        return (0, Sent::Waiting);
+    };
+    let tx = &mut job.tx;
+    let vlen = tx.slots();
+    let mut pulled = 0;
+    while pulled < vlen {
+        let Some(len) = upper.poll_transmit(now, tx.packet_slot(pulled)) else {
+            break;
+        };
+        tx.set_len(pulled, len);
+        pulled += 1;
+    }
+    if pulled == 0 {
+        helper.put_back(job);
+        return (0, Sent::Idle);
+    }
+    let mut tcp = 0;
+    for i in 0..pulled {
+        if !tx.is_udp_slot(i) {
+            tcp += 1;
+            continue;
+        }
+        let (packet, sealed) = tx.seal_slot(i);
+        if let Some(out) = device.handle_packet(now, packet, sealed) {
+            tx.push_sealed(out.to, out.len);
+        }
+    }
+    let gso = sink.gso() && !outbox.gso_refused && !helper.gso_refused();
+    let state = |outbox: &mut Outbox, device: &mut Device, sink: &mut _| {
+        if !outbox.drain(device, sink) {
+            Sent::Blocked
+        } else if pulled == vlen {
+            Sent::Full
+        } else {
+            Sent::Idle
+        }
+    };
+    if helper.outstanding() == 0 && !(open && tcp >= HANDOFF_MIN) {
+        // 手伝いは空で、束は小さい。持ち主が Inline と同じく封じて送る。送り出しの置き場は空なので
+        // (先の drain が送り切った)、置き場を取り替えれば送り切れない時も Inline と同じに続く
+        for i in 0..pulled {
+            if tx.is_udp_slot(i) {
+                continue;
+            }
+            let (packet, sealed) = tx.seal_slot(i);
+            if let Some(out) = device.handle_packet(now, packet, sealed) {
+                tx.push_sealed(out.to, out.len);
+            }
+        }
+        std::mem::swap(&mut outbox.tx, &mut job.tx);
+        helper.put_back(job);
+        outbox.tx.lay_out(0, gso);
+        #[cfg(any(test, feature = "lab-observe"))]
+        {
+            helper.counters.owner_packets += pulled as u64;
+        }
+        return (pulled, state(outbox, device, sink));
+    }
+    // TCP の counter を引いた順に予約する。UDP の counter はその前に取った
+    let udp = tx.n_sealed;
+    for i in 0..pulled {
+        if tx.is_udp_slot(i) {
+            continue;
+        }
+        if let Some(seal) = device.begin_packet(now, tx.packet(i)) {
+            job.seals.push((u16::try_from(i).unwrap_or(u16::MAX), seal));
+        }
+    }
+    // UDP は持ち主が 1 つずつ送る。ソケットが受け付けない残りは、束の先頭として手伝いが送る
+    let mut first = 0;
+    while first < udp {
+        let (to, payload) = job.tx.datagram(first);
+        match sink.send(to, payload) {
+            Ok(()) => first += 1,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(_) => {
+                outbox.send_errors += 1;
+                first += 1;
+            }
+        }
+    }
+    #[cfg(any(test, feature = "lab-observe"))]
+    {
+        helper.counters.owner_packets += first as u64;
+    }
+    if job.seals.is_empty() && first == udp {
+        helper.put_back(job);
+    } else {
+        job.first = first;
+        job.gso = gso;
+        helper.submit(job);
+    }
+    (pulled, state(outbox, device, sink))
 }
 
 /// 上の層から `limit` までの packet を、バッチの枠の数ずつ引いて送る。`limit` で止まったときだけ
@@ -493,6 +625,8 @@ pub(super) struct Rest {
     outbox: Outbox,
     peer: PublicKey,
     gso: bool,
+    /// 送りの手伝い。最後の送り出しの前に、渡した束を送り終えさせて止める。
+    helper: Option<Helper>,
 }
 
 /// 最後の送り出しで引く packet の上限。中継の task を落とした後の RST は核の制御の輪に入るので、輪の
@@ -503,6 +637,10 @@ impl Rest {
     /// 駆動の task が終わり、local の task を落とした後に、上の層に残った出力 (中継の接続を切った RST
     /// など) を 1 回だけ送り出す。セッションが無いか、ソケットが書けなければ送らずに終える。
     pub(super) fn flush<U: Upper>(mut self, local: &Local<U>) {
+        // 手伝いにある束は、ここで Inline で送るものより先に予約した counter を持つ
+        if let Some(helper) = self.helper.as_mut() {
+            helper.finish();
+        }
         let mut guard = local.0.borrow();
         let inner = &mut *guard;
         let now = clock::now();
@@ -544,6 +682,10 @@ impl Wake {
 
 /// 送信の相:時刻の来た timer を回し、受信の相が予算を使い切っても少なくとも 1 つのバッチを行う。送る向きが
 /// 受ける向きに飢えないためである。予算で止めて上の層にまだ送るものが残るかを返す。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the phase's state, and the send helper when it was made"
+)]
 fn send_phase<U: Upper>(
     local: &Local<U>,
     peer: &PublicKey,
@@ -552,6 +694,7 @@ fn send_phase<U: Upper>(
     pace: &mut Pace,
     wake: Wake,
     now: &mut Instant,
+    mut helper: Option<&mut Helper>,
 ) -> bool {
     let mut guard = local.0.borrow();
     let inner = &mut *guard;
@@ -568,21 +711,44 @@ fn send_phase<U: Upper>(
         } else {
             1
         };
-        let (pulled, state) = send_batch(
-            &mut inner.device,
-            &mut inner.upper,
-            peer,
-            *now,
-            outbox,
-            io,
-            vlen,
-        );
+        // 門が閉じていて手伝いに束が無い間は、Inline の送信のバッチそのものである
+        let (pulled, state, helped) = match helper.as_deref_mut() {
+            Some(h) if h.engaged() => {
+                let open = h.gate.is_open();
+                let (pulled, state) = send_batch_helped(
+                    &mut inner.device,
+                    &mut inner.upper,
+                    peer,
+                    *now,
+                    outbox,
+                    io,
+                    h,
+                    open,
+                );
+                (pulled, state, true)
+            }
+            _ => {
+                let (pulled, state) = send_batch(
+                    &mut inner.device,
+                    &mut inner.upper,
+                    peer,
+                    *now,
+                    outbox,
+                    io,
+                    vlen,
+                );
+                (pulled, state, false)
+            }
+        };
         tx_done += pulled;
         // 何も引かなかったバッチは測るものが無く (Pace::record は 0 個を捨てる)、相もここで終わる
-        // (Full は 1 つ以上を引いたときだけ) ので、時計を読まない
+        // (Full は 1 つ以上を引いたときだけ) ので、時計を読まない。手伝いが加わったバッチは持ち主の
+        // 仕事が Inline より軽いので、Inline のバッチの大きさの測りに入れない
         if wake.timed && pulled > 0 {
             let after = clock::now();
-            pace.record(after.saturating_duration_since(*now), pulled);
+            if !helped {
+                pace.record(after.saturating_duration_since(*now), pulled);
+            }
             *now = after;
         }
         if state != Sent::Full {
@@ -654,6 +820,9 @@ pub(super) async fn drive<U: Upper>(
     let mut tx_pace = Pace::default();
     let mut outbox = Outbox::new(batching, mtu, max_datagram);
     let mut io = Io::new(&socket, batching);
+    let mut helper = start_helper(&socket, batching, timed, mtu, max_datagram);
+    #[cfg(feature = "lab-observe")]
+    let mut observe = Observe::new(start_of_generation());
     let mut receive_errors = 0u64;
     let mut ce_seen = 0u64;
     let mut wakers = Vec::new();
@@ -712,13 +881,26 @@ pub(super) async fn drive<U: Upper>(
             &mut tx_pace,
             wake,
             &mut now,
+            helper.as_mut(),
         );
+        if let Some(h) = helper.as_mut() {
+            // 手伝いは束を持つ間しか働かないので、束が無ければ死んだ印も読まない
+            if h.engaged() && h.is_dead() {
+                return Err(io::Error::other(
+                    "a panic in the send helper ended this tunnel generation",
+                ));
+            }
+            h.end_wake(start, now, tx_more);
+        }
         let more = rx_more || tx_more;
         let deadline = finish_wake(&local, &events, high_water, &mut wakers, &mut ce_seen, now);
         for waker in wakers.drain(..) {
             waker.wake();
         }
+        #[cfg(feature = "lab-observe")]
+        observe.end_wake(start, now, helper.as_ref());
         let blocked = outbox.is_blocked();
+        let waiting = helper.as_ref().is_some_and(Helper::is_waiting);
         if more {
             // 予算で止めたので、同じスレッドの中継の task (accept と読み書き) に順を譲ってから続ける。下の
             // select の中では譲れない。ソケットが読める間は読める枝がすぐに選ばれ、task は coop の予算を
@@ -728,6 +910,7 @@ pub(super) async fn drive<U: Upper>(
         tokio::select! {
             ready = socket.readable() => ready?,
             ready = socket.writable(), if blocked => ready?,
+            () = wait_helper(helper.as_ref()), if waiting => {}
             // この起床の最後に読んだ時刻を渡し、遠い期限では時計を読み直さない
             () = clock::sleep_until_some(deadline, now) => {}
             () = local.0.wake.woken() => {}
@@ -742,11 +925,14 @@ pub(super) async fn drive<U: Upper>(
                         drops: *inner.device.drops(),
                         held: inner.device.held(),
                         local: local_addr,
-                        send_errors: outbox.send_errors,
+                        send_errors: outbox.send_errors
+                            + helper.as_ref().map_or(0, Helper::send_errors),
                         receive_errors,
                         receive_truncated: rx.truncated,
                         socket_buffers: buffers.clone(),
                         unix_high_water: inner.device.unix_high_water(),
+                        #[cfg(any(test, feature = "lab-observe"))]
+                        helper: helper.as_ref().map(Helper::counters),
                     });
                 }
                 Some(Command::SetEndpoint(endpoint)) => {
@@ -762,7 +948,110 @@ pub(super) async fn drive<U: Upper>(
         outbox,
         peer,
         gso,
+        helper,
     })
+}
+
+#[cfg(feature = "lab-observe")]
+fn start_of_generation() -> Instant {
+    clock::now()
+}
+
+/// 観測の build だけの数:駆動の task の起床と、仕事の無い起床 (読むものも送るものも無かった)、送りの手伝いの数。
+/// 累計を 1 秒に 1 回まで、起床の終わりに書く。起床を足さない。ラボは実行の前後の差を取る。
+#[cfg(feature = "lab-observe")]
+struct Observe {
+    last: Instant,
+    wakes: u64,
+    idle: u64,
+}
+
+#[cfg(feature = "lab-observe")]
+impl Observe {
+    fn new(now: Instant) -> Self {
+        Self {
+            last: now,
+            wakes: 0,
+            idle: 0,
+        }
+    }
+
+    fn end_wake(&mut self, start: Instant, now: Instant, helper: Option<&Helper>) {
+        self.wakes += 1;
+        // 時間で区切る道は、仕事をしたバッチの後にだけ時計を読み直す
+        if now == start {
+            self.idle += 1;
+        }
+        if now.saturating_duration_since(self.last) < Duration::from_secs(1) {
+            return;
+        }
+        self.last = now;
+        let gated = helper.map_or_else(
+            || "not made".to_owned(),
+            |h| {
+                let c = h.counters();
+                format!(
+                    "open {}, transitions {}, jobs {}, packets {}, owner packets {}, helper wakes {}, owner wakes {}, waits {}",
+                    h.gate.is_open(),
+                    c.transitions,
+                    c.jobs,
+                    c.packets,
+                    c.owner_packets,
+                    c.helper_wakes,
+                    c.owner_wakes,
+                    c.waits
+                )
+            },
+        );
+        crate::logf!(
+            "observe: data plane wakes {}, without work {}; gated send: {gated}",
+            self.wakes,
+            self.idle
+        );
+    }
+}
+
+/// 置き場を待つ持ち主の起床。`helper` は待つ時だけ渡る。
+async fn wait_helper(helper: Option<&Helper>) {
+    match helper {
+        Some(h) => h.notified().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// 送りの手伝いを作る。バッチの設定が手伝いを含み、時間で区切る (Linux のバッチの) 道の時だけ作る。作れ
+/// なければ 1 行書いて Inline だけで続ける。
+fn start_helper(
+    socket: &UdpSocket,
+    batching: Batching,
+    timed: bool,
+    mtu: usize,
+    max_datagram: usize,
+) -> Option<Helper> {
+    if !(batching.send_helper() && timed) {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsFd;
+        let made = socket.as_fd().try_clone_to_owned().and_then(|fd| {
+            Helper::spawn(batching, mtu, max_datagram, super::helper::DupSocket(fd))
+        });
+        match made {
+            Ok(h) => Some(h),
+            Err(e) => {
+                crate::logf!(
+                    "tunnel: could not start the gated send helper: {e}; sending on the data plane thread only"
+                );
+                None
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (socket, mtu, max_datagram);
+        None
+    }
 }
 
 #[cfg(test)]

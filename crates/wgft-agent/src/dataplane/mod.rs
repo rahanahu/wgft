@@ -17,6 +17,7 @@
 pub(crate) mod batch;
 pub(crate) mod clock;
 mod driver;
+mod helper;
 mod socket;
 pub(crate) mod stack;
 #[cfg(test)]
@@ -39,6 +40,20 @@ use wgft_wireguard::{Device, DeviceConfig, Drops, Event, Held, PeerStatus};
 pub(crate) use socket::{REQUIRED, SocketBuffers};
 
 use crate::batching::Batching;
+#[cfg(any(test, feature = "lab-observe"))]
+pub(crate) use helper::HelperCounters;
+
+/// The bytes the gated send helper reserves when it is made, for `slots` slots and packets of up to
+/// `mtu` bytes: its two send stores, their reservation lists and its stack. The memory bound adds
+/// them to the `batch` term.
+pub(crate) fn helper_bytes(slots: usize, mtu: usize) -> usize {
+    helper::bytes(
+        slots,
+        cfg!(target_os = "linux"),
+        mtu,
+        mtu + wgft_wireguard::DATA_OVERHEAD,
+    )
+}
 
 /// The layer above the WireGuard device: the TCP/IP core that ends the tunnel's traffic.
 ///
@@ -160,6 +175,9 @@ pub struct Status {
     pub socket_buffers: SocketBuffers,
     /// The device's [`Device::unix_high_water`].
     pub unix_high_water: Duration,
+    /// The gated send helper's counters, when it was made. Lab observation builds and tests only.
+    #[cfg(any(test, feature = "lab-observe"))]
+    pub helper: Option<HelperCounters>,
 }
 
 struct Inner<U> {
