@@ -637,7 +637,7 @@ fn attacker_ack_ip_id(n: &mut TestNet, pa: &mut PeerConn) -> Option<u16> {
 /// いけません。DF を立てた packet の ID が核の全体で 1 つの数えなら、被害者の接続の challenge ACK が数えを 1 つ
 /// 進めるので、第三者の 2 つの challenge ACK の ID の差は、当たりで 2、外れで 1 になります。
 #[test]
-#[ignore = "defect: global IP ID counter; fixed by a follow-up PR"]
+#[ignore = "fixed by the follow-up PR"]
 fn attacker_cannot_observe_a_spoofed_rst_hit_through_the_ip_id() {
     let observe = |hit: bool| {
         let (mut n, _, v) = established(&[VICTIM, ATTACKER]);
