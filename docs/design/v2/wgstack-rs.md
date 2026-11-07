@@ -1024,7 +1024,8 @@ CPU の目標は置き換えの条件に入れないので ([置き換えの判�
 データプレーンのスレッドがどの理由で終わっても、作り直しを管理する task はそれを知り、トンネルを作り直します。
 device の層のハンドシェイクの時刻の高い水位 (`Device::unix_high_water`) も、同じ受け渡しで次の世代に渡します。
 
-release の build は、ワークスペースのすべての crate で整数の桁あふれを検査します (`Cargo.toml` の `[profile.release]` の `overflow-checks = true`)。
+release の build は、build の対象のすべての crate で整数の桁あふれを検査します (`Cargo.toml` の `[profile.release]` の `overflow-checks = true`)。
+profile の指定はワークスペースの crate だけでなく、tokio、rustls、ring、tungstenite のような依存にも効きます。
 特に核 (`wgft-wgstack`)、WireGuard の device (`wgft-wireguard`) と、その下の WireGuard の protocol の crate (`sanstun`) は相手が送る packet を読み、桁あふれは相手が届かせうる誤りです。
 検査の有無は、ソースを書いた crate でなく、コードを build する crate の設定で決まります。
 核の `Stack<H: Hook>` のような generic なコードは、`wgft-netstack` と `wgft-agent` を通した `Stack<LanHook<T>>` の形で、使う側の crate が build します。
@@ -1042,21 +1043,43 @@ crate をまたいで inline された小さな関数も同じです。
 世代が終わると枠は全部戻り、データプレーンの UDP のソケットは閉じて同じ port を bind できます。
 隔離の単位は世代です。核の panic で、そのトンネルを通る TCP と UDP の中継は全部切れ、agent が作り直すまで転送が止まります。
 フローごとの隔離はありません。
-核の外で、データプレーンのスレッドでない tokio の task が panic した場合は、その task だけが終わります。
-その task の役目 (たとえばトンネルの監視) が止まるかどうかは、task ごとに確かめていません。
+データプレーンのスレッドの外では、隔離の単位は task です。
+次の task の panic は、その task だけが終わるのでなく、プロセスを終わらせます。
+- `main_loop` (`run.rs`) は runtime の `block_on` の中で走るので、panic は `run` から抜けてプロセスが終わります
+- 受信の stream の task (`stream_loop`) の panic は `JoinError` として `main_loop` に届き、`stream task` の誤りで `main_loop` が抜けて agent が終わります
 
-segment ごとの経路の費用は、criterion の `recv_segment`、`send_segment` と `_sack` の組で、検査を入れる前の build を基準に測りました (開発機、測定用の CPU の車線、中央の推定の変化)。
+トンネルの監視 (`tunnel/mod.rs` の `monitor` の task) が panic した場合は、その task だけが終わり、`dead` の通知は届きません。
+このときは 30 秒ごとの見回り (`TICK`、`run.rs`) が `watch_tunnel` でデータプレーンの終了を見つけ、トンネルを作り直します。
+この経路は、設計の読みであり、監視の task の panic を起こす試験では確かめていません。
+ほかの task (control API、`slot_watch` など) は、panic で役目が止まったときに agent が正しいままかを、task ごとには確かめていません。
 
-| 組 | 1 本 | 64 本 | 1024 本 |
+segment ごとの経路の費用は、criterion の `recv_segment`、`send_segment` と `_sack` の組で、検査を入れない build と、`[profile.release]` で全体に入れた build を比べました (2026-11-07、開発機、測定用の CPU の車線、4 回ずつの交互の実行の中央値)。
+基準は、核の generic な部分の検査が外れていた、overflow-hardening の改修より前の commit (`47fa00ee`) の build で、改修の後の main では測り直していません。
+bench の crate が `Stack` を自分で作るので、この値は generic な経路に検査が入った費用です。
+
+| 組 | 検査なし | 検査あり | 比 |
 | --- | --- | --- | --- |
-| `recv_segment` | +0.3% | +0.6% | +1.4% |
-| `recv_segment_sack` | -0.2% (差なし) | +2.9% | +2.2% |
-| `send_segment` | +2.5% (差なし) | +0.6% | +2.3% |
-| `send_segment_sack` | +0.7% | +2.9% | -3.3% |
-| `rig_overhead` (道具だけ) | +0.2% (差なし) | | |
+| `recv_segment` (1、64、1024 本) | 563、599、597 ns | 713、754、751 ns | 1.26 から 1.27 |
+| `recv_segment_sack` (1、64、1024 本) | 568、603、603 ns | 718、756、755 ns | 1.25 から 1.26 |
+| `send_segment` (1、64、1024 本) | 529、541、565 ns | 521、535、556 ns | 0.99 |
+| `send_segment_sack` (1、64、1024 本) | 541、552、573 ns | 532、544、563 ns | 0.98 から 0.99 |
 
-変化は -3.3% から +2.9% で、同じコードを流し直したときの揺れ (5% ほど) の内でした。
-device の層 (`wgft-wireguard`) は criterion のベンチを持たないので、検査の費用は測っていません。
+受ける向きは 1 segment あたり約 150 ns 増え、送る向きは変わりません。
+`wgft` の release の binary は 8,464,952 byte から 8,574,608 byte (+1.3%) になりました。
+
+agent を専用の VM に置くラボ (`lab paired --split --placement apart`、vCPU 1、4 round × 2 回) の `AGENTVMGUESTRATIO` (検査あり / なし、区間は実行の間) は、次のとおりです。
+
+| 組 | `AGENTVMGUESTRATIO` | `MBITRATIO` |
+| --- | --- | --- |
+| 最大負荷、送る向き、4 stream | 0.960 [0.869, 1.118] | 1.044 [0.895, 1.145] |
+| 最大負荷、受ける向き、4 stream | 1.033 [0.998, 1.055] | 0.964 [0.943, 0.996] |
+| 固定 2200 Mbit/s、送る向き (UDP の遅れ) | 1.049 [0.893, 1.293] | 1.000 |
+
+受ける向きで byte あたりの CPU が約 3% 増え、速さが約 3.6% 下がりました。
+送る向きに差は見えません。
+固定の速さの組は揺れが大きく、区間より大きな費用の有無は言えません。
+測っていないのは、ほかの vCPU 数、RTT のある組、カーネルモード、改修の後の main です。
+`wgft-agent-perf` は device の層と UDP のソケットだけを通り、核を通らないので、検査の差は byte あたりの CPU で -0.2% から +1.9% でした (ホスト、7 回)。
 
 `sanstun` の費用は、`sanstun` 0.1.0 の criterion のベンチ `data_path` で、検査を入れない build を基準に 2 回ずつ測りました (開発機、測定用の CPU の車線、中央の推定の変化)。
 

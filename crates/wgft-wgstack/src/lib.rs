@@ -66,6 +66,9 @@ pub const UDP_ENDPOINT_SHARE: usize = udp::ENDPOINT_SHARE;
 /// 足し算が panic し、検査なしなら回り込んで返ります。試験と fuzz の道具 (feature `harness`) が、
 /// `-C overflow-checks=off` や `--config 'profile.release.package.wgft-wgstack.overflow-checks=false'` が
 /// 核に本当に効いたかを判じる canary です。設定は crate ごとに効くので、呼び手の crate ではなく核の中で試します。
+/// release の profile 全体に検査を入れているので、後者の指定が外すのは核の generic でない部分だけです。
+/// generic な部分は使う側の crate の設定で決まるため、全体を外すには `profile.release.overflow-checks=false`
+/// か `-C overflow-checks=off` を使います。
 /// panic は呼び手の hook を一時的に外して受けます。
 #[cfg(feature = "harness")]
 #[doc(hidden)]
