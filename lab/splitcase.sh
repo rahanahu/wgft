@@ -24,6 +24,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 . "$HERE/sandbox.sh"
 STATE=/run/wgft-split-case.state
 TCPMEM_STATE=/run/wgft-split-case.tcp_mem
+TS_STATE=/run/wgft-split-case.tcp_timestamps  # the client's net.ipv4.tcp_timestamps, which CLIENT_TCP_TIMESTAMPS=0 changes
 LAN_ADDR=192.168.50.3  # lab/netns.sh LAN_ADDR
 HR_LAN=192.168.50.1    # lab/netns.sh HR_LAN
 
@@ -42,6 +43,8 @@ case "${1:-}" in
       echo "$ns $(ip netns exec "$ns" sysctl -n net.ipv4.tcp_rmem | tr -s ' \t' ' ')|$(ip netns exec "$ns" sysctl -n net.ipv4.tcp_wmem | tr -s ' \t' ' ')" >> "$STATE"
     done
     sysctl -n net.ipv4.tcp_mem | tr -s ' \t' ' ' > "$TCPMEM_STATE"
+    : > "$TS_STATE"
+    if has_ns "$CLIENT_NS"; then ip netns exec "$CLIENT_NS" sysctl -n net.ipv4.tcp_timestamps > "$TS_STATE"; fi
     cat "$STATE"
     echo "tcp_mem $(cat "$TCPMEM_STATE")"
     ;;
@@ -86,6 +89,10 @@ case "${1:-}" in
       [ "$(ip netns exec "$ns" sysctl -n net.ipv4.tcp_rmem | tr -s ' \t' ' ')" = "$r" ] || { echo "splitcase.sh: tcp_rmem of $ns stays changed"; rc=1; }
       [ "$(ip netns exec "$ns" sysctl -n net.ipv4.tcp_wmem | tr -s ' \t' ' ')" = "$w" ] || { echo "splitcase.sh: tcp_wmem of $ns stays changed"; rc=1; }
     done < "$STATE"
+    # a case killed while CLIENT_TCP_TIMESTAMPS=0 was in force leaves the client's timestamps off
+    if [ -s "$TS_STATE" ] && has_ns "$CLIENT_NS"; then
+      ip netns exec "$CLIENT_NS" sysctl -qw net.ipv4.tcp_timestamps="$(cat "$TS_STATE")" || rc=1
+    fi
     if [ -s "$TCPMEM_STATE" ]; then
       m=$(cat "$TCPMEM_STATE")
       sysctl -qw net.ipv4.tcp_mem="$m" || rc=1

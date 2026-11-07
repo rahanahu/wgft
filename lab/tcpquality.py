@@ -70,7 +70,7 @@
 #       unavailable" and keep the tick value. The
 #       kernel arm (by its name), whose agent process does no work, has no RATIO line but a line
 #       saying so, and is compared by the VM ratios only.
-#   iperf <jsonfile>...
+#   iperf [--late <jsonfile>]... <jsonfile>...
 #       reads the output of `iperf3 -J` and prints received=<bytes the receiver read>,
 #       sent=<bytes the sender wrote>, the receiver's duration and rate in Mbit/s and the sender's TCP
 #       retransmits, or received=0 and the error when iperf3 failed. With more than one stream, the
@@ -78,7 +78,9 @@
 #       stream's rate and the streams that read nothing. Several files are the clients of one run
 #       that tcpquality.sh starts together, past iperf3's 128 streams: their bytes and rates add up,
 #       the duration is the longest, and the fairness is over all their streams; one failed client
-#       fails the run.
+#       fails the run. A --late file is a flow that started late: its bytes and retransmits are added,
+#       its rate is over the main duration, and its stream stays out of the duration and the fairness;
+#       a late file that cannot be read, or an empty --late path, is left out and adds late_error=<reason>.
 #   agentstat <pid> <log> <netns> [label]
 #       the agent's memory and refusals at one moment, for runs with many connections: its VmRSS and
 #       VmHWM in MiB, the "memory bound: N MiB" of its start line, the latest count of each wgstack
@@ -91,15 +93,46 @@
 #       over its runs of the rate, the agent VM's CPU per GB from the host's guest time, the
 #       fairness, the UDP round trips, the agent's RSS and its refusals, or for TOOL=churn the
 #       connections per second, the setup times and the agent VM's CPU per connection.
-#   uecho <ip> <port>
-#       UDP echo server: sends every datagram back to where it came from.
-#   uping <ip> <port> <seconds> <interval_ms> <prefix>
+#   uecho <ip> <port> [stamp]
+#       UDP echo server: sends every datagram back to where it came from. With stamp it first writes
+#       its own CLOCK_MONOTONIC receive time into bytes 16-24 of the datagram, which uping reads as the
+#       one-way delay; that holds only when the echo and the pinger run in the same VM.
+#   uping <ip> <port> <seconds> <interval_ms> <prefix> [samplefile]
 #       sends a 100-byte UDP datagram every <interval_ms> for <seconds>, each carrying its sequence
 #       number and send time, reads the echoes and waits one more second for late ones. It prints
 #       <prefix>_sent, <prefix>_lost (no echo), and over the echoed datagrams the round-trip time's
 #       median, 99th percentile and maximum in ms and the jitter, the mean absolute difference of
 #       the round-trip times of datagrams sent one after the other, in ms. Only the client's clock
 #       is read, so the two namespaces' clocks never meet. The default 10 ms is a game's tick.
+#       The 95th percentile is printed too. When the echo stamps its receive time (uecho ... stamp),
+#       the one-way delays follow, <prefix>_fwd_* (pinger to echo) and <prefix>_ret_* (echo to pinger):
+#       median, 95th and 99th percentile and maximum in ms. With samplefile every datagram is written
+#       as one line "seq t_s rtt_ms fwd_ms ret_ms" (t_s is the send time since the first datagram, "-"
+#       where no echo came, fwd and ret "-" without a stamp) after a header "# start_epoch=<s>".
+#   useries <samplefile> <bucket_s>
+#       turns uping's samplefile into one line per bucket of <bucket_s> seconds of send time: the
+#       datagrams sent and lost, and the median, 95th and 99th percentile and maximum of the round-trip
+#       time and of the one-way delays in the bucket, which show the values of the first seconds of a
+#       transfer apart from the steady state.
+#   ublast <ip> <port> <mbit> <seconds> [size]
+#       sends UDP datagrams of <size> bytes (1200 by default, at least 16) at <mbit> Mbit/s for <seconds>,
+#       paced in 1 ms steps, each carrying a sequence number; prints udp_blast_sent, udp_blast_bytes and the
+#       rate it reached in udp_blast_mbit, all counting only the sends that succeeded; sends the local
+#       socket refused, such as ENOBUFS, are counted in udp_blast_send_err and take no sequence number. A python sender reaches roughly 1 Gbit/s at 1200 bytes.
+#   usink <ip> <port> <statsfile>
+#       the receiver of ublast: discards the datagrams and rewrites <statsfile> twice a second with
+#       "recv=<datagrams> bytes=<bytes> lost=<gaps in the sequence numbers>".
+#   iperfx <jsonfile> <prefix>
+#       prints <prefix>_mbit, <prefix>_bytes and <prefix>_retransmits of one `iperf3 -J` file, for the
+#       flows that are not the main transfer (a late flow, a TCP flow beside the tunnel).
+#   iperfseries <jsonfile>
+#       prints one line per reporting interval (iperf3 -i) of `iperf3 -J`, summed over the streams:
+#       the interval's start and end in s, its rate in Mbit/s and its retransmits.
+#   ssparse <file>
+#       reads a file of `ss -tin` samples (each sample is a line "T <epoch>" followed by ss's output) and
+#       prints one line per connection and sample (cwnd, rtt, retransmits, rwnd_limited ms, snd_wnd where
+#       ss printed them) and a last line SSSUM with the largest cwnd, the connections' last retransmit
+#       counts and their rwnd_limited times added.
 #   latpaired <logfile>
 #       over the PAIRED lines of runs with UDPPING=1: per arm the median over runs of the idle and
 #       the under-load round-trip values, the sum of lost datagrams, the median bulk rate and the
@@ -323,23 +356,44 @@ def sender_share(r):
     return float(v) / int(r.get("streams", "1"))
 
 
-def iperf(*jsonfiles):
+def iperf(*args):
+    # iperf [--late LATE.json]... MAIN.json...: the main files are the clients of the run's main
+    # streams; each --late file is a flow that started late
+    mains, lates = [], []
+    it = iter(args)
+    for a in it:
+        if a == "--late":
+            lates.append(next(it, ""))
+        else:
+            mains.append(a)
+    print(iperf_merge(mains, lates))
+    return 0
+
+
+def iperf_merge(mains, lates=()):
+    """The result line of one run from the iperf3 -J files of its clients.
+
+    mains are parallel clients of the same streams: their bytes and rates add up, the duration is
+    the longest, and the fairness is over all their streams. lates are flows that started late: their
+    bytes and retransmits are added to the totals and their rate is taken over the main duration, but
+    their streams stay out of the duration and the fairness. A main file that failed fails the run; a
+    late file that cannot be read, has an error or has no result is left out and the line gets
+    late_error=<reason>, so that the caller can fail the run.
+    """
     import json
     received = sent = 0
     seconds = bps = 0.0
     retrans = []
     per, secs = [], []
-    for jsonfile in jsonfiles:
+    for jsonfile in mains:
         try:
             j = json.load(open(jsonfile))
         except (OSError, ValueError) as e:
-            print("received=0 sent=0 error=%s" % str(e).replace(" ", "_"))
-            return 0
+            return "received=0 sent=0 error=%s" % str(e).replace(" ", "_")
         end = j.get("end", {})
         rcv, snd = end.get("sum_received", {}), end.get("sum_sent", {})
         if "error" in j or not rcv:
-            print("received=0 sent=0 error=%s" % str(j.get("error", "no_result")).replace(" ", "_"))
-            return 0
+            return "received=0 sent=0 error=%s" % str(j.get("error", "no_result")).replace(" ", "_")
         received += rcv["bytes"]
         sent += snd.get("bytes", 0)
         seconds = max(seconds, rcv["seconds"])
@@ -361,9 +415,34 @@ def iperf(*jsonfiles):
         if rates:
             fair += " stream_min_mbit=%.3f stream_max_mbit=%.3f" % (min(rates), max(rates))
         fair += " stream_zero=%d" % sum(1 for b in per if b == 0)
-    print("received=%d sent=%d duration_s=%.3f mbit=%.2f retransmits=%s%s"
-          % (received, sent, seconds, bps / 1e6, sum(retrans) if retrans else "-", fair))
-    return 0
+    late_error = ""
+    for extra in lates:
+        try:
+            if not extra:
+                raise ValueError("empty_late_path")
+            j = json.load(open(extra))
+            if "error" in j:
+                raise ValueError(str(j["error"]))
+            e = j.get("end", {})
+            if not e.get("sum_received"):
+                raise ValueError("no_result")
+            late_rcv = e["sum_received"]["bytes"]
+            late_snd = e.get("sum_sent", {})
+            late_sent = late_snd.get("bytes", 0)
+            late_retr = late_snd.get("retransmits")
+        except (OSError, ValueError, KeyError, AttributeError, TypeError) as ex:
+            late_error = late_error or str(ex).replace(" ", "_") or "unreadable"
+            continue
+        received += late_rcv
+        sent += late_sent
+        if seconds > 0:
+            bps += late_rcv * 8 / seconds
+        if late_retr is not None:
+            retrans.append(late_retr)
+    if late_error:
+        fair += " late_error=%s" % late_error
+    return ("received=%d sent=%d duration_s=%.3f mbit=%.2f retransmits=%s%s"
+            % (received, sent, seconds, bps / 1e6, sum(retrans) if retrans else "-", fair))
 
 
 # the agent's log lines that report a refusal or a drop, with the key agentstat gives each: wgstack's
@@ -1038,15 +1117,22 @@ def cpupaired_key(data, key, vm, pre=None, share_key="vm_cpu_share", vcpus=None)
 PING_BYTES = 100
 
 
-def uecho(ip, port):
+def uecho(ip, port, stamp=""):
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.bind((ip, int(port)))
     while True:
         data, addr = s.recvfrom(2048)
+        if stamp and len(data) >= 24:
+            data = data[:16] + struct.pack("!Q", time.monotonic_ns()) + data[24:]
         s.sendto(data, addr)
 
 
-def uping(ip, port, seconds, interval_ms, prefix):
+def pct(sorted_vals, q):
+    # the q-quantile of a sorted list by rank, as uping has always reported its percentiles
+    return sorted_vals[max(0, math.ceil(q * len(sorted_vals)) - 1)]
+
+
+def uping(ip, port, seconds, interval_ms, prefix, samplefile=""):
     import select
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     s.connect((ip, int(port)))
@@ -1056,11 +1142,15 @@ def uping(ip, port, seconds, interval_ms, prefix):
     stop_send = start + int(float(seconds) * 1e9)
     stop_read = stop_send + 1000000000
     rtt = {}
+    owd = {}
+    sent_at = {}
+    start_epoch = time.time()
     seq = 0
     nxt = start
     while True:
         now = time.monotonic_ns()
         if now >= nxt and nxt < stop_send:
+            sent_at[seq] = now
             pad = bytes(PING_BYTES - 16)
             try:
                 s.send(struct.pack("!QQ", seq, now) + pad)
@@ -1084,16 +1174,216 @@ def uping(ip, port, seconds, interval_ms, prefix):
                 break
             if len(b) >= 16:
                 k, t = struct.unpack_from("!QQ", b)
-                rtt.setdefault(k, (time.monotonic_ns() - t) / 1e6)
+                t_recv = time.monotonic_ns()
+                if k not in rtt:
+                    rtt[k] = (t_recv - t) / 1e6
+                    # an echo that stamped its receive time carries it at bytes 16-24 (zero when it did not)
+                    if len(b) >= 24:
+                        (t_echo,) = struct.unpack_from("!Q", b, 16)
+                        if t_echo:
+                            owd[k] = ((t_echo - t) / 1e6, (t_recv - t_echo) / 1e6)
     got = sorted(rtt.values())
     out = ["%s_sent=%d" % (prefix, seq), "%s_lost=%d" % (prefix, seq - len(rtt))]
     if got:
-        rank = lambda q: got[max(0, math.ceil(q * len(got)) - 1)]
         series = [rtt[k] for k in sorted(rtt)]
         jitter = (sum(abs(b - a) for a, b in zip(series, series[1:])) / (len(series) - 1)) if len(series) > 1 else 0.0
-        out += ["%s_p50_ms=%.3f" % (prefix, rank(0.5)), "%s_p99_ms=%.3f" % (prefix, rank(0.99)),
+        out += ["%s_p50_ms=%.3f" % (prefix, pct(got, 0.5)), "%s_p95_ms=%.3f" % (prefix, pct(got, 0.95)),
+                "%s_p99_ms=%.3f" % (prefix, pct(got, 0.99)),
                 "%s_max_ms=%.3f" % (prefix, got[-1]), "%s_jitter_ms=%.3f" % (prefix, jitter)]
+    for i, name in enumerate(("fwd", "ret")):
+        v = sorted(o[i] for o in owd.values())
+        if v:
+            out += ["%s_%s_p50_ms=%.3f" % (prefix, name, pct(v, 0.5)), "%s_%s_p95_ms=%.3f" % (prefix, name, pct(v, 0.95)),
+                    "%s_%s_p99_ms=%.3f" % (prefix, name, pct(v, 0.99)), "%s_%s_max_ms=%.3f" % (prefix, name, v[-1])]
     print(" ".join(out), flush=True)
+    if samplefile:
+        with open(samplefile, "w") as f:
+            f.write("# start_epoch=%.6f\n" % start_epoch)
+            for k in range(seq):
+                t_s = (sent_at[k] - start) / 1e9
+                if k in rtt:
+                    fwd, ret = ("%.3f" % owd[k][0], "%.3f" % owd[k][1]) if k in owd else ("-", "-")
+                    f.write("%d %.3f %.3f %s %s\n" % (k, t_s, rtt[k], fwd, ret))
+                else:
+                    f.write("%d %.3f - - -\n" % (k, t_s))
+    return 0
+
+
+def read_usamples(path):
+    # (start_epoch, [(seq, t_s, rtt, fwd, ret)]) from uping's samplefile; a missing value is None
+    start, rows = 0.0, []
+    with open(path) as fh:
+        lines = fh.read().splitlines()
+    for line in lines:
+        if line.startswith("# start_epoch="):
+            start = float(line.split("=", 1)[1])
+            continue
+        f = line.split()
+        if len(f) != 5:
+            continue
+        v = [None if x == "-" else float(x) for x in f[2:]]
+        rows.append((int(f[0]), float(f[1]), v[0], v[1], v[2]))
+    return start, rows
+
+
+def ubuckets(rows, bucket_s):
+    # one dict per bucket of send time that holds a datagram, in time order
+    out = {}
+    for seq, t, rtt, fwd, ret in rows:
+        out.setdefault(int(t // bucket_s), []).append((rtt, fwd, ret))
+    res = []
+    for b in sorted(out):
+        rs = out[b]
+        d = {"t": b * bucket_s, "sent": len(rs), "lost": sum(1 for r in rs if r[0] is None)}
+        for i, name in enumerate(("rtt", "fwd", "ret")):
+            v = sorted(r[i] for r in rs if r[i] is not None)
+            d[name] = [pct(v, 0.5), pct(v, 0.95), pct(v, 0.99), v[-1]] if v else None
+        res.append(d)
+    return res
+
+
+def useries(samplefile, bucket_s):
+    start, rows = read_usamples(samplefile)
+    print("USERIES start_epoch=%.3f bucket_s=%s" % (start, bucket_s))
+    for d in ubuckets(rows, float(bucket_s)):
+        parts = ["t=%g" % d["t"], "sent=%d" % d["sent"], "lost=%d" % d["lost"]]
+        for name in ("rtt", "fwd", "ret"):
+            if d[name]:
+                parts += ["%s_%s_ms=%.3f" % (name, q, x) for q, x in zip(("p50", "p95", "p99", "max"), d[name])]
+        print("USERIES " + " ".join(parts))
+    return 0
+
+
+def ublast(ip, port, mbit, seconds, size="1200"):
+    size = max(16, int(size))
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.connect((ip, int(port)))
+    per_ms = float(mbit) * 1e6 / 8 / 1000 / size  # datagrams a millisecond
+    pad = bytes(size - 8)
+    start = time.monotonic()
+    stop = start + float(seconds)
+    seq = 0  # datagrams sent; also the next sequence number, so that a failed send leaves no gap for usink to count as lost
+    tried = 0  # send attempts, which pace the loop
+    err = 0  # sends the local socket refused, for example ENOBUFS; not path loss
+    tick = start
+    while True:
+        now = time.monotonic()
+        if now >= stop:
+            break
+        # the datagrams due by now, so that a late wake-up sends its share at once and the mean rate holds
+        due = (now - start) * 1000 * per_ms - tried
+        for _ in range(int(due)):
+            tried += 1
+            try:
+                s.send(struct.pack("!Q", seq) + pad)
+            except OSError:
+                err += 1
+                continue
+            seq += 1
+        tick += 0.001
+        wait = tick - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+    took = max(time.monotonic() - start, 1e-9)
+    print("udp_blast_sent=%d udp_blast_send_err=%d udp_blast_bytes=%d udp_blast_mbit=%.1f" % (seq, err, seq * size, seq * size * 8 / took / 1e6), flush=True)
+    return 0
+
+
+def usink(ip, port, statsfile):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
+    s.bind((ip, int(port)))
+    s.settimeout(0.25)
+    buf = bytearray(2048)
+    recv = nbytes = top = 0
+    nxt = time.monotonic()
+    while True:
+        try:
+            n = s.recv_into(buf)
+            recv += 1
+            nbytes += n
+            if n >= 8:
+                top = max(top, struct.unpack_from("!Q", buf)[0] + 1)
+        except socket.timeout:
+            pass
+        if time.monotonic() >= nxt:
+            nxt = time.monotonic() + 0.5
+            tmp = statsfile + ".tmp"
+            with open(tmp, "w") as f:
+                f.write("recv=%d bytes=%d lost=%d\n" % (recv, nbytes, max(0, top - recv)))
+            os.replace(tmp, statsfile)
+
+
+def iperfx(jsonfile, prefix):
+    import json
+    try:
+        end = json.load(open(jsonfile)).get("end", {})
+        rcv, snd = end["sum_received"], end.get("sum_sent", {})
+    except (OSError, ValueError, KeyError, AttributeError):
+        print("%s_mbit=0 %s_bytes=0 %s_retransmits=- %s_error=1" % (prefix, prefix, prefix, prefix))
+        return 0
+    print("%s_mbit=%.2f %s_bytes=%d %s_retransmits=%s"
+          % (prefix, rcv["bits_per_second"] / 1e6, prefix, rcv["bytes"], prefix, snd.get("retransmits", "-")))
+    return 0
+
+
+def iperfseries(jsonfile):
+    import json
+    try:
+        ivs = json.load(open(jsonfile)).get("intervals", [])
+    except (OSError, ValueError):
+        ivs = []
+    for iv in ivs:
+        s = iv.get("sum", {})
+        print("IPERFSERIES start_s=%.1f end_s=%.1f mbit=%.2f retransmits=%s"
+              % (s.get("start", 0), s.get("end", 0), s.get("bits_per_second", 0) / 1e6, s.get("retransmits", "-")))
+    return 0
+
+
+SS_FIELDS = (("cwnd", r"^cwnd:(\d+)$", int), ("rtt", r"^rtt:([\d.]+)/[\d.]+$", float),
+             ("retrans", r"^retrans:\d+/(\d+)$", int), ("rwnd_limited", r"^rwnd_limited:(\d+)ms", int),
+             ("snd_wnd", r"^snd_wnd:(\d+)$", int))
+
+
+def ss_samples(path):
+    # [(epoch, conn, {key: value})] from a file of "T <epoch>" lines each followed by `ss -tin` output.
+    # A connection's first line has its addresses, the indented lines after it its counters.
+    out, t = [], None
+    with open(path) as fh:
+        lines = fh.read().splitlines()
+    for line in lines:
+        if line.startswith("T "):
+            t = float(line.split()[1])
+            continue
+        if t is None or not line.strip():
+            continue
+        if not line[0].isspace():
+            f = line.split()
+            out.append((t, " ".join(f[-2:]), {}))
+            continue
+        if not out:
+            continue
+        for tok in line.split():
+            for key, rx, conv in SS_FIELDS:
+                m = re.match(rx, tok)
+                if m:
+                    out[-1][2][key] = conv(m.group(1))
+    return out
+
+
+def ssparse(path):
+    rows = ss_samples(path)
+    last = {}
+    cwnd_max = 0
+    for t, conn, kv in rows:
+        if not kv:
+            continue
+        print("SS t=%.3f conn=%s %s" % (t, conn.replace(" ", ">"), " ".join("%s=%s" % (k, v) for k, v in sorted(kv.items()))))
+        last[conn] = kv
+        cwnd_max = max(cwnd_max, kv.get("cwnd", 0))
+    print("SSSUM ss_samples=%d ss_conns=%d ss_cwnd_max=%d ss_retrans=%d ss_rwnd_limited_ms=%d"
+          % (len(rows), len(last), cwnd_max, sum(v.get("retrans", 0) for v in last.values()),
+             sum(v.get("rwnd_limited", 0) for v in last.values())))
     return 0
 
 
@@ -2796,7 +3086,8 @@ if __name__ == "__main__":
     cmd, args = sys.argv[1], sys.argv[2:]
     sys.exit({"serve": serve, "fetch": fetch, "push": push, "analyze": analyze, "median": median,
               "cpuratio": cpuratio, "cpupaired": cpupaired, "udpgso": udpgso, "iperf": iperf,
-              "uecho": uecho, "uping": uping, "latpaired": latpaired, "snap": snap, "snapdiff": snapdiff,
+              "uecho": uecho, "uping": uping, "useries": useries, "ublast": ublast, "usink": usink,
+              "iperfx": iperfx, "iperfseries": iperfseries, "ssparse": ssparse, "latpaired": latpaired, "snap": snap, "snapdiff": snapdiff,
               "agentd": agentd, "agentx": agentx, "channels": channels, "hostsample": hostsample, "hostwin": hostwin,
               "kvmsample": kvmsample, "pollctl": pollctl, "guestinfo": guestinfo, "nicirq": nicirq,
               "peerseries": peerseries, "peerseries_sum": peerseries_line, "agentstat": agentstat,

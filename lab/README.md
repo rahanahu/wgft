@@ -544,6 +544,32 @@ namespace ごとのメモリの圧迫の数 (`tcp_prune`、`tcp_rcvpruned`、`tc
 
 `tcpquality.sh` の `CPU=1` の結果の行には、interface ごとの packet の数と平均の大きさ、namespace ごとの TCP の segment と UDP の datagram の数、tunnel を戻る ACK の数 (`tun_ack_pkts_per_gb`)、受け手の GRO の後の segment の大きさ (`recv_seg_avg_b`) も入ります。
 
+### 受信経路の測定の選択肢
+
+受信経路の設計の測定が要る選択肢です。
+どれも既定は無く、付けなければ今までの実行は変わりません。
+`--cases` の case ごとのフラグにもでき、環境変数は `lab/tcpquality.sh` の冒頭に書いてあります。
+`--udp-blast` から `--record` までと `--iperf-s`、`--iperf-interval`、`--late-start`、`--path-change`、`--cross-tcp` は `--tool iperf3` が要ります。
+
+- `--iperf-s SECONDS`:iperf3 の転送の時間です (既定は 10 秒)。case ごとに変えられます。`--iperf-interval SECONDS` は iperf3 の `-i` で、JSON に 0.1 秒などの区間ごとの速さが残ります
+- `--tcp-buf-max BYTES`:client と LAN のホストの namespace の TCP の buffer の最大です (`TCP_BUF_MAX`)。遅れのある経路の既定は 64 MiB (`PAIRED_TCP_BUF_MAX` で変えられる) で、この値がそれを上書きします。`tcp_mem` は本数 x 2 x BYTES x 1.25 まで上がります (`lab/tcpquality.sh` の冒頭の式)
+- `--client-tcp-timestamps off`:client の namespace の `net.ipv4.tcp_timestamps` を実行の間 0 にし、終わりに戻します。client が開く接続に TCP の timestamp option が付きません。結果の行に `client_tcp_ts=0` が付きます。`--cases` では `lab/splitcase.sh` が case の間に戻します
+- `--late-start SECONDS`:`--streams` の最後の 1 本を SECONDS 秒遅らせて始めます。別の iperf3 の server と規則 (TCP 41803) を使い、他の stream と同時に終わります。他の stream は `--streams` - 1 本で、実行の byte と速さは遅れた stream を含みます。結果の行に `late_mbit`、`late_bytes`、`late_retransmits` が付きます。公平さの値 (`stream_jain`) は遅れていない stream だけの値です
+- `--path-change AT_S:DELAY_MS`:転送の AT_S 秒後に、netem の遅れを両方向とも DELAY_MS に変えます。遅れのある経路 (`delay`) だけで使えます。netem の qdisc を置き換えるので、その時に待ち行列にあった packet は捨てられます。待ち行列の長さは大きい方の遅れで決めます。結果の行に `path_change_at_s` と `path_change_delay_ms` が付きます
+- `--cross-tcp max|MBIT`:トンネルを通らない iperf3 の流れ (homerouter の namespace から vps の namespace の TCP 25804) を、転送の向きと同じ向きに、転送と同じ時間流します。トンネルの packet と同じ netem の待ち行列を通ります。`--delay-rate-mbit` の詰まりと一緒に使い、結果の行に `cross_mbit`、`cross_bytes`、`cross_retransmits` が付きます。その CPU も VM の CPU に入ります
+- `--udp-blast MBIT`:client から LAN のホストへ、UDP の規則 (41802) を通して 1200 byte (`UDP_BLAST_SIZE`) の datagram を MBIT Mbit/s で流します。転送の 0.5 秒後から `--iperf-s` - 1 秒の間で、TCP の向きによりません。LAN のホストの `tcpquality.py usink` が捨てて数えます。結果の行に `udp_blast_sent`、`udp_blast_send_err` (送り手の socket が断った送信の数で、経路の loss には数えません)、`udp_blast_mbit` (送り手が出した速さ)、`udp_blast_recv`、`udp_blast_lost` が付きます。python の送り手は 1 Gbit/s 前後までです
+- `--record`:実行ごとの記録を残します。iperf3 の JSON (`iperf.json`、遅れた流れと外の流れは `iperf-late.json`、`iperf-cross.json`) と区間ごとの速さ (`iperf-series.txt`)、client と LAN のホストの `ss -tin` を 0.2 秒ごとに時刻つきで取った `ss-client.txt` と `ss-lan.txt` (`--target local` では client だけ) とその解析 (`ss-*.parsed.txt`)、`--udp-ping` があれば ping ごとの標本 (`udp-idle.samples`、`udp-load.samples`) と 1 秒ごとの列 (`udp-*.series.txt`) です。`--out` の下の `rec/round-<r>-<腕>/` に取り込みます。結果の行に送り手の接続の `ss_cwnd_max`、`ss_retrans`、`ss_rwnd_limited_ms` が付きます。サンプラーが VM の CPU を少し使うので、記録した実行は記録した実行と比べます
+
+`--udp-ping` は、echo が LAN のホストと同じ VM にあるとき (`--target local` 以外) に、片道の遅れも測ります。
+echo が受けた時刻を返し、結果の行に `udp_idle_fwd_*`、`udp_idle_ret_*`、`udp_load_fwd_*`、`udp_load_ret_*` (p50、p95、p99、最大) が付きます。
+`fwd` は client から LAN のホストへ、`ret` は戻る向きで、同じ VM の時計の差です。
+往復にも `udp_*_p95_ms` が付きます。
+軽い負荷の基礎の相には、既存の `--bulk-mbit 10 --udp-ping` の転送の間の値 (`udp_load_*`) を使います。何もしていない相は vCPU の休止からの起床を含みます。
+
+確認の状況:
+`lab/tcpquality_test.py` が `tcpquality.py` の新しい部分 (片道の遅れ、時刻ごとの列、UDP の送り手と受け手、iperf3 の追加の流れ、`ss` の解析) を試します。
+ラボでは、全部の選択肢を付けた `lab paired` (delay の経路、gvisor と wgstack、2 round x 2 実行) を 1 回流し、結果の行と `rec/` の記録が出ることを確かめました。各選択肢の値が設計の測定に十分かは確かめていません。
+
 ### 1 組の VM で複数の case を流す (`--cases`)
 
 ```sh
@@ -557,7 +583,7 @@ WGFT_LAB_PAIR_CPUS="16-23 8-15" lab/lab paired --split --placement apart --vcpus
   `#` から後と空行は読みません。
   名前は英数字、`-`、`_` だけで、`--out` の直下のファイルとぶつからないように点を使えません。
   例は `up-s1 fast --direction up --streams 1` と `d10-down delay --delay-ms 10 --direction down` です
-- case ごとのフラグ:`--direction`、`--bytes`、`--tool`、`--streams`、`--churn-rate`、`--churn-seconds`、`--udp-ping`、`--bulk-mbit`、`--agent-gso`、`--kernel-rmem-max`、`--delay-ms`、`--delay-rate-mbit`、`--delay-queue-pkts`、`--target`、`--rounds`、`--runs` です。
+- case ごとのフラグ:`--direction`、`--bytes`、`--tool`、`--streams`、`--churn-rate`、`--churn-seconds`、`--udp-ping`、`--bulk-mbit`、`--iperf-s`、`--iperf-interval`、`--tcp-buf-max`、`--client-tcp-timestamps`、`--late-start`、`--path-change`、`--cross-tcp`、`--udp-blast`、`--record`、`--agent-gso`、`--kernel-rmem-max`、`--delay-ms`、`--delay-rate-mbit`、`--delay-queue-pkts`、`--target`、`--rounds`、`--runs` です。
   コマンド行に書いた値は全 case の既定になり、行の値がそれを上書きします。
   case の行でコマンド行の値を消すことはできません。
   case によって有無が変わるフラグ (`--udp-ping` など) は、コマンド行に書かず、要る case の行だけに書きます。
