@@ -1037,6 +1037,14 @@ crate をまたいで inline された小さな関数も同じです。
 検査があれば panic になり、上のとおり世代を終えてトンネルを作り直すので、結果の範囲が決まります。
 このため、panic を巻き戻す設定 (`panic = "unwind"`) と組で保ちます。
 
+核の中の桁あふれの panic が世代を終わらせ、その世代の資源が返ることは、`wgft-agent` の `an_overflow_panic_in_the_core_releases_what_the_generation_held` が確かめます。
+試験は、中継の task が応答のバッファの枠を持ったまま、別の task が核の借用の中で本物の桁あふれを起こす形です。
+世代が終わると枠は全部戻り、データプレーンの UDP のソケットは閉じて同じ port を bind できます。
+隔離の単位は世代です。核の panic で、そのトンネルを通る TCP と UDP の中継は全部切れ、agent が作り直すまで転送が止まります。
+フローごとの隔離はありません。
+核の外で、データプレーンのスレッドでない tokio の task が panic した場合は、その task だけが終わります。
+その task の役目 (たとえばトンネルの監視) が止まるかどうかは、task ごとに確かめていません。
+
 segment ごとの経路の費用は、criterion の `recv_segment`、`send_segment` と `_sack` の組で、検査を入れる前の build を基準に測りました (開発機、測定用の CPU の車線、中央の推定の変化)。
 
 | 組 | 1 本 | 64 本 | 1024 本 |
